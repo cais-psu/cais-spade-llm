@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "cais-spade-llm"
+version = "0.1.0"
+description = ""
+authors = ["Jonghan Lim <jxl567@psu.edu>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+spade = "^4.1.2"
+spade-llm = "^0.2.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
