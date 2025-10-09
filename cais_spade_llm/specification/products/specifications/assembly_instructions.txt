@@ -1,0 +1,2 @@
+[Assembly Requirements]
+- The part MCP needs to be instructed to be picked from prusa-mk4-2 to placed in assembly station

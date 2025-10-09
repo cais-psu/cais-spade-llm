@@ -1,0 +1,73 @@
+{
+    "xarm6": {
+      "type": "robot",
+      "jid": "xarm6@localhost",
+      "password": "none",
+      "domain": "localhost",      
+      "annotation": "This agent handles tasks related to printer prusa-mk4-1, prusa-mk3, and assembly stations.",
+      "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
+      "functions": ["assembly"],
+      "static_capabilities":{
+        "reachability": ["prusa-mk4-1", "prusa-mk3"]
+      },                
+      "gripper_file": "manumas/specification/resources/parameters/xArm-gripper.pdf",
+      "ip": "192.168.1.240",
+      "dashboard_port": 29999,
+      "speed" : 280,
+      "acc" : 10000,
+      "radius" : -1,
+      "params": {
+        "acc": 0.5,
+        "vel": 0.3,
+        "gripper_programs": {
+          "activate": "gripper_activate.urp",
+          "open": "gripper_open.urp",
+          "close": "gripper_close.urp",
+          "close_90": "gripper_close_90.urp"
+        }
+      },
+      "camera_types": [
+        "cameraA",
+        "cameraB"
+      ],
+      "cameraA_offsets": [0, 0],
+      "cameraB_offsets": [-32, -311],
+      "location": {
+        "x": 0,
+        "y": 0
+      },
+      "z_pick": 172,
+      "z_above": 300,
+      "base_position": [0, 0],
+      "pickup_orientation": [127.23, -127.21, 0.025],
+      "place_orientations": {
+        "housing": [-89.95, 2.07, -2.03],
+        "wedge": [-67.11, 72.40, -73.48],
+        "spring": [-67.11, 72.40, -73.48],
+        "cap": [121.42, -132.48, 0.00]
+      },
+      "initial_position" : [250,-150,445,180.0,0.0,0.0],
+      "intermediate_joint_pose": [-125.00, -73.60, -132.07, -64.14, 90.00, -120.00],
+      "camera_calibration": {
+        "camera_points": [
+          [499, 258],
+          [238, 326],
+          [358, 303],
+          [403, 209]
+        ],
+        "robot_points": [
+          [373.24, -293.29],
+          [326.875, -102.682],
+          [340.53, -189.55],
+          [406.88, -225.08]
+        ]
+      },
+      "grasp_strategies": {
+        "housing": { "strategy": "top", "gripper_action": "close" },
+        "wedge":   { "strategy": "above-top", "gripper_action": "close" },
+        "spring":  { "strategy": "above-top", "gripper_action": "close_90" },
+        "cap":     { "strategy": "center", "gripper_action": "close" }
+      }
+    }
+  }
+  
