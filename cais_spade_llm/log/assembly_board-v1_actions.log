@@ -10,3 +10,7 @@
 2025-10-09 15:50:46,327 - agent:assembly_board-v1 - INFO - [Product] assembly_board-v1@localhost ready and waiting for assembly instructions.
 2025-10-09 15:50:54,360 - agent:assembly_board-v1 - WARNING - [Product] No resource_jids configured; kickoff aborted.
 2025-10-09 20:56:09,071 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized with spec 'assembly_instructions.txt'.
+2025-10-09 22:39:42,767 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized with spec 'assembly_instructions.txt'.
+2025-10-09 22:39:44,451 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-10-09 22:39:44,452 - agent:assembly_board-v1 - INFO - [Product] assembly_board-v1@localhost ready and waiting for assembly instructions.
+2025-10-09 22:39:44,453 - agent:assembly_board-v1 - WARNING - [Product] No resource_jids configured; kickoff aborted.

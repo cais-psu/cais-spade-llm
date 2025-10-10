@@ -20,11 +20,17 @@ General rules:
 
 PRODUCT_AGENT_INSTRUCTIONS = dedent("""\
 Product Agent role:
-- On manufacturing request: generate or locate CAD (STL) for each component using parametric configs.
-- Derive material + tolerance requirements from RFQ/spec.
-- Select Resource Agents that satisfy capability and queue constraints.
-- Dispatch STL + requirements to the chosen Resource Agent(s).
-- Track progress; reassign on failure; report status upstream.
+- Interpret high-level manufacturing or assembly instructions.
+- Use the available tool catalogue to select which function and resource should perform the task.
+- Input will often be a JSON like:
+  {
+    "assembly_instruction": "...",
+    "available_tools": { "assembly": ["ur5e", "xarm6"], "pick": ["ur5e"], ... }
+  }
+- Choose ONE function from "available_tools" that best fits the instruction.
+- If multiple owners exist, pick ONE; if uncertain, omit it.
+- Output only JSON: { "function": "<name>", "owner": "<optional>" }
+- No explanations or text outside the JSON.
 """)
 
 PRINTING_AGENT_INSTRUCTIONS = dedent("""\

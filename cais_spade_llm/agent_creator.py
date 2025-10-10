@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable, List
 from collections import defaultdict
 
 import utils
@@ -70,42 +70,54 @@ def create_resource_agents(resource_init_list: Iterable[str]):
             agents.append(agent)
     return agents
 
-def create_product_agents(product_init_list: Iterable[str], resource_agents: list):
-    # Build lookup so targets can be names OR full JIDs
-    res_lookup = {getattr(r, "agent_name", getattr(r, "name", str(r.jid))).lower(): str(r.jid) for r in resource_agents}
 
-    agents = []
+
+def create_product_agents(product_init_list: Iterable[str], resource_agents: list) -> List[ProductAgent]:
+    """
+    Build ProductAgent instances from initialization JSON files.
+
+    - Resolves target resource names to JIDs using `resource_agents`.
+    - Registers function names into ALLOWED_FUNCS for downstream tool exposure.
+    - Passes product-specific metadata and file paths to ProductAgent.
+    - No CAD files are processed here (removed per request).
+    """
+    # Lookup so targets can be names OR full JIDs
+    res_lookup = {
+        getattr(r, "agent_name", getattr(r, "name", str(r.jid))).lower(): str(r.jid)
+        for r in resource_agents
+    }
+
+    agents: List[ProductAgent] = []
     for init_file in product_init_list:
         raw = utils.load_json_data(init_file)
         for meta in _flat_or_nested_config(raw):
             name = meta["name"]
             jid, pw = _jid_pw(meta)
 
-            # path simplification: base_path/spec_path supported
-            base = meta.get("base_path", "")
-            cad_files = [str(Path(base) / f) for f in _as_list(meta.get("cad_files"))]
+            # record allowed tool names for this product (if any)
+            fn_names = _fn_names(meta)
+            ALLOWED_FUNCS[name].update(fn_names)
 
-            ALLOWED_FUNCS[name].update(_fn_names(meta))
-
-            # targets: list of names or JIDs
+            # targets: list of names or JIDs → resolve to JIDs
             targets_conf = _as_list(meta.get("targets"))
             resource_jids = [res_lookup.get(t.lower(), t) for t in targets_conf] if targets_conf else []
 
             agent = ProductAgent(
-                jid, pw,
+                jid,
+                pw,
                 name=name,
                 annotation=meta.get("annotation"),
                 instructions=meta.get("instructions"),
                 product_specification_file=meta.get("product_specification_file"),
-                cad_files=cad_files or None,
-                function_names=_fn_names(meta),
-                resource_jids=resource_jids
+                function_names=fn_names,
+                resource_jids=resource_jids,
             )
 
-            # optional initial message
+            # optional initial message for consistency with your UX
             inbox_msg = (meta.get("inbox") or "") + f" Your product name is `{name}`."
             if hasattr(agent, "inbox"):
                 agent.inbox.append([("user", inbox_msg)])
 
             agents.append(agent)
+
     return agents

@@ -1,7 +1,7 @@
 # agents/shared_information/llm_agent.py
 from __future__ import annotations
 import os, json, time, asyncio, logging
-from typing import Any, Callable, Optional, Dict, List
+from typing import Any, Callable, Optional, Dict, List, Tuple
 
 from openai import OpenAI  # v1.x SDK
 from spade.agent import Agent
@@ -21,7 +21,7 @@ class LlmAgent(Agent):
     Parent for ProductAgent / ResourceAgent.
     - SPADE-native (async behaviours, XMPP messaging)
     - LLM helper (non-blocking)
-    - Optional function/tool registry for model tool-calls or explicit RPC
+    - Function/tool registry with OpenAI v1 tool-calls
     """
 
     def __init__(
@@ -32,12 +32,11 @@ class LlmAgent(Agent):
         name: Optional[str] = None,
         agent_role: str = "",
         model: str = "gpt-4o",
-        non_function_model: str = "gpt-4o",
+        non_function_model: str = "gpt-4o-mini",
         annotation: Optional[str] = None,
         instructions: Optional[str] = None,        # per-agent overrides from JSON
         function_names: Optional[List[str]] = None,
     ) -> None:
-        # IMPORTANT: only pass jid/password to SPADE
         super().__init__(jid, password)
 
         # identity / metadata
@@ -72,12 +71,9 @@ class LlmAgent(Agent):
                 if hasattr(self, fn) and callable(getattr(self, fn)):
                     self.executables[fn] = getattr(self, fn)
 
-        # derived function schemas (legacy schema from analyzer) -> convert to v1 tools on call
-        self.function_info = (
-            [self.function_analyzer.analyze_function(f) for f in self.executables.values()]
-            if self.executables
-            else []
-        )
+        # derived function schemas (OpenAI v1 tools)
+        self.function_info: List[Dict[str, Any]] = []
+        self._rebuild_tool_schemas()
 
         # system prompt
         self.instructions = self._build_agent_instructions(
@@ -97,6 +93,37 @@ class LlmAgent(Agent):
         prompt = base.replace("{agent_name}", agent_name) + ("\n" + role_block if role_block else "") + tail
         return prompt.strip()
 
+    # ---------- tool schema builder ----------
+    def _rebuild_tool_schemas(self) -> None:
+        """
+        Convert FunctionAnalyzer outputs into OpenAI v1 tool objects.
+        Expected analyzer fields (legacy-friendly): name, description, parameters (JSON schema).
+        """
+        tools: List[Dict[str, Any]] = []
+        for fn_name, fn in self.executables.items():
+            try:
+                analyzed = self.function_analyzer.analyze_function(fn)
+                # normalize keys
+                name = analyzed.get("name", fn_name)
+                description = analyzed.get("description", f"Tool: {name}")
+                parameters = analyzed.get("parameters", {"type": "object", "properties": {}, "required": []})
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": parameters,
+                    }
+                })
+            except Exception as e:
+                self.logger.exception(f"Function analysis failed for '{fn_name}': {e}")
+        self.function_info = tools
+
+    def register_executable(self, name: str, fn: Callable[..., Any]) -> None:
+        """Register a function at runtime and rebuild tool schemas."""
+        self.executables[name] = fn
+        self._rebuild_tool_schemas()
+
     # ---------- SPADE lifecycle ----------
     async def setup(self):
         # 1) LLM query inbox: {type:"llm.query", body: {"prompt": "...", "with_functions": true/false}}
@@ -109,29 +136,32 @@ class LlmAgent(Agent):
         t_tool.set_metadata("type", "tool.call")
         self.add_behaviour(self._ToolInbox(), t_tool)
 
-        self.logger.info(f"[ready] {self.jid} (LLM={self.model}, tools={list(self.executables)})")
+        self.logger.info(f"[ready] {self.jid} (LLM={self.model}, tools={[t['function']['name'] for t in self.function_info]})")
 
     # ---------- Public helpers ----------
     async def ask_llm(
         self,
-        prompt: str,
+        prompt: str | Dict[str, Any],
         *,
         with_functions: bool = True,
         temperature: float = 0.0,
-    ) -> str:
-        """Non-blocking LLM call; safe inside behaviours. OpenAI SDK v1.x."""
+    ) -> Dict[str, Any] | str:
+        """
+        Non-blocking LLM call; safe inside behaviours. OpenAI SDK v1.x.
+
+        Returns:
+          - dict  => {"function_call": {"name": str, "arguments": str}}   # when tool-called
+          - str   => normal assistant text                               # when no tool-called
+        """
         def _call():
-            msgs = []
+            msgs: List[Dict[str, Any]] = []
             if self.instructions:
                 msgs.append({"role": "system", "content": self.instructions})
-            msgs.append({"role": "user", "content": prompt})
+            # allow dict prompt to be JSON-serialized for clarity to the model
+            user_content = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
+            msgs.append({"role": "user", "content": user_content})
 
-            # Convert legacy function schema → v1 tools only if requested
-            tools = (
-                [{"type": "function", "function": f} for f in self.function_info]
-                if (with_functions and self.function_info)
-                else None
-            )
+            tools = self.function_info if (with_functions and self.function_info) else None
 
             back = 1.0
             for _ in range(5):
@@ -151,30 +181,27 @@ class LlmAgent(Agent):
                             temperature=temperature,
                         )
 
-                    msg = r.choices[0].message
+                    choice = r.choices[0].message
 
-                    # If the model called a tool, surface the first call as JSON
-                    if getattr(msg, "tool_calls", None):
-                        call = msg.tool_calls[0]
-                        # call.function has .name and .arguments (JSON string)
-                        return json.dumps(
-                            {
-                                "tool_call": {
-                                    "id": call.id,
-                                    "type": call.type,
-                                    "function": {
-                                        "name": call.function.name,
-                                        "arguments": call.function.arguments,
-                                    },
-                                }
+                    # OpenAI v1: tool_calls list when a function is called
+                    if getattr(choice, "tool_calls", None):
+                        call = choice.tool_calls[0]
+                        # Return a **dict** with the "function_call" shape your RA expects
+                        return {
+                            "function_call": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,  # JSON string per API
                             }
-                        )
+                        }
 
-                    return (msg.content or "").strip()
-                except Exception:
+                    return (choice.content or "").strip()
+                except Exception as e:
+                    # simple exponential backoff
                     time.sleep(back)
                     back = min(back * 2, 8.0)
-            raise RuntimeError("LLM call failed after retries.")
+                    last_err = e
+            # if we exhausted retries, raise
+            raise RuntimeError(f"LLM call failed after retries: {type(last_err).__name__}")
 
         return await asyncio.to_thread(_call)
 
@@ -197,7 +224,13 @@ class LlmAgent(Agent):
                 ans = await self.agent.ask_llm(prompt, with_functions=with_functions)
                 reply = Message(to=str(msg.sender))
                 reply.set_metadata("type", "llm.reply")
-                reply.body = json.dumps({"answer": ans, "model": self.agent.model})
+                # Return either text or function_call dict; keep type explicit
+                payload = {"model": self.agent.model}
+                if isinstance(ans, dict):
+                    payload["function_call"] = ans.get("function_call")
+                else:
+                    payload["answer"] = ans
+                reply.body = json.dumps(payload)
                 await self.send(reply)
             except Exception as e:
                 err = Message(to=str(msg.sender))
