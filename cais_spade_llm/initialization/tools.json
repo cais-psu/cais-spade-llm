@@ -1,0 +1,48 @@
+[
+  {
+    "function": "assembly",
+    "function_owner_agent": "ur5e",
+    "verb": [
+      "assembly"
+    ],
+    "object_type": [
+      "product"
+    ],
+    "phase": "assembly",
+    "in_state": "printed",
+    "out_state": "assembled",
+    "freeze_resource": false,
+    "params": {
+      "product_name": "string",
+      "part_name_list": "list[string]",
+      "origin_resource_location": "string",
+      "sender_jid": "string?",
+      "phase_id": "string?",
+      "task_id": "string?"
+    },
+    "description": "Executes an assembly process for parts within a product using this robot agent."
+  },
+  {
+    "function": "assembly",
+    "function_owner_agent": "xarm6",
+    "verb": [
+      "assembly"
+    ],
+    "object_type": [
+      "product"
+    ],
+    "phase": "assembly",
+    "in_state": "printed",
+    "out_state": "assembled",
+    "freeze_resource": false,
+    "params": {
+      "product_name": "string",
+      "part_name_list": "list[string]",
+      "origin_resource_location": "string",
+      "sender_jid": "string?",
+      "phase_id": "string?",
+      "task_id": "string?"
+    },
+    "description": "Executes an assembly process for parts within a product using this robot agent."
+  }
+]

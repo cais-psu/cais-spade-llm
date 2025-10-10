@@ -147,23 +147,25 @@ class FunctionAnalyzer:
     def build_tools_catalogue(
         agents: Iterable[object],
         allowed: dict[str, set[str]] | None = None,
-        outfile: Path = Path("tools.json"),
+        outfile: Path | str = Path("tools.json"),
     ) -> None:
 
         rows = []
         for agent in agents:
-            owner = getattr(agent, "name", agent.__class__.__name__)
-            fn_whitelist = allowed.get(owner, set()) if allowed else set(dir(agent))
+            # prefer agent.agent_name; fallback to .name; else class name
+            owner = getattr(agent, "agent_name", getattr(agent, "name", agent.__class__.__name__))
+            fn_whitelist = allowed.get(owner, set()) if isinstance(allowed, dict) else {
+                n for n in dir(agent) if not n.startswith("_") and callable(getattr(agent, n, None))
+            }
 
             for fn_name in fn_whitelist:
-                if not hasattr(agent, fn_name):
-                    continue
-                fn = getattr(agent, fn_name)
+                fn = getattr(agent, fn_name, None)
                 if not callable(fn):
                     continue
-
                 meta = FunctionAnalyzer._extract_yaml_frontmatter(fn)
-                rows.append({"function": fn_name, "function_owner_agent": owner, **meta})
+                rows.append({"function": fn_name, "function_owner_agent": owner, **(meta or {})})
 
-        outfile.write_text(json.dumps(rows, indent=2))
-        print(f"wrote {len(rows)} capability rows to {outfile}")
+        out_path = Path(outfile)                     # ← coerce to Path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        print(f"wrote {len(rows)} capability rows to {out_path}")

@@ -10,7 +10,7 @@
       "static_capabilities":{
         "reachability": ["prusa-mk4-1", "prusa-mk3"]
       },                
-      "gripper_file": "manumas/specification/resources/parameters/xArm-gripper.pdf",
+      "gripper_file": "cais_spade_llm/specification/resources/parameters/xArm-gripper.pdf",
       "ip": "192.168.1.240",
       "dashboard_port": 29999,
       "speed" : 280,

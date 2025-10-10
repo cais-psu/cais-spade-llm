@@ -20,7 +20,7 @@ class User(Agent):
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
         fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        fh = logging.FileHandler(f"manumas/log/{self.name}_actions.log", mode="a"); fh.setFormatter(fmt)
+        fh = logging.FileHandler(f"cais_spade_llm/log/{self.name}_actions.log", mode="a"); fh.setFormatter(fmt)
         ch = logging.StreamHandler(); ch.setFormatter(fmt)
         if not self.logger.handlers:
             self.logger.addHandler(fh); self.logger.addHandler(ch)

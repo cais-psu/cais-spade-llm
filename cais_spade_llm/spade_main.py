@@ -11,9 +11,9 @@ for n in ("pyjabber", "winloop", "asyncio"):
     logging.getLogger(n).setLevel(logging.CRITICAL)
 
 # --- Use old-style static paths ---
-PRODUCT_DIR  = "manumas/initialization/products/"
-RESOURCE_DIR = "manumas/initialization/resources/"
-TOOLS_OUT    = "manumas/initialization/tools.json"
+PRODUCT_DIR  = "cais_spade_llm/initialization/products/"
+RESOURCE_DIR = "cais_spade_llm/initialization/resources/"
+TOOLS_OUT    = "cais_spade_llm/initialization/tools.json"
 
 async def spade_main():
     # Load initialization files
@@ -26,8 +26,12 @@ async def spade_main():
     products  = agent_creator.create_product_agents(prod_files, resources)
 
     # Build tools catalogue
-    FunctionAnalyzer.build_tools_catalogue(products + resources, TOOLS_OUT, ALLOWED_FUNCS)
-
+    FunctionAnalyzer.build_tools_catalogue(
+        agents=products + resources,
+        allowed=ALLOWED_FUNCS,
+        outfile=TOOLS_OUT,
+    )
+    
     # Start agents
     for ra in resources:
         await ra.start(auto_register=True)

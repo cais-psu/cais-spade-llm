@@ -10,7 +10,7 @@
       "static_capabilities":{
         "reachability": ["prusa-mk4-2", "prusa-mk3"]
       },          
-      "gripper_file": "manumas/specification/resources/parameters/ur5e-gripper.pdf",
+      "gripper_file": "cais_spade_llm/specification/resources/parameters/ur5e-gripper.pdf",
       "ip": "192.168.1.172",
       "dashboard_port": 29999,
       "params": {
