@@ -47,27 +47,24 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        verb:            [assembly]
-        object_type:     [product]
         phase:           assembly
         in_state:        printed
         out_state:       assembled
-        freeze_resource: false
         params:
           product_name:             string
           part_name_list:           list[string]
           origin_resource_location: string  # where parts are picked
-          sender_jid:               string? # (auto-filled) requester
-          phase_id:                 string? # (auto-filled)
-          task_id:                  string? # (auto-filled)
+          sender_jid:               string # (auto-filled) requester
+          phase_id:                 string # (auto-filled)
+          task_id:                  string # (auto-filled)
         description: Executes an assembly process for parts within a product using this robot agent.
         ---
         :param product_name: Name/ID of the product to assemble.
         :param part_name_list: List of parts to assemble in order.
         :param origin_resource_location: Identifier of the source resource (e.g., printer) for pickup.
-        :param sender_jid: Product agent JID that requested the job (optional).
-        :param phase_id: Phase identifier inside a plan (optional).
-        :param task_id: Task identifier inside the phase (optional).
+        :param sender_jid: Product agent JID that requested the job.
+        :param phase_id: Phase identifier inside a plan.
+        :param task_id: Task identifier inside the phase.
         :returns: Dict with status and message about queueing or start.
         """
         job = dict(
@@ -85,10 +82,11 @@ class RobotAgent(ResourceAgent):
             return {"status": "queued", "content": f"Job {task_id} queued."}
 
         await self._run_assembly(job)
-        return {"status": "started", "content": f"Started job {task_id}."}
+        # IMPORTANT: let ResourceAgent send the final ACK using this return value
+        return {"status": "completed", "content": f"Completed job {task_id}."}
 
     # ------------------------------------------------------------------ #
-    # Internal execution & ACKs
+    # Internal execution (no messaging here)
     # ------------------------------------------------------------------ #
     async def _run_assembly(self, job: Dict[str, Any]) -> None:
         """Simulate performing assembly of all parts in `job`."""
@@ -96,32 +94,17 @@ class RobotAgent(ResourceAgent):
 
         product = job["product_name"]
         parts = job["part_name_list"]
-        sender = job.get("sender_jid")
-        task_id = job.get("task_id")
 
         self.logger.info(f"[START] Assembling {product} on {self.agent_name} from {job['origin_resource_location']}")
         try:
-            # Simple simulation of a pick→place loop per part
+            # Simple simulation of a move→pick→move→place loop per part
             for idx, part in enumerate(parts, start=1):
                 self.logger.info(f"  • ({idx}/{len(parts)}) move→pick→move→place: {part}")
                 await asyncio.sleep(1.0)  # simulate action time
             self.logger.info(f"[DONE] {product} assembly complete")
-            if sender:
-                await self._send_ack(to=sender, task_id=task_id, status="completed")
-        except Exception as e:
-            self.logger.exception("[Robot] Assembly failed")
-            if sender:
-                await self._send_ack(to=sender, task_id=task_id, status=f"failed:{type(e).__name__}")
         finally:
             self._busy = False
             # Drain queue if any
             if self._queue:
                 next_job = self._queue.pop(0)
                 await self._run_assembly(next_job)
-
-    async def _send_ack(self, *, to: str, task_id: Optional[str], status: str) -> None:
-        """Sends a SPADE ACK message back to the requester."""
-        msg = Message(to=to)
-        msg.set_metadata("type", "ack")
-        msg.body = json.dumps({"task_id": task_id, "status": status})
-        await self.send(msg)

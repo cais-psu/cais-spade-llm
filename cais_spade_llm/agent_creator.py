@@ -71,21 +71,18 @@ def create_resource_agents(resource_init_list: Iterable[str]):
     return agents
 
 
-
 def create_product_agents(product_init_list: Iterable[str], resource_agents: list) -> List[ProductAgent]:
     """
-    Build ProductAgent instances from initialization JSON files.
-
-    - Resolves target resource names to JIDs using `resource_agents`.
-    - Registers function names into ALLOWED_FUNCS for downstream tool exposure.
-    - Passes product-specific metadata and file paths to ProductAgent.
-    - No CAD files are processed here (removed per request).
+    Build ProductAgent instances.
+    If `targets` is omitted in JSON, auto-use *all* provided resource agents.
     """
-    # Lookup so targets can be names OR full JIDs
+    # Map names→JIDs for optional explicit target resolution
     res_lookup = {
         getattr(r, "agent_name", getattr(r, "name", str(r.jid))).lower(): str(r.jid)
         for r in resource_agents
     }
+    # JIDs for all RAs (default when no targets specified)
+    all_ra_jids = [str(r.jid) for r in resource_agents]
 
     agents: List[ProductAgent] = []
     for init_file in product_init_list:
@@ -94,30 +91,29 @@ def create_product_agents(product_init_list: Iterable[str], resource_agents: lis
             name = meta["name"]
             jid, pw = _jid_pw(meta)
 
-            # record allowed tool names for this product (if any)
             fn_names = _fn_names(meta)
             ALLOWED_FUNCS[name].update(fn_names)
 
-            # targets: list of names or JIDs → resolve to JIDs
+            # If JSON has targets, resolve; else use ALL resource agents
             targets_conf = _as_list(meta.get("targets"))
-            resource_jids = [res_lookup.get(t.lower(), t) for t in targets_conf] if targets_conf else []
+            if targets_conf:
+                resource_jids = [res_lookup.get(t.lower(), t) for t in targets_conf]
+            else:
+                resource_jids = all_ra_jids[:]   # ← no hard-coding; just use live RAs
 
             agent = ProductAgent(
-                jid,
-                pw,
+                jid, pw,
                 name=name,
                 annotation=meta.get("annotation"),
                 instructions=meta.get("instructions"),
                 product_specification_file=meta.get("product_specification_file"),
                 function_names=fn_names,
                 resource_jids=resource_jids,
+                broadcast=bool(meta.get("broadcast", False)),
             )
 
-            # optional initial message for consistency with your UX
-            inbox_msg = (meta.get("inbox") or "") + f" Your product name is `{name}`."
             if hasattr(agent, "inbox"):
-                agent.inbox.append([("user", inbox_msg)])
+                agent.inbox.append([("user", (meta.get("inbox") or "") + f" Your product name is `{name}`.")])
 
             agents.append(agent)
-
     return agents

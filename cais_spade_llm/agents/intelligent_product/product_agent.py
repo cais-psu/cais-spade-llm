@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import uuid
+import os, uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -67,8 +67,6 @@ class ProductAgent(LlmAgent):
         t_ack.set_metadata("type", "ack")
         self.add_behaviour(self._AckInbox(), t_ack)
 
-        self.logger.info(f"[Product] {self.jid} ready.")
-
     # --------------------------------------------------------------------- #
     # Internal helpers
     # --------------------------------------------------------------------- #
@@ -82,7 +80,10 @@ class ProductAgent(LlmAgent):
 
         if self.product_specification_file:
             try:
+                cwd = os.getcwd()
+                self.logger.info(f"[Product] Current working directory: {cwd}")
                 p = Path(self.product_specification_file)
+                self.logger.info(f"[Product] Attempting to open: {p.resolve()}")
                 txt = p.read_text(encoding="utf-8").strip()
                 if txt:
                     return txt
@@ -92,6 +93,7 @@ class ProductAgent(LlmAgent):
 
         return None
 
+
     async def _send_task(
         self,
         *,
@@ -99,7 +101,6 @@ class ProductAgent(LlmAgent):
         task_id: str,
         instruction: str | dict,
         phase_id: Optional[str] = None,
-        correlation_id: Optional[str] = None,
         protocol: str = "plan/1.0",
     ) -> None:
         """Compose and send a task message to a single RA."""
@@ -113,8 +114,7 @@ class ProductAgent(LlmAgent):
         msg = Message(to=to)
         msg.set_metadata("type", "task")
         msg.set_metadata("protocol", protocol)
-        if correlation_id:
-            msg.set_metadata("correlation_id", correlation_id)
+
 
         msg.body = json.dumps(body_payload)
         await self.send(msg)
@@ -124,7 +124,20 @@ class ProductAgent(LlmAgent):
     # --------------------------------------------------------------------- #
     # Behaviours
     # --------------------------------------------------------------------- #
-
+    # in ProductAgent
+    def _compose_task_msg(
+        self, *, to: str, task_id: str, instruction: str | dict,
+        phase_id: str | None = None,
+        protocol: str = "plan/1.0",
+    ) -> Message:
+        body = {"task_id": task_id, "instruction": instruction}
+        if phase_id: body["phase_id"] = phase_id
+        msg = Message(to=to)
+        msg.set_metadata("type", "task")
+        msg.set_metadata("protocol", protocol)
+        msg.body = json.dumps(body)
+        return msg
+    
     class _Kickoff(OneShotBehaviour):
         async def run(self):
             agent: "ProductAgent" = self.agent  # type: ignore
@@ -138,30 +151,24 @@ class ProductAgent(LlmAgent):
                 agent.logger.warning("[Product] No instruction text; kickoff aborted.")
                 return
 
-            # If you prefer PA to pre-digest/condense, you could do:
-            # instruction = await agent.ask_llm(instruction, with_functions=False)
-            # But RA is the tool broker, so it's fine to forward raw spec.
-
-            # IDs for traceability
             task_id = f"T-{uuid.uuid4().hex[:8].upper()}"
             phase_id = "P-001"
-            correlation_id = f"C-{uuid.uuid4().hex[:10].upper()}"
 
-            # Choose recipients
-            targets = agent.resource_jids if agent.broadcast else [agent.resource_jids[0]]
+            # choose exactly one target (you don't use broadcast)
+            to = agent.resource_jids[0]
 
-            # Send to one or all RAs
-            for to in targets:
-                await agent._send_task(
-                    to=to,
-                    task_id=task_id,
-                    instruction=instruction,
-                    phase_id=phase_id,
-                    correlation_id=correlation_id,
-                )
+            msg = agent._compose_task_msg(
+                to=to,
+                task_id=task_id,
+                instruction=instruction,
+                phase_id=phase_id,
+            )
 
-            # Initialize local status
+            await self.send(msg)  # <-- send from Behaviour, not from Agent
+            agent.logger.info(f"[Product] Sent task {task_id} → {to} with {msg}")
+
             agent.task_states[task_id] = "sent"
+
 
     class _AckInbox(CyclicBehaviour):
         async def run(self):
@@ -170,8 +177,6 @@ class ProductAgent(LlmAgent):
             if not msg:
                 return
 
-            # Only messages with type=ack reach here (Template)
-            correlation = msg.metadata.get("correlation_id", "")
             try:
                 payload = json.loads(msg.body or "{}")
             except json.JSONDecodeError:
@@ -186,5 +191,5 @@ class ProductAgent(LlmAgent):
 
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' "
-                f"from={msg.sender} corr={correlation}"
+                f"from={msg.sender}"
             )

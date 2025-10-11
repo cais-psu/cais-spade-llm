@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional, Dict, List, Tuple
 
 from openai import OpenAI  # v1.x SDK
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour
+from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
 
@@ -144,6 +144,7 @@ class LlmAgent(Agent):
         prompt: str | Dict[str, Any],
         *,
         with_functions: bool = True,
+        force_tool: bool = False,          # ← add this
         temperature: float = 0.0,
     ) -> Dict[str, Any] | str:
         """
@@ -171,7 +172,7 @@ class LlmAgent(Agent):
                             model=self.model,
                             messages=msgs,
                             tools=tools,
-                            tool_choice="auto",
+                            tool_choice=("required" if force_tool else "auto"),  # ← use the flag
                             temperature=temperature,
                         )
                     else:
@@ -205,11 +206,38 @@ class LlmAgent(Agent):
 
         return await asyncio.to_thread(_call)
 
-    async def send_text(self, to_jid: str, text: str, *, mtype: str = "llm.reply") -> None:
+    async def send_json(
+        self,
+        to_jid: str,
+        *,
+        mtype: str = "",
+        payload: dict | None = None,
+        extra_meta: dict | None = None,
+    ) -> None:
+        """
+        SPADE-safe send: always send from inside a OneShotBehaviour.
+        - mtype -> sets metadata['type'] (optional)
+        - payload -> JSON-serialized into body
+        - extra_meta -> any extra metadata keys to set
+        """
         msg = Message(to=to_jid)
-        msg.set_metadata("type", mtype)
-        msg.body = text
-        await self.send(msg)
+        if mtype:
+            msg.set_metadata("type", mtype)
+        for k, v in (extra_meta or {}).items():
+            msg.set_metadata(k, v)
+        msg.body = json.dumps(payload or {}, ensure_ascii=False)
+
+        class _OneShot(OneShotBehaviour):
+            def __init__(self, m): super().__init__(); self._m = m
+            async def run(self): await self.send(self._m)
+
+        b = _OneShot(msg)
+        self.add_behaviour(b)
+        await b.join()  # optional, but nice to ensure delivery before returning
+
+    async def send_text(self, to_jid: str, text: str, *, mtype: str = "llm.reply") -> None:
+        # Reuse the generic helper
+        await self.send_json(to_jid, mtype=mtype, payload={"text": text})
 
     # ---------- Behaviours ----------
     class _LlmInbox(CyclicBehaviour):

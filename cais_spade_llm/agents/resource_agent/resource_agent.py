@@ -72,9 +72,6 @@ class ResourceAgent(LlmAgent):
         t_task.set_metadata("type", "task")
         self.add_behaviour(self._TaskInbox(), t_task)
 
-        self.logger.info(f"[Resource] {self.jid} ready for tasks. "
-                         f"tools={list(self.executables.keys())}")
-
     # --------------------------------------------------------------------- #
     # Behaviours
     # --------------------------------------------------------------------- #
@@ -86,22 +83,25 @@ class ResourceAgent(LlmAgent):
             if not msg:
                 return
 
-            # Basic trust boundary (optional)
+            # ----- trust boundary -----
             if agent.allowed_senders and str(msg.sender) not in agent.allowed_senders:
                 agent.logger.warning(f"[Resource] Rejecting task from {msg.sender} (not allowed)")
-                await self._ack(msg, task_id="?", status="rejected:unauthorized")
+                await self._ack(
+                    msg,
+                    task_id="?",
+                    status="rejected:unauthorized",
+                )
                 return
 
-            # Extract envelope
-            correlation = msg.metadata.get("correlation_id", "")
+            # ----- envelope -----
             protocol = msg.metadata.get("protocol", "")
 
-            # Parse body
+            # ----- parse body -----
             try:
                 data = json.loads(msg.body or "{}")
             except json.JSONDecodeError:
                 agent.logger.warning("[Resource] Malformed task body (not JSON).")
-                await self._ack(msg, task_id="?", status="failed:bad_json", correlation_id=correlation)
+                await self._ack(msg, task_id="?", status="failed:bad_json")
                 return
 
             task_id = data.get("task_id")
@@ -110,47 +110,49 @@ class ResourceAgent(LlmAgent):
 
             if not task_id:
                 agent.logger.warning("[Resource] Task without task_id.")
-                await self._ack(msg, task_id="?", status="failed:missing_task_id", correlation_id=correlation)
+                await self._ack(msg, task_id="?", status="failed:missing_task_id")
                 return
 
             agent.logger.info(
                 f"[Resource] ← Task ({task_id}) from={msg.sender} "
-                f"proto={protocol} corr={correlation}"
+                f"proto={protocol}"
             )
 
-            # Ask LLM to pick a tool (function_call)
+            # ----- EARLY ACK: accepted / queued -----
+            # If you have local queuing, detect it and send "queued"; else "accepted".
+            await self._ack(msg, task_id=task_id, status="accepted")
+
+            # ----- LLM tool selection -----
             try:
                 llm_resp = await asyncio.wait_for(
-                    agent.ask_llm(instruction, with_functions=True),
+                    agent.ask_llm(instruction, with_functions=True, force_tool=True),  # <- requires your earlier change
                     timeout=agent.llm_timeout_s,
                 )
             except asyncio.TimeoutError:
-                await self._ack(msg, task_id=task_id, status="llm_timeout", correlation_id=correlation)
+                await self._ack(msg, task_id=task_id, status="llm_timeout")
                 return
             except Exception as e:
                 agent.logger.exception("[Resource] LLM failure")
-                await self._ack(msg, task_id=task_id, status=f"failed:llm:{type(e).__name__}", correlation_id=correlation)
+                await self._ack(msg, task_id=task_id, status=f"failed:llm:{type(e).__name__}")
                 return
 
-            # Expect OpenAI-style tool call: {"function_call": {"name": "...", "arguments": "..."}}
             fn_name, fn_args = _parse_function_call(llm_resp)
-
             if not fn_name:
                 agent.logger.info(f"[Resource] ({task_id}) no_tool_match; responding.")
-                await self._ack(msg, task_id=task_id, status="no_tool_match", correlation_id=correlation)
+                await self._ack(msg, task_id=task_id, status="no_tool_match")
                 return
 
-            # Auto-plumb routing/contextual args
+            # ----- plumb routing/context -----
             fn_args.setdefault("sender_jid", str(msg.sender))
             fn_args.setdefault("task_id", task_id)
             if phase_id and "phase_id" not in fn_args:
                 fn_args["phase_id"] = phase_id
 
-            # Dispatch
+            # ----- dispatch -----
             func = agent.executables.get(fn_name)
             if not func:
                 agent.logger.warning(f"[Resource] Unknown tool '{fn_name}'")
-                await self._ack(msg, task_id=task_id, status=f"failed:unknown_tool:{fn_name}", correlation_id=correlation)
+                await self._ack(msg, task_id=task_id, status=f"failed:unknown_tool:{fn_name}")
                 return
 
             agent.logger.info(f"[Resource] ({task_id}) Calling {fn_name}({fn_args})")
@@ -158,51 +160,65 @@ class ResourceAgent(LlmAgent):
                 result = await asyncio.wait_for(
                     func(**fn_args), timeout=agent.tool_timeout_s
                 )
-                # Result is expected to be a dict with at least 'status'
-                status = (result or {}).get("status", "started")
+
+                # Tool should return a dict, at minimum {"status": "..."}
+                status = (result or {}).get("status") or "completed"
             except asyncio.TimeoutError:
                 status = "tool_timeout"
             except Exception as e:
                 agent.logger.exception("[Resource] Tool execution failed")
                 status = f"failed:tool:{type(e).__name__}"
 
-            await self._ack(msg, task_id=task_id, status=status, correlation_id=correlation)
+            # ----- FINAL ACK -----
+            await self._ack(msg, task_id=task_id, status=status)
 
-        async def _ack(self, msg: Message, *, task_id: Optional[str], status: str, correlation_id: str = ""):
+        async def _ack(self, msg: Message, *, task_id: Optional[str], status: str):
             reply = Message(to=str(msg.sender))
             reply.set_metadata("type", "ack")
-            if correlation_id:
-                reply.set_metadata("correlation_id", correlation_id)
             reply.body = json.dumps({"task_id": task_id, "status": status})
             await self.send(reply)
-
 
 # --------------------------------------------------------------------------- #
 # Utilities
 # --------------------------------------------------------------------------- #
-
 def _parse_function_call(resp: Any) -> tuple[str | None, Dict[str, Any]]:
     """
-    Extract (name, args) from a typical tool-call response.
-    Handles both stringified and dict args; returns ("name", dict_args) or (None, {}).
+    Extract (name, args) from OpenAI tool call responses.
+    Supports both:
+      - legacy {"function_call": {"name": "...", "arguments": "..."}}
+      - modern {"tool_calls": [{"type":"function","function":{"name","arguments"}}]}
+    Returns ("name", dict_args) or (None, {}).
     """
     if not isinstance(resp, dict):
         return None, {}
 
+    # Newer format: tool_calls is a list; take the first function call
+    tool_calls = resp.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        first = tool_calls[0] or {}
+        if (first.get("type") == "function") and isinstance(first.get("function"), dict):
+            f = first["function"]
+            name = f.get("name")
+            args_raw = f.get("arguments", {})
+            if isinstance(args_raw, str):
+                try:
+                    return name, json.loads(args_raw)
+                except json.JSONDecodeError:
+                    return name, {}
+            return name, (args_raw or {})
+        # If tool_calls exists but is unusable, fall through to legacy parsing
+
+    # Legacy format: single function_call object
     fc = resp.get("function_call")
-    if not isinstance(fc, dict):
-        return None, {}
+    if isinstance(fc, dict):
+        name = fc.get("name")
+        args_raw = fc.get("arguments", {})
+        if isinstance(args_raw, str):
+            try:
+                return name, json.loads(args_raw)
+            except json.JSONDecodeError:
+                return name, {}
+        return name, (args_raw or {})
 
-    name = fc.get("name")
-    args_raw = fc.get("arguments", {})
+    return None, {}
 
-    args: Dict[str, Any] = {}
-    if isinstance(args_raw, dict):
-        args = args_raw
-    elif isinstance(args_raw, str):
-        try:
-            args = json.loads(args_raw)
-        except json.JSONDecodeError:
-            args = {}
-
-    return name, args

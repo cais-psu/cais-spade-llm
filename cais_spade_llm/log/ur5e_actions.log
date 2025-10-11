@@ -17,3 +17,172 @@
 2025-10-09 22:39:42,741 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized.
 2025-10-09 22:39:43,469 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
 2025-10-09 22:39:43,470 - agent:ur5e - INFO - [Robot] ur5e@localhost ready and listening for tasks.
+2025-10-10 10:21:36,000 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 10:21:36,577 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 10:21:36,577 - agent:ur5e - INFO - [Resource] ur5e@localhost ready for tasks. tools=['assembly']
+2025-10-10 10:33:12,057 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 12:39:34,247 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:10:11,422 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:13:49,944 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 13:13:49,944 - agent:ur5e - INFO - [Resource] ur5e@localhost ready for tasks. tools=['assembly']
+2025-10-10 13:23:14,501 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:25:07,673 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 13:25:07,673 - agent:ur5e - INFO - [Resource] ur5e@localhost ready for tasks. tools=['assembly']
+2025-10-10 13:41:29,131 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:41:40,292 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 13:41:40,292 - agent:ur5e - INFO - [Resource] ur5e@localhost ready for tasks. tools=['assembly']
+2025-10-10 13:43:57,966 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:44:08,721 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 13:58:27,709 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 13:58:28,222 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:18:47,990 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:18:48,465 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:19:16,540 - agent:ur5e - INFO - [Resource] ← Task (T-F3104468) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-8D3DD8A1ED
+2025-10-10 14:19:35,267 - agent:ur5e - INFO - [Resource] (T-F3104468) no_tool_match; responding.
+2025-10-10 14:20:15,073 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:20:15,545 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:20:25,636 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:20:26,129 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:20:36,102 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:20:36,589 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:20:37,416 - agent:ur5e - INFO - [Resource] ← Task (T-44EA3CF9) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-3BC007AA77
+2025-10-10 14:20:42,839 - agent:ur5e - INFO - [Resource] (T-44EA3CF9) no_tool_match; responding.
+2025-10-10 14:32:57,507 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:32:57,986 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:32:58,820 - agent:ur5e - INFO - [Resource] ← Task (T-8F7DFABC) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-0BA8245546
+2025-10-10 14:33:00,828 - agent:ur5e - INFO - [Resource] (T-8F7DFABC) no_tool_match; responding.
+2025-10-10 14:33:18,416 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:33:18,885 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:33:19,676 - agent:ur5e - INFO - [Resource] ← Task (T-C78C673C) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-4F19B26C51
+2025-10-10 14:33:21,292 - agent:ur5e - INFO - [Resource] (T-C78C673C) no_tool_match; responding.
+2025-10-10 14:39:31,765 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:39:32,249 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:39:33,068 - agent:ur5e - INFO - [Resource] ← Task (T-6753FB41) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-CA9E357557
+2025-10-10 14:39:36,314 - agent:ur5e - INFO - [Resource] (T-6753FB41) no_tool_match; responding.
+2025-10-10 14:49:28,005 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:49:28,464 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:50:24,392 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 14:50:24,856 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 14:50:40,605 - agent:ur5e - INFO - [Resource] ← Task (T-3479C940) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-1A78F94795
+2025-10-10 14:50:58,400 - agent:ur5e - INFO - [Resource] (T-3479C940) no_tool_match; responding.
+2025-10-10 15:11:42,835 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 15:11:43,436 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 15:12:39,934 - agent:ur5e - INFO - [Resource] ← Task (T-ECE19FCA) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-3D18C6A4F4
+2025-10-10 15:12:54,050 - agent:ur5e - INFO - [Resource] (T-ECE19FCA) no_tool_match; responding.
+2025-10-10 15:56:17,891 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 15:56:18,357 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 15:56:31,820 - agent:ur5e - INFO - [Resource] ← Task (T-43A21848) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-D89B390716
+2025-10-10 15:57:25,481 - agent:ur5e - INFO - [Resource] (T-43A21848) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-43A21848', 'phase_id': 'P-001'})
+2025-10-10 15:57:36,549 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 15:57:36,551 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 15:57:37,551 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 15:57:37,552 - agent:ur5e - ERROR - [Robot] Assembly failed
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 107, in _run_assembly
+    await self._send_ack(to=sender, task_id=task_id, status="completed")
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 124, in _send_ack
+    await self.send(msg)
+          ^^^^^^^^^
+AttributeError: 'RobotAgent' object has no attribute 'send'
+2025-10-10 15:57:37,556 - agent:ur5e - ERROR - [Resource] Tool execution failed
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 107, in _run_assembly
+    await self._send_ack(to=sender, task_id=task_id, status="completed")
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 124, in _send_ack
+    await self.send(msg)
+          ^^^^^^^^^
+AttributeError: 'RobotAgent' object has no attribute 'send'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\resource_agent.py", line 159, in run
+    result = await asyncio.wait_for(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python\Python311\Lib\asyncio\tasks.py", line 489, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 84, in assembly
+    await self._run_assembly(job)
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 111, in _run_assembly
+    await self._send_ack(to=sender, task_id=task_id, status=f"failed:{type(e).__name__}")
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\robot_agent.py", line 124, in _send_ack
+    await self.send(msg)
+          ^^^^^^^^^
+AttributeError: 'RobotAgent' object has no attribute 'send'
+2025-10-10 16:18:28,887 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 16:18:29,353 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 16:18:30,152 - agent:ur5e - INFO - [Resource] ← Task (T-EF54EC2F) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-58AF535BBC
+2025-10-10 16:18:46,233 - agent:ur5e - INFO - [Resource] (T-EF54EC2F) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-EF54EC2F', 'phase_id': 'P-001'})
+2025-10-10 16:18:51,126 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 16:18:51,127 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 16:18:52,140 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 16:19:41,869 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 16:19:42,334 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 16:19:43,132 - agent:ur5e - INFO - [Resource] ← Task (T-1C4BCFE5) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-A4A6D012A8
+2025-10-10 16:19:49,865 - agent:ur5e - INFO - [Resource] (T-1C4BCFE5) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-1C4BCFE5', 'phase_id': 'P-001'})
+2025-10-10 16:19:49,867 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 16:19:49,868 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 16:19:55,262 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 16:19:55,728 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 16:19:56,525 - agent:ur5e - INFO - [Resource] ← Task (T-13735D56) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-EA6C60C4AE
+2025-10-10 16:19:57,798 - agent:ur5e - INFO - [Resource] (T-13735D56) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-13735D56', 'phase_id': 'P-001'})
+2025-10-10 16:19:57,799 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 16:19:57,799 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 16:19:58,809 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 20:33:49,377 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 20:33:49,879 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 20:33:50,694 - agent:ur5e - INFO - [Resource] ← Task (T-AEAECF47) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-3BD5B6A0A2
+2025-10-10 20:33:50,694 - agent:ur5e - ERROR - [Resource] LLM failure
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\resource_agent.py", line 130, in run
+    agent.ask_llm(instruction, with_functions=True, force_tool=True),  # <- requires your earlier change
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: LlmAgent.ask_llm() got an unexpected keyword argument 'force_tool'
+2025-10-10 20:34:18,510 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 20:34:18,987 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 20:34:19,794 - agent:ur5e - INFO - [Resource] ← Task (T-54E3BA4B) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-53A8C7331E
+2025-10-10 20:34:19,794 - agent:ur5e - ERROR - [Resource] LLM failure
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\resource_agent.py", line 130, in run
+    agent.ask_llm(instruction, with_functions=True, force_tool=True),  # <- requires your earlier change
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: LlmAgent.ask_llm() got an unexpected keyword argument 'force_tool'
+2025-10-10 20:36:10,158 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 20:36:10,622 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 20:36:11,420 - agent:ur5e - INFO - [Resource] ← Task (T-81D95578) from=assembly_board-v1@localhost proto=plan/1.0 corr=C-CA55955436
+2025-10-10 20:36:14,737 - agent:ur5e - INFO - [Resource] (T-81D95578) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-81D95578', 'phase_id': 'P-001', 'correlation_id': 'C-CA55955436'})
+2025-10-10 20:36:14,738 - agent:ur5e - ERROR - [Resource] Tool execution failed
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\resource_agent\resource_agent.py", line 165, in run
+    func(**fn_args), timeout=agent.tool_timeout_s
+    ^^^^^^^^^^^^^^^
+TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation_id'
+2025-10-10 20:40:07,007 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 20:40:07,473 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 20:40:08,257 - agent:ur5e - INFO - [Resource] ← Task (T-5AD91E46) from=assembly_board-v1@localhost proto=plan/1.0
+2025-10-10 20:40:10,024 - agent:ur5e - INFO - [Resource] (T-5AD91E46) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-5AD91E46', 'phase_id': 'P-001'})
+2025-10-10 20:40:10,024 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 20:40:10,024 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 20:40:11,034 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 20:53:27,384 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 20:53:27,857 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 20:53:28,658 - agent:ur5e - INFO - [Resource] ← Task (T-27293991) from=assembly_board-v1@localhost proto=plan/1.0
+2025-10-10 20:53:30,766 - agent:ur5e - INFO - [Resource] (T-27293991) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-27293991', 'phase_id': 'P-001'})
+2025-10-10 20:53:30,766 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 20:53:30,766 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 20:53:31,774 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 21:08:37,127 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 21:08:37,597 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 21:08:38,402 - agent:ur5e - INFO - [Resource] ← Task (T-50FECF47) from=assembly_board-v1@localhost proto=plan/1.0
+2025-10-10 21:08:40,221 - agent:ur5e - INFO - [Resource] (T-50FECF47) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-50FECF47', 'phase_id': 'P-001'})
+2025-10-10 21:08:40,222 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-2
+2025-10-10 21:08:40,222 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 21:08:41,234 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-10 21:13:30,021 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-10 21:13:30,483 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-10 21:13:31,291 - agent:ur5e - INFO - [Resource] ← Task (T-A53B7EDE) from=assembly_board-v1@localhost proto=plan/1.0
+2025-10-10 21:13:32,775 - agent:ur5e - INFO - [Resource] (T-A53B7EDE) Calling assembly({'product_name': 'MCP', 'part_name_list': ['MCP'], 'origin_resource_location': 'prusa-mk4-1', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'T-A53B7EDE', 'phase_id': 'P-001'})
+2025-10-10 21:13:32,775 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-1
+2025-10-10 21:13:32,775 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
+2025-10-10 21:13:33,782 - agent:ur5e - INFO - [DONE] MCP assembly complete

@@ -19,7 +19,6 @@
       "medium_rectangular_pin.scad",
       "large_rectangular_pin.scad"
     ],
-    "spec_path": "cais_spade_llm/specification/products/specifications/assembly_board/",
-    "product_specification_file": "assembly_instructions.txt"
+    "product_specification_file": "cais_spade_llm/specification/products/specifications/assembly_instructions.txt"
   }
 }
