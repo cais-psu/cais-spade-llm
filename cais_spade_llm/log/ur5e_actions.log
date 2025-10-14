@@ -186,3 +186,5 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-10-10 21:13:32,775 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-1
 2025-10-10 21:13:32,775 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
 2025-10-10 21:13:33,782 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-10-13 19:33:10,010 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['assembly']
+2025-10-13 19:33:10,768 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['assembly'])

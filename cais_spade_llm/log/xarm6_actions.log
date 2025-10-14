@@ -77,3 +77,5 @@
 2025-10-10 21:08:37,994 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['assembly'])
 2025-10-10 21:13:30,027 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['assembly']
 2025-10-10 21:13:30,872 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['assembly'])
+2025-10-13 19:33:10,030 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['assembly']
+2025-10-13 19:33:11,268 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['assembly'])
