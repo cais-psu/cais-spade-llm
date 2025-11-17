@@ -1,2 +1,0 @@
-[Assembly Requirements]
-- The part MCP needs to be assembled from prusa-mk4-1 to the assembly station.

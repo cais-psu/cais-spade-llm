@@ -1,0 +1,11 @@
+{
+    "cca": {
+      "type": "cca",
+      "jid": "cca@localhost",
+      "password": "none",
+      "domain": "localhost",
+      "instructions": "You are a central controller agent that handles safety related to multi-agent manufacturing systems",
+      "functions": ["validate_plan"],
+      "safety_file": "cais_spade_llm/specification/resources/parameters/ur5e-gripper.pdf"
+    }
+}

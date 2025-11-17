@@ -4,7 +4,6 @@
       "jid": "ur5e@localhost",
       "password": "none",
       "domain": "localhost",
-        "annotation": "This agent handles tasks related to printer prusa-mk4-2, prusa-mk3, and assembly stations.",
       "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly stations.",
       "functions": ["assembly"],
       "static_capabilities":{

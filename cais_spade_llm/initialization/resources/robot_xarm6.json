@@ -4,7 +4,6 @@
       "jid": "xarm6@localhost",
       "password": "none",
       "domain": "localhost",      
-      "annotation": "This agent handles tasks related to printer prusa-mk4-1, prusa-mk3, and assembly stations.",
       "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
       "functions": ["assembly"],
       "static_capabilities":{

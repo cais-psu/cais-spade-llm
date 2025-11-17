@@ -1,4 +1,5 @@
-# main_spade.py
+"""SPADe entry point that collects initialization data, spins up agents, and keeps them running."""
+
 from __future__ import annotations
 import os, asyncio, logging
 from spade import run as spade_run
@@ -6,33 +7,35 @@ import utils, agent_creator
 from function_analyzer import FunctionAnalyzer
 from agent_creator import ALLOWED_FUNCS
 
-# Silence noisy logs
+# Silence third‑party loggers that otherwise spam the console during development.
 for n in ("pyjabber", "winloop", "asyncio"):
     logging.getLogger(n).setLevel(logging.CRITICAL)
 
-# --- Use old-style static paths ---
+# Static filesystem locations for initialization payloads and generated tool catalogues.
 PRODUCT_DIR  = "cais_spade_llm/initialization/products/"
 RESOURCE_DIR = "cais_spade_llm/initialization/resources/"
 TOOLS_OUT    = "cais_spade_llm/initialization/tools.json"
 
 async def spade_main():
-    # Load initialization files
+    """Orchestrate the entire SPADE session: load configs, spawn agents, register tools, and keep the loop alive."""
+    # Collect initialization payloads describing products and hardware resources.
     prod_files = utils.get_init_files(PRODUCT_DIR)
     res_files  = utils.get_init_files(RESOURCE_DIR)
 
-    # Create agents
+    # Instantiate the user agent plus every resource/product agent defined in the JSON payloads.
     user      = agent_creator.create_user()
     resources = agent_creator.create_resource_agents(res_files)
     products  = agent_creator.create_product_agents(prod_files, resources)
 
-    # Build tools catalogue
+    # Build the single tools catalogue consumed by the LLM so it knows which agent functions are callable.
     FunctionAnalyzer.build_tools_catalogue(
         agents=products + resources,
         allowed=ALLOWED_FUNCS,
         outfile=TOOLS_OUT,
     )
     
-    # Start agents
+    # Start resource agents immediately, optionally start the user agent, then stagger product agents
+    # to avoid simultaneous startup spikes against the embedded XMPP server.
     for ra in resources:
         await ra.start(auto_register=True)
     if user:
@@ -43,11 +46,13 @@ async def spade_main():
 
     print("Agents running. Press Ctrl+C to stop.")
     try:
+        # Keep the event loop alive so agents remain connected until the operator interrupts the process.
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        # Gracefully stop every agent (products, resources, and the optional user) before exiting.
         for a in products + resources + ([user] if user else []):
             try:
                 await a.stop()
@@ -55,4 +60,5 @@ async def spade_main():
                 pass
 
 if __name__ == "__main__":
+    # Launch the SPADE runtime with an embedded XMPP server so the agents can communicate locally.
     spade_run(spade_main(), embedded_xmpp_server=True)
