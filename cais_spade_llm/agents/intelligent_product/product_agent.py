@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os, uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
@@ -32,6 +32,7 @@ class ProductAgent(LlmAgent):
         *,
         name: str,
         resource_jids: Optional[Iterable[str]] = None,
+        resource_agents: Optional[Iterable[Any]] = None,
         product_specification_file: Optional[str] = None,
         instruction_override: Optional[str] = None,
         **kw,
@@ -44,13 +45,17 @@ class ProductAgent(LlmAgent):
         super().__init__(jid, password, name=name, agent_role="product", **kw)
         # Resource agents are the downstream executors; keep them in order and avoid mutating caller lists.
         self.resource_jids = list(resource_jids or [])
+        self._resource_agent_refs = list(resource_agents or [])
         self.product_specification_file = product_specification_file
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = instruction_override
 
         # Planner scaffolding (optional DAG building)
         self.plan_path = Path("cais_spade_llm/plan") / f"{name}_plan.json"
-        self.process_planner = ProcessPlanner(self, [])
+        planner_resources = self._match_resource_objects(
+            self._resource_agent_refs, self.resource_jids
+        )
+        self.process_planner = ProcessPlanner(self, planner_resources)
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
         self.task_states: dict[str, str] = {}
@@ -144,14 +149,14 @@ class ProductAgent(LlmAgent):
                 )
         return None
 
-    def _build_high_level_plan(self, requirement_text: str) -> Optional[str]:
+    async def _build_high_level_plan(self, requirement_text: str) -> Optional[str]:
         """
-        Build / save the high-level plan DAG using ProcessPlanner.
+        Build / save the executable DAG process plan using ProcessPlanner.
         """
         if not requirement_text:
             return None
         self.plan_path.parent.mkdir(parents=True, exist_ok=True)
-        message = self.process_planner.build_high_level(requirement_text)
+        message = await self.process_planner.build_high_level(requirement_text)
         self.process_planner.save(self.plan_path)
         return message
 
@@ -176,7 +181,7 @@ class ProductAgent(LlmAgent):
                 agent.logger.warning("[Product] No instruction text; kickoff aborted.")
                 return
 
-            plan_msg = agent._build_high_level_plan(instruction)
+            plan_msg = await agent._build_high_level_plan(instruction)
             if plan_msg:
                 agent.logger.info(f"[Product] {plan_msg} (saved to {agent.plan_path})")
 
@@ -227,3 +232,25 @@ class ProductAgent(LlmAgent):
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
             )
+
+    @staticmethod
+    def _match_resource_objects(
+        resources: Iterable[Any], target_jids: Iterable[str]
+    ) -> list[Any]:
+        """Return the subset of *resources* whose JIDs appear in *target_jids* (case-insensitive)."""
+        resources = list(resources or [])
+        if not resources:
+            return []
+
+        normalized_targets = {
+            str(jid).lower() for jid in target_jids if jid is not None
+        }
+        if not normalized_targets:
+            return resources
+
+        matched = []
+        for agent in resources:
+            agent_jid = str(getattr(agent, "jid", "")).lower()
+            if agent_jid and agent_jid in normalized_targets:
+                matched.append(agent)
+        return matched

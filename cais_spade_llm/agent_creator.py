@@ -127,6 +127,7 @@ def create_product_agents(
                 product_specification_file=meta.get("product_specification_file"),
                 function_names=fn_names,
                 resource_jids=resource_jids,
+                resource_agents=resource_agents,
             )
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.
