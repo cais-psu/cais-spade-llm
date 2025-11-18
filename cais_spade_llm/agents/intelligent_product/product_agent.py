@@ -50,11 +50,17 @@ class ProductAgent(LlmAgent):
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = instruction_override
 
-        # Planner scaffolding (optional DAG building)
-        self.plan_path = Path("cais_spade_llm/plan") / f"{name}_plan.json"
+        # Planner scaffolding
+        base_plan_dir = Path("cais_spade_llm/plan")
+        # For now: requirements file (NL → structured requirements)
+        self.structured_requirements_path = base_plan_dir / f"{name}_requirements.json"
+        # Reserved for later: full DAG task plan (requirements → task graph)
+        self.plan_path = base_plan_dir / f"{name}_plan.json"
+
         planner_resources = self._match_resource_objects(
             self._resource_agent_refs, self.resource_jids
         )
+        print(planner_resources)
         self.process_planner = ProcessPlanner(self, planner_resources)
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
@@ -69,14 +75,16 @@ class ProductAgent(LlmAgent):
     async def setup(self):
         await super().setup()
 
-        # Kickoff behaviour (runs once) to send the initial task to a resource agent.
+        # Kickoff behaviour (runs once) to build the plan
         self.add_behaviour(self._Kickoff())
 
-        # ACK inbox with a template (only consume type=ack)
+        # ACK inbox
         t_ack = Template()
         t_ack.set_metadata("type", "ack")
-        # Register a cyclic behaviour to watch for acknowledgements from resource agents.
         self.add_behaviour(self._AckInbox(), t_ack)
+
+        # Plan executor (runs cycles, dispatches DAG tasks)
+        self.add_behaviour(self._PlanExecutor())
 
     # --------------------------------------------------------------------- #
     # Internal helpers
@@ -149,75 +157,62 @@ class ProductAgent(LlmAgent):
                 )
         return None
 
-    async def _build_high_level_plan(self, requirement_text: str) -> Optional[str]:
+    async def _build_plan(self, requirement_text: str):
         """
-        Build / save the executable DAG process plan using ProcessPlanner.
+        Build structured requirements → save them → expand into task DAG → save DAG.
         """
-        if not requirement_text:
-            return None
-        self.plan_path.parent.mkdir(parents=True, exist_ok=True)
-        message = await self.process_planner.build_high_level(requirement_text)
+        # 1. NL → structured requirements
+        await self.process_planner.build_high_level(requirement_text)
+
+        # (NEW) Save only structured requirements before expansion
+        self.process_planner.save(self.structured_requirements_path)
+
+        # 2. Expand structured requirements → DAG tasks
+        await self.process_planner.expand_requirements_to_tasks()
+
+        # 3. Save DAG plan separately
         self.process_planner.save(self.plan_path)
-        return message
+
+        return self.process_planner.nodes
+
 
     # --------------------------------------------------------------------- #
     # Behaviours
     # --------------------------------------------------------------------- #
 
     class _Kickoff(OneShotBehaviour):
-        """Bootstrap behaviour that transforms the product spec into a single task message."""
+        """Build the DAG plan once at startup."""
 
         async def run(self):
             agent: "ProductAgent" = self.agent  # type: ignore
 
-            # Without a resource to talk to, nothing can happen.
             if not agent.resource_jids:
                 agent.logger.warning("[Product] No resource_jids; kickoff aborted.")
                 return
 
-            # Pull requirement text from the product requirement file.
             instruction = agent._extract_requirement_text()
             if not instruction:
                 agent.logger.warning("[Product] No instruction text; kickoff aborted.")
                 return
 
-            plan_msg = await agent._build_high_level_plan(instruction)
-            if plan_msg:
-                agent.logger.info(f"[Product] {plan_msg} (saved to {agent.plan_path})")
+            # Build structured requirements → DAG → save plan
+            dag_nodes = await agent._build_plan(instruction)
 
-            # Short random identifiers keep logs readable across multiple runs.
-            task_id = f"T-{uuid.uuid4().hex[:4].upper()}"
-            phase_id = f"P-{uuid.uuid4().hex[:4].upper()}"
-
-            # Choose exactly one target (no broadcast); first entry is the preferred RA.
-            to = agent.resource_jids[0]
-
-            msg = agent._compose_task_msg(
-                to=to,
-                task_id=task_id,
-                instruction=instruction,
-                phase_id=phase_id,
+            agent.logger.info(
+                f"[Product] Built full DAG with {len(dag_nodes)} task nodes "
+                f"(saved to {agent.plan_path})"
             )
-
-            # Fire-and-forget task message; SPADE handles routing to the remote resource agent.
-            await self.send(msg)
-            agent.logger.info(f"[Product] Sent task {task_id} -> {to} with {msg}")
-
-            # Track progress so future ACKs can update human-readable state.
-            agent.task_states[task_id] = "sent"
 
     class _AckInbox(CyclicBehaviour):
         """Background behaviour that listens for acknowledgements from resource agents."""
 
         async def run(self):
             agent: "ProductAgent" = self.agent  # type: ignore
-            # Poll SPADE inbox with a short timeout so other behaviours can interleave.
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
 
             try:
-                # ACKs reuse the JSON body format produced by resource agents.
                 payload = json.loads(msg.body or "{}")
             except json.JSONDecodeError:
                 agent.logger.warning("[Product] Malformed ACK body (not JSON).")
@@ -226,12 +221,67 @@ class ProductAgent(LlmAgent):
             task_id = payload.get("task_id", "?")
             status = payload.get("status", "unknown")
 
-            # Update local state (and allow higher-level UI hooks to inspect current task status).
+            # 1) Keep existing state map for UI/debug
             agent.task_states[task_id] = status
+
+            # 2) ALSO update node status in the planner DAG if exists
+            for node in agent.process_planner.nodes:
+                if node.get("id") == task_id:
+                    # Map RA status → planner status; for now use it directly
+                    node["status"] = status
+                    break
 
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
             )
+
+    class _PlanExecutor(CyclicBehaviour):
+        """
+        Periodically checks the DAG for the next ready task and dispatches it
+        as a SPADE message to the resource agent.
+        """
+
+        async def run(self):
+            agent: "ProductAgent" = self.agent  # type: ignore
+
+            # No resources? nothing to do
+            if not agent.resource_jids:
+                return
+
+            # Ask planner for one ready task
+            task_node = agent.process_planner.next_ready_task()
+            if not task_node:
+                # No runnable tasks right now (either all done or waiting on deps)
+                await self.sleep(0.5)
+                return
+
+            to = agent.resource_jids[0]
+
+            # Build the instruction for the RobotAgent from the DAG node
+            instruction = {
+                "function_name": task_node.get("function_name"),
+                "params": task_node.get("params", {}),
+            }
+
+            task_id = task_node["id"]
+
+            msg = agent._compose_task_msg(
+                to=to,
+                task_id=task_id,
+                instruction=instruction,
+                phase_id=None,
+            )
+
+            # Mark as "dispatched" (still waiting for ACK to flip to "completed")
+            task_node["status"] = "dispatched"
+
+            await self.send(msg)
+            agent.logger.info(
+                f"[Product] Dispatched DAG task {task_id} -> {to} ({instruction})"
+            )
+
+            # Short sleep so we don't hammer the RA with a storm of tasks
+            await self.sleep(0.1)
 
     @staticmethod
     def _match_resource_objects(
@@ -242,15 +292,17 @@ class ProductAgent(LlmAgent):
         if not resources:
             return []
 
-        normalized_targets = {
+        target_jids_lower = {
             str(jid).lower() for jid in target_jids if jid is not None
         }
-        if not normalized_targets:
+        if not target_jids_lower:
             return resources
 
         matched = []
         for agent in resources:
+            # Each agent is expected to expose a `jid`; treat missing values as empty strings.
             agent_jid = str(getattr(agent, "jid", "")).lower()
-            if agent_jid and agent_jid in normalized_targets:
+            # Append resource agents whose JID matches one of the requested targets.
+            if agent_jid and agent_jid in target_jids_lower:
                 matched.append(agent)
         return matched

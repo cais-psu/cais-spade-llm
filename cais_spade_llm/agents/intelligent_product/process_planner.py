@@ -1,450 +1,300 @@
-"""ProcessPlanner builds/manages a hierarchical plan for ProductAgents."""
-
 from __future__ import annotations
 
 import json
-import os
 import re
-import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
-from function_analyzer import FunctionAnalyzer
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class ProcessPlanner:
     """
-    Small helper object owned by a ProductAgent to orchestrate phase/task plans.
-
-    - build_plan()/build_high_level() -> create/reset the full DAG (phases + tasks)
-    - save()/load()                -> persist or restore the plan tree
-    - mark_phase_done(pid)         -> set a phase status to "done"
-    - first_pending_phase()        -> id of the next runnable phase
-    - expand helpers               -> update_node(), next_pending_task(), etc.
+    ProcessPlanner converts NL to structured requirement nodes
+    and later expands them into DAG task nodes.
     """
 
     def __init__(self, product_agent, resource_agents: Iterable[Any]):
         self.product_agent = product_agent
         self.resource_agents = list(resource_agents)
         self.logger = product_agent.logger
-        self.nodes: List[Dict[str, Any]] = []  # Ordered list of phase nodes
+        self.nodes: List[Dict[str, Any]] = []
         self.phase_to_node: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ #
-    # Phase construction
+    # NL → Assembly Requirements via LLM (minimal)
     # ------------------------------------------------------------------ #
+
     async def build_high_level(self, requirement_text: str) -> str:
         """
-        Backwards-compatible wrapper that now builds the full DAG plan.
-        Prefer calling build_plan() directly.
+        Use an LLM to parse natural-language *assembly* requirements into
+        minimal requirement nodes.
+
+        Node fields:
+          id, type='requirement', raw_text,
+          phase='assembly',
+          product,
+          context={origin, destination}
         """
-        return await self.build_plan(requirement_text)
+        self.nodes.clear()
+        self.phase_to_node.clear()
 
-    async def build_plan(self, requirement_text: str) -> str:
-        """
-        Generate a directed acyclic graph (DAG) of manufacturing/assembly steps
-        using the product requirements, resource tool catalogue, and constraints.
-        """
-        plan_payload = await self._generate_plan(requirement_text)
-        nodes = self.parse_plan(plan_payload)
-        if not nodes:
-            raise ValueError("LLM did not return any plan nodes.")
-
-        self._rebuild_maps(nodes)
-        self.logger.info("Process Plan:")
-        self.logger.info(json.dumps(self.nodes, indent=2))
-        return "Process plan is created."
-
-    def _make_phase(self, pid: str, after: List[str]):
-        return {
-            "id": pid,
-            "function_owner_agent": getattr(self.product_agent, "agent_name", "product"),
-            "function": None,
-            "params": {},
-            "status": "pending",
-            "after": after,
-            "children": [],
-        }
-
-    # ------------------------------------------------------------------ #
-    # Plan generation helpers
-    # ------------------------------------------------------------------ #
-    async def _generate_plan(self, requirement_text: str) -> Any:
-        context = self._build_plan_context(requirement_text)
-        prompt = self._build_plan_prompt(context)
         try:
-            raw = await self.product_agent.ask_llm(
-                prompt,
-                with_functions=False,
-                temperature=0.0,
-            )
+            structured = await self._llm_parse_assembly_requirements(requirement_text)
         except Exception as exc:
-            self.logger.exception("LLM call failed while generating plan: %s", exc)
-            raise
-        return self._coerce_plan_payload(raw)
+            self.logger.exception("[Planner] LLM requirement parsing failed: %s", exc)
+            structured = []
 
-    def _build_plan_context(self, requirement_text: str) -> Dict[str, Any]:
-        return {
-            "product_name": getattr(self.product_agent, "agent_name", "product"),
-            "product_instructions": getattr(self.product_agent, "instructions", None),
-            "requirements": requirement_text.strip(),
-            "constraints": self._collect_constraints(),
-            "resources": self._resource_summaries(),
-            "available_tools": self._collect_tools(),
-        }
+        for idx, req in enumerate(structured, start=1):
+            node_id = f"REQ_{idx}"
 
-    def _build_plan_prompt(self, context: Dict[str, Any]) -> str:
-        schema_hint = {
-            "plan": [
-                {
-                    "id": "string (phase or macro-step id)",
-                    "after": ["dependency ids"],
-                    "function_owner_agent": "resource responsible for the phase",
-                    "function": "optional macro function",
-                    "params": {"key": "value"},
-                    "children": [
-                        {
-                            "id": "task id",
-                            "function_owner_agent": "resource executing the task",
-                            "function": "tool/function name",
-                            "params": {"key": "value"},
-                            "after": ["phase or task ids this child depends on"],
-                        }
-                    ],
-                }
-            ]
-        }
-        instructions = (
-            "You are a manufacturing process planner. Use the JSON context to build a"
-            " directed acyclic graph (DAG) that transforms the product requirements"
-            " into executable steps using ONLY the available tools."
-            " Honor all ordering constraints and capabilities. Every phase or child task"
-            " must reference a valid function_owner_agent and use tools from the catalogue."
-            " Return strictly valid JSON matching the schema sketch below. No markdown."
-        )
-        payload = json.dumps(
-            {
-                "context": context,
-                "output_schema": schema_hint,
-            },
-            indent=2,
-        )
-        return f"{instructions}\n{payload}"
+            product_id = self._normalize_id(req.get("product"))
+            ctx = req.get("context") or {}
+            origin_id = self._normalize_id(ctx.get("origin"))
+            dest_id = self._normalize_id(ctx.get("destination"))
 
-    def _target_resources(self) -> List[Any]:
-        if not self.resource_agents:
-            return []
-        targets = {
-            str(jid).lower()
-            for jid in getattr(self.product_agent, "resource_jids", [])
-            if jid
-        }
-        if not targets:
-            return list(self.resource_agents)
-
-        selected = []
-        for agent in self.resource_agents:
-            agent_jid = str(getattr(agent, "jid", "")).lower()
-            if agent_jid in targets:
-                selected.append(agent)
-        return selected
-
-    def _collect_tools(self) -> List[Dict[str, Any]]:
-        tools: List[Dict[str, Any]] = []
-        for agent in self._target_resources():
-            owner = getattr(agent, "agent_name", getattr(agent, "name", agent.__class__.__name__))
-            executables = getattr(agent, "executables", {}) or {}
-            for fn_name, fn in executables.items():
-                entry: Dict[str, Any] = {
-                    "function_owner_agent": owner,
-                    "function": fn_name,
-                }
-                meta = FunctionAnalyzer._extract_yaml_frontmatter(fn)
-                if meta:
-                    entry.update({k: v for k, v in meta.items() if v is not None})
-                doc = (fn.__doc__ or "").strip()
-                if doc:
-                    first_line = doc.splitlines()[0].strip()
-                    if first_line:
-                        entry.setdefault("description", first_line)
-                tools.append(entry)
-        return tools
-
-    def _resource_summaries(self) -> List[Dict[str, Any]]:
-        summaries: List[Dict[str, Any]] = []
-        for agent in self._target_resources():
-            summary = {
-                "name": getattr(agent, "agent_name", getattr(agent, "name", agent.__class__.__name__)),
-                "jid": str(getattr(agent, "jid", "")),
-                "instructions": getattr(agent, "instructions", None),
-                "static_capabilities": getattr(agent, "static_capabilities", None),
+            node = {
+                "id": node_id,
+                "type": "requirement",
+                "raw_text": req.get("raw_text", ""),
+                "phase": "assembly",
+                "product": product_id,
+                "context": {
+                    "origin": origin_id,
+                    "destination": dest_id,
+                },
             }
-            summaries.append({k: v for k, v in summary.items() if v})
-        return summaries
 
-    def _collect_constraints(self) -> List[str]:
-        constraints: List[str] = []
-        paths: List[Path] = [
-            Path("cais_spade_llm/specification/cca/safety_requirements.txt"),
-        ]
+            self.nodes.append(node)
 
-        spec_file = getattr(self.product_agent, "product_specification_file", None)
-        if spec_file:
-            spec_path = Path(spec_file)
-            candidate = spec_path.with_name(f"{spec_path.stem}_constraints.txt")
-            paths.append(candidate)
+        msg = f"[Planner] Parsed {len(structured)} assembly requirement(s) via LLM."
+        self.logger.info(msg)
+        return msg
 
-        for path in paths:
-            txt = self._read_optional_text(path)
-            if txt:
-                constraints.append(txt)
-        return constraints
+    async def _llm_parse_assembly_requirements(
+        self, requirement_text: str
+    ) -> List[Dict[str, Any]]:
+        """
+        LLM JSON schema expected:
 
-    def _read_optional_text(self, path: Path) -> Optional[str]:
+        {
+          "requirements": [
+            {
+              "raw_text": "...",
+              "product": "SG",
+              "context": {
+                "origin": "prusa-mk4-2",
+                "destination": "assembly station"
+              }
+            }
+          ]
+        }
+        """
+
+        prompt = (
+            "You convert natural-language *assembly* instructions into a minimal structured form.\n"
+            "Respond with valid JSON only, no extra commentary.\n\n"
+            "Schema:\n"
+            "{\n"
+            '  "requirements": [\n'
+            "    {\n"
+            '      "raw_text": string,\n'
+            '      "product": string | null,\n'
+            '      "context": {\n'
+            '         "origin": string | null,\n'
+            '         "destination": string | null\n'
+            "      }\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Rules:\n"
+            "- All requirements refer to assembly.\n"
+            '- Use short, domain-relevant tokens for product and locations (e.g. \"SG\", \"prusa-mk4-2\").\n'
+            "- If you are unsure about a field, set it to null; do not invent details.\n\n"
+            "Now convert the following text:\n\n"
+            f"{requirement_text}\n"
+        )
+
+        # IMPORTANT: use with_functions=False so ask_llm returns a plain string
+        raw = await self.product_agent.ask_llm(
+            prompt=prompt,
+            with_functions=False,
+            temperature=0.0,
+        )
+
+        if isinstance(raw, dict):
+            self.logger.error("[Planner] ask_llm returned a dict, expected JSON string.")
+            raise RuntimeError("ask_llm returned dict; expected JSON string.")
+
         try:
-            if path.exists():
-                data = path.read_text(encoding="utf-8").strip()
-                return data or None
-        except Exception as exc:
-            self.logger.warning("Failed reading constraint file %s: %s", path, exc)
-        return None
-
-    def _coerce_plan_payload(self, raw: Any) -> Any:
-        if isinstance(raw, (list, dict)):
-            return raw
-        if not isinstance(raw, str):
-            raise ValueError(f"Unsupported LLM response type: {type(raw).__name__}")
-
-        cleaned = re.sub(r"^```.*?\n|\n```$", "", raw.strip(), flags=re.S)
-        try:
-            return json.loads(cleaned)
+            parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            self.logger.error("Plan parsing failed: %s | raw LLM output: %r", exc, raw)
+            self.logger.error("[Planner] LLM did not return valid JSON: %s\nRaw: %s", exc, raw)
             raise
 
-    # ------------------------------------------------------------------ #
-    # Plan parsing helpers
-    # ------------------------------------------------------------------ #
-    def parse_plan(self, raw: Any) -> List[Dict[str, Any]]:
-        items = self._extract_plan_items(raw)
-        nodes: List[Dict[str, Any]] = []
-        for idx, entry in enumerate(items):
-            normalized = self._normalize_node(entry, idx)
-            if normalized:
-                nodes.append(normalized)
-        return nodes
+        reqs = parsed.get("requirements", [])
+        cleaned: List[Dict[str, Any]] = []
 
-    def _extract_plan_items(self, raw: Any) -> List[Dict[str, Any]]:
-        if isinstance(raw, list):
-            return raw
-        if isinstance(raw, dict):
-            for key in ("plan", "phases", "nodes", "steps"):
-                block = raw.get(key)
-                if isinstance(block, list):
-                    return block
-            return [raw]
-        raise ValueError(f"Unsupported plan payload type: {type(raw).__name__}")
+        for r in reqs:
+            if not isinstance(r, dict):
+                continue
+            ctx = r.get("context") or {}
+            if not isinstance(ctx, dict):
+                ctx = {}
+            cleaned.append(
+                {
+                    "raw_text": r.get("raw_text", ""),
+                    "product": r.get("product"),
+                    "context": {
+                        "origin": ctx.get("origin"),
+                        "destination": ctx.get("destination"),
+                    },
+                }
+            )
 
-    def _normalize_node(self, entry: Any, index: int) -> Optional[Dict[str, Any]]:
-        if not isinstance(entry, dict):
-            return None
-
-        node_id = str(
-            entry.get("id")
-            or entry.get("name")
-            or entry.get("phase_id")
-            or f"phase_{index + 1}"
-        )
-        after = self._normalize_after(entry.get("after") or entry.get("depends_on"))
-        node = self._make_phase(node_id, after)
-
-        owner = entry.get("function_owner_agent") or entry.get("owner")
-        if owner:
-            node["function_owner_agent"] = owner
-
-        node["function"] = entry.get("function")
-        node["params"] = self._normalize_params(entry.get("params") or entry.get("parameters"))
-
-        children = entry.get("children") or entry.get("tasks") or []
-        normalized_children: List[Dict[str, Any]] = []
-        for idx, child in enumerate(children):
-            fallback_id = f"{node_id}_task_{idx + 1}"
-            normalized = self._normalize_task(child, node["function_owner_agent"], fallback_id)
-            if normalized:
-                normalized_children.append(normalized)
-        node["children"] = normalized_children
-        return node
-
-    def _normalize_task(
-        self,
-        entry: Any,
-        default_owner: str,
-        fallback_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        if not isinstance(entry, dict):
-            return None
-
-        task_id = str(entry.get("id") or entry.get("name") or fallback_id)
-        task_owner = entry.get("function_owner_agent") or entry.get("owner") or default_owner
-
-        return {
-            "id": task_id,
-            "function_owner_agent": task_owner,
-            "function": entry.get("function"),
-            "params": self._normalize_params(entry.get("params") or entry.get("parameters")),
-            "status": "pending",
-            "after": self._normalize_after(entry.get("after") or entry.get("depends_on")),
-        }
-
-    def _normalize_after(self, deps: Any) -> List[str]:
-        if not deps:
-            return []
-        if isinstance(deps, (str, int)):
-            deps = [deps]
-        normalized = []
-        for dep in deps:
-            dep_str = str(dep).strip()
-            if dep_str:
-                normalized.append(dep_str)
-        return normalized
+        return cleaned
 
     @staticmethod
-    def _normalize_params(value: Any) -> Dict[str, Any]:
-        return value if isinstance(value, dict) else {}
+    def _normalize_id(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        t = text.upper().strip()
+        t = re.sub(r"[^A-Z0-9]+", "_", t)
+        return t.strip("_") or None
 
     # ------------------------------------------------------------------ #
-    # Status helpers
+    # Requirement → primitive task chain (DAG expansion)
     # ------------------------------------------------------------------ #
-    def mark_phase_done(self, phase_id: str):
-        if phase_id in self.phase_to_node:
-            self.phase_to_node[phase_id]["status"] = "done"
-
-    def first_pending_phase(self) -> Optional[str]:
-        for node in self.nodes:
-            if node["status"] == "pending":
-                prereq = node["after"][0] if node["after"] else None
-                if not prereq or self.phase_to_node.get(prereq, {}).get(
-                    "status"
-                ) == "done":
-                    return node["id"]
-        return None
-
-    def first_active_or_pending_phase(self) -> Optional[str]:
+    async def expand_requirements_to_tasks(self) -> None:
         """
-        Return the first phase that is runnable:
-        - pending with completed prerequisites
-        - already in_progress / awaiting_approval
+        Expand each requirement node into a linear chain of task nodes.
+        After this, self.nodes will contain only task nodes.
         """
-        for node in self.nodes:
-            if node["status"] in ("pending", "in_progress", "awaiting_approval"):
-                prereq = node["after"][0] if node["after"] else None
-                if not prereq or self.phase_to_node.get(prereq, {}).get(
-                    "status"
-                ) == "done":
-                    return node["id"]
-        return None
+        new_nodes: List[Dict[str, Any]] = []
 
-    def mark_task_done(self, phase_id: str, task_id: str, *, plan_path: str):
-        phase = self.phase_to_node[phase_id]
-        for child in phase["children"]:
-            if child["id"] == task_id:
-                child["status"] = "completed"
-                break
+        # self.nodes currently holds only requirement nodes (built by build_high_level)
+        requirement_nodes = [n for n in self.nodes if n.get("type") == "requirement"]
 
-        if not self.next_pending_task(phase_id, plan_path=plan_path):
-            self.mark_phase_done(phase_id)
+        for node in requirement_nodes:
+            req_id = node["id"]
+            product = node.get("product")
+            ctx = node.get("context") or {}
+            origin = ctx.get("origin")
+            dest = ctx.get("destination")
 
-    def _phase_done(self, pid: str) -> bool:
-        node = self.phase_to_node.get(pid)
-        return bool(node and node["status"] == "done")
+            def make_task(suffix: str, function_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+                tid = f"{req_id}_{suffix}"
+                return {
+                    "id": tid,
+                    "type": "task",
+                    "requirement_id": req_id,
+                    "function_name": function_name,
+                    "params": params,
+                    "status": "pending",
+                    "predecessors": [],
+                    "successors": [],
+                }
 
-    # ------------------------------------------------------------------ #
-    # Persistence / updates
-    # ------------------------------------------------------------------ #
-    def update_node(
-        self,
-        phase_id: str,
-        task_id: Optional[str] = None,
-        **changes,
-    ) -> bool:
-        """
-        Update either the phase itself (when task_id is None) or the child task.
-        Returns True when an update occurred, False otherwise.
-        """
-        node = self.phase_to_node.get(phase_id)
-        if not node:
-            return False
+            t1 = make_task("T1", "move_to_pick_location", {
+                "origin_resource_location": origin,
+            })
+            t2 = make_task("T2", "pick_part", {
+                "part_name": product,
+                "origin_resource_location": origin,
+            })
+            t3 = make_task("T3", "move_loaded_to_destination", {
+                "destination_location": dest,
+            })
+            t4 = make_task("T4", "place_part", {
+                "destination_location": dest,
+            })
+            chain = [t1, t2, t3, t4]
 
-        target = node if task_id is None else next(
-            (child for child in node["children"] if child["id"] == task_id),
-            None,
-        )
-        if not target:
-            return False
+            # Wire the chain
+            for prev, nxt in zip(chain, chain[1:]):
+                prev["successors"].append(nxt["id"])
+                nxt["predecessors"].append(prev["id"])
 
-        target.update(changes)
-        return True
+            new_nodes.extend(chain)
 
-    def save(self, path: str | os.PathLike) -> None:
-        path = Path(path)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(self.nodes, indent=2), encoding="utf-8")
-
-        for _ in range(20):
-            try:
-                tmp_path.replace(path)
-                return
-            except PermissionError:
-                time.sleep(0.05)
-
-        self.logger.error(
-            "Could not replace plan file (in use): %s (left tmp: %s)",
-            path,
-            tmp_path,
+        self.nodes = new_nodes
+        self.logger.info(
+            "[Planner] Expanded requirements into task chains (tasks only, total nodes: %d)",
+            len(self.nodes),
         )
 
-    def load(self, path: str):
-        nodes = json.loads(Path(path).read_text())
-        self._rebuild_maps(nodes)
-        return self.nodes
-
     # ------------------------------------------------------------------ #
-    # Task selection helpers
+    # Scheduling helpers
     # ------------------------------------------------------------------ #
-    def next_pending_task(
-        self,
-        phase_id: str,
-        *,
-        plan_path: str,
-        accept: Tuple[str, ...] = ("pending",),
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Return the first runnable child task within *phase_id* whose status appears in
-        *accept* and whose dependencies are fulfilled (either completed tasks or phases).
-        """
-        nodes: List[Dict[str, Any]] = json.loads(Path(plan_path).read_text())
-        phase_map = {node["id"]: node for node in nodes}
-        done_tasks = {
-            child["id"]
-            for node in nodes
-            for child in node["children"]
-            if child["status"] == "completed"
-        }
-        done_phases = {node["id"] for node in nodes if node["status"] == "completed"}
 
-        phase = phase_map[phase_id]
-        for child in phase["children"]:
-            if child["status"] not in accept:
+    def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        for n in self.nodes:
+            if n.get("id") == node_id:
+                return n
+        return None
+
+    def next_ready_task(self) -> Optional[Dict[str, Any]]:
+        """
+        Return one task node that is:
+          - type == 'task'
+          - status == 'pending'
+          - all predecessor nodes have status == 'completed'
+        or None if no such task exists.
+        """
+        for node in self.nodes:
+            if node.get("type") != "task":
                 continue
-            deps = child.get("after", [])
-            if all(dep in done_tasks or dep in done_phases for dep in deps):
-                return child
+            if node.get("status") != "pending":
+                continue
+
+            preds = node.get("predecessors", [])
+            if not preds:
+                return node  # no dependencies
+
+            all_done = True
+            for pid in preds:
+                pred_node = self._find_node(pid)
+                if not pred_node or pred_node.get("status") != "completed":
+                    all_done = False
+                    break
+
+            if all_done:
+                return node
+
         return None
 
     # ------------------------------------------------------------------ #
-    # Internals
+    # Persistence helpers
     # ------------------------------------------------------------------ #
-    def _rebuild_maps(self, nodes: List[Dict[str, Any]]) -> None:
-        self.nodes = nodes
-        self.phase_to_node = {node["id"]: node for node in nodes}
+
+    def save(self, path: Path | str) -> None:
+        """
+        Persist the current planner state (for now, just nodes) as JSON.
+        """
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "nodes": self.nodes,
+        }
+
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        self.logger.info("[Planner] Saved plan to %s", p.resolve())
+
+    def load(self, path: Path | str) -> None:
+        """
+        Load planner state from a JSON file created by save().
+        """
+        p = Path(path)
+        if not p.exists():
+            self.logger.warning("[Planner] Plan file does not exist: %s", p)
+            return
+
+        with p.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        self.nodes = payload.get("nodes", [])
+        self.phase_to_node = {}
+
+        self.logger.info("[Planner] Loaded plan from %s", p.resolve())
 

@@ -1,2 +1,3 @@
 [Assembly Requirements]
-- The part SG needs to be assembled before MCP from prusa-mk4-1 to the assembly station.
+- Assemble SG from prusa-mk4-2 to the assembly board.
+- Assemble MCP from prusa-mk4-1 to the assembly board.

@@ -1,0 +1,26 @@
+{
+  "nodes": [
+    {
+      "id": "REQ_1",
+      "type": "requirement",
+      "raw_text": "Assemble SG from prusa-mk4-2 to the assembly board.",
+      "phase": "assembly",
+      "product": "SG",
+      "context": {
+        "origin": "PRUSA_MK4_2",
+        "destination": "ASSEMBLY_BOARD"
+      }
+    },
+    {
+      "id": "REQ_2",
+      "type": "requirement",
+      "raw_text": "Assemble MCP from prusa-mk4-1 to the assembly board.",
+      "phase": "assembly",
+      "product": "MCP",
+      "context": {
+        "origin": "PRUSA_MK4_1",
+        "destination": "ASSEMBLY_BOARD"
+      }
+    }
+  ]
+}
