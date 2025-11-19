@@ -228,3 +228,15 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-17 12:30:01,978 - agent:ur5e - INFO - [START] Assembling MCP on ur5e from prusa-mk4-1
 2025-11-17 12:30:01,979 - agent:ur5e - INFO -   • (1/1) move→pick→move→place: MCP
 2025-11-17 12:30:02,994 - agent:ur5e - INFO - [DONE] MCP assembly complete
+2025-11-18 09:33:14,999 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 13:14:48,041 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 13:24:56,816 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 13:24:57,352 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=[])
+2025-11-18 13:53:04,726 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 13:53:05,203 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=[])
+2025-11-18 14:09:16,946 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 14:09:17,415 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=[])
+2025-11-18 14:11:46,625 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 14:11:47,136 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=[])
+2025-11-18 14:13:18,730 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=[]
+2025-11-18 14:13:19,192 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=[])

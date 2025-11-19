@@ -1,0 +1,126 @@
+{
+  "nodes": [
+    {
+      "id": "REQ_1_T1",
+      "type": "task",
+      "requirement_id": "REQ_1",
+      "function_name": "move_to_pick_location",
+      "params": {
+        "origin_resource_location": "PRUSA_MK4_2"
+      },
+      "status": "pending",
+      "predecessors": [],
+      "successors": [
+        "REQ_1_T2"
+      ]
+    },
+    {
+      "id": "REQ_1_T2",
+      "type": "task",
+      "requirement_id": "REQ_1",
+      "function_name": "pick_part",
+      "params": {
+        "part_name": "SG",
+        "origin_resource_location": "PRUSA_MK4_2"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_1_T1"
+      ],
+      "successors": [
+        "REQ_1_T3"
+      ]
+    },
+    {
+      "id": "REQ_1_T3",
+      "type": "task",
+      "requirement_id": "REQ_1",
+      "function_name": "move_loaded_to_destination",
+      "params": {
+        "destination_location": "ASSEMBLY_BOARD"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_1_T2"
+      ],
+      "successors": [
+        "REQ_1_T4"
+      ]
+    },
+    {
+      "id": "REQ_1_T4",
+      "type": "task",
+      "requirement_id": "REQ_1",
+      "function_name": "place_part",
+      "params": {
+        "destination_location": "ASSEMBLY_BOARD"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_1_T3"
+      ],
+      "successors": []
+    },
+    {
+      "id": "REQ_2_T1",
+      "type": "task",
+      "requirement_id": "REQ_2",
+      "function_name": "move_to_pick_location",
+      "params": {
+        "origin_resource_location": "PRUSA_MK4_1"
+      },
+      "status": "pending",
+      "predecessors": [],
+      "successors": [
+        "REQ_2_T2"
+      ]
+    },
+    {
+      "id": "REQ_2_T2",
+      "type": "task",
+      "requirement_id": "REQ_2",
+      "function_name": "pick_part",
+      "params": {
+        "part_name": "MCP",
+        "origin_resource_location": "PRUSA_MK4_1"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_2_T1"
+      ],
+      "successors": [
+        "REQ_2_T3"
+      ]
+    },
+    {
+      "id": "REQ_2_T3",
+      "type": "task",
+      "requirement_id": "REQ_2",
+      "function_name": "move_loaded_to_destination",
+      "params": {
+        "destination_location": "ASSEMBLY_BOARD"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_2_T2"
+      ],
+      "successors": [
+        "REQ_2_T4"
+      ]
+    },
+    {
+      "id": "REQ_2_T4",
+      "type": "task",
+      "requirement_id": "REQ_2",
+      "function_name": "place_part",
+      "params": {
+        "destination_location": "ASSEMBLY_BOARD"
+      },
+      "status": "pending",
+      "predecessors": [
+        "REQ_2_T3"
+      ],
+      "successors": []
+    }
+  ]
+}

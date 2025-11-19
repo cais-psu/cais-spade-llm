@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 [
   {
     "function": "move_to_pick_location",
@@ -252,3 +253,6 @@
     "description": "Return the robot arm to a predefined home position."
   }
 ]
+=======
+[]
+>>>>>>> 104b7137da8823d60c9050a142db17803b0f62b2
