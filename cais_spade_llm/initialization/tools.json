@@ -1,31 +1,4 @@
-<<<<<<< HEAD
 [
-  {
-    "function": "move_to_pick_location",
-    "function_owner_agent": "ur5e",
-    "phase": "assembly",
-    "in_state": "idle",
-    "out_state": "at_pick",
-    "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Location identifier to approach for picking."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed override."
-      },
-      "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
-      },
-      "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
-      }
-    },
-    "description": "Move empty gripper to the origin location in preparation for picking."
-  },
   {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "ur5e",
@@ -81,6 +54,32 @@
       }
     },
     "description": "Move to origin_resource_location and pick the specified part using the requested gripper."
+  },
+  {
+    "function": "move_to_pick_location",
+    "function_owner_agent": "ur5e",
+    "phase": "assembly",
+    "in_state": "idle",
+    "out_state": "at_pick",
+    "params": {
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Location identifier to approach for picking."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed override."
+      },
+      "sender_jid": {
+        "type": "string",
+        "description": "Product agent JID that issued the request."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Planner task identifier supplied by the product agent."
+      }
+    },
+    "description": "Move empty gripper to the origin location in preparation for picking."
   },
   {
     "function": "place_part",
@@ -127,32 +126,6 @@
     "description": "Return the robot arm to a predefined home position."
   },
   {
-    "function": "move_to_pick_location",
-    "function_owner_agent": "xarm6",
-    "phase": "assembly",
-    "in_state": "idle",
-    "out_state": "at_pick",
-    "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Location identifier to approach for picking."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed override."
-      },
-      "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
-      },
-      "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
-      }
-    },
-    "description": "Move empty gripper to the origin location in preparation for picking."
-  },
-  {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "xarm6",
     "phase": "assembly",
@@ -207,6 +180,32 @@
       }
     },
     "description": "Move to origin_resource_location and pick the specified part using the requested gripper."
+  },
+  {
+    "function": "move_to_pick_location",
+    "function_owner_agent": "xarm6",
+    "phase": "assembly",
+    "in_state": "idle",
+    "out_state": "at_pick",
+    "params": {
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Location identifier to approach for picking."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed override."
+      },
+      "sender_jid": {
+        "type": "string",
+        "description": "Product agent JID that issued the request."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Planner task identifier supplied by the product agent."
+      }
+    },
+    "description": "Move empty gripper to the origin location in preparation for picking."
   },
   {
     "function": "place_part",
@@ -253,6 +252,3 @@
     "description": "Return the robot arm to a predefined home position."
   }
 ]
-=======
-[]
->>>>>>> 104b7137da8823d60c9050a142db17803b0f62b2

@@ -49,11 +49,21 @@ class RobotAgent(ResourceAgent):
         in_state:        printed
         out_state:       picked
         params:
-          part_name:               string
-          origin_resource_location:string
-          gripper:                string
-          sender_jid:             string
-          task_id:                string
+          part_name:
+            type: string
+            description: Name of the part to pick up.
+          origin_resource_location:
+            type: string
+            description: Resource or printer identifier the part is located at.
+          gripper:
+            type: string
+            description: Optional gripper program or pose configuration to use.
+          sender_jid:
+            type: string
+            description: Product agent JID that issued the request.
+          task_id:
+            type: string
+            description: Planner task identifier supplied by the product agent.
         description: Move to origin_resource_location and pick the specified part using the requested gripper.
         ---
         """
@@ -83,10 +93,18 @@ class RobotAgent(ResourceAgent):
         in_state:        idle
         out_state:       at_pick
         params:
-          origin_resource_location:string
-          speed:                   float
-          sender_jid:              string
-          task_id:                 string
+          origin_resource_location:
+            type: string
+            description: Location identifier to approach for picking.
+          speed:
+            type: number
+            description: Optional motion speed override.
+          sender_jid:
+            type: string
+            description: Product agent JID that issued the request.
+          task_id:
+            type: string
+            description: Planner task identifier supplied by the product agent.
         description: Move empty gripper to the origin location in preparation for picking.
         ---
         """
@@ -118,10 +136,18 @@ class RobotAgent(ResourceAgent):
         in_state:        picked
         out_state:       positioned
         params:
-          destination_location:    string
-          speed:                   float
-          sender_jid:              string
-          task_id:                 string
+          destination_location:
+            type: string
+            description: Target pose or waypoint for the carried part.
+          speed:
+            type: number
+            description: Optional motion speed override while loaded.
+          sender_jid:
+            type: string
+            description: Product agent JID that issued the request.
+          task_id:
+            type: string
+            description: Planner task identifier supplied by the product agent.
         description: Move while carrying the picked part to its destination pose.
         ---
         """
@@ -151,8 +177,12 @@ class RobotAgent(ResourceAgent):
         in_state:        placed
         out_state:       idle
         params:
-          sender_jid:              string
-          task_id:                 string
+          sender_jid:
+            type: string
+            description: Product agent JID that issued the request.
+          task_id:
+            type: string
+            description: Planner task identifier supplied by the product agent.
         description: Return the robot arm to a predefined home position.
         ---
         """
@@ -178,10 +208,18 @@ class RobotAgent(ResourceAgent):
         in_state:        positioned
         out_state:       placed
         params:
-          destination_location:    string
-          orientation:             string
-          sender_jid:              string
-          task_id:                 string
+          destination_location:
+            type: string
+            description: Target placement location identifier.
+          orientation:
+            type: string
+            description: Optional placement orientation override.
+          sender_jid:
+            type: string
+            description: Product agent JID that issued the request.
+          task_id:
+            type: string
+            description: Planner task identifier supplied by the product agent.
         description: Place the currently held part at the destination with the requested orientation.
         ---
         """
@@ -201,81 +239,3 @@ class RobotAgent(ResourceAgent):
     async def _simulate_action(self, description: str, *, duration: float = 1.0):
         self.logger.info("[Robot] %s", description)
         await asyncio.sleep(duration)
-
-
-
-
-    '''
-    async def assembly(
-        self,
-        product_name: str,
-        part_name_list: List[str],
-        origin_resource_location: str,
-        sender_jid: Optional[str] = None,
-        phase_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        phase:           assembly
-        in_state:        printed
-        out_state:       assembled
-        params:
-          product_name:             string
-          part_name_list:           list[string]
-          origin_resource_location: string  # where parts are picked
-          sender_jid:               string # (auto-filled) requester
-          phase_id:                 string # (auto-filled)
-          task_id:                  string # (auto-filled)
-        description: Executes an assembly process for parts within a product using this robot agent.
-        ---
-        :param product_name: Name/ID of the product to assemble.
-        :param part_name_list: List of parts to assemble in order.
-        :param origin_resource_location: Identifier of the source resource (e.g., printer) for pickup.
-        :param sender_jid: Product agent JID that requested the job.
-        :param phase_id: Phase identifier inside a plan.
-        :param task_id: Task identifier inside the phase.
-        :returns: Dict with status and message about queueing or start.
-        """
-        job = dict(
-            product_name=product_name,
-            part_name_list=part_name_list,
-            origin_resource_location=origin_resource_location,
-            sender_jid=sender_jid,
-            phase_id=phase_id,
-            task_id=task_id,
-        )
-
-        if self._busy:
-            self._queue.append(job)
-            self.logger.info(f"[Robot] Busy – queued job {task_id}")
-            return {"status": "queued", "content": f"Job {task_id} queued."}
-
-        await self._run_assembly(job)
-        # IMPORTANT: let ResourceAgent send the final ACK using this return value
-        return {"status": "completed", "content": f"Completed job {task_id}."}
-
-    # ------------------------------------------------------------------ #
-    # Internal execution (no messaging here)
-    # ------------------------------------------------------------------ #
-    async def _run_assembly(self, job: Dict[str, Any]) -> None:
-        """Simulate performing assembly of all parts in `job`."""
-        self._busy = True
-
-        product = job["product_name"]
-        parts = job["part_name_list"]
-
-        self.logger.info(f"[START] Assembling {product} on {self.agent_name} from {job['origin_resource_location']}")
-        try:
-            # Simple simulation of a move→pick→move→place loop per part
-            for idx, part in enumerate(parts, start=1):
-                self.logger.info(f"  • ({idx}/{len(parts)}) move→pick→move→place: {part}")
-                await asyncio.sleep(1.0)  # simulate action time
-            self.logger.info(f"[DONE] {product} assembly complete")
-        finally:
-            self._busy = False
-            # Drain queue if any
-            if self._queue:
-                next_job = self._queue.pop(0)
-                await self._run_assembly(next_job)
-    '''
