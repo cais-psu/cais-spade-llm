@@ -282,3 +282,9 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-18 20:51:27,039 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-18 20:51:27,996 - agent:ur5e - INFO - [Resource] (REQ_1_T4) Calling place_part({'destination_location': 'ASSEMBLY_BOARD', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T4'})
 2025-11-18 20:51:27,997 - agent:ur5e - INFO - [Robot] Placing SG at ASSEMBLY_BOARD (orientation=default)
+2025-11-19 10:46:05,777 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 10:46:06,350 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-19 12:14:00,647 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 12:14:01,185 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-19 12:29:19,907 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 12:29:20,485 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])

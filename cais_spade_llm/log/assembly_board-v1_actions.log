@@ -384,3 +384,25 @@ FileNotFoundError: [Errno 2] No such file or directory: 'cais_spade_llm\\specifi
 2025-11-18 20:51:27,052 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='accepted' from=ur5e@localhost
 2025-11-18 20:51:29,013 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
 2025-11-18 20:51:29,014 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='completed' from=ur5e@localhost
+2025-11-19 10:46:05,797 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-19 10:46:07,154 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-19 10:46:07,157 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\specification\products\requirements\assembly_board-v1.txt
+2025-11-19 10:46:14,501 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 assembly requirement(s) via LLM.
+2025-11-19 10:46:14,503 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_requirements.json
+2025-11-19 10:46:39,384 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-19 10:46:39,387 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-19 10:46:39,387 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 10 task nodes (saved to cais_spade_llm\plan\assembly_board-v1_plan.json)
+2025-11-19 12:14:00,672 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-19 12:14:01,963 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-19 12:14:01,975 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\specification\products\requirements\assembly_board-v1.txt
+2025-11-19 12:14:07,106 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-19 12:14:07,107 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_requirements.json
+2025-11-19 12:14:43,930 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-19 12:14:54,384 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-19 12:29:19,951 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-19 12:29:21,276 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-19 12:29:21,278 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\specification\products\requirements\assembly_board-v1.txt
+2025-11-19 12:29:27,994 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-19 12:29:27,994 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_requirements.json
+2025-11-19 12:30:01,769 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-19 12:30:13,615 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json

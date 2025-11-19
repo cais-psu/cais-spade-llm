@@ -26,6 +26,10 @@ class ProductAgent(LlmAgent):
 
     agent_role = "product"  # Registered role so the shared LLM base class can fetch the right prompts.
 
+    # NEW: class-level caches for tools.json
+    _TOOLS_CATALOG: list[dict] | None = None
+    _TOOLS_BY_FUNC: dict[str, dict] | None = None
+
     def __init__(
         self,
         jid: str,
@@ -62,6 +66,9 @@ class ProductAgent(LlmAgent):
             self._resource_agent_refs, self.resource_jids
         )
         self.process_planner = ProcessPlanner(self, planner_resources)
+        
+        #keep resolved resource agents on the ProductAgent for caps overview
+        self.resource_agents = planner_resources
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
         self.task_states: dict[str, str] = {}
@@ -115,12 +122,8 @@ class ProductAgent(LlmAgent):
         return self.__class__._TOOLS_BY_FUNC or {}
     
     def _capability_catalogue(self) -> dict[str, set[str]]:
-        """
-        Merge every resource agent’s `static_capabilities`
-        → {'material': {'PLA','PETG'}, 'nozzle_diameter': {'0.4'}, …}
-        """
         caps: dict[str, set[str]] = {}
-        for ra in getattr(self, "resource_agents", []):
+        for ra in self.resource_agents:  # now guaranteed to exist
             for key, val in getattr(ra, "static_capabilities", {}).items():
                 iterable = val if isinstance(val, (list, tuple, set)) else [val]
                 caps.setdefault(key.lower(), set()).update(map(str, iterable))
@@ -323,11 +326,19 @@ class ProductAgent(LlmAgent):
             # Ask planner for one ready task
             task_node = agent.process_planner.next_ready_task()
             if not task_node:
-                # No runnable tasks right now (either all done or waiting on deps)
                 await asyncio.sleep(0.5)
                 return
 
-            to = agent.resource_jids[0]
+            # NEW: prefer resource_jid chosen by the planner (LLM)
+            to = task_node.get("resource_jid")
+            if not to:
+                # Fallback: first configured resource JID
+                to = agent.resource_jids[0]
+                agent.logger.warning(
+                    "[Product] Task %s has no resource_jid, falling back to %s",
+                    task_node.get("id"),
+                    to,
+                )
 
             # Build the instruction for the RobotAgent from the DAG node
             instruction = {

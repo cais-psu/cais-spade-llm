@@ -1,254 +1,280 @@
 [
   {
-    "function": "move_home",
+    "function": "pick_part",
     "function_owner_agent": "ur5e",
-    "phase": "assembly",
-    "in_state": "placed",
-    "out_state": "idle",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
+    "in_state": "printed",
+    "out_state": "picked",
+    "required_context_keys": [
+      "origin"
+    ],
     "params": {
-      "sender_jid": {
+      "part_name": {
         "type": "string",
-        "description": "Product agent JID that issued the request."
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "sender_jid": {
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Return the robot arm to a predefined home position."
+    "description": "Pick a printed part from an origin location."
   },
   {
     "function": "move_to_pick_location",
     "function_owner_agent": "ur5e",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "idle",
     "out_state": "at_pick",
+    "required_context_keys": [
+      "origin"
+    ],
     "params": {
       "origin_resource_location": {
         "type": "string",
-        "description": "Location identifier to approach for picking."
+        "description": "Target origin location to approach for picking."
       },
       "speed": {
         "type": "number",
-        "description": "Optional motion speed override."
+        "description": "Optional motion speed."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Move empty gripper to the origin location in preparation for picking."
+    "description": "Move empty gripper to the part's origin location."
   },
   {
     "function": "place_part",
     "function_owner_agent": "ur5e",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "positioned",
     "out_state": "placed",
+    "required_context_keys": [
+      "destination"
+    ],
     "params": {
       "destination_location": {
         "type": "string",
-        "description": "Target placement location identifier."
+        "description": "Target placement location."
       },
       "orientation": {
         "type": "string",
-        "description": "Optional placement orientation override."
+        "description": "Optional placement orientation."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Place the currently held part at the destination with the requested orientation."
-  },
-  {
-    "function": "pick_part",
-    "function_owner_agent": "ur5e",
-    "phase": "assembly",
-    "in_state": "printed",
-    "out_state": "picked",
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick up."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Resource or printer identifier the part is located at."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper program or pose configuration to use."
-      },
-      "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
-      },
-      "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
-      }
-    },
-    "description": "Move to origin_resource_location and pick the specified part using the requested gripper."
+    "description": "Place the currently held part at a destination."
   },
   {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "ur5e",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "picked",
     "out_state": "positioned",
+    "required_context_keys": [
+      "destination"
+    ],
     "params": {
       "destination_location": {
         "type": "string",
-        "description": "Target pose or waypoint for the carried part."
+        "description": "Destination location to carry the loaded part."
       },
       "speed": {
         "type": "number",
-        "description": "Optional motion speed override while loaded."
+        "description": "Optional motion speed while loaded."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Move while carrying the picked part to its destination pose."
+    "description": "Move the loaded part to its destination location."
   },
   {
     "function": "move_home",
-    "function_owner_agent": "xarm6",
-    "phase": "assembly",
+    "function_owner_agent": "ur5e",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "placed",
     "out_state": "idle",
+    "required_context_keys": [],
     "params": {
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Return the robot arm to a predefined home position."
+    "description": "Return robot arm to its home position."
+  },
+  {
+    "function": "pick_part",
+    "function_owner_agent": "xarm6",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
+    "in_state": "printed",
+    "out_state": "picked",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Pick a printed part from an origin location."
   },
   {
     "function": "move_to_pick_location",
     "function_owner_agent": "xarm6",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "idle",
     "out_state": "at_pick",
+    "required_context_keys": [
+      "origin"
+    ],
     "params": {
       "origin_resource_location": {
         "type": "string",
-        "description": "Location identifier to approach for picking."
+        "description": "Target origin location to approach for picking."
       },
       "speed": {
         "type": "number",
-        "description": "Optional motion speed override."
+        "description": "Optional motion speed."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Move empty gripper to the origin location in preparation for picking."
+    "description": "Move empty gripper to the part's origin location."
   },
   {
     "function": "place_part",
     "function_owner_agent": "xarm6",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "positioned",
     "out_state": "placed",
+    "required_context_keys": [
+      "destination"
+    ],
     "params": {
       "destination_location": {
         "type": "string",
-        "description": "Target placement location identifier."
+        "description": "Target placement location."
       },
       "orientation": {
         "type": "string",
-        "description": "Optional placement orientation override."
+        "description": "Optional placement orientation."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Place the currently held part at the destination with the requested orientation."
-  },
-  {
-    "function": "pick_part",
-    "function_owner_agent": "xarm6",
-    "phase": "assembly",
-    "in_state": "printed",
-    "out_state": "picked",
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick up."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Resource or printer identifier the part is located at."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper program or pose configuration to use."
-      },
-      "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
-      },
-      "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
-      }
-    },
-    "description": "Move to origin_resource_location and pick the specified part using the requested gripper."
+    "description": "Place the currently held part at a destination."
   },
   {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "xarm6",
-    "phase": "assembly",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
     "in_state": "picked",
     "out_state": "positioned",
+    "required_context_keys": [
+      "destination"
+    ],
     "params": {
       "destination_location": {
         "type": "string",
-        "description": "Target pose or waypoint for the carried part."
+        "description": "Destination location to carry the loaded part."
       },
       "speed": {
         "type": "number",
-        "description": "Optional motion speed override while loaded."
+        "description": "Optional motion speed while loaded."
       },
       "sender_jid": {
-        "type": "string",
-        "description": "Product agent JID that issued the request."
+        "type": "string"
       },
       "task_id": {
-        "type": "string",
-        "description": "Planner task identifier supplied by the product agent."
+        "type": "string"
       }
     },
-    "description": "Move while carrying the picked part to its destination pose."
+    "description": "Move the loaded part to its destination location."
+  },
+  {
+    "function": "move_home",
+    "function_owner_agent": "xarm6",
+    "phase": "ASSEMBLY",
+    "process_type": "PICK_PLACE",
+    "resource_type": "robot",
+    "in_state": "placed",
+    "out_state": "idle",
+    "required_context_keys": [],
+    "params": {
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Return robot arm to its home position."
   }
 ]

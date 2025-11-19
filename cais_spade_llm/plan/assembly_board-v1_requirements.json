@@ -3,23 +3,25 @@
     {
       "id": "REQ_1",
       "type": "requirement",
-      "raw_text": "Assemble SG from prusa-mk4-2 to the assembly board.",
-      "phase": "assembly",
+      "raw_text": "Assemble SG from prusa-mk4-2 to the assembly_board-v1.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
       "product": "SG",
       "context": {
-        "origin": "PRUSA_MK4_2",
-        "destination": "ASSEMBLY_BOARD"
+        "origin": "prusa-mk4-2",
+        "destination": "assembly_board-v1"
       }
     },
     {
       "id": "REQ_2",
       "type": "requirement",
-      "raw_text": "Assemble MCP from prusa-mk4-1 to the assembly board.",
-      "phase": "assembly",
+      "raw_text": "Assemble MCP from prusa-mk4-1 to the assembly_board-v1.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
       "product": "MCP",
       "context": {
-        "origin": "PRUSA_MK4_1",
-        "destination": "ASSEMBLY_BOARD"
+        "origin": "prusa-mk4-1",
+        "destination": "assembly_board-v1"
       }
     }
   ]

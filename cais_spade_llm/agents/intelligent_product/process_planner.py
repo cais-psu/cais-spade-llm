@@ -4,12 +4,13 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from prompts import build_task_expansion_prompt, build_requirement_parse_prompt
 
 
 class ProcessPlanner:
     """
-    ProcessPlanner converts NL to structured requirement nodes
-    and later expands them into DAG task nodes.
+    1. NL → structured requirement nodes   (build_high_level)
+    2. requirement nodes → executable task DAG   (expand_requirements_to_tasks)
     """
 
     def __init__(self, product_agent, resource_agents: Iterable[Any]):
@@ -20,25 +21,21 @@ class ProcessPlanner:
         self.phase_to_node: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ #
-    # NL → Assembly Requirements via LLM (minimal)
+    # 1. NL → High-level requirements
     # ------------------------------------------------------------------ #
-
     async def build_high_level(self, requirement_text: str) -> str:
         """
-        Use an LLM to parse natural-language *assembly* requirements into
-        minimal requirement nodes.
+        Parse natural-language manufacturing requirements into internal requirement nodes.
 
-        Node fields:
-          id, type='requirement', raw_text,
-          phase='assembly',
-          product,
-          context={origin, destination}
+        No normalization is applied:
+        - phase, process_type, product, context are kept exactly as returned by the LLM.
         """
+        # Reset state
         self.nodes.clear()
         self.phase_to_node.clear()
 
         try:
-            structured = await self._llm_parse_assembly_requirements(requirement_text)
+            structured = await self._llm_parse_requirements(requirement_text)
         except Exception as exc:
             self.logger.exception("[Planner] LLM requirement parsing failed: %s", exc)
             structured = []
@@ -46,74 +43,35 @@ class ProcessPlanner:
         for idx, req in enumerate(structured, start=1):
             node_id = f"REQ_{idx}"
 
-            product_id = self._normalize_id(req.get("product"))
-            ctx = req.get("context") or {}
-            origin_id = self._normalize_id(ctx.get("origin"))
-            dest_id = self._normalize_id(ctx.get("destination"))
+            # Use values exactly as returned by _llm_parse_requirements
+            raw_text = req.get("raw_text", "")
+            phase = req.get("phase")              # e.g. "ASSEMBLY", "printing", or None
+            process_type = req.get("process_type")  # e.g. "PICK_PLACE", "FDM_PRINT", or None
+            product = req.get("product")          # e.g. "SG", "MCP", or None
+            context = req.get("context") or {}    # e.g. {"origin": "prusa-mk4-2", "destination": "assembly board"}
 
             node = {
                 "id": node_id,
                 "type": "requirement",
-                "raw_text": req.get("raw_text", ""),
-                "phase": "assembly",
-                "product": product_id,
-                "context": {
-                    "origin": origin_id,
-                    "destination": dest_id,
-                },
+                "raw_text": raw_text,
+                "phase": phase,
+                "process_type": process_type,
+                "product": product,
+                "context": context,
             }
 
             self.nodes.append(node)
 
-        msg = f"[Planner] Parsed {len(structured)} assembly requirement(s) via LLM."
+        msg = f"[Planner] Parsed {len(structured)} requirement(s) via LLM."
         self.logger.info(msg)
         return msg
 
-    async def _llm_parse_assembly_requirements(
-        self, requirement_text: str
-    ) -> List[Dict[str, Any]]:
-        """
-        LLM JSON schema expected:
 
-        {
-          "requirements": [
-            {
-              "raw_text": "...",
-              "product": "SG",
-              "context": {
-                "origin": "prusa-mk4-2",
-                "destination": "assembly station"
-              }
-            }
-          ]
-        }
-        """
+    async def _llm_parse_requirements(self, requirement_text: str) -> list[dict[str, Any]]:
+        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
 
-        prompt = (
-            "You convert natural-language *assembly* instructions into a minimal structured form.\n"
-            "Respond with valid JSON only, no extra commentary.\n\n"
-            "Schema:\n"
-            "{\n"
-            '  "requirements": [\n'
-            "    {\n"
-            '      "raw_text": string,\n'
-            '      "product": string | null,\n'
-            '      "context": {\n'
-            '         "origin": string | null,\n'
-            '         "destination": string | null\n'
-            "      }\n"
-            "    }\n"
-            "  ]\n"
-            "}\n\n"
-            "Rules:\n"
-            "- All requirements refer to assembly.\n"
-            '- Use short, domain-relevant tokens for product and locations (e.g. \"SG\", \"prusa-mk4-2\").\n'
-            "- If you are unsure about a field, set it to null; do not invent details.\n\n"
-            "Now convert the following text:\n\n"
-            f"{requirement_text}\n"
-        )
+        prompt = build_requirement_parse_prompt(requirement_text, tools_catalog)
 
-        # IMPORTANT: use with_functions=False so ask_llm returns a plain string
         raw = await self.product_agent.ask_llm(
             prompt=prompt,
             with_functions=False,
@@ -127,11 +85,13 @@ class ProcessPlanner:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            self.logger.error("[Planner] LLM did not return valid JSON: %s\nRaw: %s", exc, raw)
+            self.logger.error(
+                "[Planner] LLM did not return valid JSON: %s\nRaw: %s", exc, raw
+            )
             raise
 
         reqs = parsed.get("requirements", [])
-        cleaned: List[Dict[str, Any]] = []
+        cleaned: list[dict[str, Any]] = []
 
         for r in reqs:
             if not isinstance(r, dict):
@@ -142,89 +102,113 @@ class ProcessPlanner:
             cleaned.append(
                 {
                     "raw_text": r.get("raw_text", ""),
+                    "phase": r.get("phase"),
+                    "process_type": r.get("process_type"),
                     "product": r.get("product"),
-                    "context": {
-                        "origin": ctx.get("origin"),
-                        "destination": ctx.get("destination"),
-                    },
+                    "context": ctx,
                 }
             )
 
         return cleaned
 
-    @staticmethod
-    def _normalize_id(text: Optional[str]) -> Optional[str]:
-        if not text:
-            return None
-        t = text.upper().strip()
-        t = re.sub(r"[^A-Z0-9]+", "_", t)
-        return t.strip("_") or None
-
     # ------------------------------------------------------------------ #
-    # Requirement → primitive task chain (DAG expansion)
+    # 2. REQUIREMENT → LLM TASK EXPANSION (replaces hard-coded version)
     # ------------------------------------------------------------------ #
     async def expand_requirements_to_tasks(self) -> None:
         """
-        Expand each requirement node into a linear chain of task nodes.
-        After this, self.nodes will contain only task nodes.
+        Replace requirement nodes with task nodes produced by LLM.
+        Includes resource assignment and sequence_index-based DAG structure.
         """
-        new_nodes: List[Dict[str, Any]] = []
+        req_nodes = [n for n in self.nodes if n.get("type") == "requirement"]
+        if not req_nodes:
+            self.logger.warning("[Planner] No requirement nodes to expand.")
+            self.nodes = []
+            return
 
-        # self.nodes currently holds only requirement nodes (built by build_high_level)
-        requirement_nodes = [n for n in self.nodes if n.get("type") == "requirement"]
+        # Prepare for LLM
+        req_payload = [
+            {
+                "id": n["id"],
+                "product": n.get("product"),
+                "context": n.get("context"),
+                "raw_text": n.get("raw_text"),
+            }
+            for n in req_nodes
+        ]
 
-        for node in requirement_nodes:
-            req_id = node["id"]
-            product = node.get("product")
-            ctx = node.get("context") or {}
-            origin = ctx.get("origin")
-            dest = ctx.get("destination")
+        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
 
-            def make_task(suffix: str, function_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-                tid = f"{req_id}_{suffix}"
-                return {
-                    "id": tid,
-                    "type": "task",
-                    "requirement_id": req_id,
-                    "function_name": function_name,
-                    "params": params,
-                    "status": "pending",
-                    "predecessors": [],
-                    "successors": [],
-                }
+        # capabilities overview from ProductAgent
+        caps_overview = ""
+        if hasattr(self.product_agent, "_static_caps_overview"):
+            try:
+                caps_overview = self.product_agent._static_caps_overview()
+            except Exception:
+                caps_overview = ""
 
-            t1 = make_task("T1", "move_to_pick_location", {
-                "origin_resource_location": origin,
-            })
-            t2 = make_task("T2", "pick_part", {
-                "part_name": product,
-                "origin_resource_location": origin,
-            })
-            t3 = make_task("T3", "move_loaded_to_destination", {
-                "destination_location": dest,
-            })
-            t4 = make_task("T4", "place_part", {
-                "destination_location": dest,
-            })
-            chain = [t1, t2, t3, t4]
+        resource_infos = [
+            {
+                "jid": str(getattr(ra, "jid", "")),
+                "static_capabilities": getattr(ra, "static_capabilities", {}),
+            }
+            for ra in self.resource_agents
+        ]
 
-            # Wire the chain
-            for prev, nxt in zip(chain, chain[1:]):
+        # Build LLM prompt (from prompts.py)
+        prompt = build_task_expansion_prompt(
+            requirements=req_payload,
+            tools_catalog=tools_catalog,
+            resource_infos=resource_infos,
+            caps_overview=caps_overview,
+        )
+
+        raw = await self.product_agent.ask_llm(
+            prompt=prompt,
+            with_functions=False,
+            temperature=0.0,
+        )
+
+        parsed = json.loads(raw)
+        task_specs = parsed.get("tasks", [])
+
+        new_nodes = []
+
+        # Create nodes
+        for t in task_specs:
+            node = {
+                "id": t.get("id"),
+                "type": "task",
+                "requirement_id": t.get("requirement_id"),
+                "function_name": t.get("function_name"),
+                "params": t.get("params") or {},
+                "resource_jid": t.get("resource_jid"),
+                "sequence_index": t.get("sequence_index", 0),
+                "status": "pending",
+                "predecessors": [],
+                "successors": [],
+            }
+            new_nodes.append(node)
+
+        # Build simple linear DAG per requirement
+        by_req: Dict[str, List[Dict[str, Any]]] = {}
+        for n in new_nodes:
+            rid = n["requirement_id"]
+            by_req.setdefault(rid, []).append(n)
+
+        for rid, seq in by_req.items():
+            seq.sort(key=lambda n: n["sequence_index"])
+            for prev, nxt in zip(seq, seq[1:]):
                 prev["successors"].append(nxt["id"])
                 nxt["predecessors"].append(prev["id"])
 
-            new_nodes.extend(chain)
-
         self.nodes = new_nodes
         self.logger.info(
-            "[Planner] Expanded requirements into task chains (tasks only, total nodes: %d)",
-            len(self.nodes),
+            f"[Planner] Expanded to {len(self.nodes)} LLM-generated task node(s)."
         )
 
     # ------------------------------------------------------------------ #
     # Scheduling helpers
     # ------------------------------------------------------------------ #
-
     def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         for n in self.nodes:
             if n.get("id") == node_id:
@@ -232,13 +216,6 @@ class ProcessPlanner:
         return None
 
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
-        """
-        Return one task node that is:
-          - type == 'task'
-          - status == 'pending'
-          - all predecessor nodes have status == 'completed'
-        or None if no such task exists.
-        """
         for node in self.nodes:
             if node.get("type") != "task":
                 continue
@@ -247,54 +224,30 @@ class ProcessPlanner:
 
             preds = node.get("predecessors", [])
             if not preds:
-                return node  # no dependencies
+                return node
 
-            all_done = True
-            for pid in preds:
-                pred_node = self._find_node(pid)
-                if not pred_node or pred_node.get("status") != "completed":
-                    all_done = False
-                    break
-
-            if all_done:
+            if all(self._find_node(pid).get("status") == "completed" for pid in preds):
                 return node
 
         return None
 
     # ------------------------------------------------------------------ #
-    # Persistence helpers
+    # Persistence
     # ------------------------------------------------------------------ #
-
     def save(self, path: Path | str) -> None:
-        """
-        Persist the current planner state (for now, just nodes) as JSON.
-        """
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-
-        payload = {
-            "nodes": self.nodes,
-        }
-
+        payload = {"nodes": self.nodes}
         with p.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
-        self.logger.info("[Planner] Saved plan to %s", p.resolve())
+            json.dump(payload, f, indent=2)
+        self.logger.info(f"[Planner] Saved plan to {p.resolve()}")
 
     def load(self, path: Path | str) -> None:
-        """
-        Load planner state from a JSON file created by save().
-        """
         p = Path(path)
         if not p.exists():
-            self.logger.warning("[Planner] Plan file does not exist: %s", p)
+            self.logger.warning(f"[Planner] Plan file missing: {p}")
             return
-
         with p.open("r", encoding="utf-8") as f:
             payload = json.load(f)
-
         self.nodes = payload.get("nodes", [])
-        self.phase_to_node = {}
-
-        self.logger.info("[Planner] Loaded plan from %s", p.resolve())
-
+        self.logger.info(f"[Planner] Loaded plan from {p.resolve()}")

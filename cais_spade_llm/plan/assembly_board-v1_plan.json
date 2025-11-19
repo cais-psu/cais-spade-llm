@@ -1,124 +1,202 @@
 {
   "nodes": [
     {
-      "id": "REQ_1_T1",
+      "id": "TASK_1",
       "type": "task",
       "requirement_id": "REQ_1",
       "function_name": "move_to_pick_location",
       "params": {
-        "origin_resource_location": "PRUSA_MK4_2"
+        "origin_resource_location": "prusa-mk4-2",
+        "speed": null,
+        "sender_jid": "ur5e@localhost",
+        "task_id": "TASK_1"
       },
-      "status": "accepted",
+      "resource_jid": "ur5e@localhost",
+      "sequence_index": 0,
+      "status": "pending",
       "predecessors": [],
       "successors": [
-        "REQ_1_T2"
+        "TASK_2"
       ]
     },
     {
-      "id": "REQ_1_T2",
+      "id": "TASK_2",
       "type": "task",
       "requirement_id": "REQ_1",
       "function_name": "pick_part",
       "params": {
         "part_name": "SG",
-        "origin_resource_location": "PRUSA_MK4_2"
+        "origin_resource_location": "prusa-mk4-2",
+        "gripper": null,
+        "sender_jid": "ur5e@localhost",
+        "task_id": "TASK_2"
       },
+      "resource_jid": "ur5e@localhost",
+      "sequence_index": 1,
       "status": "pending",
       "predecessors": [
-        "REQ_1_T1"
+        "TASK_1"
       ],
       "successors": [
-        "REQ_1_T3"
+        "TASK_3"
       ]
     },
     {
-      "id": "REQ_1_T3",
+      "id": "TASK_3",
       "type": "task",
       "requirement_id": "REQ_1",
       "function_name": "move_loaded_to_destination",
       "params": {
-        "destination_location": "ASSEMBLY_BOARD"
+        "destination_location": "assembly_board-v1",
+        "speed": null,
+        "sender_jid": "ur5e@localhost",
+        "task_id": "TASK_3"
       },
+      "resource_jid": "ur5e@localhost",
+      "sequence_index": 2,
       "status": "pending",
       "predecessors": [
-        "REQ_1_T2"
+        "TASK_2"
       ],
       "successors": [
-        "REQ_1_T4"
+        "TASK_4"
       ]
     },
     {
-      "id": "REQ_1_T4",
+      "id": "TASK_4",
       "type": "task",
       "requirement_id": "REQ_1",
       "function_name": "place_part",
       "params": {
-        "destination_location": "ASSEMBLY_BOARD"
+        "destination_location": "assembly_board-v1",
+        "orientation": null,
+        "sender_jid": "ur5e@localhost",
+        "task_id": "TASK_4"
       },
+      "resource_jid": "ur5e@localhost",
+      "sequence_index": 3,
       "status": "pending",
       "predecessors": [
-        "REQ_1_T3"
+        "TASK_3"
+      ],
+      "successors": [
+        "TASK_5"
+      ]
+    },
+    {
+      "id": "TASK_5",
+      "type": "task",
+      "requirement_id": "REQ_1",
+      "function_name": "move_home",
+      "params": {
+        "sender_jid": "ur5e@localhost",
+        "task_id": "TASK_5"
+      },
+      "resource_jid": "ur5e@localhost",
+      "sequence_index": 4,
+      "status": "pending",
+      "predecessors": [
+        "TASK_4"
       ],
       "successors": []
     },
     {
-      "id": "REQ_2_T1",
+      "id": "TASK_6",
       "type": "task",
       "requirement_id": "REQ_2",
       "function_name": "move_to_pick_location",
       "params": {
-        "origin_resource_location": "PRUSA_MK4_1"
+        "origin_resource_location": "prusa-mk4-1",
+        "speed": null,
+        "sender_jid": "xarm6@localhost",
+        "task_id": "TASK_6"
       },
+      "resource_jid": "xarm6@localhost",
+      "sequence_index": 0,
       "status": "pending",
       "predecessors": [],
       "successors": [
-        "REQ_2_T2"
+        "TASK_7"
       ]
     },
     {
-      "id": "REQ_2_T2",
+      "id": "TASK_7",
       "type": "task",
       "requirement_id": "REQ_2",
       "function_name": "pick_part",
       "params": {
         "part_name": "MCP",
-        "origin_resource_location": "PRUSA_MK4_1"
+        "origin_resource_location": "prusa-mk4-1",
+        "gripper": null,
+        "sender_jid": "xarm6@localhost",
+        "task_id": "TASK_7"
       },
+      "resource_jid": "xarm6@localhost",
+      "sequence_index": 1,
       "status": "pending",
       "predecessors": [
-        "REQ_2_T1"
+        "TASK_6"
       ],
       "successors": [
-        "REQ_2_T3"
+        "TASK_8"
       ]
     },
     {
-      "id": "REQ_2_T3",
+      "id": "TASK_8",
       "type": "task",
       "requirement_id": "REQ_2",
       "function_name": "move_loaded_to_destination",
       "params": {
-        "destination_location": "ASSEMBLY_BOARD"
+        "destination_location": "assembly_board-v1",
+        "speed": null,
+        "sender_jid": "xarm6@localhost",
+        "task_id": "TASK_8"
       },
+      "resource_jid": "xarm6@localhost",
+      "sequence_index": 2,
       "status": "pending",
       "predecessors": [
-        "REQ_2_T2"
+        "TASK_7"
       ],
       "successors": [
-        "REQ_2_T4"
+        "TASK_9"
       ]
     },
     {
-      "id": "REQ_2_T4",
+      "id": "TASK_9",
       "type": "task",
       "requirement_id": "REQ_2",
       "function_name": "place_part",
       "params": {
-        "destination_location": "ASSEMBLY_BOARD"
+        "destination_location": "assembly_board-v1",
+        "orientation": null,
+        "sender_jid": "xarm6@localhost",
+        "task_id": "TASK_9"
       },
+      "resource_jid": "xarm6@localhost",
+      "sequence_index": 3,
       "status": "pending",
       "predecessors": [
-        "REQ_2_T3"
+        "TASK_8"
+      ],
+      "successors": [
+        "TASK_10"
+      ]
+    },
+    {
+      "id": "TASK_10",
+      "type": "task",
+      "requirement_id": "REQ_2",
+      "function_name": "move_home",
+      "params": {
+        "sender_jid": "xarm6@localhost",
+        "task_id": "TASK_10"
+      },
+      "resource_jid": "xarm6@localhost",
+      "sequence_index": 4,
+      "status": "pending",
+      "predecessors": [
+        "TASK_9"
       ],
       "successors": []
     }
