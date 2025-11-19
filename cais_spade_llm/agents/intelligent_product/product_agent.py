@@ -68,6 +68,19 @@ class ProductAgent(LlmAgent):
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
+    # ------------------------------------------------------------------ #
+    # Persistence helper
+    # ------------------------------------------------------------------ #
+    def _persist_plan_snapshot(self) -> None:
+        """Persist the current process planner graph to disk."""
+        if not self.plan_path:
+            return
+
+        try:
+            self.process_planner.save(self.plan_path)
+        except Exception:
+            self.logger.exception("[Product] Failed to persist plan snapshot.")
+
     # --------------------------------------------------------------------- #
     # Tool catalogue helpers
     # --------------------------------------------------------------------- #
@@ -278,11 +291,17 @@ class ProductAgent(LlmAgent):
             agent.task_states[task_id] = status
 
             # 2) ALSO update node status in the planner DAG if exists
+            updated_node = False
             for node in agent.process_planner.nodes:
                 if node.get("id") == task_id:
                     # Map RA status → planner status; for now use it directly
-                    node["status"] = status
+                    if node.get("status") != status:
+                        node["status"] = status
+                        updated_node = True
                     break
+
+            if updated_node:
+                agent._persist_plan_snapshot()
 
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"

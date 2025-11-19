@@ -346,3 +346,41 @@ FileNotFoundError: [Errno 2] No such file or directory: 'cais_spade_llm\\specifi
 2025-11-18 19:29:52,227 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_1_T4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'ASSEMBLY_BOARD'}})
 2025-11-18 19:29:52,228 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='accepted' from=ur5e@localhost
 2025-11-18 19:29:54,535 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='completed' from=ur5e@localhost
+2025-11-18 20:51:01,524 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-18 20:51:03,124 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-18 20:51:03,126 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\specification\products\requirements\assembly_board-v1.txt
+2025-11-18 20:51:07,142 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 assembly requirement(s) via LLM.
+2025-11-18 20:51:07,144 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_requirements.json
+2025-11-18 20:51:07,144 - agent:assembly_board-v1 - INFO - [Planner] Expanded requirements into task chains (tasks only, total nodes: 8)
+2025-11-18 20:51:07,149 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:07,149 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm\plan\assembly_board-v1_plan.json)
+2025-11-18 20:51:15,877 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_1_T1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'PRUSA_MK4_2'}})
+2025-11-18 20:51:15,892 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:15,894 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T1) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:15,987 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_2_T1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'PRUSA_MK4_1'}})
+2025-11-18 20:51:18,299 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:18,300 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T1) status='completed' from=ur5e@localhost
+2025-11-18 20:51:18,315 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:18,315 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_2_T1) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:18,607 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_1_T2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'PRUSA_MK4_2'}})
+2025-11-18 20:51:20,906 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:20,907 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_2_T1) status='completed' from=ur5e@localhost
+2025-11-18 20:51:20,925 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:20,926 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T2) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:21,254 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_2_T2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'PRUSA_MK4_1'}})
+2025-11-18 20:51:23,593 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:23,594 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T2) status='completed' from=ur5e@localhost
+2025-11-18 20:51:23,602 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:23,603 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_2_T2) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:23,879 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_1_T3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'ASSEMBLY_BOARD'}})
+2025-11-18 20:51:24,666 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:24,666 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_2_T2) status='blocked' from=ur5e@localhost
+2025-11-18 20:51:24,681 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:24,682 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T3) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:26,932 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:26,933 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T3) status='completed' from=ur5e@localhost
+2025-11-18 20:51:27,038 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task REQ_1_T4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'ASSEMBLY_BOARD'}})
+2025-11-18 20:51:27,051 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:27,052 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='accepted' from=ur5e@localhost
+2025-11-18 20:51:29,013 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\plan\assembly_board-v1_plan.json
+2025-11-18 20:51:29,014 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T4) status='completed' from=ur5e@localhost

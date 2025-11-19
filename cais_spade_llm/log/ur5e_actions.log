@@ -262,3 +262,23 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-18 19:29:52,228 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-18 19:29:53,519 - agent:ur5e - INFO - [Resource] (REQ_1_T4) Calling place_part({'destination_location': 'ASSEMBLY_BOARD', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T4'})
 2025-11-18 19:29:53,519 - agent:ur5e - INFO - [Robot] Placing SG at ASSEMBLY_BOARD (orientation=default)
+2025-11-18 20:51:01,489 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-18 20:51:02,195 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-18 20:51:15,881 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:17,289 - agent:ur5e - INFO - [Resource] (REQ_1_T1) Calling move_to_pick_location({'origin_resource_location': 'PRUSA_MK4_2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T1'})
+2025-11-18 20:51:17,290 - agent:ur5e - INFO - [Robot] Travel empty to pick location PRUSA_MK4_2 (speed=default)
+2025-11-18 20:51:18,293 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:19,880 - agent:ur5e - INFO - [Resource] (REQ_2_T1) Calling move_to_pick_location({'origin_resource_location': 'PRUSA_MK4_1', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_2_T1'})
+2025-11-18 20:51:19,882 - agent:ur5e - INFO - [Robot] Travel empty to pick location PRUSA_MK4_1 (speed=default)
+2025-11-18 20:51:20,895 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:22,571 - agent:ur5e - INFO - [Resource] (REQ_1_T2) Calling pick_part({'part_name': 'SG', 'origin_resource_location': 'PRUSA_MK4_2', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T2'})
+2025-11-18 20:51:22,572 - agent:ur5e - INFO - [Robot] Picking SG from PRUSA_MK4_2 (gripper=default)
+2025-11-18 20:51:23,579 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:24,653 - agent:ur5e - INFO - [Resource] (REQ_2_T2) Calling pick_part({'part_name': 'MCP', 'origin_resource_location': 'PRUSA_MK4_1', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_2_T2'})
+2025-11-18 20:51:24,655 - agent:ur5e - WARNING - [Robot] Already holding SG; place it before picking a new part.
+2025-11-18 20:51:24,658 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:25,911 - agent:ur5e - INFO - [Resource] (REQ_1_T3) Calling move_loaded_to_destination({'destination_location': 'ASSEMBLY_BOARD', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T3'})
+2025-11-18 20:51:25,911 - agent:ur5e - INFO - [Robot] Move loaded part SG to ASSEMBLY_BOARD (speed=default)
+2025-11-18 20:51:27,039 - agent:ur5e - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-18 20:51:27,996 - agent:ur5e - INFO - [Resource] (REQ_1_T4) Calling place_part({'destination_location': 'ASSEMBLY_BOARD', 'sender_jid': 'assembly_board-v1@localhost', 'task_id': 'REQ_1_T4'})
+2025-11-18 20:51:27,997 - agent:ur5e - INFO - [Robot] Placing SG at ASSEMBLY_BOARD (orientation=default)

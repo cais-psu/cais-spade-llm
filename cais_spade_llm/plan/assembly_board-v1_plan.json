@@ -8,7 +8,7 @@
       "params": {
         "origin_resource_location": "PRUSA_MK4_2"
       },
-      "status": "pending",
+      "status": "accepted",
       "predecessors": [],
       "successors": [
         "REQ_1_T2"

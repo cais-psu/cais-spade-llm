@@ -108,3 +108,5 @@
 2025-11-18 19:26:43,368 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
 2025-11-18 19:29:35,234 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
 2025-11-18 19:29:36,424 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-18 20:51:01,521 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-18 20:51:02,660 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
