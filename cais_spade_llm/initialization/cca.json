@@ -1,0 +1,10 @@
+{
+    "cca": {
+      "type": "cca",
+      "jid": "cca@localhost",
+      "password": "none",
+      "domain": "localhost",
+      "instructions": "You are a central controller agent that handles safety related to multi-agent manufacturing systems.",
+      "safety_file": "cais_spade_llm/specification/cca/safety_requirements.pdf"
+    }
+}

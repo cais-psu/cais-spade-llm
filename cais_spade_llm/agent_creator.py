@@ -12,6 +12,7 @@ from agents.shared_information.user import User
 from agents.intelligent_product.product_agent import ProductAgent
 from agents.resource_agent.printing_agent import PrintingAgent
 from agents.resource_agent.robot_agent import RobotAgent
+from agents.central_controller.central_controller_agent import CentralControllerAgent
 
 # FunctionAnalyzer consults this registry to decide which methods each agent is allowed to expose.
 ALLOWED_FUNCS: dict[str, set[str]] = defaultdict(set)
@@ -144,3 +145,52 @@ def create_product_agents(
 
             agents.append(agent)
     return agents
+
+
+def create_central_controller(cca_init_file: str) -> CentralControllerAgent:
+    """
+    Build exactly ONE CentralControllerAgent from a JSON manifest.
+
+    Expected JSON format:
+
+    {
+      "cca": {
+        "type": "cca",
+        "jid": "cca@localhost",
+        "password": "none",
+        "domain": "localhost",
+        "instructions": " ... ",
+        "safety_file": "cais_spade_llm/specification/cca/safety_requirements.txt"
+      }
+    }
+    """
+
+    data = utils.load_json_data(cca_init_file)
+
+    if "cca" not in data:
+        raise ValueError(f"No 'cca' section found in {cca_init_file}.")
+
+    meta = data["cca"]
+
+    # Minimal validation
+    if (meta.get("type") or "").lower() != "cca":
+        raise ValueError("The 'cca' object must have type='cca'")
+
+    name = meta.get("name", "cca")   # default agent name = "cca"
+    jid = meta.get("jid")
+    password = meta.get("password")
+
+    if not jid or not password:
+        raise ValueError("CCA must have 'jid' and 'password' fields.")
+
+    safety_file = meta.get("safety_file")
+
+    controller = CentralControllerAgent(
+        jid,
+        password,
+        name=name,
+        instructions=meta.get("instructions", None),
+        safety_file=safety_file,
+    )
+
+    return controller

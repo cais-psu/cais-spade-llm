@@ -13,7 +13,7 @@
       },
       "resource_jid": "ur5e@localhost",
       "sequence_index": 0,
-      "status": "pending",
+      "status": "completed",
       "predecessors": [],
       "successors": [
         "TASK_2"
@@ -113,7 +113,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 0,
-      "status": "pending",
+      "status": "completed",
       "predecessors": [],
       "successors": [
         "TASK_7"
@@ -133,7 +133,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 1,
-      "status": "pending",
+      "status": "accepted",
       "predecessors": [
         "TASK_6"
       ],

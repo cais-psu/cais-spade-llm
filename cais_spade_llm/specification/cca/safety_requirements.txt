@@ -1,0 +1,2 @@
+- The two robot arms (xArm and UR5e) must not move loaded parts toward the assembly station at the same time to avoid collisions.
+- The two robot arms (xArm and UR5e) must not place parts on the assembly station at the same time to avoid collisions.

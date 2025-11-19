@@ -1,0 +1,5 @@
+2025-11-19 15:22:58,186 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.pdf
+2025-11-19 15:22:59,498 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-19 15:22:59,498 - agent:cca - INFO - [CCA] setup completed.
+2025-11-19 15:22:59,501 - agent:cca - INFO - [CCA] _InitSafety starting.
+2025-11-19 15:23:04,253 - agent:cca - INFO - [CCA] _InitSafety completed.

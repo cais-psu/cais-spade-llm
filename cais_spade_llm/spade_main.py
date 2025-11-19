@@ -15,6 +15,7 @@ for n in ("pyjabber", "winloop", "asyncio"):
 PRODUCT_DIR  = "cais_spade_llm/initialization/products/"
 RESOURCE_DIR = "cais_spade_llm/initialization/resources/"
 TOOLS_OUT    = "cais_spade_llm/initialization/tools.json"
+CCA_INIT     = "cais_spade_llm/initialization/cca.json"
 
 async def spade_main():
     """Orchestrate the entire SPADE session: load configs, spawn agents, register tools, and keep the loop alive."""
@@ -23,9 +24,10 @@ async def spade_main():
     res_files  = utils.get_init_files(RESOURCE_DIR)
 
     # Instantiate the user agent plus every resource/product agent defined in the JSON payloads.
-    user      = agent_creator.create_user()
-    resources = agent_creator.create_resource_agents(res_files)
-    products  = agent_creator.create_product_agents(prod_files, resources)
+    user       = agent_creator.create_user()
+    resources  = agent_creator.create_resource_agents(res_files)
+    products   = agent_creator.create_product_agents(prod_files, resources)
+    cca        = agent_creator.create_central_controller(CCA_INIT)  # <-- NEW
 
     # Build the single tools catalogue consumed by the LLM so it knows which agent functions are callable.
     FunctionAnalyzer.build_tools_catalogue(
@@ -33,13 +35,17 @@ async def spade_main():
         allowed=ALLOWED_FUNCS,
         outfile=TOOLS_OUT,
     )
-    
-    # Start resource agents immediately, optionally start the user agent, then stagger product agents
-    # to avoid simultaneous startup spikes against the embedded XMPP server.
+
+    # Start agents: resources -> CCA -> user -> products
     for ra in resources:
         await ra.start(auto_register=True)
+
+    if cca:
+        await cca.start(auto_register=True)
+
     if user:
         await user.start(auto_register=True)
+
     for i, pa in enumerate(products):
         await asyncio.sleep(0.2 * i)
         await pa.start(auto_register=True)
@@ -52,8 +58,7 @@ async def spade_main():
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        # Gracefully stop every agent (products, resources, and the optional user) before exiting.
-        for a in products + resources + ([user] if user else []):
+        for a in products + resources + ([cca] if cca else []) + ([user] if user else []):
             try:
                 await a.stop()
             except:
