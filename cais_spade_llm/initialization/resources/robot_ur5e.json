@@ -5,9 +5,9 @@
       "password": "none",
       "domain": "localhost",
       "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly stations.",
-      "functions": ["assembly"],
+      "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "move_home", "place_part"],
       "static_capabilities":{
-        "reachability": ["prusa-mk4-2", "prusa-mk3"]
+        "reachability": ["prusa-mk4-2", "prusa-mk3", "assembly_board-v1"]
       },          
       "gripper_file": "cais_spade_llm/specification/resources/parameters/ur5e-gripper.pdf",
       "ip": "192.168.1.172",
