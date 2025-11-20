@@ -199,3 +199,48 @@ TOOLS_CATALOGUE (for reference):
 Convert the following instructions into structured requirements:
 {requirement_text}
 """)
+
+SAFETY_PARSE_PROMPT = dedent("""
+You convert natural-language *safety rules* into a small structured form.
+
+You are given a TOOLS CATALOGUE. Each tool has:
+- function          (event name)
+- function_owner_agent  (resource id)
+- phase             (process)
+- required_context_keys (e.g. ["origin"], ["destination"], ["zone_id"], ...)
+
+For each safety sentence, output one object:
+
+{
+  "raw_text": string,
+  "constraint_type": string | null,   # short snake_case label, e.g. "no_simultaneous_action", "order_before"
+  "process": string | null,          # from tool.phase
+  "product": string | null,          # "any" if not specified
+  "resources": [string],             # tool.function_owner_agent ids
+  "event": string | null,            # tool.function
+  "context": string | null           # one of the tool.required_context_keys
+}
+
+Guidelines:
+- Pick a short snake_case constraint_type that summarizes the rule
+  (e.g., "no_simultaneous_action", "order_before", "max_frequency").
+- Do NOT invent resources or events; use only values from the tools catalogue.
+- process must match the chosen tool.phase.
+- If the product is not clearly specified, set "product": "any".
+- context must be one of the chosen tool's required_context_keys.
+- If you cannot confidently choose an event/tool, set all fields except raw_text to null.
+
+Respond with VALID JSON only:
+{ "rules": [ ... ] }
+""")
+
+def build_safety_parse_prompt(safety_text: str, tools_catalog: list) -> str:
+    return dedent(f"""
+{SAFETY_PARSE_PROMPT}
+
+TOOLS_CATALOGUE:
+{json.dumps(tools_catalog, ensure_ascii=False, indent=2)}
+
+Convert the following safety rules:
+{safety_text}
+""")

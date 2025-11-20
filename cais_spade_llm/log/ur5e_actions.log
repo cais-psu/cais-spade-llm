@@ -312,3 +312,12 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-19 15:23:29,496 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-19 15:23:31,890 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_1'})
 2025-11-19 15:23:31,890 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-19 21:26:35,269 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 21:26:35,868 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-19 21:28:11,357 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 21:28:11,898 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-19 21:28:48,845 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-19 21:29:23,436 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 21:29:23,970 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-19 21:35:49,604 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-19 21:35:50,131 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])

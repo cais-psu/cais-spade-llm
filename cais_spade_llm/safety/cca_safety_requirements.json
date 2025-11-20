@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "The two robot arms (xArm and UR5e) must not move loaded parts toward the assembly station at the same time to avoid collisions.",
+      "constraint_type": "no_simultaneous_action",
+      "process": "ASSEMBLY",
+      "product": "any",
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "context": "destination"
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "The two robot arms (xArm and UR5e) must not place parts on the assembly station at the same time to avoid collisions.",
+      "constraint_type": "no_simultaneous_action",
+      "process": "ASSEMBLY",
+      "product": "any",
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "context": "destination"
+    }
+  ]
+}

@@ -26,10 +26,6 @@ class ProductAgent(LlmAgent):
 
     agent_role = "product"  # Registered role so the shared LLM base class can fetch the right prompts.
 
-    # NEW: class-level caches for tools.json
-    _TOOLS_CATALOG: list[dict] | None = None
-    _TOOLS_BY_FUNC: dict[str, dict] | None = None
-
     def __init__(
         self,
         jid: str,
@@ -88,39 +84,6 @@ class ProductAgent(LlmAgent):
         except Exception:
             self.logger.exception("[Product] Failed to persist plan snapshot.")
 
-    # --------------------------------------------------------------------- #
-    # Tool catalogue helpers
-    # --------------------------------------------------------------------- #
-    @classmethod
-    def _load_tools_catalogue(cls) -> None:
-        """Lazy-load tools.json exactly once."""
-        if cls._TOOLS_CATALOG is not None:
-            return
-
-        path = Path("cais_spade_llm/initialization/tools.json")
-        try:
-            cls._TOOLS_CATALOG = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "tools.json missing – run FunctionAnalyzer.build_tools_catalogue() first."
-            ) from exc
-
-        cls._TOOLS_BY_FUNC = {
-            row["function"]: row
-            for row in (cls._TOOLS_CATALOG or [])
-            if "function" in row
-        }
-
-    @property
-    def tools_catalog(self) -> list[dict]:
-        self.__class__._load_tools_catalogue()
-        return self.__class__._TOOLS_CATALOG or []
-
-    @property
-    def tools_by_func(self) -> dict[str, dict]:
-        self.__class__._load_tools_catalogue()
-        return self.__class__._TOOLS_BY_FUNC or {}
-    
     def _capability_catalogue(self) -> dict[str, set[str]]:
         caps: dict[str, set[str]] = {}
         for ra in self.resource_agents:  # now guaranteed to exist

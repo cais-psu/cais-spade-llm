@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+from prompts import build_safety_parse_prompt
+import json
 
 class SafetyPlanner:
     """
@@ -24,7 +25,6 @@ class SafetyPlanner:
     def load_nl_safety_text(self) -> Optional[str]:
         """
         Load raw NL safety text from safety_file.
-
         This is a simple helper, similar to ProductAgent._read_spec_text.
         """
         try:
@@ -55,35 +55,159 @@ class SafetyPlanner:
             return None
 
     # ------------------------------------------------------------------ #
-    # 2. NL → structured safety rules (placeholder)
+    # NL → structured safety rules (via LLM)
     # ------------------------------------------------------------------ #
     async def build_safety_rules(self, safety_text: str) -> str:
         """
-        Placeholder for parsing NL safety requirements.
+        Use the LLM to parse natural-language safety rules into structured
+        safety rule nodes.
 
-        For now:
-          - each non-empty line becomes one safety rule node
-          - only 'id' and 'raw_text' are filled
-        Later:
-          - you will replace this with LLM parsing + AP/LTLf building.
+        Each rule has:
+          - id
+          - raw_text
+          - constraint_type   (e.g. "no_simultaneous_action")
+          - process           (e.g. "ASSEMBLY")
+          - product           (e.g. "any")
+          - resources         (e.g. ["xarm6", "ur5e"])
+          - event             (e.g. "move_loaded_to_destination")
+          - context           (e.g. "destination", "origin", "zone_id")
         """
         self.rules.clear()
 
-        lines = [ln.strip() for ln in safety_text.splitlines() if ln.strip()]
+        try:
+            structured = await self._llm_parse_safety_rules(safety_text)
+        except Exception as exc:
+            if self.logger:
+                self.logger.exception("[SafetyPlanner] LLM safety parsing failed: %s", exc)
+            structured = []
 
-        for idx, line in enumerate(lines, start=1):
+        for idx, r in enumerate(structured, start=1):
             rule_id = f"SAFE_{idx}"
+
+            raw_text        = r.get("raw_text", "")
+            constraint_type = r.get("constraint_type")
+            process         = r.get("process")
+            product         = r.get("product")
+            resources       = r.get("resources") or []
+            event           = r.get("event")
+            context         = r.get("context")
+
+            if not isinstance(resources, list):
+                resources = []
+            resources = [str(res).strip() for res in resources if res]
+
+            if isinstance(context, str):
+                context = context.strip()
+            else:
+                context = None
+
             node: Dict[str, Any] = {
                 "id": rule_id,
-                "raw_text": line,
-                # placeholders for later
-                "rule_type": None,
-                "actions": [],
-                "scope_location": None,
-                "resources": [],
+                "raw_text": raw_text,
+                "constraint_type": constraint_type,
+                "process": process,
+                "product": product,
+                "resources": resources,
+                "event": event,
+                "context": context,
             }
+
             self.rules.append(node)
 
-        msg = f"[SafetyPlanner] Parsed {len(self.rules)} safety rule(s) (placeholder)."
-        self.logger.info(msg)
+        msg = f"[SafetyPlanner] Parsed {len(self.rules)} structured safety rule(s) via LLM."
+        if self.logger:
+            self.logger.info(msg)
         return msg
+
+    # ------------------------------------------------------------------ #
+    # LLM call: NL → structured safety rules
+    # ------------------------------------------------------------------ #
+    async def _llm_parse_safety_rules(self, safety_text: str) -> list[dict[str, Any]]:
+        """
+        Call the LLM with SAFETY_PARSE_PROMPT and tools_catalog, return
+        a cleaned list of structured safety rules.
+        """
+        tools_catalog = getattr(self.controller_agent, "tools_catalog", [])
+        prompt = build_safety_parse_prompt(safety_text, tools_catalog)
+
+        raw = await self.controller_agent.ask_llm(
+            prompt=prompt,
+            with_functions=False,
+            temperature=0.0,
+        )
+
+        if isinstance(raw, dict):
+            if self.logger:
+                self.logger.error(
+                    "[SafetyPlanner] ask_llm returned dict, expected JSON string."
+                )
+            raise RuntimeError("ask_llm returned dict; expected JSON string.")
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            if self.logger:
+                self.logger.error(
+                    "[SafetyPlanner] LLM did not return valid JSON: %s\nRaw: %s",
+                    exc,
+                    raw,
+                )
+            raise
+
+        rules = parsed.get("rules", [])
+        cleaned: list[dict[str, Any]] = []
+
+        for r in rules:
+            if not isinstance(r, dict):
+                continue
+
+            resources = r.get("resources") or []
+            if not isinstance(resources, list):
+                resources = []
+
+            context = r.get("context")
+            if not isinstance(context, str):
+                context = None
+
+            cleaned.append(
+                {
+                    "raw_text":        r.get("raw_text", ""),
+                    "constraint_type": r.get("constraint_type"),
+                    "process":         r.get("process"),
+                    "product":         r.get("product"),
+                    "resources":       resources,
+                    "event":           r.get("event"),
+                    "context":         context,
+                }
+            )
+
+        return cleaned
+    
+    # ------------------------------------------------------------------ #
+    # Persistence helpers
+    # ------------------------------------------------------------------ #
+    def save(self, path: Path | str | None = None) -> None:
+        p = Path(path) if path else self.structured_safety_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {"rules": self.rules}
+
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        if self.logger:
+            self.logger.info(f"[SafetyPlanner] Saved structured safety rules to {p.resolve()}")
+
+    def load(self, path: Path | str | None = None) -> None:
+        p = Path(path) if path else self.structured_safety_path
+        if not p.exists():
+            if self.logger:
+                self.logger.warning(f"[SafetyPlanner] Safety file missing: {p}")
+            return
+
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.rules = data.get("rules", [])
+
+        if self.logger:
+            self.logger.info(f"[SafetyPlanner] Loaded structured safety rules from {p.resolve()}")

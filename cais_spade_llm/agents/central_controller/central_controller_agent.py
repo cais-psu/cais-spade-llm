@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +39,10 @@ class CentralControllerAgent(LlmAgent):
         self.agent_name = name
         self.safety_file = Path(safety_file) if safety_file else None
 
+        # Where the *structured* safety rules will be saved (like ProductAgent plan.json)
+        base_safety_dir = Path("cais_spade_llm/safety")
+        self.structured_safety_path = base_safety_dir / f"{name}_safety_requirements.json"
+
         # Safety planner scaffolding (similar to ProductAgent -> ProcessPlanner)
         self.safety_planner: Optional[SafetyPlanner] = None
         if self.safety_file:
@@ -67,7 +72,7 @@ class CentralControllerAgent(LlmAgent):
     # ------------------------------------------------------------------ #
 
     class _InitSafety(OneShotBehaviour):
-        """Build the safety rule model once at startup (placeholder)."""
+        """Build the safety rule model once at startup."""
 
         async def run(self) -> None:
             agent: "CentralControllerAgent" = self.agent  # type: ignore
@@ -85,8 +90,13 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.warning("[CCA] No NL safety text; _InitSafety aborted.")
                 return
 
-            # NL → structured safety rules (placeholder)
+            # 1. NL → structured safety rules
             await planner.build_safety_rules(safety_text)
+
+            # 2. Save structured safety (like ProductAgent does for requirements)
+            planner.save(agent.structured_safety_path)
+
+            # 3. Keep in memory for runtime use / UI
             agent.safety_rules = planner.rules
 
             agent.logger.info(
@@ -111,4 +121,4 @@ class CentralControllerAgent(LlmAgent):
             # Later:
             #   msg = await self.receive(timeout=0.5)
             #   if msg: ... handle safety query ...
-            await self.sleep(0.5)
+            await asyncio.sleep(0.5)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os, json, time, asyncio, logging
+from pathlib import Path
 from typing import Any, Callable, Optional, Dict, List
 
 from openai import OpenAI  # REST client for GPT models.
@@ -15,6 +16,11 @@ _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-li
 
 class LlmAgent(Agent):
     """Mixin-style agent that wires logging, tool analysis, and LLM access into SPADE agents."""
+
+    # Shared tool catalogue cache so every agent has access to the same tool metadata.
+    _TOOLS_CATALOG: List[Dict[str, Any]] | None = None
+    _TOOLS_BY_FUNC: Dict[str, Dict[str, Any]] | None = None
+
     def __init__(
         self,
         jid: str,
@@ -84,6 +90,39 @@ class LlmAgent(Agent):
         tail = f"\nCustom overrides:\n{overrides}\n" if overrides else ""  # User-provided tweaks.
         prompt = base.replace("{agent_name}", agent_name) + ("\n" + role_block if role_block else "") + tail
         return prompt.strip()
+
+    # ------------------------------------------------------------------ #
+    # Tool catalogue helpers
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def _load_shared_tools_catalogue(cls) -> None:
+        """Lazy-load tools.json exactly once so every agent sees the same snapshot."""
+        if LlmAgent._TOOLS_CATALOG is not None:
+            return
+
+        path = Path("cais_spade_llm/initialization/tools.json")
+        try:
+            LlmAgent._TOOLS_CATALOG = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "tools.json missing – run FunctionAnalyzer.build_tools_catalogue() first."
+            ) from exc
+
+        LlmAgent._TOOLS_BY_FUNC = {
+            row["function"]: row
+            for row in (LlmAgent._TOOLS_CATALOG or [])
+            if "function" in row
+        }
+
+    @property
+    def tools_catalog(self) -> List[Dict[str, Any]]:
+        self.__class__._load_shared_tools_catalogue()
+        return LlmAgent._TOOLS_CATALOG or []
+
+    @property
+    def tools_by_func(self) -> Dict[str, Dict[str, Any]]:
+        self.__class__._load_shared_tools_catalogue()
+        return LlmAgent._TOOLS_BY_FUNC or {}
 
     def _rebuild_tool_schemas(self) -> None:
         """Convert bound executable methods into JSON schema definitions for tool calling."""
