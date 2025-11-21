@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os, json, time, asyncio, logging
 from pathlib import Path
-from typing import Any, Callable, Optional, Dict, List
+from typing import Any, Callable, Optional, Dict, List, Iterable
 
 from openai import OpenAI  # REST client for GPT models.
 from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
@@ -150,6 +150,38 @@ class LlmAgent(Agent):
         """Log the configured LLM and functions so operators know the agent is ready."""
         self.logger.info(
             f"[ready] {self.jid} (LLM={self.model}, tools={[t['function']['name'] for t in self.function_info]})"
+        )
+
+    # ------------------------------------------------------------------ #
+    # Resource capability helpers (shared by product/controller agents)
+    # ------------------------------------------------------------------ #
+    def _capability_catalogue(
+        self, resource_agents: Optional[Iterable[Any]] = None
+    ) -> dict[str, set[str]]:
+        """
+        Build a map of capability -> set of values across resource agents.
+        Each resource agent may expose `.static_capabilities` as dict[str, Iterable].
+        """
+        resources = list(resource_agents) if resource_agents is not None else list(
+            getattr(self, "resource_agents", []) or []
+        )
+
+        caps: dict[str, set[str]] = {}
+        for ra in resources:
+            for key, val in getattr(ra, "static_capabilities", {}).items():
+                iterable = val if isinstance(val, (list, tuple, set)) else [val]
+                caps.setdefault(str(key).lower(), set()).update(map(str, iterable))
+        return caps
+
+    def _static_caps_overview(
+        self, resource_agents: Optional[Iterable[Any]] = None
+    ) -> str:
+        """Human-friendly string summarizing capabilities for prompt grounding."""
+        caps = self._capability_catalogue(resource_agents)
+        if not caps:
+            return "(no static capabilities registered)"
+        return " | ".join(
+            f"{k}: {', '.join(sorted(v))}" for k, v in caps.items()
         )
 
     async def ask_llm(

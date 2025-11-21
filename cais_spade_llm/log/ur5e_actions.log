@@ -321,3 +321,70 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-19 21:29:23,970 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
 2025-11-19 21:35:49,604 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
 2025-11-19 21:35:50,131 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 16:20:09,730 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 16:20:10,357 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 16:25:41,470 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 16:25:42,002 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 16:35:54,462 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 16:35:54,993 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 16:36:19,293 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 16:36:20,111 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_1'})
+2025-11-20 16:36:20,112 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-20 16:36:21,550 - agent:ur5e - INFO - [Resource] ← Task (TASK_2) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 16:36:22,597 - agent:ur5e - INFO - [Resource] (TASK_2) Calling pick_part({'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_2'})
+2025-11-20 16:36:22,598 - agent:ur5e - INFO - [Robot] Picking SG from prusa-mk4-2 (gripper=default)
+2025-11-20 16:36:23,815 - agent:ur5e - INFO - [Resource] ← Task (TASK_3) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 16:36:26,237 - agent:ur5e - INFO - [Resource] (TASK_3) Calling move_loaded_to_destination({'destination_location': 'assembly_board-v1', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_3'})
+2025-11-20 16:36:26,238 - agent:ur5e - INFO - [Robot] Move loaded part SG to assembly_board-v1 (speed=default)
+2025-11-20 16:36:27,721 - agent:ur5e - INFO - [Resource] ← Task (TASK_4) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 16:36:29,022 - agent:ur5e - INFO - [Resource] (TASK_4) Calling place_part({'destination_location': 'assembly_board-v1', 'orientation': None, 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_4'})
+2025-11-20 16:36:29,023 - agent:ur5e - INFO - [Robot] Placing SG at assembly_board-v1 (orientation=default)
+2025-11-20 16:36:30,476 - agent:ur5e - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 16:36:31,359 - agent:ur5e - INFO - [Resource] (TASK_5) Calling move_home({'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_5'})
+2025-11-20 16:36:31,359 - agent:ur5e - INFO - [Robot] Moving arm to home position
+2025-11-20 16:43:40,354 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 16:43:40,877 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:00:26,100 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:00:26,622 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:05:48,513 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:05:49,034 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:09:07,658 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:09:08,188 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:09:21,259 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:09:21,787 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:12:25,047 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 17:12:26,092 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_1'})
+2025-11-20 17:12:26,094 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-20 17:12:27,297 - agent:ur5e - INFO - [Resource] ← Task (TASK_2) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 17:12:28,870 - agent:ur5e - INFO - [Resource] (TASK_2) Calling pick_part({'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_2'})
+2025-11-20 17:12:28,872 - agent:ur5e - INFO - [Robot] Picking SG from prusa-mk4-2 (gripper=default)
+2025-11-20 17:12:30,079 - agent:ur5e - INFO - [Resource] ← Task (TASK_3) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 17:12:31,618 - agent:ur5e - INFO - [Resource] (TASK_3) Calling move_loaded_to_destination({'destination_location': 'assembly_board-v1', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_3'})
+2025-11-20 17:12:31,618 - agent:ur5e - INFO - [Robot] Move loaded part SG to assembly_board-v1 (speed=default)
+2025-11-20 17:12:32,945 - agent:ur5e - INFO - [Resource] ← Task (TASK_4) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-20 17:12:33,949 - agent:ur5e - INFO - [Resource] (TASK_4) Calling place_part({'destination_location': 'assembly_board-v1', 'orientation': None, 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_4'})
+2025-11-20 17:12:33,950 - agent:ur5e - INFO - [Robot] Placing SG at assembly_board-v1 (orientation=default)
+2025-11-20 17:13:07,863 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:13:08,390 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:14:07,147 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:14:07,669 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:14:13,134 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:14:13,665 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:19:24,688 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:19:25,221 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:20:03,808 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:20:04,323 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:39:52,347 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:39:52,872 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:42:03,358 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:42:03,878 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:46:51,360 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:46:51,887 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:47:16,487 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:47:17,010 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:48:32,935 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:48:33,467 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:49:49,234 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:49:49,750 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-20 17:52:33,768 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-20 17:52:34,289 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])

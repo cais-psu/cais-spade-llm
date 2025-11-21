@@ -84,22 +84,6 @@ class ProductAgent(LlmAgent):
         except Exception:
             self.logger.exception("[Product] Failed to persist plan snapshot.")
 
-    def _capability_catalogue(self) -> dict[str, set[str]]:
-        caps: dict[str, set[str]] = {}
-        for ra in self.resource_agents:  # now guaranteed to exist
-            for key, val in getattr(ra, "static_capabilities", {}).items():
-                iterable = val if isinstance(val, (list, tuple, set)) else [val]
-                caps.setdefault(key.lower(), set()).update(map(str, iterable))
-        return caps
-
-    def _static_caps_overview(self) -> str:
-        caps = self._capability_catalogue()
-        if not caps:
-            return "(no static capabilities registered)"
-        return " | ".join(
-            f"{k}: {', '.join(sorted(v))}" for k, v in caps.items()
-        )
-
     # --------------------------------------------------------------------- #
     # SPADE lifecycle
     # --------------------------------------------------------------------- #

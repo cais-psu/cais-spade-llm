@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Iterable
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from agents.shared_information.llm_agent import LlmAgent
-from agents.central_controller.safety_planner import SafetyPlanner
+from agents.central_controller.safety_logic import SafetyLogic
 
 
 class CentralControllerAgent(LlmAgent):
@@ -31,6 +31,7 @@ class CentralControllerAgent(LlmAgent):
         password: str,
         *,
         name: str,
+        resource_agents: Optional[Iterable[Any]] = None,
         safety_file: str | None = None,
         **kw: Any,
     ) -> None:
@@ -38,15 +39,17 @@ class CentralControllerAgent(LlmAgent):
 
         self.agent_name = name
         self.safety_file = Path(safety_file) if safety_file else None
+        # Resource agents (used for grounding capability overviews in safety prompts)
+        self.resource_agents = list(resource_agents or [])
 
-        # Where the *structured* safety rules will be saved (like ProductAgent plan.json)
+        # Where the safety rules and logic will be saved (like ProductAgent plan.json)
         base_safety_dir = Path("cais_spade_llm/safety")
-        self.structured_safety_path = base_safety_dir / f"{name}_safety_requirements.json"
+        self.safety_logic_path = base_safety_dir / f"{name}_safety_logic.json"
 
-        # Safety planner scaffolding (similar to ProductAgent -> ProcessPlanner)
-        self.safety_planner: Optional[SafetyPlanner] = None
+        # Safety logic scaffolding
+        self.safety_logic: Optional[SafetyLogic] = None
         if self.safety_file:
-            self.safety_planner = SafetyPlanner(self, self.safety_file)
+            self.safety_logic = SafetyLogic(self, self.safety_file)
 
         # In-memory safety rules (for later DFA/LTLf integration)
         self.safety_rules: list[dict[str, Any]] = []
@@ -78,26 +81,26 @@ class CentralControllerAgent(LlmAgent):
             agent: "CentralControllerAgent" = self.agent  # type: ignore
             agent.logger.info("[CCA] _InitSafety starting.")
 
-            planner = agent.safety_planner
-            if not planner:
+            safety_logic = agent.safety_logic
+            if not safety_logic:
                 agent.logger.warning(
                     "[CCA] No SafetyPlanner configured (missing safety_file)."
                 )
                 return
 
-            safety_text = planner.load_nl_safety_text()
+            safety_text = safety_logic.load_nl_safety_text()
             if not safety_text:
                 agent.logger.warning("[CCA] No NL safety text; _InitSafety aborted.")
                 return
 
-            # 1. NL → structured safety rules
-            await planner.build_safety_rules(safety_text)
+            # 1. NL → safety rules → AP/LTLf logic
+            await safety_logic.build_safety_rules_and_logic(safety_text)
 
-            # 2. Save structured safety (like ProductAgent does for requirements)
-            planner.save(agent.structured_safety_path)
+            # 2. Save safety rules
+            safety_logic.save(agent.safety_logic_path)
 
             # 3. Keep in memory for runtime use / UI
-            agent.safety_rules = planner.rules
+            agent.safety_rules = safety_logic.rules
 
             agent.logger.info(
                 "[CCA] _InitSafety completed with %d safety rule(s).",

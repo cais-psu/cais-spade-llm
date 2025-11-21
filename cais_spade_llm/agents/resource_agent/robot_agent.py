@@ -45,8 +45,7 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        phase: ASSEMBLY
-        process_type: PICK_PLACE
+        process: assembly
         resource_type: robot
 
         in_state: idle
@@ -95,8 +94,7 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        phase: ASSEMBLY
-        process_type: PICK_PLACE
+        process: assembly
         resource_type: robot
 
         in_state: printed
@@ -145,8 +143,7 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        phase: ASSEMBLY
-        process_type: PICK_PLACE
+        process: assembly
         resource_type: robot
 
         in_state: picked
@@ -194,8 +191,7 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        phase: ASSEMBLY
-        process_type: PICK_PLACE
+        process: assembly
         resource_type: robot
 
         in_state: positioned
@@ -240,14 +236,13 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """
         ---
-        phase: ASSEMBLY
-        process_type: PICK_PLACE
+        process: assembly
         resource_type: robot
 
         in_state: placed
         out_state: idle
 
-        required_context_keys: []
+        context: []
 
         params:
           sender_jid:

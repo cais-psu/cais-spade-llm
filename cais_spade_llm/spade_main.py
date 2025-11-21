@@ -27,7 +27,7 @@ async def spade_main():
     user       = agent_creator.create_user()
     resources  = agent_creator.create_resource_agents(res_files)
     products   = agent_creator.create_product_agents(prod_files, resources)
-    cca        = agent_creator.create_central_controller(CCA_INIT)  # <-- NEW
+    cca        = agent_creator.create_central_controller(CCA_INIT, resources)  # <-- pass resources for capability overview
 
     # Build the single tools catalogue consumed by the LLM so it knows which agent functions are callable.
     FunctionAnalyzer.build_tools_catalogue(

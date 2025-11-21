@@ -1,0 +1,56 @@
+{
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "The two robot arms (xArm and UR5e) must not move loaded parts toward the assembly board at the same time to avoid collisions.",
+      "constraint_type": "no_simultaneous_movement",
+      "process": "assembly",
+      "product": "any",
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "event": "move_loaded_to_destination",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "AP_001",
+          "full": "evt/assembly/any/ur5e/move_loaded_to_destination/assembly_board-v1"
+        },
+        {
+          "label": "AP_003",
+          "full": "evt/assembly/any/xarm6/move_loaded_to_destination/assembly_board-v1"
+        }
+      ],
+      "ltlf": "G !(AP_001 & AP_003)"
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "The two robot arms (xArm and UR5e) must not place parts on the assembly board at the same time to avoid collisions.",
+      "constraint_type": "no_simultaneous_placement",
+      "process": "assembly",
+      "product": "any",
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "event": "place_part",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "AP_002",
+          "full": "evt/assembly/any/ur5e/place_part/assembly_board-v1"
+        },
+        {
+          "label": "AP_004",
+          "full": "evt/assembly/any/xarm6/place_part/assembly_board-v1"
+        }
+      ],
+      "ltlf": "G !(AP_002 & AP_004)"
+    }
+  ]
+}

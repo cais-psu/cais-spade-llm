@@ -201,46 +201,261 @@ Convert the following instructions into structured requirements:
 """)
 
 SAFETY_PARSE_PROMPT = dedent("""
-You convert natural-language *safety rules* into a small structured form.
+You convert natural-language safety statements into structured rule objects.
 
-You are given a TOOLS CATALOGUE. Each tool has:
-- function          (event name)
-- function_owner_agent  (resource id)
-- phase             (process)
-- required_context_keys (e.g. ["origin"], ["destination"], ["zone_id"], ...)
-
-For each safety sentence, output one object:
+------------------------------------------------------------
+STRUCTURED RULE FORMAT
+------------------------------------------------------------
+For each safety sentence, produce:
 
 {
   "raw_text": string,
-  "constraint_type": string | null,   # short snake_case label, e.g. "no_simultaneous_action", "order_before"
-  "process": string | null,          # from tool.phase
-  "product": string | null,          # "any" if not specified
-  "resources": [string],             # tool.function_owner_agent ids
-  "event": string | null,            # tool.function
-  "context": string | null           # one of the tool.required_context_keys
+  "constraint_type": string | null,
+  "process": string | null,
+  "product": string | null,
+  "resources": [string],
+  "event": string | null,
+  "context": object | null
 }
 
-Guidelines:
-- Pick a short snake_case constraint_type that summarizes the rule
-  (e.g., "no_simultaneous_action", "order_before", "max_frequency").
-- Do NOT invent resources or events; use only values from the tools catalogue.
-- process must match the chosen tool.phase.
-- If the product is not clearly specified, set "product": "any".
-- context must be one of the chosen tool's required_context_keys.
-- If you cannot confidently choose an event/tool, set all fields except raw_text to null.
+------------------------------------------------------------
+FIELD RULES
+------------------------------------------------------------
+• raw_text
+  - Copy the original sentence exactly.
 
-Respond with VALID JSON only:
-{ "rules": [ ... ] }
-""")
+• constraint_type
+  - A short snake_case label summarizing the safety meaning.
+  - Not restricted to a fixed set of types.
 
-def build_safety_parse_prompt(safety_text: str, tools_catalog: list) -> str:
+• process
+  - If a matching tool can be identified, use tool.process.
+  - Otherwise set to null.
+
+• event
+  - If a matching tool matches the described action, use tool.function.
+  - Otherwise set to null.
+
+• resources
+  - Use tool.function_owner_agent identifiers when they participate.
+  - Avoid generic labels when specific resources are identifiable.
+  - If none can be identified, use [].
+
+• context
+  - Represent contextual information as an OBJECT (dictionary).
+  - Keys correspond to contextual roles implied by the tools or the text
+    (e.g., location, target, source, zone, area, machine, buffer, fixture).
+  - Values should be canonical identifiers whenever possible, drawn from
+    TOOLS_CATALOGUE or CAPABILITY_OVERVIEW, or normalized from the
+    natural language when no direct canonical match exists.
+  - Include all relevant context dimensions in:
+        "context": { "<key>": "<value>", ... }
+  - If no meaningful contextual information applies, set context to null.
+
+• product
+  - Use the referenced product if mentioned, otherwise "any".
+
+------------------------------------------------------------
+GENERAL RULES
+------------------------------------------------------------
+• Use ONLY values grounded in the TOOLS_CATALOGUE, CAPABILITY_OVERVIEW.
+• Prefer canonical identifiers from TOOLS_CATALOGUE or CAPABILITY_OVERVIEW
+  over ad-hoc free-text names.
+• Do not invent tools, events, processes, or contexts that are not supported
+  by the catalogues or the sentence.
+• Use lowercase + underscores for identifiers where applicable.
+• When information is missing or ambiguous, leave fields null or empty.
+• Output MUST be valid JSON.
+
+------------------------------------------------------------
+OUTPUT FORMAT
+------------------------------------------------------------
+{
+  "rules": [ ... ]
+}
+""").strip()
+
+
+def build_safety_parse_prompt(
+    safety_text: str,
+    tools_catalog: list[dict],
+    capability_overview: str = "",
+) -> str:
+    """
+    Prompt to convert raw NL safety text into structured safety rules.
+    Includes tools and capability information for grounding.
+    """
+    tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
+
     return dedent(f"""
+You are the SAFETY RULE PARSER.
+
 {SAFETY_PARSE_PROMPT}
 
 TOOLS_CATALOGUE:
-{json.dumps(tools_catalog, ensure_ascii=False, indent=2)}
+{tools_json}
 
-Convert the following safety rules:
+CAPABILITY_OVERVIEW:
+{capability_overview}
+
+Use these catalogues to choose grounded processes, events, resources,
+and canonical context identifiers.
+
+SAFETY_TEXT:
 {safety_text}
-""")
+""").strip()
+
+# ----------------------------------------------------------------------
+# SAFETY LOGIC: structured rules -> APs + LTLf
+# ----------------------------------------------------------------------
+
+SAFETY_AP_TEMPLATE_DOC = dedent("""
+Atomic propositions (APs) describe discrete system events or conditions.
+
+Use the format:
+  evt/<process>/<product>/<resource>/<event>/<context>
+
+Each segment is derived from:
+  • the structured safety rule fields produced during parsing
+      (process, product, resources, event, context)
+  • the values available in the TOOLS_CATALOGUE
+
+Segment meanings:
+  - process: operational phase associated with the event
+  - product: referenced product, or "any" if not specific
+  - resource: agent or tool involved in the event
+  - event: the action or condition described by the rule
+  - context: a compact representation of the relevant contextual
+             information for this event (e.g. derived from one or more
+             entries in the rule's context map, such as location, zone, machine, buffer)
+
+Segments should be:
+  - lowercase
+  - underscore-separated when needed
+  - consistent with the parsed rule fields and tool definitions
+
+When multiple context entries are present (e.g. locations),
+the context segment may combine them into a single token in a
+systematic way (for example by concatenating key/value information)
+as long as it remains concise and semantically meaningful.
+
+APs should not introduce any new processes, events, resources, or context
+information that are not present in the parsed rule or TOOLS_CATALOGUE.
+""").strip()
+
+SAFETY_LTLF_TEMPLATE_DOC = dedent("""
+Write one LTLf formula using only the APs defined for the rule.
+
+Available operators:
+  G  (globally)
+  F  (eventually)
+  X  (next)
+  U  (until)
+  &  (and)
+  |  (or)
+  !  (not)
+  -> (implies)
+  ( ) for grouping
+
+Guidelines:
+  - Interpret the safety meaning of the sentence and express it using
+    temporal and logical operators.
+  - Safety constraints often describe conditions that should never occur,
+    relationships that define ordering or dependency between events,
+    or requirements about eventual outcomes.
+  - Prohibitive constraints can be expressed using global negation
+    (e.g., G !(...)).
+  - Ordering and dependency constraints can be expressed using
+    implication, until, or eventuality.
+  - Formulas should reflect the intent of the natural-language
+    statement and remain consistent with the APs created for the rule.
+
+No specific pattern is assumed; choose an appropriate
+temporal relationship based on the rule’s meaning.
+""").strip()
+
+SAFETY_LTLF_FEWSHOT = dedent("""
+Few-shot examples (generic):
+
+Example A:
+Natural-language: "Two conditions should never hold together."
+APs: p1, p2
+LTLf: G !(p1 & p2)
+
+Example B:
+Natural-language: "If condition A occurs, condition B should eventually follow."
+APs: a, b
+LTLf: G (a -> F b)
+
+Example C:
+Natural-language: "Condition A must hold until condition B becomes true."
+APs: a, b
+LTLf: a U b
+
+Example D:
+Natural-language: "Condition A should never occur."
+APs: a
+LTLf: G !a
+""").strip()
+
+
+def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> str:
+    """
+    Prompt to convert structured safety rules -> AP strings + LTLf.
+    Includes the TOOLS_CATALOGUE and uses the AP/LTLf templates + few-shot.
+    """
+    rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
+    tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
+
+    return dedent(f"""
+You are the SAFETY LOGIC GENERATOR.
+
+For each structured safety rule in INPUT RULES you receive fields such as:
+  - id
+  - raw_text
+  - constraint_type
+  - process, product, resources, event, context
+
+Your task for each rule:
+  1) Define a set of APs using the AP template.
+  2) Define one LTLf safety formula that reflects the meaning of raw_text,
+     using only the APs you defined for that rule.
+
+Use the tool information in the TOOLS_CATALOGUE so that processes, events,
+resources, and context in the APs stay aligned with actual system behavior.
+
+=== TOOLS_CATALOGUE ===
+{tools_json}
+
+=== AP TEMPLATE ===
+{SAFETY_AP_TEMPLATE_DOC}
+
+=== LTLf TEMPLATE ===
+{SAFETY_LTLF_TEMPLATE_DOC}
+
+=== LTLf FEW-SHOT EXAMPLES (GENERIC) ===
+{SAFETY_LTLF_FEWSHOT}
+
+Response format:
+  - Return a single JSON object.
+  - For each input rule, produce an output entry with the same "id",
+    together with its AP list and LTLf formula.
+
+Expected JSON structure:
+
+{{
+  "rules": [
+    {{
+      "id": "<same id as input rule>",
+      "aps": ["evt/process/product/resource/event/context", ...],
+      "ltlf": "<one LTLf formula over these APs>"
+    }},
+    ...
+  ]
+}}
+
+Do not include explanations or comments outside this JSON.
+
+INPUT RULES:
+{rules_json}
+""").strip()

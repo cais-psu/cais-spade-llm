@@ -4,7 +4,7 @@
       "jid": "ur5e@localhost",
       "password": "none",
       "domain": "localhost",
-      "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly stations.",
+      "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly board.",
       "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "move_home", "place_part"],
       "static_capabilities":{
         "reachability": ["prusa-mk4-2", "prusa-mk3", "assembly_board-v1"]

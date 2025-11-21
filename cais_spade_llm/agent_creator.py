@@ -147,7 +147,10 @@ def create_product_agents(
     return agents
 
 
-def create_central_controller(cca_init_file: str) -> CentralControllerAgent:
+def create_central_controller(
+    cca_init_file: str,
+    resource_agents: list | None = None,
+) -> CentralControllerAgent:
     """
     Build exactly ONE CentralControllerAgent from a JSON manifest.
 
@@ -191,6 +194,7 @@ def create_central_controller(cca_init_file: str) -> CentralControllerAgent:
         name=name,
         instructions=meta.get("instructions", None),
         safety_file=safety_file,
+        resource_agents=resource_agents,
     )
 
     return controller

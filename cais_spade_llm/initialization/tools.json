@@ -1,96 +1,8 @@
 [
   {
-    "function": "move_to_pick_location",
-    "function_owner_agent": "ur5e",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
-    "resource_type": "robot",
-    "in_state": "idle",
-    "out_state": "at_pick",
-    "required_context_keys": [
-      "origin"
-    ],
-    "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Target origin location to approach for picking."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed."
-      },
-      "sender_jid": {
-        "type": "string"
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Move empty gripper to the part's origin location."
-  },
-  {
-    "function": "move_loaded_to_destination",
-    "function_owner_agent": "ur5e",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
-    "resource_type": "robot",
-    "in_state": "picked",
-    "out_state": "positioned",
-    "required_context_keys": [
-      "destination"
-    ],
-    "params": {
-      "destination_location": {
-        "type": "string",
-        "description": "Destination location to carry the loaded part."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed while loaded."
-      },
-      "sender_jid": {
-        "type": "string"
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Move the loaded part to its destination location."
-  },
-  {
-    "function": "place_part",
-    "function_owner_agent": "ur5e",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
-    "resource_type": "robot",
-    "in_state": "positioned",
-    "out_state": "placed",
-    "required_context_keys": [
-      "destination"
-    ],
-    "params": {
-      "destination_location": {
-        "type": "string",
-        "description": "Target placement location."
-      },
-      "orientation": {
-        "type": "string",
-        "description": "Optional placement orientation."
-      },
-      "sender_jid": {
-        "type": "string"
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Place the currently held part at a destination."
-  },
-  {
     "function": "pick_part",
     "function_owner_agent": "ur5e",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "printed",
     "out_state": "picked",
@@ -122,12 +34,11 @@
   {
     "function": "move_home",
     "function_owner_agent": "ur5e",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "placed",
     "out_state": "idle",
-    "required_context_keys": [],
+    "context": [],
     "params": {
       "sender_jid": {
         "type": "string"
@@ -139,39 +50,9 @@
     "description": "Return robot arm to its home position."
   },
   {
-    "function": "move_to_pick_location",
-    "function_owner_agent": "xarm6",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
-    "resource_type": "robot",
-    "in_state": "idle",
-    "out_state": "at_pick",
-    "required_context_keys": [
-      "origin"
-    ],
-    "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Target origin location to approach for picking."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed."
-      },
-      "sender_jid": {
-        "type": "string"
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Move empty gripper to the part's origin location."
-  },
-  {
     "function": "move_loaded_to_destination",
-    "function_owner_agent": "xarm6",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "picked",
     "out_state": "positioned",
@@ -198,9 +79,8 @@
   },
   {
     "function": "place_part",
-    "function_owner_agent": "xarm6",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "positioned",
     "out_state": "placed",
@@ -226,10 +106,37 @@
     "description": "Place the currently held part at a destination."
   },
   {
+    "function": "move_to_pick_location",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "idle",
+    "out_state": "at_pick",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Target origin location to approach for picking."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed."
+      },
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Move empty gripper to the part's origin location."
+  },
+  {
     "function": "pick_part",
     "function_owner_agent": "xarm6",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "printed",
     "out_state": "picked",
@@ -261,12 +168,11 @@
   {
     "function": "move_home",
     "function_owner_agent": "xarm6",
-    "phase": "ASSEMBLY",
-    "process_type": "PICK_PLACE",
+    "process": "assembly",
     "resource_type": "robot",
     "in_state": "placed",
     "out_state": "idle",
-    "required_context_keys": [],
+    "context": [],
     "params": {
       "sender_jid": {
         "type": "string"
@@ -276,5 +182,89 @@
       }
     },
     "description": "Return robot arm to its home position."
+  },
+  {
+    "function": "move_loaded_to_destination",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "picked",
+    "out_state": "positioned",
+    "required_context_keys": [
+      "destination"
+    ],
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Destination location to carry the loaded part."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed while loaded."
+      },
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Move the loaded part to its destination location."
+  },
+  {
+    "function": "place_part",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "positioned",
+    "out_state": "placed",
+    "required_context_keys": [
+      "destination"
+    ],
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Target placement location."
+      },
+      "orientation": {
+        "type": "string",
+        "description": "Optional placement orientation."
+      },
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Place the currently held part at a destination."
+  },
+  {
+    "function": "move_to_pick_location",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "idle",
+    "out_state": "at_pick",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Target origin location to approach for picking."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed."
+      },
+      "sender_jid": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Move empty gripper to the part's origin location."
   }
 ]
