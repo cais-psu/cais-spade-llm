@@ -75,37 +75,34 @@ class CentralControllerAgent(LlmAgent):
     # ------------------------------------------------------------------ #
 
     class _InitSafety(OneShotBehaviour):
-        """Build the safety rule model once at startup."""
-
         async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
-            agent.logger.info("[CCA] _InitSafety starting.")
+            agent: "CentralControllerAgent" = self.agent
 
             safety_logic = agent.safety_logic
             if not safety_logic:
-                agent.logger.warning(
-                    "[CCA] No SafetyPlanner configured (missing safety_file)."
-                )
+                agent.logger.warning("[CCA] No SafetyPlanner configured.")
                 return
 
             safety_text = safety_logic.load_nl_safety_text()
             if not safety_text:
-                agent.logger.warning("[CCA] No NL safety text; _InitSafety aborted.")
+                agent.logger.warning("[CCA] No NL safety text.")
                 return
 
-            # 1. NL → safety rules → AP/LTLf logic
+            # 1. Build structured rules + APs + LTLf
             await safety_logic.build_safety_rules_and_logic(safety_text)
 
-            # 2. Save safety rules
+            # 2. Save JSON
             safety_logic.save(agent.safety_logic_path)
 
-            # 3. Keep in memory for runtime use / UI
+            # 3. Store rules in memory
             agent.safety_rules = safety_logic.rules
 
-            agent.logger.info(
-                "[CCA] _InitSafety completed with %d safety rule(s).",
-                len(agent.safety_rules),
-            )
+            # 4. Build DFA for runtime monitoring
+            dfa = safety_logic.build_dfa()
+            agent.dfa = dfa
+
+            agent.logger.info("[CCA] _InitSafety completed.")
+
 
     class _SafetyMonitor(CyclicBehaviour):
         """

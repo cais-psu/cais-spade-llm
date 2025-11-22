@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
+from ltlf2dfa.parser.ltlf import LTLfParser
 
 from prompts import (
     build_safety_parse_prompt,
@@ -31,7 +32,7 @@ class SafetyLogic:
         # Parsed structured rules (NL -> rules)
         self.rules: List[Dict[str, Any]] = []
 
-        # Raw logic from LLM: rule_id -> {"aps": [full_ap_str...], "ltlf": "..."}
+        # Raw logic from LLM: rule_id -> {"aps": [full___str...], "ltlf": "..."}
         self.logic_raw: Dict[str, Dict[str, Any]] = {}
 
         # Optional combined safety spec: {"aps": {label: full}, "formula": "φ_safety"}
@@ -347,7 +348,7 @@ class SafetyLogic:
         # Assign labels (global)
         ap_reverse: Dict[str, str] = {}  # full_ap -> label
         for idx, ap in enumerate(unique_aps, start=1):
-            label = f"AP_{idx:03d}"
+            label = f"ap{idx:03d}"
             ap_reverse[ap] = label
 
         # Inject into rules
@@ -417,6 +418,52 @@ class SafetyLogic:
             "aps": global_ap_map,
             "formula": global_formula,
         }
+
+
+    # ------------------------------------------------------------------ #
+    # ltlf to dfa
+    # ------------------------------------------------------------------ #
+    def build_dfa(self):
+        """
+        Convert the combined LTLf formula into a DFA (DOT string) using ltlf2dfa.
+
+        We store the DOT string and write it to a .dot file for visualization.
+        """
+        formula_str = self.global_safety_spec.get("formula", "")
+        if not formula_str:
+            if self.logger:
+                self.logger.warning("[SafetyLogic] No global LTLf safety formula to convert.")
+            return None
+
+        try:
+            parser = LTLfParser()
+            ltlf_formula = parser(formula_str)
+            dfa_dot = ltlf_formula.to_dfa()  # This is a DOT string, not a Python DFA object
+        except Exception as exc:
+            if self.logger:
+                self.logger.exception(
+                    "[SafetyLogic] Failed to build DFA from formula '%s': %s",
+                    formula_str, exc
+                )
+            return None
+
+        # Store the DOT string on the instance (for future use if needed)
+        self.dfa = dfa_dot
+
+        # Save DOT to file so you can inspect / render it
+        out_dir = Path("cais_spade_llm/safety")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dot_path = out_dir / "cca_safety_dfa.dot"
+        dot_path.write_text(dfa_dot, encoding="utf-8")
+
+        if self.logger:
+            # Optionally log a small preview of the DOT string
+            preview = dfa_dot.splitlines()[0] if dfa_dot else "<empty>"
+            self.logger.info("[SafetyLogic] DFA (DOT) built and saved to %s", dot_path)
+            self.logger.debug("[SafetyLogic] DFA DOT first line: %s", preview)
+
+        return dfa_dot
+
 
     # ------------------------------------------------------------------ #
     # Persistence helpers

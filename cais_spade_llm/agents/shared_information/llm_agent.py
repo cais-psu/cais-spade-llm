@@ -10,6 +10,8 @@ from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 
 from function_analyzer import FunctionAnalyzer  # Introspects agent methods for tool schemas.
 from prompts import PROMPT_MAS_AGENT, BASE_INSTRUCTIONS, ROLE_BLOCKS
+from dotenv import load_dotenv
+load_dotenv()
 
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
 

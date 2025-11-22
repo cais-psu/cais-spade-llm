@@ -167,3 +167,295 @@ TypeError: build_safety_parse_prompt() missing 1 required positional argument: '
 2025-11-20 17:52:59,283 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
 2025-11-20 17:53:06,203 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 47
 2025-11-20 17:53:09,061 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:31:30,499 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:31:31,881 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:31:31,882 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:31:31,883 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:31:55,594 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:32:22,510 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:32:23,854 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:32:23,854 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:32:23,854 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:32:32,631 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:32:38,639 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 47
+2025-11-22 13:32:47,002 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:33:09,845 - agent:cca - ERROR - [SafetyLogic] Failed to build DFA from formula '(G !(AP_001 & AP_003)) & (G !(AP_002 & AP_004))': No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP_001 & AP_003)) & (G !(AP_002 & AP_004
+     ^
+Expected one of: 
+	* LAST
+	* pl__FALSE
+	* pl__TRUE
+	* ALWAYS
+	* SYMBOL_NAME
+	* LSEPARATOR
+	* NEXT
+	* WEAK_NEXT
+	* EVENTUALLY
+	* NOT
+
+Previous tokens: Token('LSEPARATOR', '(')
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 486, in lex
+    token = self.root_lexer.next_token(lexer_state, parser_state)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 398, in next_token
+    raise UnexpectedCharacters(lex_state.text, line_ctr.char_pos, line_ctr.line, line_ctr.column,
+lark.exceptions.UnexpectedCharacters: No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP_001 & AP_003)) & (G !(AP_002 & AP_004
+     ^
+Expected one of: 
+	* RSEPARATOR
+	* IMPLY
+	* LAST
+	* pl__FALSE
+	* pl__TRUE
+	* SYMBOL_NAME
+	* RELEASE
+	* NEXT
+	* AND
+	* NOT
+	* OR
+	* EQUIVALENCE
+	* ALWAYS
+	* LSEPARATOR
+	* UNTIL
+	* WEAK_NEXT
+	* EVENTUALLY
+
+Previous tokens: Token('LSEPARATOR', '(')
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\central_controller\safety_logic.py", line 443, in build_dfa
+    ltlf_formula = parser(formula_str)   # LTLfFormula
+                   ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\ltlf2dfa\parser\ltlf.py", line 223, in __call__
+    tree = self._parser.parse(text)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lark.py", line 581, in parse
+    return self.parser.parse(text, start=start, on_error=on_error)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parser_frontends.py", line 106, in parse
+    return self.parser.parse(stream, chosen_start, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 41, in parse
+    return self.parser.parse(lexer, start)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 171, in parse
+    return self.parse_from_state(parser_state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 188, in parse_from_state
+    raise e
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 178, in parse_from_state
+    for token in state.lexer.lex(state):
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 489, in lex
+    raise e  # Raise the original UnexpectedCharacters. The root lexer raises it with the wrong expected set.
+    ^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 478, in lex
+    yield lexer.next_token(lexer_state, parser_state)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 398, in next_token
+    raise UnexpectedCharacters(lex_state.text, line_ctr.char_pos, line_ctr.line, line_ctr.column,
+lark.exceptions.UnexpectedCharacters: No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP_001 & AP_003)) & (G !(AP_002 & AP_004
+     ^
+Expected one of: 
+	* LAST
+	* pl__FALSE
+	* pl__TRUE
+	* ALWAYS
+	* SYMBOL_NAME
+	* LSEPARATOR
+	* NEXT
+	* WEAK_NEXT
+	* EVENTUALLY
+	* NOT
+
+Previous tokens: Token('LSEPARATOR', '(')
+
+2025-11-22 13:38:51,550 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:38:52,863 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:38:52,865 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:38:52,865 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:39:02,992 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:39:07,944 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 13:39:07,947 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:39:21,376 - agent:cca - ERROR - [SafetyLogic] Failed to build DFA from formula '(G !(AP001 & AP003)) & (G !(AP002 & AP004))': No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP001 & AP003)) & (G !(AP002 & AP004))
+     ^
+Expected one of: 
+	* SYMBOL_NAME
+	* LAST
+	* EVENTUALLY
+	* NOT
+	* pl__TRUE
+	* WEAK_NEXT
+	* pl__FALSE
+	* NEXT
+	* ALWAYS
+	* LSEPARATOR
+
+Previous tokens: Token('LSEPARATOR', '(')
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 486, in lex
+    token = self.root_lexer.next_token(lexer_state, parser_state)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 398, in next_token
+    raise UnexpectedCharacters(lex_state.text, line_ctr.char_pos, line_ctr.line, line_ctr.column,
+lark.exceptions.UnexpectedCharacters: No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP001 & AP003)) & (G !(AP002 & AP004))
+     ^
+Expected one of: 
+	* SYMBOL_NAME
+	* NOT
+	* WEAK_NEXT
+	* ALWAYS
+	* RSEPARATOR
+	* AND
+	* LSEPARATOR
+	* LAST
+	* EVENTUALLY
+	* pl__TRUE
+	* IMPLY
+	* UNTIL
+	* pl__FALSE
+	* EQUIVALENCE
+	* NEXT
+	* OR
+	* RELEASE
+
+Previous tokens: Token('LSEPARATOR', '(')
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\central_controller\safety_logic.py", line 443, in build_dfa
+    ltlf_formula = parser(formula_str)   # LTLfFormula
+                   ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\ltlf2dfa\parser\ltlf.py", line 223, in __call__
+    tree = self._parser.parse(text)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lark.py", line 581, in parse
+    return self.parser.parse(text, start=start, on_error=on_error)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parser_frontends.py", line 106, in parse
+    return self.parser.parse(stream, chosen_start, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 41, in parse
+    return self.parser.parse(lexer, start)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 171, in parse
+    return self.parse_from_state(parser_state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 188, in parse_from_state
+    raise e
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\parsers\lalr_parser.py", line 178, in parse_from_state
+    for token in state.lexer.lex(state):
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 489, in lex
+    raise e  # Raise the original UnexpectedCharacters. The root lexer raises it with the wrong expected set.
+    ^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 478, in lex
+    yield lexer.next_token(lexer_state, parser_state)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\lark\lexer.py", line 398, in next_token
+    raise UnexpectedCharacters(lex_state.text, line_ctr.char_pos, line_ctr.line, line_ctr.column,
+lark.exceptions.UnexpectedCharacters: No terminal matches 'A' in the current parser context, at line 1 col 6
+
+(G !(AP001 & AP003)) & (G !(AP002 & AP004))
+     ^
+Expected one of: 
+	* SYMBOL_NAME
+	* LAST
+	* EVENTUALLY
+	* NOT
+	* pl__TRUE
+	* WEAK_NEXT
+	* pl__FALSE
+	* NEXT
+	* ALWAYS
+	* LSEPARATOR
+
+Previous tokens: Token('LSEPARATOR', '(')
+
+2025-11-22 13:41:31,873 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:41:33,213 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:41:33,213 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:41:33,214 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:41:38,817 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:41:43,604 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 13:41:43,605 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:41:51,287 - agent:cca - ERROR - [SafetyLogic] Failed to build DFA from formula '(G !(ap001 & ap003)) & (G !(ap002 & ap004))': module 'os' has no attribute 'setsid'
+Traceback (most recent call last):
+  File "C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\agents\central_controller\safety_logic.py", line 444, in build_dfa
+    dfa = ltlf_formula.to_dfa()          # DFA object from ltlf2dfa
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\ltlf2dfa\ltlf.py", line 74, in to_dfa
+    return to_dfa(self, mona_dfa_out)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\ltlf2dfa\ltlf2dfa.py", line 207, in to_dfa
+    mona_dfa = invoke_mona()
+               ^^^^^^^^^^^^^
+  File "C:\Users\jongh\projects\cais-spade-llm\.venv\Lib\site-packages\ltlf2dfa\ltlf2dfa.py", line 182, in invoke_mona
+    preexec_fn=os.setsid,
+               ^^^^^^^^^
+AttributeError: module 'os' has no attribute 'setsid'
+2025-11-22 13:46:54,116 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:46:55,397 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:46:55,397 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:46:55,398 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:47:00,118 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:47:05,431 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 13:47:05,434 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:47:31,275 - agent:cca - INFO - [SafetyLogic] DFA built successfully. (states ~= 0)
+2025-11-22 13:47:34,027 - agent:cca - INFO - [CCA] _InitSafety completed.
+2025-11-22 13:49:43,327 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:49:44,660 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:49:44,660 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:49:44,661 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:49:50,868 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:49:55,237 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 13:49:55,239 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:50:04,624 - agent:cca - INFO - [SafetyLogic] DFA built successfully. (states ~= 0)
+2025-11-22 13:50:05,541 - agent:cca - INFO - Initial state: None
+2025-11-22 13:50:06,289 - agent:cca - INFO - Final states: None
+2025-11-22 13:50:06,942 - agent:cca - INFO - Transitions: None
+2025-11-22 13:53:07,390 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:53:08,694 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 13:53:08,694 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 13:53:08,695 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm\specification\cca\safety_requirements.txt
+2025-11-22 13:53:13,766 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 13:53:18,609 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 13:53:18,610 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to C:\Users\jongh\projects\cais-spade-llm\cais_spade_llm\safety\cca_safety_logic.json
+2025-11-22 13:53:35,120 - agent:cca - INFO - [SafetyLogic] DFA built (type=str).
+2025-11-22 13:53:35,924 - agent:cca - INFO - Initial state: None
+2025-11-22 13:53:36,523 - agent:cca - INFO - Final states: None
+2025-11-22 13:53:38,823 - agent:cca - INFO - [CCA] _InitSafety completed.
+2025-11-22 15:30:50,797 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 15:30:52,275 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 15:30:52,275 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 15:30:52,276 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 15:30:58,805 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 15:31:02,198 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 15:31:02,199 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-22 15:31:12,216 - agent:cca - INFO - [SafetyLogic] DFA built successfully. (states ~= 0)
+2025-11-22 15:31:13,293 - agent:cca - INFO - Initial state: None
+2025-11-22 15:31:13,701 - agent:cca - INFO - Final states: None
+2025-11-22 15:31:14,135 - agent:cca - INFO - Transitions: None
+2025-11-22 15:34:30,931 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 15:34:32,389 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 15:34:32,389 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 15:34:32,389 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 15:34:35,979 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 15:34:41,804 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 15:34:41,805 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-22 15:34:52,513 - agent:cca - INFO - [SafetyLogic] DFA (DOT) built and saved to cais_spade_llm/safety/cca_safety_dfa.dot
+2025-11-22 15:35:05,120 - agent:cca - INFO - [CCA] _InitSafety completed.
