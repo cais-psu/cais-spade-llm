@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 from ltlf2dfa.parser.ltlf import LTLfParser
+from graphviz import Source
 
 from prompts import (
     build_safety_parse_prompt,
@@ -37,6 +38,10 @@ class SafetyLogic:
 
         # Optional combined safety spec: {"aps": {label: full}, "formula": "φ_safety"}
         self.global_safety_spec: Dict[str, Any] = {}
+
+        # store one DFA (DOT string) per rule
+        self.rule_dfas: Dict[str, str] = {}
+
 
     # ------------------------------------------------------------------ #
     # 1. Load NL safety requirements
@@ -419,15 +424,85 @@ class SafetyLogic:
             "formula": global_formula,
         }
 
-
     # ------------------------------------------------------------------ #
     # ltlf to dfa
     # ------------------------------------------------------------------ #
-    def build_dfa(self):
+    def build_dfas_per_rule(self):
+        """
+        Build one DFA per safety rule (SAFE_1, SAFE_2, ...) using ltlf2dfa.
+
+        For each rule, we:
+          - parse its LTLf formula
+          - convert to DFA (DOT string)
+          - save DOT and PNG under cais_spade_llm/safety/
+        """
+        if not self.rules:
+            if self.logger:
+                self.logger.warning("[SafetyLogic] No safety rules to build DFAs for.")
+            return {}
+
+        parser = LTLfParser()
+        out_dir = Path("cais_spade_llm/safety")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.rule_dfas = {}
+
+        for rule in self.rules:
+            rid = rule.get("id")
+            phi = rule.get("ltlf")
+            if not rid or not phi:
+                continue
+
+            try:
+                ltlf_formula = parser(phi)
+                dfa_dot = ltlf_formula.to_dfa()  # DOT string for this rule only
+            except Exception as exc:
+                if self.logger:
+                    self.logger.exception(
+                        "[SafetyLogic] Failed to build DFA for rule %s (formula '%s'): %s",
+                        rid, phi, exc,
+                    )
+                continue
+
+            # Store in memory
+            self.rule_dfas[rid] = dfa_dot
+
+            # Save DOT file
+            dot_path = out_dir / f"{rid}_dfa.dot"
+            dot_path.write_text(dfa_dot, encoding="utf-8")
+
+            if self.logger:
+                self.logger.info(
+                    "[SafetyLogic] DFA (DOT) for %s built and saved to %s",
+                    rid, dot_path,
+                )
+
+            # Render PNG via Graphviz
+            try:
+                src = Source(dfa_dot)
+                render_path = src.render(
+                    filename=str(out_dir / f"{rid}_dfa"),
+                    format="png",
+                    cleanup=True,
+                )
+                if self.logger:
+                    self.logger.info(
+                        "[SafetyLogic] DFA graph for %s rendered to %s",
+                        rid, render_path,
+                    )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.exception(
+                        "[SafetyLogic] Graphviz rendering failed for %s: %s",
+                        rid, exc,
+                    )
+
+        return self.rule_dfas
+
+    def build_global_dfa(self):
         """
         Convert the combined LTLf formula into a DFA (DOT string) using ltlf2dfa.
-
-        We store the DOT string and write it to a .dot file for visualization.
+        Then save it and render a PNG visualization.
         """
         formula_str = self.global_safety_spec.get("formula", "")
         if not formula_str:
@@ -438,7 +513,7 @@ class SafetyLogic:
         try:
             parser = LTLfParser()
             ltlf_formula = parser(formula_str)
-            dfa_dot = ltlf_formula.to_dfa()  # This is a DOT string, not a Python DFA object
+            dfa_dot = ltlf_formula.to_dfa()  # DOT string
         except Exception as exc:
             if self.logger:
                 self.logger.exception(
@@ -447,22 +522,36 @@ class SafetyLogic:
                 )
             return None
 
-        # Store the DOT string on the instance (for future use if needed)
         self.dfa = dfa_dot
 
-        # Save DOT to file so you can inspect / render it
+        # Save DOT file
         out_dir = Path("cais_spade_llm/safety")
         out_dir.mkdir(parents=True, exist_ok=True)
         dot_path = out_dir / "cca_safety_dfa.dot"
         dot_path.write_text(dfa_dot, encoding="utf-8")
 
         if self.logger:
-            # Optionally log a small preview of the DOT string
-            preview = dfa_dot.splitlines()[0] if dfa_dot else "<empty>"
             self.logger.info("[SafetyLogic] DFA (DOT) built and saved to %s", dot_path)
-            self.logger.debug("[SafetyLogic] DFA DOT first line: %s", preview)
+
+        # -------------------------
+        # Graphviz Visualization
+        # -------------------------
+        try:
+            src = Source(dfa_dot)
+            render_path = src.render(
+                filename=str(out_dir / "cca_safety_dfa"),
+                format="png",
+                cleanup=True
+            )
+            if self.logger:
+                self.logger.info("[SafetyLogic] DFA graph rendered to %s", render_path)
+
+        except Exception as exc:
+            if self.logger:
+                self.logger.exception("[SafetyLogic] Graphviz rendering failed: %s", exc)
 
         return dfa_dot
+    
 
 
     # ------------------------------------------------------------------ #

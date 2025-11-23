@@ -175,6 +175,23 @@ class ResourceAgent(LlmAgent):
                 )
                 return
 
+            # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
+            try:
+                from spade.message import Message  # already imported at top
+
+                resource_msg = Message(to="cca@localhost")  # CCA JID
+                resource_msg.set_metadata("type", "resource_event")
+                resource_msg.body = json.dumps({
+                    "task_id": task_id,
+                    "resource_jid": str(agent.jid),
+                    "function_name": fn_name,
+                    "params": fn_args,
+                    # later you can also add current running tasks info if you want
+                })
+                await agent.send(resource_msg)
+            except Exception:
+                agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
+
             agent.logger.info(f"[Resource] ({task_id}) Calling {fn_name}({fn_args})")
             try:
                 result = await asyncio.wait_for(

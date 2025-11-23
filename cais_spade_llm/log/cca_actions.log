@@ -459,3 +459,37 @@ AttributeError: module 'os' has no attribute 'setsid'
 2025-11-22 15:34:41,805 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
 2025-11-22 15:34:52,513 - agent:cca - INFO - [SafetyLogic] DFA (DOT) built and saved to cais_spade_llm/safety/cca_safety_dfa.dot
 2025-11-22 15:35:05,120 - agent:cca - INFO - [CCA] _InitSafety completed.
+2025-11-22 20:03:58,036 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 20:03:59,429 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 20:03:59,429 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 20:03:59,432 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 20:04:10,298 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 20:04:19,759 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 20:04:19,760 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-22 20:04:22,043 - agent:cca - INFO - [SafetyLogic] DFA (DOT) built and saved to cais_spade_llm/safety/cca_safety_dfa.dot
+2025-11-22 20:04:22,106 - agent:cca - INFO - [SafetyLogic] DFA graph rendered to cais_spade_llm/safety/cca_safety_dfa.png
+2025-11-22 20:04:27,620 - agent:cca - INFO - [CCA] _InitSafety completed.
+2025-11-22 20:26:38,841 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 20:26:40,289 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 20:26:40,289 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 20:26:40,292 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 20:26:43,808 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 20:26:49,085 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 20:26:49,086 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-22 20:26:49,188 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-22 20:26:49,244 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-22 20:26:49,256 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-22 20:26:49,269 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-22 20:26:49,269 - agent:cca - INFO - [CCA] _InitSafety completed.
+2025-11-22 21:31:03,024 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 21:31:04,477 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-22 21:31:04,478 - agent:cca - INFO - [CCA] setup completed.
+2025-11-22 21:31:04,478 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-22 21:31:10,479 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-22 21:31:15,811 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-22 21:31:15,811 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-22 21:31:15,921 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-22 21:31:15,982 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-22 21:31:15,995 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-22 21:31:16,008 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-22 21:31:16,008 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.

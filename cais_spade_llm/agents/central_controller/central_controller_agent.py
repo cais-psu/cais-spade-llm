@@ -9,7 +9,7 @@ from typing import Any, Optional, Iterable
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from agents.shared_information.llm_agent import LlmAgent
 from agents.central_controller.safety_logic import SafetyLogic
-
+from agents.central_controller.safety_monitor import SafetyMonitor
 
 class CentralControllerAgent(LlmAgent):
     """
@@ -97,28 +97,16 @@ class CentralControllerAgent(LlmAgent):
             # 3. Store rules in memory
             agent.safety_rules = safety_logic.rules
 
-            # 4. Build DFA for runtime monitoring
-            dfa = safety_logic.build_dfa()
-            agent.dfa = dfa
+            # 4. Build DFAs for runtime monitoring (one DOT per rule)
+            dfa_map = safety_logic.build_dfas_per_rule()  # { "SAFE_1": dot_str, "SAFE_2": dot_str, ... }
 
-            agent.logger.info("[CCA] _InitSafety completed.")
+            # Runtime safety monitor (wraps all per-rule DFAs)
+            self.safety_monitor: Optional[SafetyMonitor] = None
 
+            agent.logger.info(
+                "[CCA] _InitSafety completed. %d rules, %d DFAs.",
+                len(agent.safety_rules),
+                len(dfa_map),
+            )
 
-    class _SafetyMonitor(CyclicBehaviour):
-        """
-        Placeholder: cyclic behaviour for safety monitoring.
-
-        Later this will:
-          - receive safety_query messages from ProductAgents
-          - consult DFA/LTLf monitor
-          - reply with allowed/blocked
-        """
-
-        async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
-
-            # Placeholder: just sleep to keep loop alive
-            # Later:
-            #   msg = await self.receive(timeout=0.5)
-            #   if msg: ... handle safety query ...
-            await asyncio.sleep(0.5)
+    
