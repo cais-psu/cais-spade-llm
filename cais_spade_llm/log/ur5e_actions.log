@@ -434,3 +434,5 @@ TypeError: RobotAgent.assembly() got an unexpected keyword argument 'correlation
 2025-11-22 21:31:22,628 - agent:ur5e - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-22 21:31:23,184 - agent:ur5e - INFO - [Resource] (TASK_8) Calling place_part({'destination_location': 'assembly_board-v1', 'orientation': None, 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_8'})
 2025-11-22 21:31:23,184 - agent:ur5e - INFO - [Robot] Placing MCP at assembly_board-v1 (orientation=default)
+2025-11-24 17:36:53,551 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-24 17:36:54,254 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])

@@ -493,3 +493,6 @@ AttributeError: module 'os' has no attribute 'setsid'
 2025-11-22 21:31:15,995 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
 2025-11-22 21:31:16,008 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
 2025-11-22 21:31:16,008 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 17:36:53,559 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 17:36:55,422 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 17:36:55,422 - agent:cca - INFO - [CCA] setup completed.

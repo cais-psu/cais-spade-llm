@@ -1,0 +1,9 @@
+# Python virtual environments
+.venv/
+.venv-windows/
+venv/
+env/
+
+# (optional extras)
+__pycache__/
+*.pyc

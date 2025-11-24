@@ -261,3 +261,5 @@
 2025-11-22 21:31:22,022 - agent:xarm6 - INFO - [Resource] ← Task (TASK_4) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-22 21:31:23,102 - agent:xarm6 - INFO - [Resource] (TASK_4) Calling place_part({'destination_location': 'assembly_board-v1', 'orientation': None, 'sender_jid': 'xarm6@localhost', 'task_id': 'TASK_4'})
 2025-11-22 21:31:23,102 - agent:xarm6 - INFO - [Robot] Placing SG at assembly_board-v1 (orientation=default)
+2025-11-24 17:36:53,558 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-24 17:36:54,837 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
