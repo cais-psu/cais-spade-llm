@@ -177,8 +177,6 @@ class ResourceAgent(LlmAgent):
 
             # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
             try:
-                from spade.message import Message  # already imported at top
-
                 resource_msg = Message(to="cca@localhost")  # CCA JID
                 resource_msg.set_metadata("type", "resource_event")
                 resource_msg.body = json.dumps({
@@ -186,9 +184,9 @@ class ResourceAgent(LlmAgent):
                     "resource_jid": str(agent.jid),
                     "function_name": fn_name,
                     "params": fn_args,
-                    # later you can also add current running tasks info if you want
+                    "status": "running",   # <--- NEW: this action is about to run
                 })
-                await agent.send(resource_msg)
+                await self.send(resource_msg)
             except Exception:
                 agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
 
@@ -200,6 +198,22 @@ class ResourceAgent(LlmAgent):
                 )
                 # Tool implementations optionally return {"status": "..."}; default to completed.
                 status = (result or {}).get("status") or "completed"
+
+                # ----- RESOURCE EVENT: TASK FINISHED (same type, different status) ----- #
+                try:
+                    done_msg = Message(to="cca@localhost")
+                    done_msg.set_metadata("type", "resource_event")
+                    done_msg.body = json.dumps({
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": status,   # e.g. "completed", "failed:tool:X", etc.
+                    })
+                    asyncio.create_task(self.send(done_msg))  # <- do NOT await, just fire-and-forget
+                except Exception:
+                    agent.logger.exception("[Resource] Failed to send final resource_event to CCA (ignored).")
+
             except asyncio.TimeoutError:
                 status = "tool_timeout"
             except Exception as e:

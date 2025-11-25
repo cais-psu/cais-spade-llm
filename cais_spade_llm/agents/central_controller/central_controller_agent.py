@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Optional, Iterable
 
@@ -11,16 +12,15 @@ from agents.shared_information.llm_agent import LlmAgent
 from agents.central_controller.safety_logic import SafetyLogic
 from agents.central_controller.safety_monitor import SafetyMonitor
 
+
 class CentralControllerAgent(LlmAgent):
     """
     Central Controller Agent (CCA)
 
-    Placeholder version:
-
-      - Holds path to safety requirements file
-      - Owns a SafetyPlanner (NL -> safety rules)
-      - Has OneShot behaviour to build safety model at startup
-      - Has Cyclic behaviour placeholder for future safety monitoring
+    - Loads NL safety requirements and builds structured rules + LTLf via SafetyLogic
+    - Builds per-rule DFAs and wraps them in a SafetyMonitor
+    - Runs a generic _Monitor behaviour that listens for 'resource_event' messages
+      from ResourceAgents and calls monitor_run(...) to perform runtime safety checks.
     """
 
     agent_role = "controller"
@@ -54,6 +54,13 @@ class CentralControllerAgent(LlmAgent):
         # In-memory safety rules (for later DFA/LTLf integration)
         self.safety_rules: list[dict[str, Any]] = []
 
+        # Runtime safety monitor (wraps all per-rule DFAs)
+        self.safety_monitor: Optional[SafetyMonitor] = None
+
+        # Track which APs are currently considered "running" across resources.
+        # This lets the DFA see simultaneous actions: σ = running_aps ∪ candidate_aps.
+        self.running_aps: set[str] = set()
+
         self.logger.info(
             "CentralControllerAgent '%s' initialized. safety_file=%s",
             name,
@@ -65,16 +72,129 @@ class CentralControllerAgent(LlmAgent):
         self.logger.info("[CCA] setup completed.")
 
         # One-shot init behaviour (build safety rules once at startup)
-        self.add_behaviour(self._InitSafety())
+        self.add_behaviour(self._InitCCA())
 
-        # Cyclic monitoring behaviour (placeholder)
-        self.add_behaviour(self._SafetyMonitor())
+        # Cyclic monitoring behaviour
+        self.add_behaviour(self._Monitor())
+
+    # ------------------------------------------------------------------ #
+    # Runtime monitoring entry point
+    # ------------------------------------------------------------------ #
+    async def monitor_run(self, msg) -> None:
+        """
+        Called by the _Monitor behaviour when a 'resource_event' arrives.
+
+        We use a single message type with a 'status' field:
+
+          - status == "running"  → task is starting (safety check + add APs)
+          - otherwise            → task finished (remove APs)
+
+        This avoids separate monitor_finish/resource_done functions.
+        """
+        if not self.safety_monitor:
+            self.logger.warning("[CCA] safety_monitor not initialized.")
+            return
+
+        try:
+            data = json.loads(msg.body or "{}")
+        except Exception:
+            self.logger.error("[CCA] Malformed resource_event body.")
+            return
+
+        task_id       = data.get("task_id")
+        resource_jid  = data.get("resource_jid")
+        function_name = data.get("function_name")
+        params        = data.get("params") or {}
+        status        = data.get("status") or "running"
+
+        if not (resource_jid and function_name):
+            self.logger.warning("[CCA] resource_event missing resource_jid or function_name.")
+            return
+
+        # Map task → AP labels using SafetyMonitor’s helper
+        candidate_aps = self.safety_monitor._map_task_to_aps(
+            resource_jid=resource_jid,
+            function_name=function_name,
+            params=params,
+        )
+
+        if not candidate_aps:
+            self.logger.info(
+                "[CCA] No AP mapping for task=%s (%s, %s, status=%s); skipping.",
+                task_id,
+                resource_jid,
+                function_name,
+                status,
+            )
+            return
+
+        # -----------------------------
+        # 1) START event → run safety
+        # -----------------------------
+        if status == "running":
+            running_snapshot = list(self.running_aps)
+
+            allowed, meta = self.safety_monitor.check(
+                running_aps=running_snapshot,
+                candidate_aps=candidate_aps,
+            )
+
+            if not allowed:
+                self.logger.warning(
+                    "[CCA] SAFETY VIOLATION: task=%s rule=%s aps=%s (running=%s)",
+                    task_id,
+                    meta.get("violated_rule"),
+                    candidate_aps,
+                    running_snapshot,
+                )
+                # Do NOT add APs on violation
+                return
+
+            # DFA accepted → mark these APs as running
+            self.running_aps.update(candidate_aps)
+
+            self.logger.info(
+                "[CCA] Safety OK (start): task=%s aps=%s (now running=%s)",
+                task_id,
+                candidate_aps,
+                sorted(self.running_aps),
+            )
+            return
+
+        # --------------------------------
+        # 2) FINISH event → remove APs
+        # --------------------------------
+        for ap in candidate_aps:
+            if ap in self.running_aps:
+                self.running_aps.discard(ap)
+
+        self.logger.info(
+            "[CCA] Task finished: task=%s status=%s removed_aps=%s (now running=%s)",
+            task_id,
+            status,
+            candidate_aps,
+            sorted(self.running_aps),
+        )
 
     # ------------------------------------------------------------------ #
     # Behaviours
     # ------------------------------------------------------------------ #
 
-    class _InitSafety(OneShotBehaviour):
+    class _Monitor(CyclicBehaviour):
+        async def run(self) -> None:
+            agent: "CentralControllerAgent" = self.agent  # type: ignore
+
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            if msg.metadata.get("type") != "resource_event":
+                return
+
+            await agent.monitor_run(msg)
+
+
+    class _InitCCA(OneShotBehaviour):
         async def run(self) -> None:
             agent: "CentralControllerAgent" = self.agent
 
@@ -100,13 +220,11 @@ class CentralControllerAgent(LlmAgent):
             # 4. Build DFAs for runtime monitoring (one DOT per rule)
             dfa_map = safety_logic.build_dfas_per_rule()  # { "SAFE_1": dot_str, "SAFE_2": dot_str, ... }
 
-            # Runtime safety monitor (wraps all per-rule DFAs)
-            self.safety_monitor: Optional[SafetyMonitor] = None
+            # 5. Create runtime SafetyMonitor on the agent
+            agent.safety_monitor = SafetyMonitor(dfa_map, agent.safety_rules)
 
             agent.logger.info(
                 "[CCA] _InitSafety completed. %d rules, %d DFAs.",
                 len(agent.safety_rules),
                 len(dfa_map),
             )
-
-    

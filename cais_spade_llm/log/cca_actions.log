@@ -496,3 +496,212 @@ AttributeError: module 'os' has no attribute 'setsid'
 2025-11-24 17:36:53,559 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
 2025-11-24 17:36:55,422 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
 2025-11-24 17:36:55,422 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 18:05:02,213 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 18:05:04,087 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 18:05:04,087 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 20:52:52,705 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:52:54,647 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 20:52:54,648 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 20:52:54,650 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:53:03,910 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 20:53:11,455 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 20:53:11,456 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 20:53:11,729 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 20:53:11,824 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 20:53:11,844 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 20:53:11,866 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 20:53:18,788 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 20:55:36,602 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:55:38,402 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 20:55:38,403 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 20:55:38,403 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:55:46,163 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 20:55:53,688 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 20:55:53,688 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 20:55:53,839 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 20:55:53,861 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 20:55:53,889 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 20:55:53,912 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 20:55:53,913 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 20:58:41,943 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:58:43,747 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 20:58:43,747 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 20:58:43,748 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 20:58:49,386 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 20:58:54,825 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 20:58:54,826 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 20:58:54,975 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 20:58:54,998 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 20:58:55,027 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 20:58:55,048 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 20:58:55,050 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 20:59:49,990 - agent:cca - INFO - [CCA] Safety OK: task=TASK_5 aps=[]
+2025-11-24 20:59:58,340 - agent:cca - INFO - [CCA] Safety OK: task=TASK_1 aps=[]
+2025-11-24 21:00:08,612 - agent:cca - INFO - [CCA] Safety OK: task=TASK_6 aps=[]
+2025-11-24 21:00:12,592 - agent:cca - INFO - [CCA] Safety OK: task=TASK_2 aps=[]
+2025-11-24 21:00:34,523 - agent:cca - INFO - [CCA] Safety OK: task=TASK_7 aps=['ap003']
+2025-11-24 21:00:54,198 - agent:cca - INFO - [CCA] Safety OK: task=TASK_3 aps=['ap001']
+2025-11-24 22:19:23,322 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:19:25,494 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:19:25,494 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:19:25,496 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:19:30,723 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:19:32,881 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:19:32,884 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:19:33,072 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:19:33,163 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:19:33,189 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:19:33,218 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:19:33,222 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:19:49,027 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:19:49,529 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:19:50,028 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:19:50,536 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:19:51,119 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=running); skipping.
+2025-11-24 22:19:51,540 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=running); skipping.
+2025-11-24 22:19:52,119 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:19:52,544 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:20:01,406 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_3 aps=['ap001'] (now running=['ap001'])
+2025-11-24 22:20:12,244 - agent:cca - INFO - [CCA] Task finished: task=TASK_3 status=completed removed_aps=['ap001'] (now running=[])
+2025-11-24 22:20:15,085 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_8 aps=['ap003'] (now running=['ap003'])
+2025-11-24 22:21:09,640 - agent:cca - INFO - [CCA] Task finished: task=TASK_8 status=completed removed_aps=['ap003'] (now running=[])
+2025-11-24 22:21:23,656 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_9 aps=['ap004'] (now running=['ap004'])
+2025-11-24 22:21:38,800 - agent:cca - INFO - [CCA] Task finished: task=TASK_9 status=completed removed_aps=['ap004'] (now running=[])
+2025-11-24 22:22:06,904 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:22:08,747 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:22:08,747 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:22:08,748 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:22:13,431 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:22:18,289 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:22:18,290 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:22:18,438 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:22:18,464 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:22:18,488 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:22:18,524 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:22:18,528 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:22:40,256 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:22:50,407 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:22:55,812 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:22:58,067 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:23:02,041 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=running); skipping.
+2025-11-24 22:23:06,957 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:23:11,293 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=running); skipping.
+2025-11-24 22:27:49,239 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:27:51,493 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:27:51,494 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:27:51,495 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:27:56,334 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:28:00,359 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:28:00,360 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:28:00,521 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:28:00,549 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:28:00,567 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:28:00,596 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:28:00,598 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:29:26,307 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:29:46,309 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:30:12,974 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=running); skipping.
+2025-11-24 22:30:50,094 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:30:57,393 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_8 aps=['ap003'] (now running=['ap003'])
+2025-11-24 22:38:10,779 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:38:12,966 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:38:12,967 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:38:12,968 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:38:17,965 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:38:22,985 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:38:22,986 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:38:23,155 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:38:23,246 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:38:23,267 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:38:23,291 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:38:23,294 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:38:41,388 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_5 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:39:15,435 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_5 (xarm6@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:41:00,411 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:41:02,417 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:41:02,418 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:41:02,419 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:41:09,365 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:41:16,415 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:41:16,416 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:41:16,589 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:41:16,677 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:41:16,698 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:41:16,722 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:41:16,724 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:41:46,952 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:41:53,128 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:42:05,715 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=running); skipping.
+2025-11-24 22:42:24,595 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=running); skipping.
+2025-11-24 22:53:49,890 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:53:51,771 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:53:51,772 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:53:51,774 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:53:55,663 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2025-11-24 22:53:59,052 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2025-11-24 22:53:59,055 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:53:59,255 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:53:59,338 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:53:59,360 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:53:59,388 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:53:59,391 - agent:cca - INFO - [CCA] _InitSafety completed. 2 rules, 2 DFAs.
+2025-11-24 22:54:17,470 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:54:28,025 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=running); skipping.
+2025-11-24 22:54:39,463 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_6 (xarm6@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:55:21,902 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_1 (ur5e@localhost, move_to_pick_location, status=completed); skipping.
+2025-11-24 22:55:32,352 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=running); skipping.
+2025-11-24 22:55:40,273 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_7 (xarm6@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:55:55,999 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=running); skipping.
+2025-11-24 22:55:58,497 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:56:12,241 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_8 aps=['ap003'] (now running=['ap003'])
+2025-11-24 22:56:25,894 - agent:cca - INFO - [CCA] Task finished: task=TASK_8 status=completed removed_aps=['ap003'] (now running=[])
+2025-11-24 22:56:36,961 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_3 aps=['ap001'] (now running=['ap001'])
+2025-11-24 22:57:34,886 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:57:36,711 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:57:36,712 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:57:36,712 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:57:42,137 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2025-11-24 22:57:45,713 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2025-11-24 22:57:45,714 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:57:45,885 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:57:45,909 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:57:45,932 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:57:45,957 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:57:45,979 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2025-11-24 22:57:46,003 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2025-11-24 22:57:46,005 - agent:cca - INFO - [CCA] _InitSafety completed. 3 rules, 3 DFAs.
+2025-11-24 22:58:42,000 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_1 aps=['ap002'] (now running=['ap002'])
+2025-11-24 22:58:54,501 - agent:cca - INFO - [CCA] Task finished: task=TASK_1 status=completed removed_aps=['ap002'] (now running=[])
+2025-11-24 22:59:08,042 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=running); skipping.
+2025-11-24 22:59:20,432 - agent:cca - INFO - [CCA] No AP mapping for task=TASK_2 (ur5e@localhost, pick_part, status=completed); skipping.
+2025-11-24 22:59:33,568 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:59:35,339 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 22:59:35,339 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 22:59:35,340 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 22:59:42,498 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2025-11-24 22:59:47,034 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2025-11-24 22:59:47,034 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 22:59:47,177 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 22:59:47,200 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 22:59:47,223 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 22:59:47,247 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 22:59:47,265 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2025-11-24 22:59:47,287 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2025-11-24 22:59:47,290 - agent:cca - INFO - [CCA] _InitSafety completed. 3 rules, 3 DFAs.
+2025-11-24 23:00:31,682 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_1 aps=['ap002'] (now running=['ap002'])
+2025-11-24 23:01:09,069 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 23:01:10,874 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2025-11-24 23:01:10,874 - agent:cca - INFO - [CCA] setup completed.
+2025-11-24 23:01:10,874 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/cca/safety_requirements.txt
+2025-11-24 23:01:18,899 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2025-11-24 23:01:25,236 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2025-11-24 23:01:25,238 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2025-11-24 23:01:25,389 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2025-11-24 23:01:25,412 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2025-11-24 23:01:25,433 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2025-11-24 23:01:25,457 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2025-11-24 23:01:25,480 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2025-11-24 23:01:25,504 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2025-11-24 23:01:25,507 - agent:cca - INFO - [CCA] _InitSafety completed. 3 rules, 3 DFAs.
+2025-11-24 23:01:43,908 - agent:cca - INFO - [CCA] Safety OK (start): task=TASK_6 aps=['ap005'] (now running=['ap005'])
+2025-11-24 23:02:01,039 - agent:cca - WARNING - [CCA] SAFETY VIOLATION: task=TASK_1 rule=SAFE_1 aps=['ap002'] (running=['ap005'])

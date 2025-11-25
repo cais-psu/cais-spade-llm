@@ -23,16 +23,15 @@ class SafetyMonitor:
             # blocked by meta["violated_rule"]
     """
 
-    def __init__(self, dfa_dots: Dict[str, str]) -> None:
+    def __init__(self, dfa_dots: Dict[str, str], safety_rules: list[dict]) -> None:
         """
-        Initialize from a mapping {rule_id: DFA_DOT_string}.
-        Each rule gets its own DFA and current state.
+        Initialize from:
+          - dfa_dots: {rule_id: DFA_DOT_string}
+          - safety_rules: list of rules from safety_logic.json
         """
+        self.safety_rules = safety_rules
+
         # Per-rule DFA data:
-        #   transitions[rule_id][state] = [(label_str, next_state), ...]
-        #   init_state[rule_id] = "1"
-        #   violation_state[rule_id] = "2" (state with self-loop 'true')
-        #   ap_symbols[rule_id] = ["ap001", "ap002", ...]
         self.transitions: Dict[str, Dict[str, List[Tuple[str, str]]]] = {}
         self.init_state: Dict[str, str] = {}
         self.violation_state: Dict[str, Optional[str]] = {}
@@ -41,7 +40,6 @@ class SafetyMonitor:
 
         for rule_id, dot_src in dfa_dots.items():
             self._parse_dot_for_rule(rule_id, dot_src)
-
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -194,6 +192,9 @@ class SafetyMonitor:
 
         return bool(result)
 
+    # ------------------------------------------------------------------ #
+    # Task → AP mapping (no hard-coded destinations)
+    # ------------------------------------------------------------------ #
     def _map_task_to_aps(
         self,
         resource_jid: str,

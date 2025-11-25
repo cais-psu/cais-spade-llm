@@ -1,2 +1,3 @@
+- The two robot arms (xArm and UR5e) must not move to pick locations at the same time.
 - The two robot arms (xArm and UR5e) must not move loaded parts toward the assembly board at the same time to avoid collisions.
 - The two robot arms (xArm and UR5e) must not place parts on the assembly board at the same time to avoid collisions.

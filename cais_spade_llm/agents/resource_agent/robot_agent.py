@@ -262,6 +262,6 @@ class RobotAgent(ResourceAgent):
         await self._simulate_action("Moving arm to home position")
         return {"status": "completed", "content": "At home position."}
 
-    async def _simulate_action(self, description: str, *, duration: float = 1.0):
+    async def _simulate_action(self, description: str, *, duration: float = 300.0):
         self.logger.info("[Robot] %s", description)
         await asyncio.sleep(duration)
