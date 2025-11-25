@@ -147,7 +147,26 @@ class CentralControllerAgent(LlmAgent):
                     candidate_aps,
                     running_snapshot,
                 )
-                # Do NOT add APs on violation
+
+                # -----------------------------
+                # LLM REPLAN LOGIC
+                # -----------------------------
+                # DO NOT block the entire system.
+                # Only send this violation info to the replan handler.
+                try:
+                    await self.handle_safety_violation_for_replan(
+                        task_id=task_id,
+                        resource_jid=resource_jid,
+                        function_name=function_name,
+                        params=params,
+                        candidate_aps=candidate_aps,
+                        running_aps=running_snapshot,
+                        violated_rule=meta.get("violated_rule"),
+                    )
+                except Exception:
+                    self.logger.exception("[CCA] Replan handler failed (ignored).")
+                # -----------------------------                
+
                 return
 
             # DFA accepted → mark these APs as running
@@ -174,6 +193,71 @@ class CentralControllerAgent(LlmAgent):
             status,
             candidate_aps,
             sorted(self.running_aps),
+        )
+
+    async def handle_safety_violation_for_replan(
+        self,
+        *,
+        task_id: str,
+        resource_jid: str,
+        function_name: str,
+        params: dict,
+        candidate_aps: list,
+        running_aps: list,
+        violated_rule: str,
+    ):
+        """
+        Placeholder for future LLM-driven replanning.
+
+        This method receives:
+        - the blocked task
+        - its APs
+        - the currently running APs
+        - the violated rule
+        and is responsible for triggering:
+        - minimal structural repairs (e.g., add DAG edge TASK_1 -> TASK_6)
+        - OR a full LLM replan request.
+        
+        NOTE:
+        This runs OUTSIDE the hot path.
+        Do NOT block the robots here — just queue/mark tasks as blocked
+        and start async replanning in the background.
+        """
+
+        self.logger.info(
+            "[CCA] (REPLAN PLACEHOLDER) Received safety violation for task=%s rule=%s",
+            task_id,
+            violated_rule,
+        )
+
+        # Example: mark this task locally so scheduler won't retry until repaired
+        # You can extend this with your actual plan manager.
+        # self.blocked_tasks.add(task_id)
+
+        # Example structure for what you will send to LLM later
+        violation_context = {
+            "task": {
+                "task_id": task_id,
+                "resource_jid": resource_jid,
+                "function_name": function_name,
+                "params": params,
+            },
+            "safety": {
+                "violated_rule": violated_rule,
+                "running_aps": running_aps,
+                "candidate_aps": candidate_aps,
+            },
+            "plan": await self._load_current_plan_if_available(),
+        }
+
+        # ---- Future use:
+        # await self.llm_replan(violation_context)
+        # ----
+
+        # For now, just log the context size
+        self.logger.debug(
+            "[CCA] (REPLAN PLACEHOLDER) Violation context prepared: keys=%s",
+            list(violation_context.keys()),
         )
 
     # ------------------------------------------------------------------ #
