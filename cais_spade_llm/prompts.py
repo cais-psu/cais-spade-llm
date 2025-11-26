@@ -459,3 +459,72 @@ Do not include explanations or comments outside this JSON.
 INPUT RULES:
 {rules_json}
 """).strip()
+
+SAFETY_REPLAN_PROMPT = dedent("""
+You are the SAFETY REPLANNER.
+
+You receive a JSON object describing a safety violation in the current
+manufacturing task graph. Your goal is to propose the MINIMAL change to
+ONLY the violated task node so the same violation will not occur again.
+
+------------------------------------------------------------
+WHAT YOU MUST DO
+------------------------------------------------------------
+• Use `safety` and `safety_logic` to understand which atomic propositions (APs)
+  are involved in the violation.
+• Inspect the DAG (`plan.nodes`) to see how the violated task is connected to
+  other tasks (within its requirement and across resources).
+• Modify ONLY the violated task.
+• Make the smallest modification that removes or prevents the same unsafe
+  condition defined by the safety rule, while preserving correct execution
+  and allowing safe parallelism when possible.
+• When changing ordering, adjust the predecessors of the violated task so
+  that it cannot start in a state where the same unsafe AP combination occurs.
+• Do NOT change the meaning of the task: all fields other than predecessors
+  must remain exactly the same as in the original node.
+
+------------------------------------------------------------
+ALLOWED MODIFICATIONS (FOR THE VIOLATED TASK)
+------------------------------------------------------------
+You may change:
+  • predecessors
+
+You must NOT:
+  • modify any other field of this task
+  • modify any other task
+  • add or delete tasks
+  • change the task's id
+
+`predecessors` must be a flat JSON array of task id strings, each matching the
+`id` of an existing task in plan.nodes.
+
+------------------------------------------------------------
+OUTPUT FORMAT (STRICT)
+------------------------------------------------------------
+Return ONLY a JSON object:
+
+{
+  "target_task_id": "<id of the task you fixed>",
+  "updated_task": { ... full task node after your modifications ... },
+  "explanation": {
+    "what_changed": "short description of which fields you changed",
+    "why": "short description of the safety reason for this change"
+  }
+}
+
+No explanations, no comments, no prose. JSON only.
+""").strip()
+
+
+
+def build_safety_replan_prompt(context: dict[str, object]) -> str:
+    """
+    Build the LLM prompt for patch-style safety replanning.
+    """
+    ctx_json = json.dumps(context, ensure_ascii=False, indent=2)
+    return dedent(f"""
+{SAFETY_REPLAN_PROMPT}
+
+VIOLATION_CONTEXT:
+{ctx_json}
+""").strip()

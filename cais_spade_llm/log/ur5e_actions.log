@@ -536,3 +536,175 @@ AttributeError: 'RobotAgent' object has no attribute 'send'
 2025-11-24 23:01:34,052 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-24 23:01:46,244 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_1'})
 2025-11-24 23:01:46,244 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 13:35:53,962 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 13:35:54,668 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 13:36:22,661 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 13:38:02,539 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 13:38:03,217 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 13:38:31,630 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 13:38:33,245 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'sender_jid': 'ur5e@localhost', 'task_id': 'TASK_1'})
+2025-11-25 13:38:33,246 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 13:45:33,758 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 13:45:34,387 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 13:45:58,977 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 13:46:00,096 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'SG', 'task_id': 'TASK_1', 'sender_jid': 'assembly_board-v1@localhost'})
+2025-11-25 13:46:00,096 - agent:ur5e - ERROR - [Resource] Tool execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/resource_agent.py", line 196, in run
+    func(**fn_args),
+    ^^^^^^^^^^^^^^^
+TypeError: RobotAgent.move_to_pick_location() got an unexpected keyword argument 'sender_jid'
+2025-11-25 14:09:49,174 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 14:09:49,904 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 14:10:12,808 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 14:10:14,090 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1', 'sender_jid': 'assembly_board-v1@localhost'})
+2025-11-25 14:10:14,090 - agent:ur5e - ERROR - [Resource] Tool execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/resource_agent.py", line 196, in run
+    func(**fn_args),
+    ^^^^^^^^^^^^^^^
+TypeError: RobotAgent.move_to_pick_location() got an unexpected keyword argument 'sender_jid'
+2025-11-25 14:15:35,944 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 14:15:36,599 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 14:15:53,377 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 14:15:54,587 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1', 'sender_jid': 'assembly_board-v1@localhost'})
+2025-11-25 14:15:54,588 - agent:ur5e - ERROR - [Resource] Tool execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/resource_agent.py", line 196, in run
+    func(**fn_args),
+    ^^^^^^^^^^^^^^^
+TypeError: RobotAgent.move_to_pick_location() got an unexpected keyword argument 'sender_jid'
+2025-11-25 14:25:03,490 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 14:25:04,258 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 14:25:24,079 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 14:25:24,716 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'})
+2025-11-25 14:25:24,716 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 15:27:18,883 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 15:27:19,540 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 15:27:41,385 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 15:27:42,149 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'})
+2025-11-25 15:27:42,150 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 18:52:26,402 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 18:52:27,557 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 19:10:26,076 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 19:10:26,963 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 19:10:50,935 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 19:10:52,825 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'})
+2025-11-25 19:10:52,826 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 19:19:54,336 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 19:19:55,342 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 19:20:17,677 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 19:20:18,610 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'})
+2025-11-25 19:20:18,610 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 19:35:23,947 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 19:35:24,583 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 19:35:45,464 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 19:35:47,050 - agent:ur5e - INFO - [Resource] (TASK_1) Calling move_to_pick_location({'origin_resource_location': 'prusa-mk4-2', 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'})
+2025-11-25 19:35:47,051 - agent:ur5e - INFO - [Robot] Travel empty to pick location prusa-mk4-2 (speed=default)
+2025-11-25 20:20:24,969 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 20:20:25,593 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 20:20:47,446 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 20:21:00,417 - agent:ur5e - ERROR - [Resource] Error waiting for safety_decision
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/resource_agent.py", line 99, in _wait_for_safety_decision
+    msg: Message = await self.get(timeout=remaining)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Agent.get() got an unexpected keyword argument 'timeout'
+2025-11-25 20:30:11,018 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 20:30:11,703 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 20:30:40,555 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 20:39:50,360 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 20:39:50,973 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 20:40:19,604 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 20:40:21,181 - agent:ur5e - WARNING - [Resource] No safety_decision received for task=TASK_1 (empty msg)
+2025-11-25 20:40:21,184 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=cca@localhost proto=
+2025-11-25 20:40:21,665 - agent:ur5e - WARNING - [Resource] No safety_decision received for task=TASK_1 (empty msg)
+2025-11-25 20:47:51,201 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 20:47:51,847 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 20:48:14,948 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 20:48:16,668 - agent:ur5e - WARNING - [Resource] No safety_decision received for task=TASK_1 (empty msg)
+2025-11-25 20:48:16,670 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=cca@localhost proto=
+2025-11-25 20:48:17,593 - agent:ur5e - WARNING - [Resource] No safety_decision received for task=TASK_1 (empty msg)
+2025-11-25 20:53:53,381 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 20:53:54,032 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 20:54:15,919 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 21:02:29,441 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 21:02:30,141 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 21:03:00,620 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 21:03:55,806 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 21:03:57,146 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-25 21:04:05,614 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (5.0 / 300.0 sec)
+2025-11-25 21:04:10,619 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (10.0 / 300.0 sec)
+2025-11-25 21:04:15,621 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (15.0 / 300.0 sec)
+2025-11-25 21:04:20,624 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (20.0 / 300.0 sec)
+2025-11-25 21:04:25,625 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (25.0 / 300.0 sec)
+2025-11-25 21:04:30,626 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (30.0 / 300.0 sec)
+2025-11-25 21:09:02,768 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 21:09:03,423 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 21:09:28,935 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 21:09:35,603 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 21:09:35,695 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-25 21:09:40,696 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (5.0 / 300.0 sec)
+2025-11-25 21:09:45,697 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (10.0 / 300.0 sec)
+2025-11-25 21:37:19,441 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 21:37:20,166 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 21:37:42,867 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 21:37:43,987 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 22:23:09,907 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 22:23:10,632 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 22:23:28,301 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 22:23:29,561 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 22:23:29,659 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-25 23:44:18,076 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 23:44:18,816 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 23:44:48,789 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 23:44:50,290 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=TASK_1
+2025-11-25 23:50:15,833 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 23:50:16,477 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 23:50:41,390 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 23:50:42,096 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 23:50:42,196 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-25 23:50:47,197 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk4-2 (speed=default) (5.0 / 300.0 sec)
+2025-11-25 23:56:11,165 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 23:56:11,820 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 23:56:33,903 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 23:56:34,661 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-25 23:56:34,760 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-25 23:57:51,702 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-25 23:57:52,339 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-25 23:58:18,455 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-25 23:58:19,301 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=TASK_1
+2025-11-26 00:02:29,100 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:02:29,782 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:03:04,866 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:03:05,620 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:03:05,720 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-26 00:03:57,983 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:03:58,645 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:04:19,016 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:04:20,220 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:04:20,317 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-26 00:17:40,083 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:17:40,737 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:18:01,590 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:18:02,765 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=TASK_1
+2025-11-26 00:26:17,413 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:26:18,068 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:26:37,941 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:26:38,852 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:26:38,951 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-26 00:29:33,171 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:29:33,888 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:29:56,622 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:29:57,537 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:29:57,636 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-26 00:30:33,483 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:30:34,146 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:31:04,042 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:31:04,824 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:31:04,925 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)
+2025-11-26 00:31:43,201 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 00:31:43,907 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 00:32:05,123 - agent:ur5e - INFO - [Resource] ← Task (TASK_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 00:32:05,881 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=TASK_1
+2025-11-26 00:32:05,980 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk4-2 (speed=default) (estimated 300.0 sec)

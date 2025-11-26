@@ -62,27 +62,42 @@ class ResourceAgent(LlmAgent):
         self.llm_timeout_s = int(llm_timeout_s)
         self.tool_timeout_s = int(tool_timeout_s)
 
+        self._safety_decisions: dict[str, str] = {}
+
     # ------------------------------------------------------------------ #
     # SPADE lifecycle
     # ------------------------------------------------------------------ #
-
     async def setup(self) -> None:
-        """Register inbox behaviour filtered to 'task' messages."""
         await super().setup()
 
-        # Only receive messages that are type="task"
+        # Tasks from ProductAgent
         t_task = Template()
-        t_task.set_metadata("type", "task")  # Ignore chat pings/acks/etc.; only react to tasks.
+        t_task.set_metadata("type", "task")
         self.add_behaviour(self._TaskInbox(), t_task)
 
+        # Safety decisions from CCA
+        t_safety = Template()
+        t_safety.set_metadata("type", "safety_decision")
+        self.add_behaviour(self._SafetyDecisionInbox(), t_safety)
+
+    async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
+        """
+        Block until a safety_decision is available for this task_id.
+        No timeout: waits indefinitely until CCA replies.
+        """
+        while True:
+            decision = self._safety_decisions.pop(task_id, None)
+            if decision is not None:
+                return decision
+            await asyncio.sleep(0.1)
     # ------------------------------------------------------------------ #
     # Behaviours
     # ------------------------------------------------------------------ #
-
     class _TaskInbox(CyclicBehaviour):
         """Long-running behaviour that processes incoming tasks sequentially."""
         async def run(self) -> None:
             agent: "ResourceAgent" = self.agent  # type: ignore
+
             # Poll inbox frequently but yield control if nothing arrives to keep agent responsive.
             msg = await self.receive(timeout=0.5)
             if not msg:
@@ -159,7 +174,7 @@ class ResourceAgent(LlmAgent):
 
             # ----- plumb routing/context ----- #
             # Pass routing info into the tool implementation for downstream logging/rpc calls.
-            fn_args.setdefault("sender_jid", str(msg.sender))
+            fn_args.setdefault("product_jid", str(msg.sender))
             fn_args.setdefault("task_id", task_id)
             if phase_id and "phase_id" not in fn_args:
                 fn_args["phase_id"] = phase_id
@@ -177,29 +192,54 @@ class ResourceAgent(LlmAgent):
 
             # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
             try:
-                resource_msg = Message(to="cca@localhost")  # CCA JID
+                # 1) Send request permission, not running
+                resource_msg = Message(to="cca@localhost")
                 resource_msg.set_metadata("type", "resource_event")
                 resource_msg.body = json.dumps({
                     "task_id": task_id,
                     "resource_jid": str(agent.jid),
                     "function_name": fn_name,
                     "params": fn_args,
-                    "status": "running",   # <--- NEW: this action is about to run
+                    "status": "safety_check",   # <-- REQUEST permission
                 })
                 await self.send(resource_msg)
             except Exception:
                 agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
 
-            agent.logger.info(f"[Resource] ({task_id}) Calling {fn_name}({fn_args})")
+            # 2) Wait for CCA decision (no timeout; uses _SafetyDecisionInbox + dict)
+            decision = await agent._wait_for_safety_decision(task_id)
+
+            if decision == "block":
+                await self._ack(msg, task_id=task_id, status="blocked")
+                return
+
+            # ---------------------------
+            #  SAFETY PASSED → RUNNING
+            # ---------------------------
+            await self._ack(msg, task_id=task_id, status="running")
+
+            running_msg = Message(to="cca@localhost")
+            running_msg.set_metadata("type", "resource_event")
+            running_msg.body = json.dumps({
+                "task_id": task_id,
+                "resource_jid": str(agent.jid),
+                "function_name": fn_name,
+                "params": fn_args,
+                "status": "running",
+            })
+            await self.send(running_msg)
+
+            # ---------------------------
+            #  EXECUTE THE TOOL
+            # ---------------------------
             try:
                 result = await asyncio.wait_for(
                     func(**fn_args),
                     timeout=agent.tool_timeout_s,
                 )
-                # Tool implementations optionally return {"status": "..."}; default to completed.
-                status = (result or {}).get("status") or "completed"
+                final_status = (result or {}).get("status") or "completed"
 
-                # ----- RESOURCE EVENT: TASK FINISHED (same type, different status) ----- #
+                # ----- RESOURCE EVENT: TASK FINISHED (notify CCA) ----- #
                 try:
                     done_msg = Message(to="cca@localhost")
                     done_msg.set_metadata("type", "resource_event")
@@ -208,21 +248,26 @@ class ResourceAgent(LlmAgent):
                         "resource_jid": str(agent.jid),
                         "function_name": fn_name,
                         "params": fn_args,
-                        "status": status,   # e.g. "completed", "failed:tool:X", etc.
+                        "status": final_status,  # e.g. "completed", "blocked", etc.
                     })
-                    asyncio.create_task(self.send(done_msg))  # <- do NOT await, just fire-and-forget
+                    # fire-and-forget so we don't block on CCA
+                    asyncio.create_task(self.send(done_msg))
                 except Exception:
-                    agent.logger.exception("[Resource] Failed to send final resource_event to CCA (ignored).")
+                    agent.logger.exception(
+                        "[Resource] Failed to send final resource_event to CCA (ignored)."
+                    )
 
             except asyncio.TimeoutError:
-                status = "tool_timeout"
+                agent.logger.exception("[Resource] Tool execution timeout")
+                final_status = "tool_timeout"
             except Exception as e:
                 agent.logger.exception("[Resource] Tool execution failed")
-                status = f"failed:tool:{type(e).__name__}"
+                final_status = f"failed:tool:{type(e).__name__}"
 
-            # ----- FINAL ACK ----- #
-            # Always reply back so the ProductAgent doesn't have to rely on timeouts.
-            await self._ack(msg, task_id=task_id, status=status)
+            # ---------------------------
+            #  SEND FINAL ACK TO PA
+            # ---------------------------
+            await self._ack(msg, task_id=task_id, status=final_status)
 
         async def _ack(
             self,
@@ -237,6 +282,36 @@ class ResourceAgent(LlmAgent):
             reply.body = json.dumps({"task_id": task_id, "status": status})
             await self.send(reply)
 
+    class _SafetyDecisionInbox(CyclicBehaviour):
+        """Receives safety_decision messages from CCA and stores them on the agent."""
+        async def run(self) -> None:
+            agent: "ResourceAgent" = self.agent  # type: ignore
+
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                data = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning("[Resource] Malformed safety_decision body")
+                return
+
+            task_id = data.get("task_id")
+            decision = data.get("decision")
+
+            if not task_id or decision not in ("allow", "block"):
+                agent.logger.warning(
+                    "[Resource] Invalid safety_decision message: %s", data
+                )
+                return
+
+            agent._safety_decisions[task_id] = decision
+            agent.logger.info(
+                "[Resource] Stored safety_decision=%s for task=%s",
+                decision,
+                task_id,
+            )
 
 # --------------------------------------------------------------------------- #
 # Utilities

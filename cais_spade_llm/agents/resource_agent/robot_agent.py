@@ -40,7 +40,7 @@ class RobotAgent(ResourceAgent):
         origin_resource_location: str,
         *,
         speed: Optional[float] = None,
-        sender_jid: Optional[str] = None,
+        product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -60,8 +60,9 @@ class RobotAgent(ResourceAgent):
           speed:
             type: number
             description: Optional motion speed.
-          sender_jid:
+          product_jid:
             type: string
+            description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
@@ -89,7 +90,7 @@ class RobotAgent(ResourceAgent):
         origin_resource_location: str,
         *,
         gripper: Optional[str] = None,
-        sender_jid: Optional[str] = None,
+        product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -112,8 +113,9 @@ class RobotAgent(ResourceAgent):
           gripper:
             type: string
             description: Optional gripper configuration.
-          sender_jid:
+          product_jid:
             type: string
+            description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
@@ -138,7 +140,7 @@ class RobotAgent(ResourceAgent):
         destination_location: str,
         *,
         speed: Optional[float] = None,
-        sender_jid: Optional[str] = None,
+        product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -158,8 +160,9 @@ class RobotAgent(ResourceAgent):
           speed:
             type: number
             description: Optional motion speed while loaded.
-          sender_jid:
+          product_jid:
             type: string
+            description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
@@ -186,7 +189,7 @@ class RobotAgent(ResourceAgent):
         destination_location: str,
         *,
         orientation: Optional[str] = None,
-        sender_jid: Optional[str] = None,
+        product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -206,8 +209,9 @@ class RobotAgent(ResourceAgent):
           orientation:
             type: string
             description: Optional placement orientation.
-          sender_jid:
+          product_jid:
             type: string
+            description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
@@ -231,7 +235,7 @@ class RobotAgent(ResourceAgent):
     async def move_home(
         self,
         *,
-        sender_jid: Optional[str] = None,
+        product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -245,8 +249,9 @@ class RobotAgent(ResourceAgent):
         context: []
 
         params:
-          sender_jid:
+          product_jid:
             type: string
+            description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
@@ -263,5 +268,22 @@ class RobotAgent(ResourceAgent):
         return {"status": "completed", "content": "At home position."}
 
     async def _simulate_action(self, description: str, *, duration: float = 300.0):
-        self.logger.info("[Robot] %s", description)
-        await asyncio.sleep(duration)
+        """
+        Simulate a long-running robot action while printing progress every 5 seconds,
+        including robot name for clarity when multiple robots run in parallel.
+        """
+        robot = self.agent_name
+
+        self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
+
+        interval = 5.0   # print every 5 seconds
+        elapsed = 0.0
+
+        while elapsed < duration:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            self.logger.info(
+                "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
+            )
+
+        self.logger.info("[%s] Finished: %s", robot, description)
