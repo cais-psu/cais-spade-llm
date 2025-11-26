@@ -267,6 +267,9 @@ class RobotAgent(ResourceAgent):
         await self._simulate_action("Moving arm to home position")
         return {"status": "completed", "content": "At home position."}
 
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
     async def _simulate_action(self, description: str, *, duration: float = 300.0):
         """
         Simulate a long-running robot action while printing progress every 5 seconds,

@@ -92,7 +92,7 @@ class ResourceAgent(LlmAgent):
             await asyncio.sleep(0.1)
     # ------------------------------------------------------------------ #
     # Behaviours
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ ##
     class _TaskInbox(CyclicBehaviour):
         """Long-running behaviour that processes incoming tasks sequentially."""
         async def run(self) -> None:
