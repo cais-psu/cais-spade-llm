@@ -35,7 +35,9 @@ class ProductAgent(LlmAgent):
         resource_jids: Optional[Iterable[str]] = None,
         resource_agents: Optional[Iterable[Any]] = None,
         product_specification_file: Optional[str] = None,
+        safety_file: Optional[str] = None,
         instruction_override: Optional[str] = None,
+        cca_jid: Optional[str] = None,
         **kw,
     ) -> None:
         """
@@ -44,10 +46,14 @@ class ProductAgent(LlmAgent):
         :param instruction_override: If provided, this text is used instead of reading a file.
         """
         super().__init__(jid, password, name=name, agent_role="product", **kw)
+
+        self.cca_jid = cca_jid or "cca@localhost"
+
         # Resource agents are the downstream executors; keep them in order and avoid mutating caller lists.
         self.resource_jids = list(resource_jids or [])
         self._resource_agent_refs = list(resource_agents or [])
         self.product_specification_file = product_specification_file
+        self.safety_file = safety_file
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = instruction_override
 
@@ -74,6 +80,16 @@ class ProductAgent(LlmAgent):
     # ------------------------------------------------------------------ #
     # Persistence helper
     # ------------------------------------------------------------------ #
+    def _build_plan_validation_payload(self, nodes: list[dict[str, Any]]) -> dict:
+        """
+        Build the JSON payload to send to the CCA for offline plan validation.
+        This does NOT send anything; sending is done from behaviours.
+        """
+        return {
+            "plan": {"nodes": nodes},
+            "product_jid": str(self.jid),
+        }
+
     def _persist_plan_snapshot(self) -> None:
         """Persist the current process planner graph to disk."""
         if not self.plan_path:
@@ -100,12 +116,31 @@ class ProductAgent(LlmAgent):
         self.add_behaviour(self._AckInbox(), t_ack)
 
         # Plan executor (runs cycles, dispatches DAG tasks)
-        self.add_behaviour(self._PlanExecutor())
+        # self.add_behaviour(self._PlanExecutor())
 
     # --------------------------------------------------------------------- #
     # Internal helpers
     # --------------------------------------------------------------------- #
-
+    def _read_safety_text(self) -> str:
+        """
+        Read the NL safety file if provided. Returns empty string if missing.
+        """
+        if not self.safety_file:
+            return ""
+        
+        try:
+            p = Path(self.safety_file)
+            if p.exists():
+                txt = p.read_text(encoding="utf-8").strip()
+                self.logger.info(f"[Product] Loaded safety constraints from {p}")
+                return txt
+            else:
+                self.logger.warning(f"[Product] Safety file path provided but not found: {p}")
+        except Exception as e:
+            self.logger.exception(f"[Product] Failed to read safety file: {e}")
+        
+        return ""
+    
     def _read_spec_text(self) -> Optional[str]:
         """Return the instruction text: prefer override, else read file, else None."""
         if self.instruction_override:
@@ -173,7 +208,7 @@ class ProductAgent(LlmAgent):
                 )
         return None
 
-    async def _build_plan(self, requirement_text: str):
+    async def _build_plan(self, requirement_text: str, safety_text: str = ""):
         """
         Build structured requirements → save them → expand into task DAG → save DAG.
         """
@@ -184,7 +219,7 @@ class ProductAgent(LlmAgent):
         self.process_planner.save(self.structured_requirements_path)
 
         # 2. Expand structured requirements → DAG tasks
-        await self.process_planner.expand_requirements_to_tasks()
+        await self.process_planner.expand_requirements_to_tasks(safety_text=safety_text)
 
         # 3. Save DAG plan separately
         self.process_planner.save(self.plan_path)
@@ -195,29 +230,57 @@ class ProductAgent(LlmAgent):
     # --------------------------------------------------------------------- #
     # Behaviours
     # --------------------------------------------------------------------- #
-
     class _Kickoff(OneShotBehaviour):
-        """Build the DAG plan once at startup."""
-
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: "ProductAgent" = self.agent
 
-            if not agent.resource_jids:
-                agent.logger.warning("[Product] No resource_jids; kickoff aborted.")
-                return
-
+            # Initial Plan Build
             instruction = agent._extract_requirement_text()
-            if not instruction:
-                agent.logger.warning("[Product] No instruction text; kickoff aborted.")
-                return
+            safety_text = agent._read_safety_text()
 
-            # Build structured requirements → DAG → save plan
-            dag_nodes = await agent._build_plan(instruction)
+            dag_nodes = await agent._build_plan(instruction, safety_text)
+            
+            # Retry Loop for Safety
+            max_retries = 3
+            attempt = 0
+            
+            while attempt < max_retries:
+                attempt += 1
+                agent.logger.info(f"[Product] Validating Plan (Attempt {attempt}/{max_retries})...")
+                
+                # 1. Send to CCA
+                payload = agent._build_plan_validation_payload(agent.process_planner.nodes)
+                msg = Message(to=agent.cca_jid)
+                msg.set_metadata("type", "plan_safety_check")
+                msg.body = json.dumps(payload)
+                await self.send(msg)
+                
+                # 2. Wait for Reply
+                reply = None
+                while reply is None:
+                    reply = await self.receive(timeout=5.0)
 
-            agent.logger.info(
-                f"[Product] Built full DAG with {len(dag_nodes)} task nodes "
-                f"(saved to {agent.plan_path})"
-            )
+                if reply.metadata.get("type") != "plan_safety_result":
+                    continue # or handle error
+
+                data = json.loads(reply.body)
+                is_safe = data.get("ok", False)
+                violations = data.get("violations", [])
+
+                if is_safe:
+                    agent.logger.info("[Product] Plan PASSED safety validation.")
+                    agent.add_behaviour(agent._PlanExecutor())
+                    return # Exit Kickoff successfully
+                
+                # 3. Handle Failure
+                agent.logger.warning(f"[Product] Plan FAILED safety check ({len(violations)} violations). Triggering Re-plan...")
+                
+                # Call the new Re-planning method
+                await agent.process_planner.replan_with_feedback(violations)
+                
+                # Loop continues to validate the NEW plan
+
+            agent.logger.error("[Product] Max replanning attempts reached. Aborting.")
 
     class _AckInbox(CyclicBehaviour):
         """Background behaviour that listens for acknowledgements from resource agents."""

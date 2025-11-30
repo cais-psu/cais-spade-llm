@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import utils
 
@@ -52,9 +52,12 @@ def create_user():
     except Exception:
         return None
 
-
-def create_resource_agents(resource_init_list: Iterable[str]):
+def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str):
     """Build resource-oriented agents (printing, robot, etc.) from their manifest files."""
+    cca_config = utils.load_json_data(cca_init_file) or {}
+    cca_meta = cca_config.get("cca", cca_config)  # handle {"cca": {...}} or flat
+    cca_jid = cca_meta.get("jid")
+
     agents = []
     for init_file in resource_init_list:
         raw = utils.load_json_data(init_file)
@@ -71,6 +74,7 @@ def create_resource_agents(resource_init_list: Iterable[str]):
                 instructions=meta.get("instructions"),
                 function_names=fn_names,
                 static_capabilities=meta.get("static_capabilities"),
+                cca_jid=cca_jid,  # <-- pass CCA JID into every resource agent
             )
 
             if kind == "printing":
@@ -86,15 +90,18 @@ def create_resource_agents(resource_init_list: Iterable[str]):
             agents.append(agent)
     return agents
 
-
 def create_product_agents(
-    product_init_list: Iterable[str], resource_agents: list
+    product_init_list: Iterable[str], resource_agents: list, cca_init_file: str,
 ) -> List[ProductAgent]:
     """
     Build ProductAgent instances from JSON manifests.
 
     If a product omits `targets`, it automatically receives every available resource agent.
     """
+    cca_config = utils.load_json_data(cca_init_file) or {}
+    cca_meta = cca_config.get("cca", cca_config)  # handle {"cca": {...}} or flat
+    cca_jid = cca_meta.get("jid")
+
     # Map agent-name -> JID so manifests can reference either friendly names or raw addresses.
     res_lookup = {
         getattr(r, "agent_name", getattr(r, "name", str(r.jid))).lower(): str(r.jid)
@@ -126,9 +133,11 @@ def create_product_agents(
                 name=name,
                 instructions=meta.get("instructions"),
                 product_specification_file=meta.get("product_specification_file"),
+                safety_file=meta.get("safety_file"),
                 function_names=fn_names,
                 resource_jids=resource_jids,
                 resource_agents=resource_agents,
+                cca_jid=cca_jid,  # <-- pass CCA JID into every resource agent
             )
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.

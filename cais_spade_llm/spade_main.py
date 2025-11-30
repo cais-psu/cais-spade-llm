@@ -25,8 +25,8 @@ async def spade_main():
 
     # Instantiate the user agent plus every resource/product agent defined in the JSON payloads.
     user       = agent_creator.create_user()
-    resources  = agent_creator.create_resource_agents(res_files)
-    products   = agent_creator.create_product_agents(prod_files, resources)
+    resources  = agent_creator.create_resource_agents(res_files, CCA_INIT)
+    products   = agent_creator.create_product_agents(prod_files, resources, CCA_INIT)
     cca        = agent_creator.create_central_controller(CCA_INIT, resources)  # <-- pass resources for capability overview
 
     # Build the single tools catalogue consumed by the LLM so it knows which agent functions are callable.

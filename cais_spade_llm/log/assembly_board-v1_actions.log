@@ -1637,3 +1637,1303 @@ FileNotFoundError: [Errno 2] No such file or directory: 'cais_spade_llm\\specifi
 2025-11-26 00:32:05,981 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
 2025-11-26 00:32:06,263 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
 2025-11-26 00:32:06,263 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='blocked' from=xarm6@localhost
+2025-11-26 09:12:48,411 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:12:50,985 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:12:50,988 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:12:55,002 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:12:55,003 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:13:07,920 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-26 09:13:07,923 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:13:07,923 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:13:08,025 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:13:08,034 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:13:08,035 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:13:08,127 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_5'}})
+2025-11-26 09:13:08,132 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:13:08,132 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-26 09:13:10,253 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:13:10,253 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 09:14:10,263 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:14:10,264 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 09:14:10,291 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'SG', 'task_id': 'TASK_2'}})
+2025-11-26 09:14:10,302 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:14:10,302 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 09:19:45,651 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:19:57,402 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:19:59,972 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:19:59,975 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:20:03,171 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:20:03,172 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:20:21,014 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-26 09:20:21,015 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:20:21,015 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 10 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:20:21,293 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:20:21,302 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:20:21,303 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:20:21,394 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_6'}})
+2025-11-26 09:20:21,397 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:20:21,397 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 09:20:22,364 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:20:22,364 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 09:20:22,743 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:20:22,744 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='blocked' from=ur5e@localhost
+2025-11-26 09:21:10,673 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:21:13,434 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:21:13,435 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:21:16,708 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:21:16,709 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:21:32,762 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-26 09:21:32,765 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:32,765 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 10 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:21:33,248 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:21:33,254 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:33,254 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:21:33,349 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_6'}})
+2025-11-26 09:21:33,353 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:33,354 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 09:21:34,193 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:34,193 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 09:21:34,441 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:34,442 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='blocked' from=ur5e@localhost
+2025-11-26 09:21:54,201 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:54,202 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-26 09:21:54,471 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': None, 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'MCP', 'task_id': 'TASK_7'}})
+2025-11-26 09:21:54,477 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:21:54,478 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-26 09:26:09,148 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:26:11,715 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:26:11,716 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:26:16,222 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:26:16,223 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:26:28,703 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-26 09:26:28,704 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:28,704 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:26:28,994 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:26:28,999 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:29,000 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:26:29,095 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_5'}})
+2025-11-26 09:26:29,100 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:29,100 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-26 09:26:30,069 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:30,070 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 09:26:30,129 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:30,129 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='blocked' from=xarm6@localhost
+2025-11-26 09:26:50,073 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:50,073 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 09:26:50,213 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'SG', 'task_id': 'TASK_2'}})
+2025-11-26 09:26:50,218 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:26:50,218 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 09:51:01,495 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:51:04,630 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:51:04,636 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:51:09,691 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:51:09,692 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:51:31,391 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-26 09:51:31,394 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:31,394 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 10 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:51:31,437 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:51:31,443 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:31,443 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:51:31,539 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_6'}})
+2025-11-26 09:51:31,542 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:31,542 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 09:51:32,384 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:32,384 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 09:51:37,389 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:37,390 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 09:51:37,427 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:37,427 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 09:51:37,645 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'SG', 'task_id': 'TASK_2'}})
+2025-11-26 09:51:37,649 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:37,649 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 09:51:42,427 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:42,428 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-26 09:51:42,752 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'MCP', 'task_id': 'TASK_7'}})
+2025-11-26 09:51:42,758 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:51:42,758 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-26 09:58:20,107 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 09:58:22,579 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 09:58:22,584 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 09:58:26,662 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 09:58:26,663 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 09:58:46,400 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-26 09:58:46,401 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:46,401 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 10 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 09:58:46,655 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 09:58:46,673 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:46,673 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 09:58:46,758 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_6'}})
+2025-11-26 09:58:46,761 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:46,761 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 09:58:47,753 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:47,754 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 09:58:52,757 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:52,758 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 09:58:52,834 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:52,834 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 09:58:52,866 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'SG', 'task_id': 'TASK_2'}})
+2025-11-26 09:58:52,871 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:52,871 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 09:58:54,022 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:54,022 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-26 09:58:57,834 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:57,834 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-26 09:58:57,977 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'MCP', 'task_id': 'TASK_7'}})
+2025-11-26 09:58:57,983 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:57,984 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-26 09:58:59,025 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:59,025 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-26 09:58:59,073 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:59,073 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-26 09:58:59,078 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_3'}})
+2025-11-26 09:58:59,083 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:58:59,083 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-26 09:59:00,059 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:00,060 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-26 09:59:04,077 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:04,077 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='completed' from=xarm6@localhost
+2025-11-26 09:59:04,187 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_8 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_8'}})
+2025-11-26 09:59:04,192 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:04,193 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='accepted' from=xarm6@localhost
+2025-11-26 09:59:05,061 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:05,062 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='completed' from=ur5e@localhost
+2025-11-26 09:59:05,290 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'SG', 'task_id': 'TASK_4'}})
+2025-11-26 09:59:05,294 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:05,294 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='accepted' from=ur5e@localhost
+2025-11-26 09:59:06,052 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:06,052 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='running' from=xarm6@localhost
+2025-11-26 09:59:06,439 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:06,439 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='running' from=ur5e@localhost
+2025-11-26 09:59:11,054 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:11,054 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='completed' from=xarm6@localhost
+2025-11-26 09:59:11,397 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_9 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'MCP', 'task_id': 'TASK_9'}})
+2025-11-26 09:59:11,401 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:11,402 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_9) status='accepted' from=xarm6@localhost
+2025-11-26 09:59:11,440 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:11,440 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='completed' from=ur5e@localhost
+2025-11-26 09:59:11,498 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> ur5e@localhost ({'function_name': 'move_home', 'params': {'product_jid': 'SG', 'task_id': 'TASK_5'}})
+2025-11-26 09:59:11,501 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:11,502 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=ur5e@localhost
+2025-11-26 09:59:12,340 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:12,341 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_9) status='running' from=xarm6@localhost
+2025-11-26 09:59:12,467 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:12,467 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=ur5e@localhost
+2025-11-26 09:59:17,342 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:17,342 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_9) status='completed' from=xarm6@localhost
+2025-11-26 09:59:17,468 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:17,468 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=ur5e@localhost
+2025-11-26 09:59:17,606 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_10 -> xarm6@localhost ({'function_name': 'move_home', 'params': {'product_jid': 'MCP', 'task_id': 'TASK_10'}})
+2025-11-26 09:59:17,613 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:17,614 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_10) status='accepted' from=xarm6@localhost
+2025-11-26 09:59:18,518 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:18,518 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_10) status='running' from=xarm6@localhost
+2025-11-26 09:59:23,518 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 09:59:23,518 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_10) status='completed' from=xarm6@localhost
+2025-11-26 10:40:29,654 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 10:40:45,635 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 10:40:48,432 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 10:40:48,434 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 10:41:06,336 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 10:41:08,990 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 10:41:08,992 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 10:41:14,011 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 10:41:14,012 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 10:41:31,560 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 10:41:34,536 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 10:41:34,544 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 10:41:38,691 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 10:41:38,692 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 10:41:55,186 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-26 10:41:55,189 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 10:41:55,189 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 10:41:55,589 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 10:41:55,595 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 10:41:55,596 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 10:41:55,691 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_5'}})
+2025-11-26 10:41:55,694 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 10:41:55,695 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-26 11:24:54,261 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 11:24:56,920 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 11:24:56,923 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 11:25:00,718 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 11:25:00,719 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 15:23:15,948 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 15:23:18,734 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 15:23:18,735 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 15:23:23,623 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 15:23:23,624 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 15:23:42,391 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-26 15:23:42,391 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:42,392 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 15:23:42,556 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_1'}})
+2025-11-26 15:23:42,561 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:42,561 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 15:23:42,656 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'MCP', 'task_id': 'TASK_5'}})
+2025-11-26 15:23:42,660 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:42,660 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-26 15:23:43,422 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:43,422 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 15:23:48,422 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:48,422 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 15:23:48,460 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:48,461 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-26 15:23:48,761 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'SG', 'task_id': 'TASK_2'}})
+2025-11-26 15:23:48,766 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:48,766 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 15:23:50,022 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:50,022 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-26 15:23:53,461 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:53,461 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-26 15:23:53,868 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'MCP', 'task_id': 'TASK_6'}})
+2025-11-26 15:23:53,872 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:53,872 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 15:23:55,022 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:55,022 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-26 15:23:55,470 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'SG', 'task_id': 'TASK_3'}})
+2025-11-26 15:23:55,473 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:55,473 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-26 15:23:56,380 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:56,380 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 15:23:56,523 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:23:56,524 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-26 15:41:54,894 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-26 15:41:57,662 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-26 15:41:57,664 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-26 15:42:02,241 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-26 15:42:02,242 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-26 15:42:15,285 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-26 15:42:15,288 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:15,288 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-26 15:42:15,728 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-26 15:42:15,735 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:15,735 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-26 15:42:15,830 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-26 15:42:15,837 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:15,837 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-26 15:42:16,979 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:16,979 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-26 15:42:21,981 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:21,981 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-26 15:42:22,032 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:22,032 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-26 15:42:22,434 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_2'}})
+2025-11-26 15:42:22,441 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:22,441 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-26 15:42:23,740 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:23,740 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-26 15:42:27,033 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:27,033 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-26 15:42:27,038 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_6'}})
+2025-11-26 15:42:27,043 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:27,043 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-26 15:42:28,068 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:28,069 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-26 15:42:28,745 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:28,746 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-26 15:42:29,142 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_3'}})
+2025-11-26 15:42:29,147 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:29,147 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-26 15:42:30,834 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:30,834 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-26 15:42:33,074 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:33,075 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-26 15:42:33,246 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_7'}})
+2025-11-26 15:42:33,251 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:33,251 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-26 15:42:34,723 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:34,723 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-26 15:42:35,835 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:35,835 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='completed' from=ur5e@localhost
+2025-11-26 15:42:35,849 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_4'}})
+2025-11-26 15:42:35,856 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:35,856 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='accepted' from=ur5e@localhost
+2025-11-26 15:42:36,702 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:36,702 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='running' from=ur5e@localhost
+2025-11-26 15:42:39,725 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:39,725 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='completed' from=xarm6@localhost
+2025-11-26 15:42:39,956 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_8 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_8'}})
+2025-11-26 15:42:39,961 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:39,961 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='accepted' from=xarm6@localhost
+2025-11-26 15:42:41,704 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-26 15:42:41,704 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='completed' from=ur5e@localhost
+2025-11-27 11:05:05,081 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 11:05:07,535 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 11:05:07,538 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 11:05:12,436 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 11:05:12,437 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 11:05:31,421 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 11:05:31,423 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 11:05:31,424 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 11:06:21,433 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 11:06:23,924 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 11:06:23,925 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 11:06:30,586 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 11:06:30,587 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 11:06:48,055 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 11:06:48,056 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 11:06:48,056 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 11:06:59,180 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:04:40,370 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:04:43,127 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:04:43,131 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:04:48,584 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:04:48,584 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:05:12,456 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:05:12,461 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:05:12,462 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:05:16,563 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:10:26,653 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:10:29,078 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:10:29,084 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:10:33,965 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:10:33,966 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:10:49,734 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:10:49,735 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:10:49,735 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:10:49,737 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:11:42,867 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 13:11:42,884 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:11:42,885 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 13:11:42,968 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 13:11:42,977 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:11:42,978 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 13:14:10,858 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:14:13,400 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:14:13,402 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:14:17,722 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:14:17,728 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:14:34,490 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:14:34,492 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:14:34,492 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:14:34,494 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:15:38,357 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:15:40,775 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:15:40,777 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:15:44,481 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:15:44,483 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:15:58,858 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:15:58,859 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:15:58,859 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:15:58,860 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:16:17,896 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:16:20,309 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:16:20,310 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:16:23,620 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:16:23,622 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:16:40,024 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:16:40,026 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:16:40,026 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:16:40,028 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:17:48,567 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:17:51,268 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:17:51,269 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:17:54,323 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:17:54,323 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:18:08,802 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:18:08,803 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:18:08,803 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:18:08,805 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 13:18:54,837 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:18:57,461 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:18:57,463 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:19:01,552 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:19:01,553 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:19:37,231 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 13:19:39,576 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 13:19:39,578 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 13:19:42,364 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 13:19:42,365 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 13:19:54,494 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 13:19:54,496 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 13:19:54,496 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 13:19:54,497 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 17:53:55,492 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 17:53:58,210 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 17:53:58,212 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 17:54:03,056 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 17:54:03,057 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 17:54:20,749 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 17:54:20,751 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 17:54:20,751 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 17:54:20,752 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 17:54:36,085 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 17:54:36,098 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 17:54:36,099 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 17:54:36,186 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 17:54:36,198 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 17:54:36,199 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 17:55:13,614 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 17:55:13,615 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='llm_timeout' from=ur5e@localhost
+2025-11-27 17:56:40,441 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 17:56:43,375 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 17:56:43,380 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 17:56:47,379 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 17:56:47,380 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 17:57:17,091 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 17:57:17,092 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 17:57:17,092 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 17:57:17,094 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 17:57:17,094 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 18:00:02,100 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 18:00:02,123 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 18:00:02,124 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 18:00:02,137 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 18:00:02,137 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 21:34:18,041 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 21:34:20,763 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 21:34:20,765 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 21:34:24,553 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 21:34:24,554 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 21:34:40,404 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 21:34:40,407 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 21:34:40,408 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 21:34:40,409 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 21:59:37,634 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 21:59:40,249 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 21:59:40,250 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 21:59:45,225 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 21:59:45,226 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 22:00:02,943 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 22:00:02,945 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:00:02,945 - agent:assembly_board-v1 - INFO - [Product] Built full DAG with 8 task nodes (saved to cais_spade_llm/plan/assembly_board-v1_plan.json)
+2025-11-27 22:00:02,946 - agent:assembly_board-v1 - INFO - [Product] Sent plan with 8 node(s) to CCA cca@localhost for safety validation.
+2025-11-27 22:06:17,327 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 22:06:17,345 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:06:17,346 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 22:06:17,428 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 22:06:17,436 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:06:17,436 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 22:23:39,006 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 22:23:41,525 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 22:23:41,527 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 22:23:48,351 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 22:23:48,351 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 22:24:04,966 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 22:24:04,968 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:24:04,968 - agent:assembly_board-v1 - INFO - [Product] Plan built (8 nodes). Requesting safety check...
+2025-11-27 22:28:01,572 - agent:assembly_board-v1 - ERROR - [Product] Timed out waiting for safety validation from CCA.
+2025-11-27 22:28:21,110 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 22:28:23,522 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 22:28:23,525 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 22:28:27,272 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 22:28:27,273 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 22:28:40,827 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 22:28:40,831 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:28:40,831 - agent:assembly_board-v1 - INFO - [Product] Plan built (8 nodes). Requesting safety check...
+2025-11-27 22:28:48,245 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 22:29:03,403 - agent:assembly_board-v1 - WARNING - [Product] Plan REJECTED by CCA with 2 violations.
+2025-11-27 22:31:37,155 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 22:31:39,606 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 22:31:39,607 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 22:31:43,603 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 22:31:43,604 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 22:32:04,834 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 22:32:04,835 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:32:04,835 - agent:assembly_board-v1 - INFO - [Product] Plan built (8 nodes). Requesting safety check...
+2025-11-27 22:32:07,675 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 22:32:07,688 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:32:07,688 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 22:32:07,776 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 22:32:07,790 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:32:07,791 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 22:35:56,373 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 22:35:58,763 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 22:35:58,770 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 22:36:02,081 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 22:36:02,082 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 22:36:14,685 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 22:36:14,686 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 22:36:14,686 - agent:assembly_board-v1 - INFO - [Product] Plan built (8 nodes). Requesting safety check...
+2025-11-27 23:20:27,173 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:20:29,584 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:20:29,586 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:20:33,793 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:20:33,794 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:20:53,616 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:20:53,617 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:20:58,742 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:21:15,864 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 23:21:23,289 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-27 23:21:31,170 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-27 23:21:31,223 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 23:21:31,226 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:21:31,226 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 23:21:31,242 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:21:31,243 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 23:21:53,408 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 10 nodes.
+2025-11-27 23:32:47,671 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:32:50,221 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:32:50,222 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:32:55,097 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:32:55,098 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:33:11,313 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:33:11,317 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:33:13,552 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:33:17,389 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-27 23:33:18,431 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-27 23:33:39,251 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 10 nodes.
+2025-11-27 23:33:41,813 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-27 23:33:49,085 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-27 23:36:40,648 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:36:43,224 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:36:43,237 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:36:47,314 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:36:47,315 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:37:05,688 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:37:05,689 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:37:10,075 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:37:10,085 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-27 23:37:13,017 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-27 23:37:37,296 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 10 nodes.
+2025-11-27 23:37:37,298 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:37:41,641 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-27 23:37:50,391 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-27 23:41:53,585 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:41:56,117 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:41:56,129 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:42:00,054 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:42:00,055 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:42:15,858 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:42:15,861 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:42:15,862 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:44:23,072 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:44:25,806 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:44:25,809 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:44:30,733 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:44:30,737 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:44:53,034 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:44:53,036 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:53,036 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:44:53,039 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-27 23:44:53,040 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 23:44:53,047 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:53,047 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 23:44:53,142 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 23:44:53,155 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:53,156 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 23:44:54,145 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:54,145 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-27 23:44:55,248 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:55,248 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-27 23:44:59,147 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:59,147 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-27 23:44:59,257 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_2'}})
+2025-11-27 23:44:59,261 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:44:59,262 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-27 23:45:00,086 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:00,086 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-27 23:45:00,249 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:00,250 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-27 23:45:00,361 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_6'}})
+2025-11-27 23:45:00,366 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:00,366 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-27 23:45:01,793 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:01,793 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-27 23:45:05,087 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:05,087 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-27 23:45:05,468 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_3'}})
+2025-11-27 23:45:05,473 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:05,474 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-27 23:45:06,434 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:06,434 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-27 23:45:06,793 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:06,793 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-27 23:45:07,071 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_7'}})
+2025-11-27 23:45:07,074 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:07,075 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-27 23:45:08,001 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:08,001 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-27 23:45:11,434 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:11,434 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='completed' from=ur5e@localhost
+2025-11-27 23:45:11,677 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_4'}})
+2025-11-27 23:45:11,683 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:11,683 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='accepted' from=ur5e@localhost
+2025-11-27 23:45:12,499 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:12,499 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='running' from=ur5e@localhost
+2025-11-27 23:45:13,005 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:13,006 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='completed' from=xarm6@localhost
+2025-11-27 23:45:13,280 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_8 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_8'}})
+2025-11-27 23:45:13,294 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:13,294 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='accepted' from=xarm6@localhost
+2025-11-27 23:45:14,342 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:45:14,343 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='running' from=xarm6@localhost
+2025-11-27 23:45:40,959 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:45:43,418 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:45:43,419 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:45:46,847 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:45:46,848 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:46:04,147 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:46:04,149 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:46:04,150 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:56:24,953 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-27 23:56:27,507 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-27 23:56:27,511 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-27 23:56:31,491 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-27 23:56:31,493 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-27 23:56:45,385 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-27 23:56:45,387 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:56:45,387 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-27 23:56:45,389 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-27 23:56:45,389 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-27 23:56:45,394 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:56:45,395 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-27 23:56:45,491 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-27 23:56:45,496 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:56:45,496 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-27 23:56:46,213 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:56:46,213 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-27 23:56:46,481 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-27 23:56:46,481 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-28 00:05:46,136 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 00:05:48,759 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 00:05:48,763 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 00:05:53,014 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 00:05:53,015 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 00:06:12,184 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 00:06:12,186 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:06:12,186 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 00:15:44,040 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 00:15:46,712 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 00:15:46,713 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 00:15:49,949 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 00:15:49,950 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 00:17:54,683 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 00:17:57,160 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 00:17:57,161 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 00:18:00,500 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 00:18:00,501 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 00:18:14,711 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 00:18:14,712 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:18:14,712 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 00:19:00,710 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 00:19:03,162 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 00:19:03,163 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 00:19:06,282 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 00:19:06,285 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 00:19:22,809 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 00:19:22,810 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:22,811 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 00:19:22,813 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-28 00:19:22,814 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-28 00:19:22,823 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:22,823 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-28 00:19:22,915 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-28 00:19:22,917 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:22,917 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-28 00:19:23,849 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:23,849 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-28 00:19:24,211 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:24,211 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-28 00:19:28,850 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:28,851 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-28 00:19:29,026 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_6'}})
+2025-11-28 00:19:29,031 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:29,031 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-28 00:19:29,214 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:29,214 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-28 00:19:29,626 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_2'}})
+2025-11-28 00:19:29,631 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:29,631 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-28 00:19:30,299 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:30,299 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-28 00:19:30,497 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:30,497 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-28 00:19:35,300 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:35,300 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-28 00:19:35,498 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:35,498 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-28 00:19:35,734 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_3'}})
+2025-11-28 00:19:35,738 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:35,738 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-28 00:19:35,835 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_7'}})
+2025-11-28 00:19:35,839 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:35,839 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-28 00:19:36,572 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:36,572 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-28 00:19:37,080 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:37,080 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-28 00:19:41,573 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:41,573 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='completed' from=ur5e@localhost
+2025-11-28 00:19:41,942 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'SG', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_4'}})
+2025-11-28 00:19:41,947 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:41,947 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='accepted' from=ur5e@localhost
+2025-11-28 00:19:42,081 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:42,081 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='completed' from=xarm6@localhost
+2025-11-28 00:19:42,544 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_8 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_8'}})
+2025-11-28 00:19:42,551 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:42,552 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='accepted' from=xarm6@localhost
+2025-11-28 00:19:42,739 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:42,739 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='running' from=ur5e@localhost
+2025-11-28 00:19:43,487 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:43,487 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='running' from=xarm6@localhost
+2025-11-28 00:19:47,741 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:47,741 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='completed' from=ur5e@localhost
+2025-11-28 00:19:48,487 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:19:48,488 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='completed' from=xarm6@localhost
+2025-11-28 00:20:59,196 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 00:21:01,743 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 00:21:01,745 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 00:21:04,439 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 00:21:04,440 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 00:21:18,076 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 00:21:18,077 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 00:21:18,077 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:16:56,270 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:16:58,728 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:16:58,741 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:17:04,890 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:17:04,891 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:17:21,430 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2025-11-28 01:17:21,432 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:17:21,433 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:21:08,462 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:21:10,972 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:21:10,974 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:21:16,317 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:21:16,319 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:22:54,214 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:22:56,831 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:22:56,833 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:23:01,287 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:23:01,288 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:23:15,087 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:23:15,092 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:23:15,092 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:27:02,386 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:27:04,979 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:27:04,980 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:27:08,582 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:27:08,585 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:27:22,315 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:27:22,315 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:27:22,316 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:28:56,814 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:28:59,166 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:28:59,173 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:29:01,881 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:29:01,883 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:29:15,685 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:29:15,687 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:29:15,687 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:34:22,287 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:34:24,735 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:34:24,736 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:34:28,159 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:34:28,160 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:34:41,160 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:34:41,161 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:34:41,161 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:35:37,851 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:35:40,310 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:35:40,311 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:35:43,615 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:35:43,616 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:35:59,292 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:35:59,293 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:35:59,293 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 01:37:02,985 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 01:37:05,383 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 01:37:05,385 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 01:37:08,254 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 01:37:08,255 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 01:37:20,646 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 01:37:20,646 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 01:37:20,647 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 06:51:09,540 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 06:51:12,032 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 06:51:12,033 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 06:51:15,717 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 06:51:15,719 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 06:51:30,510 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 06:51:30,512 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 06:51:30,513 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 06:52:08,497 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 06:52:10,846 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 06:52:10,847 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 06:52:15,391 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 06:52:15,391 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 06:52:30,224 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 06:52:30,225 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 06:52:30,225 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 06:54:11,673 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 06:54:14,087 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 06:54:14,088 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 06:54:17,695 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 06:54:17,696 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 06:54:33,405 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 06:54:33,408 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 06:54:33,409 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-28 23:15:52,026 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-28 23:15:54,550 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-28 23:15:54,562 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-28 23:15:59,093 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-28 23:15:59,095 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-28 23:16:15,994 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-28 23:16:15,996 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-28 23:16:15,996 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:05:36,705 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:05:39,235 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:05:39,238 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:05:43,406 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:05:43,409 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:06:01,626 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 00:06:01,628 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:06:01,628 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:11:42,976 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:11:45,551 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:11:45,554 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:11:49,170 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:11:49,171 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:12:03,571 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 00:12:03,572 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:12:03,572 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:31:39,305 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:31:41,802 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:31:41,804 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:31:46,157 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:31:46,161 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:32:15,213 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:32:17,565 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:32:17,567 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:32:20,666 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:32:20,667 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:33:09,291 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:33:11,853 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:33:11,854 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:33:17,289 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:33:17,291 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:33:34,002 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 00:33:34,004 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:33:34,004 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:34:49,347 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:34:52,163 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:34:52,165 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:34:55,862 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:34:55,863 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:35:34,489 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:35:36,963 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:35:36,967 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:35:40,953 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:35:40,954 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:36:00,348 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 00:36:00,349 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:36:00,349 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:36:59,372 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 00:37:01,833 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 00:37:01,842 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 00:37:05,447 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 00:37:05,449 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 00:37:22,079 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 00:37:22,080 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:37:22,080 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 00:37:56,951 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 00:38:01,406 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 00:38:17,874 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 00:38:17,879 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 00:38:48,889 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 00:39:13,158 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 00:39:16,087 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 00:39:33,022 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 00:39:33,025 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 09:22:06,621 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 09:22:09,396 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 09:22:09,400 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 09:22:14,460 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 09:22:14,463 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 09:22:32,214 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 09:22:32,216 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 09:22:32,216 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 09:22:47,596 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 09:22:51,775 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 09:23:12,647 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 09:23:12,650 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 09:23:12,650 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 09:24:17,778 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 09:24:26,137 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 10:16:35,642 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 10:16:38,504 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 10:16:38,529 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 10:16:43,553 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 10:16:43,555 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 10:16:56,819 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2025-11-29 10:16:56,821 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:16:56,821 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 10:16:56,824 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 10:17:17,940 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 10:17:32,316 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 6 nodes.
+2025-11-29 10:17:38,522 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:20,422 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 10:18:23,086 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 10:18:23,098 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 10:18:25,198 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 10:18:25,200 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 10:18:38,669 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 10:18:38,677 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:38,678 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 10:18:38,691 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 10:18:38,693 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-29 10:18:38,731 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:38,732 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-29 10:18:38,795 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-29 10:18:38,802 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:38,802 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-29 10:18:39,783 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:39,784 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-29 10:18:40,029 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:40,029 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-29 10:18:44,785 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:44,785 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-29 10:18:44,953 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_6'}})
+2025-11-29 10:18:44,968 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:44,969 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-29 10:18:45,031 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:45,031 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-29 10:18:45,055 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_2'}})
+2025-11-29 10:18:45,064 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:45,064 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-29 10:18:45,744 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:45,744 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-29 10:18:46,827 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:46,828 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-29 10:18:50,745 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:50,746 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-29 10:18:51,170 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_7'}})
+2025-11-29 10:18:51,176 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:51,176 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-29 10:18:51,829 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:51,830 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-29 10:18:52,228 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:52,229 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-29 10:18:52,274 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_3'}})
+2025-11-29 10:18:52,284 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:18:52,284 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-29 10:19:04,088 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 10:19:06,750 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 10:19:06,752 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 10:19:10,126 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 10:19:10,136 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 10:19:23,397 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 10:19:23,399 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:23,399 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 10:19:23,402 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 10:19:23,403 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_1'}})
+2025-11-29 10:19:23,410 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:23,410 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='accepted' from=ur5e@localhost
+2025-11-29 10:19:23,505 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_5'}})
+2025-11-29 10:19:23,508 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:23,509 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='accepted' from=xarm6@localhost
+2025-11-29 10:19:24,248 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:24,248 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='running' from=ur5e@localhost
+2025-11-29 10:19:24,386 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:24,386 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='running' from=xarm6@localhost
+2025-11-29 10:19:28,555 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:28,555 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_1) status='completed' from=ur5e@localhost
+2025-11-29 10:19:28,695 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:28,695 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_5) status='completed' from=xarm6@localhost
+2025-11-29 10:19:28,960 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_2'}})
+2025-11-29 10:19:28,965 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:28,965 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='accepted' from=ur5e@localhost
+2025-11-29 10:19:29,062 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_6'}})
+2025-11-29 10:19:29,067 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:29,068 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='accepted' from=xarm6@localhost
+2025-11-29 10:19:29,778 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:29,779 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='running' from=xarm6@localhost
+2025-11-29 10:19:29,799 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:29,799 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='running' from=ur5e@localhost
+2025-11-29 10:19:34,782 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:34,783 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_6) status='completed' from=xarm6@localhost
+2025-11-29 10:19:34,800 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:34,800 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_2) status='completed' from=ur5e@localhost
+2025-11-29 10:19:35,186 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_3'}})
+2025-11-29 10:19:35,190 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:35,190 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='accepted' from=ur5e@localhost
+2025-11-29 10:19:35,287 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_7'}})
+2025-11-29 10:19:35,291 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:35,291 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='accepted' from=xarm6@localhost
+2025-11-29 10:19:36,005 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:36,005 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='running' from=xarm6@localhost
+2025-11-29 10:19:36,578 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:36,578 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='running' from=ur5e@localhost
+2025-11-29 10:19:41,006 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:41,006 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_7) status='completed' from=xarm6@localhost
+2025-11-29 10:19:41,441 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_8 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_8'}})
+2025-11-29 10:19:41,445 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:41,445 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='accepted' from=xarm6@localhost
+2025-11-29 10:19:41,580 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:41,581 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_3) status='completed' from=ur5e@localhost
+2025-11-29 10:19:42,043 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task TASK_4 -> ur5e@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'SG', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'TASK_4'}})
+2025-11-29 10:19:42,047 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:42,047 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='accepted' from=ur5e@localhost
+2025-11-29 10:19:42,127 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:42,127 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='running' from=xarm6@localhost
+2025-11-29 10:19:42,812 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:42,812 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_4) status='running' from=ur5e@localhost
+2025-11-29 10:19:47,131 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:19:47,131 - agent:assembly_board-v1 - INFO - [Product] ACK (TASK_8) status='completed' from=xarm6@localhost
+2025-11-29 10:20:04,539 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 10:20:07,498 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 10:20:07,500 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 10:20:12,306 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 10:20:12,307 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 10:20:28,661 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 10:20:28,662 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 10:20:28,662 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 10:20:28,665 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 10:20:55,530 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 10:21:12,794 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 10:21:17,493 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:20,544 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 13:04:23,242 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 13:04:23,249 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 13:04:27,985 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 13:04:27,986 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 13:04:54,453 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 13:04:54,456 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:54,457 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 13:04:54,461 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 13:04:54,462 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2025-11-29 13:04:54,470 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:54,470 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2025-11-29 13:04:54,563 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_5'}})
+2025-11-29 13:04:54,568 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:54,568 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='accepted' from=xarm6@localhost
+2025-11-29 13:04:55,786 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:55,787 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='running' from=ur5e@localhost
+2025-11-29 13:04:56,562 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:04:56,562 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='running' from=xarm6@localhost
+2025-11-29 13:05:29,563 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 13:05:32,135 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 13:05:32,138 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 13:05:36,005 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 13:05:36,008 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 13:05:58,944 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-29 13:05:58,945 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:05:58,945 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 13:06:58,526 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 13:06:58,532 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2025-11-29 13:06:58,562 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:06:58,564 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2025-11-29 13:06:58,635 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_6 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_6'}})
+2025-11-29 13:06:58,639 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:06:58,639 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='accepted' from=xarm6@localhost
+2025-11-29 13:07:07,080 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 13:07:09,936 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 13:07:09,940 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 13:07:20,148 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 13:07:20,150 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 13:07:40,265 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 13:07:40,266 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:07:40,266 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 13:09:34,045 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 13:09:34,047 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2025-11-29 13:09:34,057 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:09:34,057 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2025-11-29 13:09:34,150 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_5'}})
+2025-11-29 13:09:34,156 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:09:34,156 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='accepted' from=xarm6@localhost
+2025-11-29 13:09:42,150 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 13:09:44,664 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 13:09:44,666 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 13:09:48,311 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 13:09:48,312 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 13:10:10,552 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-29 13:10:10,553 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:10:10,553 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 13:10:26,530 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 13:10:28,089 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 13:10:28,091 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 13:10:32,170 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 13:10:32,172 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 13:10:50,865 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 13:10:50,867 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 13:10:50,868 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:17:35,577 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 14:17:38,107 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 14:17:38,111 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 14:17:43,025 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 14:17:43,026 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 14:18:04,873 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 14:18:04,875 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:18:04,875 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:18:09,984 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 14:18:12,552 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 14:18:32,902 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 14:18:32,905 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:18:32,905 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 14:19:12,504 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 14:20:01,205 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 14:20:21,807 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 14:20:25,934 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:21:25,472 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 3/3)...
+2025-11-29 14:21:33,282 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 14:21:33,282 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 14:33:51,838 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 14:33:54,738 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 14:33:54,742 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 14:34:01,433 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 14:34:01,435 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 14:34:24,642 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 14:34:24,646 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:34:24,647 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:35:37,796 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 14:35:40,588 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 14:35:40,589 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 14:35:45,574 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 14:35:45,576 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 14:36:09,727 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-29 14:36:09,728 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:36:09,728 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:36:15,484 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 14:36:15,486 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 14:36:55,753 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 10 nodes.
+2025-11-29 14:36:59,836 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:50:27,391 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 14:50:30,035 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 14:50:30,048 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 14:50:34,218 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 14:50:34,221 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 14:50:58,631 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-29 14:50:58,633 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:50:58,634 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:52:19,825 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 14:52:22,698 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 14:52:22,700 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 14:52:28,379 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 14:52:28,379 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 14:52:48,917 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 14:52:48,918 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 14:52:48,918 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 14:52:59,796 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 14:52:59,797 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 14:53:18,864 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 8 nodes.
+2025-11-29 14:53:28,911 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 15:54:14,666 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 15:54:17,411 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 15:54:17,435 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 15:54:20,571 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 15:54:20,572 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 15:54:46,449 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2025-11-29 15:54:46,452 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 15:54:46,453 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 15:54:50,249 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 15:54:50,250 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 15:55:12,895 - agent:assembly_board-v1 - INFO - Task task_4 changed: ADDED DEPENDENCY: Added 'task_9' to predecessors to resolve ordering violation.
+2025-11-29 15:55:12,896 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. New plan has 10 nodes.
+2025-11-29 15:55:41,080 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 16:14:32,244 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 16:14:33,786 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 16:14:33,788 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 16:14:38,244 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 16:14:38,245 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 16:14:59,157 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 16:14:59,160 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 16:14:59,160 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 16:15:05,565 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 16:15:05,565 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 16:15:07,250 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 16:15:07,252 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 16:16:00,135 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 16:16:02,853 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 16:16:02,856 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 16:16:07,990 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 16:16:07,993 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 16:16:22,109 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2025-11-29 16:16:22,110 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 16:16:22,110 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 16:16:28,139 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 16:16:28,140 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 16:16:31,244 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 16:16:31,245 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_6: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 16:16:31,246 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2025-11-29 16:16:31,247 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 16:16:31,247 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 17:40:31,362 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 17:40:34,631 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 17:40:34,635 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 17:40:39,921 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 17:40:39,923 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 17:41:01,141 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 17:41:01,142 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 17:41:01,142 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 17:41:08,145 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 17:41:08,148 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 17:41:10,523 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 17:41:10,524 - agent:assembly_board-v1 - INFO - [Planner] DELETING task task_8: DELETION: Task violates prohibition rule.
+2025-11-29 17:41:10,524 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2025-11-29 17:41:10,526 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 17:41:10,526 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 17:42:34,319 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 17:42:37,601 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 17:42:37,603 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 17:42:41,068 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 17:42:41,070 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 17:43:01,544 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 17:43:01,546 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 17:43:01,546 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 17:43:23,660 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (2 violations). Triggering Re-plan...
+2025-11-29 17:43:23,661 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 17:43:26,802 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 17:43:26,802 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Ensured task_8 is placed before task_4.
+2025-11-29 17:43:26,803 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2025-11-29 17:43:26,804 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 17:43:26,804 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 18:20:25,630 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 18:20:28,377 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 18:20:28,378 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 18:20:33,496 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 18:20:33,497 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 18:20:48,843 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2025-11-29 18:20:48,845 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 18:20:48,846 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 18:20:56,426 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2025-11-29 18:20:56,426 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2025-11-29 18:20:59,059 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 18:20:59,059 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_6: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2025-11-29 18:20:59,060 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2025-11-29 18:20:59,061 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 18:20:59,061 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2025-11-29 19:04:56,081 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 19:04:58,809 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 19:04:58,810 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 19:04:58,811 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2025-11-29 19:05:03,894 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 19:05:03,895 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 19:05:26,655 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 19:05:26,657 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:05:26,658 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2025-11-29 19:13:48,343 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2025-11-29 19:13:48,347 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2025-11-29 19:13:48,362 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:13:48,362 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=xarm6@localhost
+2025-11-29 19:13:49,780 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:13:49,780 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='running' from=xarm6@localhost
+2025-11-29 19:13:54,784 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:13:54,784 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='completed' from=xarm6@localhost
+2025-11-29 19:13:54,956 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_2 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_2'}})
+2025-11-29 19:13:54,965 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:13:54,965 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='accepted' from=xarm6@localhost
+2025-11-29 19:13:57,194 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:13:57,194 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='running' from=xarm6@localhost
+2025-11-29 19:14:02,202 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:02,203 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='completed' from=xarm6@localhost
+2025-11-29 19:14:02,574 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_3 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_3'}})
+2025-11-29 19:14:02,582 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:02,582 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='accepted' from=xarm6@localhost
+2025-11-29 19:14:03,840 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:03,841 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='running' from=xarm6@localhost
+2025-11-29 19:14:08,848 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:08,849 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='completed' from=xarm6@localhost
+2025-11-29 19:14:09,190 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_4 -> xarm6@localhost ({'function_name': 'place_part', 'params': {'destination_location': 'assembly_board-v1', 'part_name': 'MCP', 'orientation': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_4'}})
+2025-11-29 19:14:09,197 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:09,197 - agent:assembly_board-v1 - INFO - [Product] ACK (task_4) status='accepted' from=xarm6@localhost
+2025-11-29 19:14:10,138 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:10,139 - agent:assembly_board-v1 - INFO - [Product] ACK (task_4) status='running' from=xarm6@localhost
+2025-11-29 19:14:26,596 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2025-11-29 19:14:29,322 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2025-11-29 19:14:29,326 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2025-11-29 19:14:29,327 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2025-11-29 19:14:32,355 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2025-11-29 19:14:32,357 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2025-11-29 19:14:47,469 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2025-11-29 19:14:47,470 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2025-11-29 19:14:47,470 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...

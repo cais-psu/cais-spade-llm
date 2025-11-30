@@ -506,3 +506,431 @@ TypeError: Agent.get() got an unexpected keyword argument 'timeout'
 2025-11-26 00:31:44,495 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
 2025-11-26 00:32:05,225 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
 2025-11-26 00:32:06,164 - agent:xarm6 - INFO - [Resource] Stored safety_decision=block for task=TASK_5
+2025-11-26 09:12:48,409 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:12:49,670 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:13:08,127 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:19:45,650 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:19:46,881 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:19:57,401 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:19:58,638 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:20:21,394 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:20:22,265 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 09:20:22,363 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 60.0 sec)
+2025-11-26 09:20:27,364 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 60.0 sec)
+2025-11-26 09:20:32,364 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (10.0 / 60.0 sec)
+2025-11-26 09:20:37,365 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (15.0 / 60.0 sec)
+2025-11-26 09:20:42,366 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (20.0 / 60.0 sec)
+2025-11-26 09:21:10,672 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:21:11,915 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:21:33,350 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:21:34,092 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 09:21:34,192 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 20.0 sec)
+2025-11-26 09:21:39,192 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 20.0 sec)
+2025-11-26 09:21:44,193 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (10.0 / 20.0 sec)
+2025-11-26 09:21:49,194 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (15.0 / 20.0 sec)
+2025-11-26 09:21:54,195 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (20.0 / 20.0 sec)
+2025-11-26 09:21:54,196 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-26 09:21:54,471 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:26:09,147 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:26:10,359 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:26:29,096 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:26:30,028 - agent:xarm6 - INFO - [Resource] Stored safety_decision=block for task=TASK_5
+2025-11-26 09:26:50,074 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-26 09:51:01,493 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:51:03,019 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:51:31,539 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:51:37,393 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 09:51:37,426 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 5.0 sec)
+2025-11-26 09:51:42,426 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 09:51:42,426 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-26 09:51:42,753 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:58:20,105 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 09:58:21,330 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 09:58:46,758 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:58:52,760 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 09:58:52,833 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 5.0 sec)
+2025-11-26 09:58:57,833 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 09:58:57,833 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-26 09:58:57,977 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:58:58,972 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 09:58:59,072 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-26 09:58:59,074 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 09:59:04,074 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-26 09:59:04,074 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-26 09:59:04,078 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 09:59:04,188 - agent:xarm6 - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:59:05,950 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_8
+2025-11-26 09:59:06,051 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-26 09:59:11,051 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 09:59:11,052 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-26 09:59:11,398 - agent:xarm6 - INFO - [Resource] ← Task (TASK_9) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:59:12,239 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_9
+2025-11-26 09:59:12,339 - agent:xarm6 - INFO - [xarm6] Placing MCP at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
+2025-11-26 09:59:17,340 - agent:xarm6 - INFO - [xarm6] ... Placing MCP at assembly_board-v1 (orientation=default) (5.0 / 5.0 sec)
+2025-11-26 09:59:17,341 - agent:xarm6 - INFO - [xarm6] Finished: Placing MCP at assembly_board-v1 (orientation=default)
+2025-11-26 09:59:17,607 - agent:xarm6 - INFO - [Resource] ← Task (TASK_10) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 09:59:18,414 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_10
+2025-11-26 09:59:18,515 - agent:xarm6 - INFO - [xarm6] Moving arm to home position (estimated 5.0 sec)
+2025-11-26 09:59:18,519 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_10
+2025-11-26 09:59:23,516 - agent:xarm6 - INFO - [xarm6] ... Moving arm to home position (5.0 / 5.0 sec)
+2025-11-26 09:59:23,516 - agent:xarm6 - INFO - [xarm6] Finished: Moving arm to home position
+2025-11-26 09:59:23,519 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_10
+2025-11-26 10:40:29,649 - agent:xarm6 - ERROR - Function analysis failed for 'move_home': while scanning an alias
+  in "<unicode string>", line 5, column 11:
+    in_state: *
+              ^
+expected alphabetic or numeric character, but found '\n'
+  in "<unicode string>", line 5, column 12:
+    in_state: *
+               ^
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/shared_information/llm_agent.py", line 134, in _rebuild_tool_schemas
+    analyzed = self.function_analyzer.analyze_function(fn)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/function_analyzer.py", line 87, in analyze_function
+    frontmatter, doc_body = FunctionAnalyzer._frontmatter_and_body(doc)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/function_analyzer.py", line 160, in _frontmatter_and_body
+    meta = yaml.safe_load(yaml_block) or {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/__init__.py", line 125, in safe_load
+    return load(stream, SafeLoader)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/__init__.py", line 81, in load
+    return loader.get_single_data()
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/constructor.py", line 49, in get_single_data
+    node = self.get_single_node()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/composer.py", line 36, in get_single_node
+    document = self.compose_document()
+               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/composer.py", line 55, in compose_document
+    node = self.compose_node(None, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/composer.py", line 64, in compose_node
+    if self.check_event(AliasEvent):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/parser.py", line 98, in check_event
+    self.current_event = self.state()
+                         ^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/parser.py", line 449, in parse_block_mapping_value
+    if not self.check_token(KeyToken, ValueToken, BlockEndToken):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/scanner.py", line 116, in check_token
+    self.fetch_more_tokens()
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/scanner.py", line 227, in fetch_more_tokens
+    return self.fetch_alias()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/scanner.py", line 610, in fetch_alias
+    self.tokens.append(self.scan_anchor(AliasToken))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jongh/projects/cais-spade-llm/.venv/lib/python3.12/site-packages/yaml/scanner.py", line 922, in scan_anchor
+    raise ScannerError("while scanning an %s" % name, start_mark,
+yaml.scanner.ScannerError: while scanning an alias
+  in "<unicode string>", line 5, column 11:
+    in_state: *
+              ^
+expected alphabetic or numeric character, but found '\n'
+  in "<unicode string>", line 5, column 12:
+    in_state: *
+               ^
+2025-11-26 10:40:29,653 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 10:40:45,634 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 10:40:46,984 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 10:41:06,335 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 10:41:07,588 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 10:41:31,559 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 10:41:32,863 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 10:41:55,691 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 11:24:54,259 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 11:24:55,520 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 15:23:15,946 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 15:23:17,319 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 15:23:42,657 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 15:23:48,423 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-26 15:23:48,459 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 5.0 sec)
+2025-11-26 15:23:53,459 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 15:23:53,459 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-26 15:23:53,869 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 15:23:56,279 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 15:23:56,379 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-26 15:23:56,381 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 15:41:54,892 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-26 15:41:56,222 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-26 15:42:15,831 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 15:42:21,983 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-26 15:42:22,031 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 5.0 sec)
+2025-11-26 15:42:27,032 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 15:42:27,032 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-26 15:42:27,038 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 15:42:27,966 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 15:42:28,067 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-26 15:42:28,069 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 15:42:33,068 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-26 15:42:33,069 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-26 15:42:33,076 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-26 15:42:33,246 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-26 15:42:34,621 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 15:42:34,721 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-26 15:42:34,724 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 15:42:39,722 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-26 15:42:39,722 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-26 15:42:39,726 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-26 15:42:39,956 - agent:xarm6 - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 11:05:05,079 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 11:05:06,254 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 11:06:21,432 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 11:06:22,652 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:04:40,368 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:04:41,736 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:10:26,652 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:10:27,829 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:11:42,969 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 13:14:10,857 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:14:12,108 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:15:38,356 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:15:39,519 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:16:17,895 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:16:19,072 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:17:48,566 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:17:49,898 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:18:54,836 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:18:56,109 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 13:19:37,230 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 13:19:38,343 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 17:53:55,490 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 17:53:56,802 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 17:54:36,187 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 17:56:40,438 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 17:56:41,848 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 18:00:02,124 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 21:34:18,039 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 21:34:19,408 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 21:59:37,632 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 21:59:38,888 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 22:06:17,429 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 22:23:39,004 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 22:23:40,204 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 22:28:21,109 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 22:28:22,280 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 22:31:37,154 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 22:31:38,307 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 22:32:07,777 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 22:35:56,372 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 22:35:57,525 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:20:27,170 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:20:28,371 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:21:31,232 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:32:47,669 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:32:48,911 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:36:40,646 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:36:41,920 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:41:53,584 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:41:54,730 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:44:23,071 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:44:24,325 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:44:53,143 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:44:55,148 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-27 23:44:55,247 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 (speed=default) (estimated 5.0 sec)
+2025-11-27 23:45:00,248 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 (speed=default) (5.0 / 5.0 sec)
+2025-11-27 23:45:00,248 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 (speed=default)
+2025-11-27 23:45:00,361 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:45:01,692 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-27 23:45:01,792 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-27 23:45:06,792 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-27 23:45:06,792 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-27 23:45:07,071 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:45:07,900 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-27 23:45:08,000 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-27 23:45:13,001 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-27 23:45:13,001 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-27 23:45:13,281 - agent:xarm6 - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:45:14,241 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_8
+2025-11-27 23:45:14,340 - agent:xarm6 - INFO - [xarm6] Placing MCP at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
+2025-11-27 23:45:40,958 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:45:42,139 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:56:24,952 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-27 23:56:26,227 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-27 23:56:45,492 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-27 23:56:46,380 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-27 23:56:46,480 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-28 00:05:46,134 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 00:05:47,461 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 00:15:44,038 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 00:15:45,305 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 00:17:54,681 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 00:17:55,919 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 00:19:00,708 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 00:19:01,893 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 00:19:22,915 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-28 00:19:23,748 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-28 00:19:23,848 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-28 00:19:28,848 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (5.0 / 5.0 sec)
+2025-11-28 00:19:28,849 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 for MCP (speed=default)
+2025-11-28 00:19:29,026 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-28 00:19:30,197 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-28 00:19:30,298 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-28 00:19:35,298 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-28 00:19:35,299 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-28 00:19:35,836 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-28 00:19:36,978 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-28 00:19:37,079 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-28 00:19:42,079 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-28 00:19:42,079 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-28 00:19:42,545 - agent:xarm6 - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-28 00:19:43,385 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_8
+2025-11-28 00:19:43,485 - agent:xarm6 - INFO - [xarm6] Placing MCP at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
+2025-11-28 00:19:48,486 - agent:xarm6 - INFO - [xarm6] ... Placing MCP at assembly_board-v1 (orientation=default) (5.0 / 5.0 sec)
+2025-11-28 00:19:48,486 - agent:xarm6 - INFO - [xarm6] Finished: Placing MCP at assembly_board-v1 (orientation=default)
+2025-11-28 00:20:59,195 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 00:21:00,456 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:16:56,268 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:16:57,484 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:21:08,460 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:21:09,627 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:22:54,212 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:22:55,435 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:27:02,384 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:27:03,600 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:28:56,813 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:28:57,955 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:34:22,286 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:34:23,450 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:35:37,850 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:35:39,063 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 01:37:02,983 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 01:37:04,154 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 06:51:09,537 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 06:51:10,815 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 06:52:08,496 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 06:52:09,591 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 06:54:11,672 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 06:54:12,834 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-28 23:15:52,024 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-28 23:15:53,262 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:05:36,703 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:05:37,942 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:11:42,975 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:11:44,255 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:31:39,302 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:31:40,518 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:32:15,212 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:32:16,352 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:33:09,289 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:33:10,622 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:34:49,345 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:34:50,677 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:35:34,488 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:35:35,701 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 00:36:59,371 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 00:37:00,537 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 09:22:06,618 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 09:22:08,070 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 10:16:35,639 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 10:16:37,075 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 10:18:20,420 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 10:18:21,749 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 10:18:38,795 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:18:39,681 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-29 10:18:39,780 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-29 10:18:44,783 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (5.0 / 5.0 sec)
+2025-11-29 10:18:44,783 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 for MCP (speed=default)
+2025-11-29 10:18:44,954 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:18:45,642 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-29 10:18:45,743 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-29 10:18:50,744 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-29 10:18:50,744 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-29 10:18:51,170 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:18:52,125 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-29 10:18:52,225 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-29 10:19:04,086 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 10:19:05,377 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 10:19:23,505 - agent:xarm6 - INFO - [Resource] ← Task (TASK_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:19:24,283 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_5
+2025-11-29 10:19:24,384 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-29 10:19:28,691 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (5.0 / 5.0 sec)
+2025-11-29 10:19:28,692 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 for MCP (speed=default)
+2025-11-29 10:19:29,063 - agent:xarm6 - INFO - [Resource] ← Task (TASK_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:19:29,676 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_6
+2025-11-29 10:19:29,777 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-29 10:19:34,777 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-29 10:19:34,779 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-29 10:19:35,288 - agent:xarm6 - INFO - [Resource] ← Task (TASK_7) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:19:35,902 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_7
+2025-11-29 10:19:36,003 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-29 10:19:41,005 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-29 10:19:41,005 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-29 10:19:41,441 - agent:xarm6 - INFO - [Resource] ← Task (TASK_8) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 10:19:42,026 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=TASK_8
+2025-11-29 10:19:42,126 - agent:xarm6 - INFO - [xarm6] Placing MCP at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
+2025-11-29 10:19:47,129 - agent:xarm6 - INFO - [xarm6] ... Placing MCP at assembly_board-v1 (orientation=default) (5.0 / 5.0 sec)
+2025-11-29 10:19:47,130 - agent:xarm6 - INFO - [xarm6] Finished: Placing MCP at assembly_board-v1 (orientation=default)
+2025-11-29 10:20:04,538 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 10:20:06,079 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 13:04:20,542 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 13:04:21,852 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 13:04:54,564 - agent:xarm6 - INFO - [Resource] ← Task (task_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 13:04:56,460 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_5
+2025-11-29 13:04:56,560 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-29 13:05:29,562 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 13:05:30,826 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 13:06:58,635 - agent:xarm6 - INFO - [Resource] ← Task (task_6) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 13:07:07,080 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 13:07:08,241 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 13:09:34,150 - agent:xarm6 - INFO - [Resource] ← Task (task_5) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 13:09:35,082 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_5
+2025-11-29 13:09:42,149 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 13:09:43,354 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 13:10:26,528 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 13:10:26,621 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 14:17:35,575 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 14:17:36,804 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 14:33:51,836 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 14:33:53,303 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 14:35:37,795 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 14:35:39,169 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 14:50:27,389 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 14:50:28,687 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 14:52:19,823 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 14:52:21,176 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 15:54:14,663 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 15:54:16,017 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 16:14:32,242 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 16:14:33,485 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 16:16:00,134 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 16:16:01,424 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 17:40:31,359 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 17:40:32,906 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 17:42:34,317 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 17:42:35,895 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 18:20:25,628 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 18:20:26,977 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 19:04:56,079 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 19:04:57,400 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])
+2025-11-29 19:13:48,348 - agent:xarm6 - INFO - [Resource] ← Task (task_1) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 19:13:49,677 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_1
+2025-11-29 19:13:49,778 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (estimated 5.0 sec)
+2025-11-29 19:13:54,781 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk4-1 for MCP (speed=default) (5.0 / 5.0 sec)
+2025-11-29 19:13:54,781 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk4-1 for MCP (speed=default)
+2025-11-29 19:13:54,956 - agent:xarm6 - INFO - [Resource] ← Task (task_2) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 19:13:57,092 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_2
+2025-11-29 19:13:57,192 - agent:xarm6 - INFO - [xarm6] Picking MCP from prusa-mk4-1 (gripper=default) (estimated 5.0 sec)
+2025-11-29 19:14:02,194 - agent:xarm6 - INFO - [xarm6] ... Picking MCP from prusa-mk4-1 (gripper=default) (5.0 / 5.0 sec)
+2025-11-29 19:14:02,195 - agent:xarm6 - INFO - [xarm6] Finished: Picking MCP from prusa-mk4-1 (gripper=default)
+2025-11-29 19:14:02,574 - agent:xarm6 - INFO - [Resource] ← Task (task_3) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 19:14:03,738 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_3
+2025-11-29 19:14:03,838 - agent:xarm6 - INFO - [xarm6] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2025-11-29 19:14:08,839 - agent:xarm6 - INFO - [xarm6] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2025-11-29 19:14:08,840 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2025-11-29 19:14:09,191 - agent:xarm6 - INFO - [Resource] ← Task (task_4) from=assembly_board-v1@localhost proto=plan/1.0
+2025-11-29 19:14:10,035 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=task_4
+2025-11-29 19:14:10,136 - agent:xarm6 - INFO - [xarm6] Placing MCP at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
+2025-11-29 19:14:26,595 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2025-11-29 19:14:27,961 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-4o, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part'])

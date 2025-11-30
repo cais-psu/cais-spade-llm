@@ -1,0 +1,1 @@
+- MCP must be place_part to assembly_board-v1 before SG is place_part to assembly_board-v1 (ordering constraint)

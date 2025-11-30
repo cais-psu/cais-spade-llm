@@ -115,7 +115,13 @@ class SafetyLogic:
             raw_text        = r.get("raw_text", "")
             constraint_type = r.get("constraint_type")
             process         = r.get("process")
-            product         = r.get("product")
+
+            product_raw = r.get("product")
+            products = []
+            if isinstance(product_raw, list):
+                # Filter out empty strings/nulls
+                products = [str(p).strip() for p in product_raw if p]
+
             resources       = r.get("resources") or []
             event           = r.get("event")
             context         = r.get("context")       # expected to be dict or None
@@ -134,7 +140,7 @@ class SafetyLogic:
                 "raw_text": raw_text,
                 "constraint_type": constraint_type,
                 "process": process,
-                "product": product,
+                "product": products,
                 "resources": resources,
                 "event": event,
                 "context": context,   # dict or None
@@ -172,6 +178,9 @@ class SafetyLogic:
                 )
             self.logic_raw = {}
             return msg + " LTLf logic generation failed."
+
+        # 2.5) split LTLf formulas that are conjunctions of independent AP groups
+        self._split_rules_on_independent_conjuncts()
 
         # 3) inject labels + full APs + LTLf into rule nodes
         self._apply_labels_into_rules()
@@ -329,6 +338,175 @@ class SafetyLogic:
         return result
 
     # ------------------------------------------------------------------ #
+    # Split LTLf formula
+    # ------------------------------------------------------------------ #
+    def _split_ltlf_formula_by_top_level_and(self, formula: str) -> List[str]:
+        """
+        Split an LTLf formula string by top-level '&' operators.
+        We ignore '&' that are inside parentheses.
+        Example:
+          "G (a -> X b) & G (c -> X d)"
+          -> ["G (a -> X b)", "G (c -> X d)"]
+        """
+        if not formula:
+            return []
+
+        f = formula.strip()
+        parts: List[str] = []
+        depth = 0
+        last = 0
+
+        for i, ch in enumerate(f):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "&" and depth == 0:
+                # split before this '&'
+                segment = f[last:i].strip()
+                if segment:
+                    parts.append(segment)
+                last = i + 1  # skip '&'
+
+        tail = f[last:].strip()
+        if tail:
+            parts.append(tail)
+
+        # If we didn't actually split, just return the whole thing
+        return parts or [f]
+    
+    def _split_rules_on_independent_conjuncts(self) -> None:
+        """
+        For each rule's raw LTLf (before AP labels), check if it is a
+        top-level '&' of independent conjuncts (disjoint AP sets).
+
+        If so, split that rule into multiple rules:
+          SAFE_2 -> SAFE_2-1, SAFE_2-2, ...
+
+        Independence = two conjuncts do not share any AP strings.
+        This works regardless of whether APs differ by agent, product, zone, etc.
+        """
+        if not self.logic_raw or not self.rules:
+            return
+
+        new_rules: List[Dict[str, Any]] = []
+        new_logic: Dict[str, Dict[str, Any]] = {}
+
+        for rule in self.rules:
+            rid = rule.get("id")
+            if not rid:
+                new_rules.append(rule)
+                continue
+
+            raw_logic = self.logic_raw.get(rid)
+            if not raw_logic:
+                new_rules.append(rule)
+                continue
+
+            raw_ltlf = str(raw_logic.get("ltlf", "") or "").strip()
+            raw_aps: List[str] = [str(a).strip() for a in (raw_logic.get("aps") or [])]
+
+            if not raw_ltlf or not raw_aps:
+                new_rules.append(rule)
+                new_logic[rid] = {
+                    "aps": raw_aps,
+                    "ltlf": raw_ltlf,
+                }
+                continue
+
+            # 1) split by top-level '&'
+            conjuncts = self._split_ltlf_formula_by_top_level_and(raw_ltlf)
+            if len(conjuncts) <= 1:
+                # nothing to split
+                new_rules.append(rule)
+                new_logic[rid] = {
+                    "aps": raw_aps,
+                    "ltlf": raw_ltlf,
+                }
+                continue
+
+            # 2) for each conjunct, collect the APs that appear in it
+            ap_sets: List[set] = []
+            for conj in conjuncts:
+                used = {ap for ap in raw_aps if ap and ap in conj}
+                ap_sets.append(used)
+
+            # if any conjunct has no APs, splitting is risky -> keep whole rule
+            if any(len(s) == 0 for s in ap_sets):
+                new_rules.append(rule)
+                new_logic[rid] = {
+                    "aps": raw_aps,
+                    "ltlf": raw_ltlf,
+                }
+                continue
+
+            # 3) group conjuncts by AP overlap (very simple grouping)
+            groups: List[List[int]] = []
+            assigned: set[int] = set()
+
+            for i in range(len(conjuncts)):
+                if i in assigned:
+                    continue
+                group = [i]
+                assigned.add(i)
+                merged_aps = set(ap_sets[i])
+
+                # put any conjunct that shares APs with this group into the same group
+                for j in range(i + 1, len(conjuncts)):
+                    if j in assigned:
+                        continue
+                    if ap_sets[j] & merged_aps:
+                        assigned.add(j)
+                        group.append(j)
+                        merged_aps |= ap_sets[j]
+
+                groups.append(group)
+
+            # if everything is one group, no split
+            if len(groups) <= 1:
+                new_rules.append(rule)
+                new_logic[rid] = {
+                    "aps": raw_aps,
+                    "ltlf": raw_ltlf,
+                }
+                continue
+
+            if self.logger:
+                self.logger.info(
+                    "[SafetyLogic] Splitting rule %s into %d independent sub-rules.",
+                    rid,
+                    len(groups),
+                )
+
+            # 4) create new rules: SAFE_2-1, SAFE_2-2, ...
+            for group_index, grp in enumerate(groups, start=1):
+                new_id = f"{rid}-{group_index}"
+
+                # subformula: AND of this group's conjuncts (keep order)
+                sub_conjs = [conjuncts[k] for k in sorted(grp)]
+                sub_formula = " & ".join(sub_conjs)
+
+                # APs used by this group
+                used_aps: set[str] = set()
+                for k in grp:
+                    used_aps |= ap_sets[k]
+                sub_aps = [ap for ap in raw_aps if ap in used_aps]
+
+                # clone rule and update id
+                new_rule = dict(rule)
+                new_rule["id"] = new_id
+                new_rules.append(new_rule)
+
+                new_logic[new_id] = {
+                    "aps": sub_aps,
+                    "ltlf": sub_formula,
+                }
+
+        # commit split
+        self.rules = new_rules
+        self.logic_raw = new_logic
+
+    # ------------------------------------------------------------------ #
     # Inject AP labels + full AP strings into each rule
     # ------------------------------------------------------------------ #
     def _apply_labels_into_rules(self) -> None:
@@ -452,6 +630,9 @@ class SafetyLogic:
             phi = rule.get("ltlf")
             if not rid or not phi:
                 continue
+
+            # e.g. '"G (a -> b)"' -> 'G (a -> b)'
+            phi = phi.strip().strip('"').strip("'")
 
             try:
                 ltlf_formula = parser(phi)

@@ -37,6 +37,7 @@ class ResourceAgent(LlmAgent):
         allowed_senders: Optional[Iterable[str]] = None,
         llm_timeout_s: int = 30,
         tool_timeout_s: int = 300,
+        cca_jid: Optional[str] = None,   # <-- NEW
         **kw: Any,
     ) -> None:
         """
@@ -54,6 +55,9 @@ class ResourceAgent(LlmAgent):
             function_names=list(function_names or []),
             **kw,
         )
+
+        self.cca_jid = cca_jid
+
         # Optional metadata (payload limits, tool list, etc.) exposed to other agents or dashboards.
         self.static_capabilities: Dict[str, Any] = static_capabilities or {}
         # Optional sender allow-list: if populated, only those JIDs can submit work.
@@ -193,7 +197,7 @@ class ResourceAgent(LlmAgent):
             # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
             try:
                 # 1) Send request permission, not running
-                resource_msg = Message(to="cca@localhost")
+                resource_msg = Message(to=agent.cca_jid)
                 resource_msg.set_metadata("type", "resource_event")
                 resource_msg.body = json.dumps({
                     "task_id": task_id,

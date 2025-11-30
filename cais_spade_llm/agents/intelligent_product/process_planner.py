@@ -4,8 +4,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from prompts import build_task_expansion_prompt, build_requirement_parse_prompt
-
+from prompts import build_task_expansion_prompt, build_requirement_parse_prompt, build_replan_prompt
 
 class ProcessPlanner:
     """
@@ -114,10 +113,12 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     # 2. REQUIREMENT → LLM TASK EXPANSION (replaces hard-coded version)
     # ------------------------------------------------------------------ #
-    async def expand_requirements_to_tasks(self) -> None:
+    async def expand_requirements_to_tasks(self, safety_text: str = "") -> None:
         """
         Replace requirement nodes with task nodes produced by LLM.
-        Includes resource assignment and sequence_index-based DAG structure.
+
+        The LLM returns a DIRECTED ACYCLIC GRAPH (DAG) of tasks where
+        dependencies are expressed via `predecessors` and `successors`.
         """
         req_nodes = [n for n in self.nodes if n.get("type") == "requirement"]
         if not req_nodes:
@@ -125,7 +126,7 @@ class ProcessPlanner:
             self.nodes = []
             return
 
-        # Prepare for LLM
+        # Prepare payload for LLM
         req_payload = [
             {
                 "id": n["id"],
@@ -160,6 +161,7 @@ class ProcessPlanner:
             tools_catalog=tools_catalog,
             resource_infos=resource_infos,
             caps_overview=caps_overview,
+            safety_text=safety_text
         )
 
         raw = await self.product_agent.ask_llm(
@@ -171,44 +173,240 @@ class ProcessPlanner:
         parsed = json.loads(raw)
         task_specs = parsed.get("tasks", [])
 
-        new_nodes = []
+        new_nodes: list[dict[str, Any]] = []
 
-        # Create nodes
+        # Create task nodes from LLM output
         for t in task_specs:
+            params = t.get("params") or {}
+            # Ensure product_jid is always present
+            params["product_jid"] = str(self.product_agent.jid)
+
             node = {
                 "id": t.get("id"),
                 "type": "task",
                 "requirement_id": t.get("requirement_id"),
                 "function_name": t.get("function_name"),
-                "params": t.get("params") or {},
+                "params": params,
                 "resource_jid": t.get("resource_jid"),
                 "sequence_index": t.get("sequence_index", 0),
                 "status": "pending",
-                "predecessors": [],
-                "successors": [],
+                # Preserve graph structure from LLM if provided
+                "predecessors": t.get("predecessors", []),
+                "successors": t.get("successors", []),
             }
             new_nodes.append(node)
 
-        # Build simple linear DAG per requirement
+        # OPTIONAL: fill in trivial per-requirement chains
+        # for tasks that have no predecessors/successors at all.
+        # This keeps things backwards-compatible if the LLM omits edges.
         by_req: Dict[str, List[Dict[str, Any]]] = {}
         for n in new_nodes:
-            rid = n["requirement_id"]
+            rid = n.get("requirement_id")
             by_req.setdefault(rid, []).append(n)
 
         for rid, seq in by_req.items():
-            seq.sort(key=lambda n: n["sequence_index"])
+            # Check if ALL tasks under this requirement have completely empty edges
+            all_edges_empty = all(
+                not n.get("predecessors") and not n.get("successors") for n in seq
+            )
+            if not all_edges_empty:
+                # LLM already defined some graph structure for this requirement;
+                # do NOT overwrite it.
+                continue
+
+            # Otherwise, fall back to a simple linear chain by sequence_index
+            seq.sort(key=lambda n: n.get("sequence_index", 0))
             for prev, nxt in zip(seq, seq[1:]):
                 prev["successors"].append(nxt["id"])
                 nxt["predecessors"].append(prev["id"])
 
         self.nodes = new_nodes
         self.logger.info(
-            f"[Planner] Expanded to {len(self.nodes)} LLM-generated task node(s)."
+            "[Planner] Expanded to %d LLM-generated task node(s).",
+            len(self.nodes),
         )
+
+
+    # ------------------------------------------------------------------ #
+    # 3. REPLAN WHEN SAFETY VIOLATION OCCURS
+    # ------------------------------------------------------------------ #
+    async def replan_with_feedback(self, violations: list[dict]) -> None:
+        self.logger.info("[Planner] Triggering LLM Re-planning with safety feedback...")
+        
+        # 1. Gather all tasks
+        failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
+
+        # 2. Extract the "Conflict Set" - IDs of tasks involved in violations
+        conflict_task_ids = set()
+        for v in violations:
+            # Add tasks from the witness trace
+            conflict_task_ids.update(v.get("witness_trace", []))
+            
+            # Optionally add relevant tasks if provided by the validator
+            rel_tasks = v.get("relevant_tasks", [])
+            for rt in rel_tasks:
+                if "id" in rt:
+                    conflict_task_ids.add(rt["id"])
+
+        # 3. Mark the nodes in the payload so the LLM knows what to focus on
+        plan_payload = []
+        for node in failed_nodes:
+            node_copy = node.copy()
+            if node_copy["id"] in conflict_task_ids:
+                node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
+            plan_payload.append(node_copy)
+
+        # --- DEFINITIONS RESTORED HERE ---
+        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
+
+        # Get capability overview string
+        caps_overview = ""
+        if hasattr(self.product_agent, "_static_caps_overview"):
+            try:
+                caps_overview = self.product_agent._static_caps_overview()
+            except Exception:
+                caps_overview = ""
+
+        # Get resource agent info
+        resource_infos = [
+            {
+                "jid": str(getattr(ra, "jid", "")),
+                "static_capabilities": getattr(ra, "static_capabilities", {}),
+            }
+            for ra in self.resource_agents
+        ]
+        # ---------------------------------
+
+        # 4. Build Prompt
+        prompt = build_replan_prompt(
+            failed_plan_nodes=plan_payload, 
+            violations=violations,
+            tools_catalog=tools_catalog,
+            resource_infos=resource_infos,
+            caps_overview=caps_overview,
+        )
+
+        raw = await self.product_agent.ask_llm(
+            prompt=prompt,
+            with_functions=False,
+            temperature=0.0, # Keep temp low for deterministic fixes
+        )
+
+        try:
+            parsed = json.loads(raw)
+            modified_tasks = parsed.get("tasks", [])
+
+            if not modified_tasks:
+                self.logger.warning("[Planner] LLM returned no modified tasks. Plan remains unchanged.")
+                return
+            
+            # --- MERGE STRATEGY (Supports Modification, Insertion, Deletion) ---
+            node_map = {n["id"]: n for n in self.nodes}
+
+            for t in modified_tasks:
+                tid = t.get("id")
+                if not tid: 
+                    continue
+
+                # CASE A: DELETION
+                if t.get("delete") is True:
+                    if tid in node_map:
+                        self.logger.info(f"[Planner] DELETING task {tid}: {t.get('change_reason')}")
+                        del node_map[tid]
+                        # Cleanup: Remove edges pointing to the deleted node
+                        for other in node_map.values():
+                            if tid in other.get("predecessors", []):
+                                other["predecessors"].remove(tid)
+                            if tid in other.get("successors", []):
+                                other["successors"].remove(tid)
+                    continue
+
+                # CASE B: MODIFICATION / INSERTION
+                
+                # Prepare params: use existing if modifying, empty if new
+                params = t.get("params") or {}
+                if tid in node_map and not t.get("params"):
+                    params = node_map[tid].get("params", {})
+                
+                # Ensure product_jid is always present
+                params["product_jid"] = str(self.product_agent.jid)
+
+                # Initialize new node if it doesn't exist
+                if tid not in node_map:
+                    node_map[tid] = {
+                        "id": tid,
+                        "type": "task",
+                        "status": "pending",
+                        "predecessors": [],
+                        "successors": []
+                    }
+
+                target = node_map[tid]
+
+                # Update fields ONLY if they are present in the LLM output
+                if "function_name" in t: target["function_name"] = t["function_name"]
+                if "params" in t: target["params"] = params
+                if "resource_jid" in t: target["resource_jid"] = t["resource_jid"]
+                if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
+                
+                # Overwrite edges if provided (LLM is authoritative on structure changes)
+                if "predecessors" in t: target["predecessors"] = t["predecessors"]
+                if "successors" in t: target["successors"] = t["successors"]
+
+                if "change_reason" in t:
+                    target["change_reason"] = t["change_reason"]
+                    self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
+
+                # Reset status so it runs again
+                target["status"] = "pending" 
+
+            self.nodes = list(node_map.values())
+            
+            # 5. Consistency Check (Auto-repair bidirectional links)
+            self._ensure_graph_consistency()
+
+            self.logger.info(
+                "[Planner] Re-planning successful. Merged %d modifications.",
+                len(modified_tasks),
+            )
+
+            if hasattr(self.product_agent, "plan_path"):
+                self.save(self.product_agent.plan_path)
+
+        except json.JSONDecodeError as exc:
+            self.logger.error(f"[Planner] LLM Re-planning returned invalid JSON: {exc}")
+
 
     # ------------------------------------------------------------------ #
     # Scheduling helpers
     # ------------------------------------------------------------------ #
+    def _ensure_graph_consistency(self) -> None:
+        """
+        Helper to ensure that if A lists B as a predecessor, 
+        B lists A as a successor (and vice versa).
+        This fixes 'one-sided' edits from the LLM.
+        """
+        node_map = {n["id"]: n for n in self.nodes}
+        
+        for nid, node in node_map.items():
+            # 1. Sync Predecessors -> Successors
+            # If 'node' thinks 'pid' is a predecessor, make sure 'pid' knows 'node' is a successor.
+            preds = node.get("predecessors", [])
+            for pid in preds:
+                if pid in node_map:
+                    p_node = node_map[pid]
+                    if nid not in p_node.get("successors", []):
+                        p_node.setdefault("successors", []).append(nid)
+            
+            # 2. Sync Successors -> Predecessors
+            # If 'node' thinks 'sid' is a successor, make sure 'sid' knows 'node' is a predecessor.
+            succs = node.get("successors", [])
+            for sid in succs:
+                if sid in node_map:
+                    s_node = node_map[sid]
+                    if nid not in s_node.get("predecessors", []):
+                        s_node.setdefault("predecessors", []).append(nid)
+
     def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         for n in self.nodes:
             if n.get("id") == node_id:

@@ -38,6 +38,7 @@ class RobotAgent(ResourceAgent):
     async def move_to_pick_location(
         self,
         origin_resource_location: str,
+        part_name: str,
         *,
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
@@ -57,6 +58,9 @@ class RobotAgent(ResourceAgent):
           origin_resource_location:
             type: string
             description: Target origin location to approach for picking.
+          part_name:
+            type: string
+            description: Name of the part intended to be picked (for tracking).
           speed:
             type: number
             description: Optional motion speed.
@@ -76,12 +80,12 @@ class RobotAgent(ResourceAgent):
             return {"status": "blocked", "content": msg}
 
         await self._simulate_action(
-            f"Travel empty to pick location {origin_resource_location} "
+            f"Travel empty to pick location {origin_resource_location} for {part_name} "
             f"(speed={speed or 'default'})"
         )
         return {
             "status": "completed",
-            "content": f"Arrived at {origin_resource_location} ready to pick.",
+            "content": f"Arrived at {origin_resource_location} ready to pick {part_name}.",
         }
 
     async def pick_part(
@@ -138,6 +142,7 @@ class RobotAgent(ResourceAgent):
     async def move_loaded_to_destination(
         self,
         destination_location: str,
+        part_name: str,
         *,
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
@@ -157,6 +162,9 @@ class RobotAgent(ResourceAgent):
           destination_location:
             type: string
             description: Destination location to carry the loaded part.
+          part_name:
+            type: string
+            description: Name of the part being moved.
           speed:
             type: number
             description: Optional motion speed while loaded.
@@ -174,6 +182,13 @@ class RobotAgent(ResourceAgent):
             msg = "Cannot move-loaded without holding a part."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
+        
+        # Consistency check: Ensure we are moving the part we think we are moving
+        if part_name and self._held_part != part_name:
+            self.logger.warning(
+                "[Robot] Requested to move '%s' but currently holding '%s'. Proceeding with held part.",
+                part_name, self._held_part
+            )
 
         await self._simulate_action(
             f"Move loaded part {self._held_part} to {destination_location} "
@@ -187,6 +202,7 @@ class RobotAgent(ResourceAgent):
     async def place_part(
         self,
         destination_location: str,
+        part_name: str,
         *,
         orientation: Optional[str] = None,
         product_jid: Optional[str] = None,
@@ -206,6 +222,9 @@ class RobotAgent(ResourceAgent):
           destination_location:
             type: string
             description: Target placement location.
+          part_name:
+            type: string
+            description: Name of the part being placed.
           orientation:
             type: string
             description: Optional placement orientation.
@@ -223,6 +242,13 @@ class RobotAgent(ResourceAgent):
             msg = "No part currently held; run pick_part first."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
+
+        # Consistency check
+        if part_name and self._held_part != part_name:
+            self.logger.warning(
+                "[Robot] Requested to place '%s' but currently holding '%s'. Placing held part.",
+                part_name, self._held_part
+            )
 
         await self._simulate_action(
             f"Placing {self._held_part} at {destination_location} "
@@ -243,8 +269,8 @@ class RobotAgent(ResourceAgent):
         process: assembly
         resource_type: robot
 
-        in_state: placed
-        out_state: idle
+        in_state: any
+        out_state: any
 
         context: []
 
@@ -255,7 +281,7 @@ class RobotAgent(ResourceAgent):
           task_id:
             type: string
 
-        description: Return robot arm to its home position.
+        description: Robot arm move to its home position.
         ---
         """
 
@@ -270,7 +296,7 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    async def _simulate_action(self, description: str, *, duration: float = 300.0):
+    async def _simulate_action(self, description: str, *, duration: float = 5.0):
         """
         Simulate a long-running robot action while printing progress every 5 seconds,
         including robot name for clarity when multiple robots run in parallel.

@@ -1,6 +1,7 @@
 # prompts.py
 import json
 from textwrap import dedent
+from typing import Any, Dict
 
 PROMPT_MAS_AGENT = dedent("""\
 You are a helpful agent in a cooperative Multi-Agent System.
@@ -77,47 +78,57 @@ TASK_EXPANSION_INSTRUCTIONS = dedent("""\
 You are a manufacturing process planner LLM.
 
 You receive:
-1) A list of high-level assembly requirements.
-2) A tools catalogue: each tool has a function name and expected parameters.
+1) A list of high-level requirements.
+2) A tools catalogue (each tool has a function name and parameter schema).
 3) A list of available resource agents and their static capabilities.
 
 Your job:
-- Expand each requirement into a SEQUENCE of executable task nodes.
+- Expand each requirement into a set of executable tasks.
+- The plan you generate is a DIRECTED ACYCLIC GRAPH (DAG).
 - Each task must:
-  - use **one** function_name from the tools catalogue
-  - include a params dict (exact param names from the tool spec)
+  - use exactly one function_name from the tools catalogue
+  - include a params dict (parameter names exactly match the tool spec)
   - be assigned to ONE resource agent via `resource_jid`
-  - reference its originating requirement_id
-  - include a sequence_index (0,1,2,...) to encode execution order
+  - reference its originating `requirement_id`
+  - include an integer `sequence_index` describing its position WITHIN that requirement
+  - include a list of `predecessors` (task IDs that must complete before this one)
+  - include a list of `successors` (task IDs that may start after this one)
 
-Rules:
-- Prefer the minimal valid sequence that satisfies the requirement.
-- Use resource capabilities to pick a reasonable resource_jid.
-- If uncertain about a param value, set it to null (do NOT hallucinate).
-- Keep sequences linear unless explicitly told otherwise.
-- Return ONLY valid JSON. No commentary, no natural-language text.
+GENERAL RULES:
+- Produce the minimal task set required to satisfy each requirement.
+- Use resource capabilities to assign suitable resources.
+- If a parameter value is not specified, set it to null (never invent data).
+- Within each requirement, sequence_index should increase in logical order.
+- You MAY create cross-requirement dependencies if needed to reflect natural ordering implied by the requirements.
+- You are provided with safety rules for context. Try to generate a plan that respects them.
+- Return ONLY valid JSON (no extra commentary).
 
-JSON schema to output:
+OUTPUT FORMAT:
+
 {
   "tasks": [
     {
-      "id": "TASK_1",
-      "requirement_id": "REQ_1",
-      "function_name": "move_to_pick_location",
+      "id": "...",
+      "requirement_id": "...",
+      "function_name": "...",
       "params": { ... },
-      "resource_jid": "robot1@localhost",
-      "sequence_index": 0
+      "resource_jid": "...",
+      "sequence_index": 0,
+      "predecessors": [],
+      "successors": []
     }
   ]
 }
 """)
+
 
 def build_task_expansion_prompt(
     *,
     requirements: list,
     tools_catalog: list,
     resource_infos: list,
-    caps_overview: str
+    caps_overview: str,
+    safety_text: str = ""
 ) -> str:
     """
     Create the LLM prompt for expanding requirements into tasks.
@@ -136,6 +147,9 @@ RESOURCE_AGENTS:
 
 REQUIREMENTS:
 {requirements}
+
+SAFETY CONSTRAINTS:
+{safety_text if safety_text else "No specific safety constraints provided."}
 """)
 
 import json
@@ -212,7 +226,7 @@ For each safety sentence, produce:
   "raw_text": string,
   "constraint_type": string | null,
   "process": string | null,
-  "product": string | null,
+  "product": [string] | null,
   "resources": [string],
   "event": string | null,
   "context": object | null
@@ -237,9 +251,11 @@ FIELD RULES
   - Otherwise set to null.
 
 • resources
-  - Use tool.function_owner_agent identifiers when they participate.
-  - Avoid generic labels when specific resources are identifiable.
-  - If none can be identified, use [].
+  - If the natural-language rule explicitly refers to specific resources,
+    list those resources (using tool.function_owner_agent identifiers).
+  - If the rule does NOT care which specific resource executes the action, either:
+    - use ["any"].
+  - Avoid over-specifying resources just because they exist in the tools catalogue.
 
 • context
   - Represent contextual information as an OBJECT (dictionary).
@@ -253,8 +269,11 @@ FIELD RULES
   - If no meaningful contextual information applies, set context to null.
 
 • product
-  - Use the referenced product if mentioned, otherwise "any".
-
+  - List ALL specific referenced products/parts (e.g. ["pin", "gear"]).
+  - If a rule describes an ordering between Part A and Part B, include BOTH in this list.
+  - Even if only one product is mentioned, return a list with one item (e.g. ["pin"]).
+  - Do NOT use "any" if specific parts are named.
+                             
 ------------------------------------------------------------
 GENERAL RULES
 ------------------------------------------------------------
@@ -323,7 +342,8 @@ Each segment is derived from:
 Segment meanings:
   - process: operational phase associated with the event
   - product: referenced product, or "any" if not specific
-  - resource: agent or tool involved in the event
+  - resource: - If the safety meaning does NOT depend on which specific resource executes the event, prefer "any" for the resource segment even when
+                multiple concrete resources exist in the system.                                
   - event: the action or condition described by the rule
   - context: a compact representation of the relevant contextual
              information for this event (e.g. derived from one or more
@@ -358,46 +378,42 @@ Available operators:
   ( ) for grouping
 
 Guidelines:
-  - Interpret the safety meaning of the sentence and express it using
-    temporal and logical operators.
-  - Safety constraints often describe conditions that should never occur,
-    relationships that define ordering or dependency between events,
-    or requirements about eventual outcomes.
-  - Prohibitive constraints can be expressed using global negation
-    (e.g., G !(...)).
-  - Ordering and dependency constraints can be expressed using
-    implication, until, or eventuality.
-  - Formulas should reflect the intent of the natural-language
-    statement and remain consistent with the APs created for the rule.
+  - **INVARIANTS (Use G):** If the rule describes a state that must ALWAYS hold (e.g., "Robot must never collide", "Temperature < 100"), wrap the formula in G(...).
+  - **ONE-OFF SEQUENCES (No G):** If the rule describes a specific sequence of events that happens once per cycle (e.g., "Place A before B"), **DO NOT use G**.
+    - The sequence is satisfied once the events occur.
+    - Using G(...) for one-off events will cause a violation after the event completes.
 
-No specific pattern is assumed; choose an appropriate
-temporal relationship based on the rule’s meaning.
+  - You must use Example E for ordering constraint.
+
+CRITICAL FORMATTING RULE:
+- The "ltlf" field must be a valid JSON string.
+- You MUST wrap the entire formula in double quotes.
+- Example: "ltlf": "(!b) U a"  <-- Note: No G for simple ordering
 """).strip()
 
 SAFETY_LTLF_FEWSHOT = dedent("""
-Few-shot examples (generic):
+Few-shot examples:
 
-Example A:
+Example A (Invariant / Prohibition):
 Natural-language: "Two conditions should never hold together."
 APs: p1, p2
 LTLf: G !(p1 & p2)
 
-Example B:
-Natural-language: "If condition A occurs, condition B should eventually follow."
+Example B (Invariant / Triggered Condition):
+Natural-language: "Whenever A occurs, B must eventually follow."
 APs: a, b
 LTLf: G (a -> F b)
 
-Example C:
+Example C (Duration):
 Natural-language: "Condition A must hold until condition B becomes true."
 APs: a, b
 LTLf: a U b
 
-Example D:
-Natural-language: "Condition A should never occur."
-APs: a
-LTLf: G !a
+Example E (Ordering / Sequence - NO "G"):
+Natural-language: "Event A must happen before Event B."
+APs: a, b   # a = earlier event, b = later event
+LTLf: (!b) U a
 """).strip()
-
 
 def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> str:
     """
@@ -460,72 +476,136 @@ INPUT RULES:
 {rules_json}
 """).strip()
 
-###
-SAFETY_REPLAN_PROMPT = dedent("""
-You are the SAFETY REPLANNER.
+REPLAN_WITH_FEEDBACK_INSTRUCTIONS = dedent("""\
+You are a Plan Repair Expert.
+You are given an execution plan (a Directed Acyclic Graph) that violates specific safety rules.
 
-You receive a JSON object describing a safety violation in the current
-manufacturing task graph. Your goal is to propose the MINIMAL change to
-ONLY the violated task node so the same violation will not occur again.
+YOUR GOAL:
+Produce a corrected plan by applying the MINIMAL necessary Graph Operations (Edit, Insert, or Delete) to resolve the violations.
 
-------------------------------------------------------------
-WHAT YOU MUST DO
-------------------------------------------------------------
-• Use `safety` and `safety_logic` to understand which atomic propositions (APs)
-  are involved in the violation.
-• Inspect the DAG (`plan.nodes`) to see how the violated task is connected to
-  other tasks (within its requirement and across resources).
-• Modify ONLY the violated task.
-• Make the smallest modification that removes or prevents the same unsafe
-  condition defined by the safety rule, while preserving correct execution
-  and allowing safe parallelism when possible.
-• When changing ordering, adjust the predecessors of the violated task so
-  that it cannot start in a state where the same unsafe AP combination occurs.
-• Do NOT change the meaning of the task: all fields other than predecessors
-  must remain exactly the same as in the original node.
+STRICT RULES FOR MODIFICATION:
+1. ANALYZE THE VIOLATION LOGIC:
+   - **PROHIBITION / NEGATIVE CONSTRAINT** (e.g., "Action X is forbidden", "Resource Y cannot be used"):
+     -> ACTION: **DELETE** the violating task.
+   
+   - **MISSING PREREQUISITE / REQUIREMENT** (e.g., "Action A requires Setup B", "Action C must be followed by Cleanup D"):
+     -> ACTION: **INSERT** a new task to satisfy the requirement. Link it to the surrounding tasks.
+   
+   - **TEMPORAL / ORDERING CONSTRAINT** (e.g., "A must happen before B", "Parallel execution unsafe"):
+     -> ACTION: **MODIFY EDGES**. Add dependencies (add 'A' to B's `predecessors`).
+   
+   - **ATTRIBUTE / PARAMETER CONSTRAINT** (e.g., "Invalid parameter value", "Incapable agent assigned"):
+     -> ACTION: **MODIFY ATTRIBUTES**. Change `resource_jid` or specific `params`.
 
-------------------------------------------------------------
-ALLOWED MODIFICATIONS (FOR THE VIOLATED TASK)
-------------------------------------------------------------
-You may change:
-  • predecessors
+2. CRITICAL - DATA CONSISTENCY:
+   - **Do not just describe the fix in `change_reason`.**
+   - YOU MUST PHYSICALLY UPDATE THE JSON STRUCTURE.
+   - If adding a dependency, the ID *must* appear in `predecessors`.
+   - If inserting a task, you must explicitly define its `predecessors` and `successors`.
 
-You must NOT:
-  • modify any other field of this task
-  • modify any other task
-  • add or delete tasks
-  • change the task's id
+OUTPUT FORMAT:
+Return a JSON object containing **ONLY** the tasks you modified, added, or deleted.
 
-`predecessors` must be a flat JSON array of task id strings, each matching the
-`id` of an existing task in plan.nodes.
-
-------------------------------------------------------------
-OUTPUT FORMAT (STRICT)
-------------------------------------------------------------
-Return ONLY a JSON object:
-
+**1. TO MODIFY A TASK (Attribute or Edge fix):**
 {
-  "target_task_id": "<id of the task you fixed>",
-  "updated_task": { ... full task node after your modifications ... },
-  "explanation": {
-    "what_changed": "short description of which fields you changed",
-    "why": "short description of the safety reason for this change"
-  }
+  "id": "TASK_ID",
+  "resource_jid": "NEW_AGENT_ID",      <-- Only include changed fields
+  "predecessors": ["NEW_PRED_ID"],     <-- Or changed edges
+  "change_reason": "Explanation of fix"
 }
 
-No explanations, no comments, no prose. JSON only.
-""").strip()
+**2. TO INSERT A NEW TASK:**
+{
+  "id": "NEW_UNIQUE_ID",
+  "function_name": "REQUIRED_FUNCTION",
+  "params": { ... },
+  "predecessors": ["PREVIOUS_TASK_ID"],
+  "successors": ["NEXT_TASK_ID"],
+  "change_reason": "INSERTION: Added missing required step."
+}
+
+**3. TO DELETE A TASK:**
+{
+  "id": "TASK_TO_REMOVE",
+  "delete": true,
+  "change_reason": "DELETION: Task violates prohibition rule."
+}
+
+FINAL JSON STRUCTURE:
+{
+  "tasks": [ ... list of modified/added/deleted tasks ... ]
+}
+""")
 
 
 
-def build_safety_replan_prompt(context: dict[str, object]) -> str:
+
+def build_replan_prompt(
+    *,
+    failed_plan_nodes: list,
+    violations: list,
+    tools_catalog: list,
+    resource_infos: list,
+    caps_overview: str,
+) -> str:
     """
-    Build the LLM prompt for patch-style safety replanning.
+    Create the LLM prompt for RE-PLANNING based on safety feedback.
     """
-    ctx_json = json.dumps(context, ensure_ascii=False, indent=2)
-    return dedent(f"""
-{SAFETY_REPLAN_PROMPT}
 
-VIOLATION_CONTEXT:
-{ctx_json}
-""").strip()
+    # Optional: de-duplicate violations by rule id so we show at most
+    # one entry per violated_rule_id to the LLM.
+    by_rule: Dict[str, Dict[str, Any]] = {}
+    for v in violations:
+        rid = v.get("violated_rule_id")
+        if rid and rid not in by_rule:
+            by_rule[rid] = v
+    if by_rule:
+        violations = list(by_rule.values())
+
+    # Format violations for readability
+    violation_text: list[str] = []
+    for v in violations:
+        rule_text = v.get("violation_text", "Unknown rule")
+        rule_logic = v.get("violation_logic", "")
+        witness = v.get("witness_trace", [])
+        relevant_tasks = v.get("relevant_tasks", [])
+        relevant_pred_map = v.get("relevant_pred_map", {})
+
+        violation_text.append(
+            "- Rule ID: {rid}\n"
+            "  Requirement: {rule}\n"
+            "  Logic: {logic}\n"
+            "  Witness trace (task_ids): {wt}\n"
+            "  Relevant tasks (projected subgraph for this rule):\n"
+            "{tasks_json}\n"
+            "  Relevant predecessor map (within this rule): {pred_map}".format(
+                rid=v.get("violated_rule_id"),
+                rule=rule_text,
+                logic=rule_logic,
+                wt=witness,
+                tasks_json=json.dumps(relevant_tasks, indent=2),
+                pred_map=json.dumps(relevant_pred_map, indent=2),
+            )
+        )
+
+    formatted_violations = "\n".join(violation_text) if violation_text else "(none)"
+
+    return dedent(f"""\
+{REPLAN_WITH_FEEDBACK_INSTRUCTIONS}
+
+=== FAILED PLAN (Do not repeat this exactly, FIX IT) ===
+{json.dumps(failed_plan_nodes, indent=2)}
+
+=== SAFETY VIOLATIONS (Must be resolved) ===
+{formatted_violations}
+
+=== CONTEXT ===
+TOOLS_CATALOG:
+{json.dumps(tools_catalog, indent=2)}
+
+RESOURCE_AGENTS:
+{json.dumps(resource_infos, indent=2)}
+
+RESOURCE_CAPABILITIES_OVERVIEW:
+{caps_overview}
+""")
