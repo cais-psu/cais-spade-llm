@@ -2937,3 +2937,646 @@ FileNotFoundError: [Errno 2] No such file or directory: 'cais_spade_llm\\specifi
 2025-11-29 19:14:47,469 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
 2025-11-29 19:14:47,470 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
 2025-11-29 19:14:47,470 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-05 16:10:22,573 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-05 16:10:25,593 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-05 16:10:25,594 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-05 16:10:25,594 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-05 16:10:29,011 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-05 16:10:29,014 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-05 16:10:50,421 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-05 16:10:50,425 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-05 16:10:50,427 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-05 16:10:50,427 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-05 16:10:50,434 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2026-01-05 16:10:50,437 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2026-01-05 16:10:50,452 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-05 16:10:50,452 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2026-01-06 14:34:53,097 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 14:34:57,121 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 14:34:57,123 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 14:34:57,123 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 14:35:02,140 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 14:35:02,141 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 14:35:17,872 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-06 14:35:17,878 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 14:35:20,570 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 14:52:07,090 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 14:52:11,385 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 14:52:11,388 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 14:52:11,390 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 14:52:16,458 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 14:52:16,460 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 14:52:32,950 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-06 14:52:32,970 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 14:56:08,743 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 14:57:45,609 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 14:57:48,623 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 14:57:48,625 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 14:57:48,626 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 14:57:54,252 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 14:57:54,253 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 14:58:06,764 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-06 14:58:06,766 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 14:58:10,347 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 15:00:36,436 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 15:00:40,547 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 15:00:40,548 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 15:00:40,548 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 15:00:47,910 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 15:00:47,912 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 15:01:06,832 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-06 15:01:06,836 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 15:01:09,885 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 15:02:05,952 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 15:02:08,835 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 15:02:08,835 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 15:02:08,836 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 15:02:12,512 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 15:02:12,514 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 15:02:32,934 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-06 15:02:32,935 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 15:02:35,179 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 18:09:53,275 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 18:10:01,148 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 18:10:01,150 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 18:10:01,155 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 18:10:05,684 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 18:10:05,687 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 18:10:27,405 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-06 18:10:27,409 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 18:10:30,482 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-06 18:42:44,989 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-06 18:42:49,047 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-06 18:42:49,050 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-06 18:42:49,051 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-06 18:42:54,950 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-06 18:42:54,952 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-06 18:43:23,873 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-06 18:43:23,875 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-06 18:43:28,576 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 12:54:35,721 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 12:54:39,823 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 12:54:39,825 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 12:54:39,826 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 12:54:44,128 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 12:54:44,129 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 12:54:57,569 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-07 12:54:57,570 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 12:54:57,576 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 12:55:15,552 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 14:26:35,583 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 14:26:38,485 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 14:26:38,487 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 14:26:38,487 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 14:26:43,019 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 14:26:43,020 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 14:27:06,209 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 9 LLM-generated task node(s).
+2026-01-07 14:27:06,213 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 14:27:06,219 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 14:27:06,219 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:02:26,422 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:02:35,303 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:02:38,386 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:02:38,387 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:02:38,387 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:02:43,345 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:02:43,346 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:03:07,338 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-07 15:03:07,339 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:03:07,346 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:03:07,346 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:08:34,466 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:08:37,351 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:08:37,351 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:08:37,352 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:08:41,803 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:08:41,808 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:09:00,577 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 9 LLM-generated task node(s).
+2026-01-07 15:09:00,579 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:09:00,586 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:09:00,587 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:14:07,747 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:14:10,563 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:14:10,563 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:14:10,564 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:14:14,703 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:14:14,704 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:14:32,082 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 15:14:32,083 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:14:32,090 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:14:32,090 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:16:55,174 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:16:57,997 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:16:57,998 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:16:57,999 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:17:02,281 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:17:02,285 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:17:17,313 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 15:17:17,315 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:17:17,322 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:17:17,323 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:19:02,201 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:19:05,018 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:19:05,019 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:19:05,019 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:19:08,203 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:19:08,204 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:19:20,551 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-07 15:19:20,553 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:19:20,557 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:19:20,557 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:20:10,341 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:20:13,194 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:20:13,194 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:20:13,194 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:20:17,721 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:20:17,722 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:20:36,797 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 15:20:36,798 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:20:36,804 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:20:36,804 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:21:55,161 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:21:57,996 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:21:57,997 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:21:57,998 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:22:01,925 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:22:01,926 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:22:20,916 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-07 15:22:20,917 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:22:20,924 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:22:20,925 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 15:37:29,333 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 15:37:32,174 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 15:37:32,175 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 15:37:32,175 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 15:37:39,986 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 15:37:39,987 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 15:38:01,142 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-07 15:38:01,144 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 15:38:01,152 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 15:38:01,153 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 16:03:05,029 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:03:05,033 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:03:06,987 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:03:06,988 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 1 modifications.
+2026-01-07 16:03:06,993 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:03:06,993 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 16:03:14,870 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:03:14,871 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:03:16,883 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Removed dependency on task_6 to ensure MCP is placed before SG.
+2026-01-07 16:03:16,883 - agent:assembly_board-v1 - INFO - [Planner] DELETING task task_6: DELETION: Task violates prohibition rule.
+2026-01-07 16:03:16,884 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 16:03:16,885 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:03:16,886 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 3/3)...
+2026-01-07 16:04:04,758 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 16:04:07,882 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 16:04:07,885 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 16:04:07,886 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 16:04:11,850 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 16:04:11,854 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 16:04:30,625 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 16:04:30,626 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:04:30,629 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 16:04:30,629 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 16:05:26,395 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:05:26,397 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:05:29,241 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:05:29,241 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:05:29,242 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 16:05:29,247 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:05:29,247 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 16:11:45,374 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 16:11:48,215 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 16:11:48,215 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 16:11:48,216 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 16:11:53,010 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 16:11:53,014 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 16:12:13,858 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 16:12:13,859 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:12:13,866 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 16:12:13,867 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 16:12:28,890 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:12:28,891 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:12:31,543 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:12:31,544 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Updated predecessors to enforce correct order of placing parts.
+2026-01-07 16:12:31,544 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 16:12:31,546 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:12:31,546 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 16:44:43,083 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 16:44:46,048 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 16:44:46,049 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 16:44:46,051 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 16:44:51,288 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 16:44:51,288 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 16:45:13,673 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 16:45:13,674 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:45:13,681 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 16:45:13,681 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 16:45:32,589 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:45:32,589 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:45:35,559 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:45:35,559 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Updated successors to reflect new dependency.
+2026-01-07 16:45:35,559 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 16:45:35,561 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:45:35,562 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 16:46:14,313 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 16:46:17,152 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 16:46:17,153 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 16:46:17,153 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 16:46:21,947 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 16:46:21,951 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 16:46:45,176 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 16:46:45,178 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:46:45,183 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 16:46:45,183 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 16:47:06,902 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 16:47:06,903 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 16:47:10,137 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 16:47:10,137 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Updated predecessors to enforce correct order.
+2026-01-07 16:47:10,137 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 16:47:10,138 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 16:47:10,139 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 17:04:15,492 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 17:04:18,393 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 17:04:18,394 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 17:04:18,394 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 17:04:25,404 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 17:04:25,405 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 17:04:49,640 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 17:04:49,641 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 17:04:49,645 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 17:04:49,646 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 17:05:04,377 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 17:05:04,377 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 17:05:06,876 - agent:assembly_board-v1 - INFO - [Planner] DELETING task task_8: DELETION: Task violates prohibition rule.
+2026-01-07 17:05:06,876 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 17:05:06,876 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 17:05:06,877 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 17:05:06,880 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 17:05:06,881 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 17:05:26,004 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 17:05:28,820 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 17:05:28,821 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 17:05:28,821 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 17:05:32,628 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 17:05:32,629 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 17:05:50,881 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 17:05:50,882 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 17:05:50,888 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 17:05:50,888 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-07 17:06:19,182 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-07 17:06:19,183 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-07 17:06:21,850 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 17:06:21,850 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure MCP is placed before SG.
+2026-01-07 17:06:21,851 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-07 17:06:21,853 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 17:06:21,860 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 17:06:21,860 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-07 18:22:46,161 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-07 18:22:50,105 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-07 18:22:50,108 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-07 18:22:50,108 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-07 18:22:54,275 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-07 18:22:54,280 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-07 18:23:12,403 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-07 18:23:12,405 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-07 18:23:12,412 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-07 18:23:12,412 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 00:09:01,749 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 00:09:05,719 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 00:09:05,723 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 00:09:05,723 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 00:09:10,489 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 00:09:10,490 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 00:09:34,655 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-08 00:09:34,656 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:09:34,662 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:09:34,662 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 00:09:56,272 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 00:10:00,320 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 00:10:00,321 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 00:10:00,321 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 00:10:05,777 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 00:10:05,779 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 00:10:35,378 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-08 00:10:35,380 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:10:35,399 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:10:35,399 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 00:10:51,281 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 00:10:51,281 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 00:10:54,835 - agent:assembly_board-v1 - INFO - [Planner] DELETING task task_4: DELETION: Task violates prohibition rule.
+2026-01-08 00:10:54,836 - agent:assembly_board-v1 - INFO - [Planner] DELETING task task_9: DELETION: Task violates prohibition rule.
+2026-01-08 00:10:54,836 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 00:10:54,840 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:10:54,853 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:10:54,855 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 00:40:01,574 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 00:40:05,655 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 00:40:05,656 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 00:40:05,656 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 00:40:09,775 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 00:40:09,783 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 00:40:32,317 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-08 00:40:32,320 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:40:32,334 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:40:32,334 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 00:40:39,481 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 00:40:39,483 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 00:40:42,752 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 00:40:42,753 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 00:40:42,753 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 00:40:42,756 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:40:42,767 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:40:42,768 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 00:45:21,301 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 00:45:21,303 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 00:45:24,766 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 00:45:24,767 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 00:45:24,768 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 00:45:24,772 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 00:45:24,780 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 00:45:24,782 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 3/3)...
+2026-01-08 01:07:07,975 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:07:12,330 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:07:12,332 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:07:12,333 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:07:17,537 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:07:17,540 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:07:40,482 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-08 01:07:40,483 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:07:40,486 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:07:40,486 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:07:49,511 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:07:49,511 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:07:53,218 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:07:53,219 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:07:53,219 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:07:53,221 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:07:53,228 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:07:53,228 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:08:27,659 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:08:27,659 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:08:32,414 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:08:32,414 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:08:32,415 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:08:32,416 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:09:01,360 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:09:04,208 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:09:04,209 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:09:04,210 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:09:08,806 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:09:08,808 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:09:34,029 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-08 01:09:34,030 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:09:34,036 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:09:34,036 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:09:47,479 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:09:47,480 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:09:50,622 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:09:50,623 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:09:50,623 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:09:50,625 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:09:50,634 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:09:50,635 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:10:04,732 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:10:04,733 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:10:08,249 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:10:08,249 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:10:08,250 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:10:08,251 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:10:29,999 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:10:32,846 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:10:32,847 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:10:32,847 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:10:38,211 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:10:38,213 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:11:10,639 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-08 01:11:10,640 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:11:10,648 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:11:10,649 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:11:21,692 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:11:21,694 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:11:25,170 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:11:25,171 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_9: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:11:25,171 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:11:25,173 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:11:25,185 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:11:25,186 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:11:41,127 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:11:41,127 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:11:44,913 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:11:44,914 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_9: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:11:44,914 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:11:44,916 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:21:37,312 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:21:40,158 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:21:40,159 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:21:40,159 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:21:44,402 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:21:44,403 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:22:02,863 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-08 01:22:02,864 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:22:02,869 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:22:02,870 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:22:37,951 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:22:37,952 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:22:39,861 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:22:39,862 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 1 modifications.
+2026-01-08 01:22:39,863 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:22:39,868 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:22:39,868 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:23:18,805 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:23:18,805 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:23:23,299 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:23:23,299 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_5: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:23:23,299 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:23:23,301 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:23:44,287 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:23:47,124 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:23:47,125 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:23:47,125 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:23:51,018 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:23:51,020 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:24:13,106 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-08 01:24:13,110 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:24:13,118 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:24:13,118 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:24:19,067 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:24:19,068 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:24:21,545 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:24:21,545 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_9: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:24:21,546 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:24:21,547 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:24:21,554 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:24:21,555 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:25:06,158 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:25:08,977 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:25:08,978 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:25:08,978 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:25:13,418 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:25:13,421 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:25:30,288 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 6 LLM-generated task node(s).
+2026-01-08 01:25:30,289 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:25:30,293 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:25:30,293 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:25:43,540 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:25:43,540 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:25:46,115 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_3: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:25:46,115 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_6: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:25:46,116 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:25:46,118 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:30:52,493 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-08 01:30:55,309 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-08 01:30:55,310 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-08 01:30:55,310 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-08 01:31:01,561 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-08 01:31:01,561 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-08 01:31:28,390 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-08 01:31:28,392 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:31:28,397 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:31:28,398 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-08 01:31:35,249 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-08 01:31:35,250 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...
+2026-01-08 01:31:38,285 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_4: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:31:38,285 - agent:assembly_board-v1 - INFO - [Planner] Applied fix to task_8: MODIFICATION: Added dependency to ensure xarm6 and ur5e do not place parts simultaneously.
+2026-01-08 01:31:38,286 - agent:assembly_board-v1 - INFO - [Planner] Re-planning successful. Merged 2 modifications.
+2026-01-08 01:31:38,287 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:31:38,293 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-08 01:31:38,293 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 2/3)...
+2026-01-08 01:31:59,035 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2026-01-08 01:31:59,040 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2026-01-08 01:31:59,058 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:31:59,058 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2026-01-08 01:31:59,141 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_5'}})
+2026-01-08 01:31:59,154 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-08 01:31:59,154 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='accepted' from=xarm6@localhost
+2026-01-13 11:18:05,924 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:18:08,793 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:18:08,794 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:18:08,795 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:18:15,152 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:18:15,153 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:18:43,202 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-13 11:18:43,204 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:18:43,209 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:18:43,209 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:19:02,858 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:19:05,577 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:19:05,577 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:19:05,577 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:19:11,988 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:19:11,989 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:19:39,578 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-13 11:19:39,579 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:39,584 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:19:39,584 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:19:39,590 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2026-01-13 11:19:39,591 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': 'SG', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2026-01-13 11:19:39,595 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:39,595 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2026-01-13 11:19:39,691 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': 'MCP', 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_5'}})
+2026-01-13 11:19:39,694 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:39,694 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='accepted' from=xarm6@localhost
+2026-01-13 11:19:47,898 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:47,898 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='running' from=xarm6@localhost
+2026-01-13 11:19:47,900 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:47,901 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='running' from=ur5e@localhost
+2026-01-13 11:19:52,896 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:52,897 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='completed' from=xarm6@localhost
+2026-01-13 11:19:52,897 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:52,898 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='completed' from=ur5e@localhost
+2026-01-13 11:19:53,302 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'SG', 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_2'}})
+2026-01-13 11:19:53,319 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:53,320 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='accepted' from=ur5e@localhost
+2026-01-13 11:19:53,404 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': 'MCP', 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_6'}})
+2026-01-13 11:19:53,410 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:53,410 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='accepted' from=xarm6@localhost
+2026-01-13 11:19:54,533 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:54,533 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='running' from=ur5e@localhost
+2026-01-13 11:19:55,515 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:19:55,515 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='running' from=xarm6@localhost
+2026-01-13 11:20:05,587 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:20:08,334 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:20:08,334 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:20:08,335 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:20:11,727 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:20:11,730 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:20:36,713 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-13 11:20:36,715 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:36,721 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:20:36,722 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:20:36,735 - agent:assembly_board-v1 - INFO - [Product] Plan PASSED safety validation.
+2026-01-13 11:20:36,737 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_1 -> ur5e@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-2', 'part_name': None, 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_1'}})
+2026-01-13 11:20:36,743 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:36,744 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='accepted' from=ur5e@localhost
+2026-01-13 11:20:36,837 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_5 -> xarm6@localhost ({'function_name': 'move_to_pick_location', 'params': {'origin_resource_location': 'prusa-mk4-1', 'part_name': None, 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_5'}})
+2026-01-13 11:20:36,841 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:36,841 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='accepted' from=xarm6@localhost
+2026-01-13 11:20:37,717 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:37,717 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='running' from=ur5e@localhost
+2026-01-13 11:20:37,934 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:37,934 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='running' from=xarm6@localhost
+2026-01-13 11:20:42,718 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:42,718 - agent:assembly_board-v1 - INFO - [Product] ACK (task_1) status='completed' from=ur5e@localhost
+2026-01-13 11:20:42,935 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:42,936 - agent:assembly_board-v1 - INFO - [Product] ACK (task_5) status='completed' from=xarm6@localhost
+2026-01-13 11:20:42,943 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_2 -> ur5e@localhost ({'function_name': 'pick_part', 'params': {'part_name': None, 'origin_resource_location': 'prusa-mk4-2', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_2'}})
+2026-01-13 11:20:42,949 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:42,949 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='accepted' from=ur5e@localhost
+2026-01-13 11:20:43,044 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_6 -> xarm6@localhost ({'function_name': 'pick_part', 'params': {'part_name': None, 'origin_resource_location': 'prusa-mk4-1', 'gripper': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_6'}})
+2026-01-13 11:20:43,048 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:43,049 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='accepted' from=xarm6@localhost
+2026-01-13 11:20:43,980 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:43,980 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='running' from=ur5e@localhost
+2026-01-13 11:20:45,386 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:45,386 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='running' from=xarm6@localhost
+2026-01-13 11:20:48,981 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:48,981 - agent:assembly_board-v1 - INFO - [Product] ACK (task_2) status='completed' from=ur5e@localhost
+2026-01-13 11:20:49,151 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_3 -> ur5e@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': None, 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_3'}})
+2026-01-13 11:20:49,157 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:49,157 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='accepted' from=ur5e@localhost
+2026-01-13 11:20:51,147 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:51,147 - agent:assembly_board-v1 - INFO - [Product] ACK (task_6) status='completed' from=xarm6@localhost
+2026-01-13 11:20:51,514 - agent:assembly_board-v1 - INFO - [Product] Dispatched DAG task task_7 -> xarm6@localhost ({'function_name': 'move_loaded_to_destination', 'params': {'destination_location': 'assembly_board-v1', 'part_name': None, 'speed': None, 'product_jid': 'assembly_board-v1@localhost', 'task_id': 'task_7'}})
+2026-01-13 11:20:51,516 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:51,516 - agent:assembly_board-v1 - INFO - [Product] ACK (task_7) status='accepted' from=xarm6@localhost
+2026-01-13 11:20:52,099 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:52,100 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='running' from=ur5e@localhost
+2026-01-13 11:20:52,103 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:52,103 - agent:assembly_board-v1 - INFO - [Product] ACK (task_3) status='blocked' from=ur5e@localhost
+2026-01-13 11:20:52,982 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:52,983 - agent:assembly_board-v1 - INFO - [Product] ACK (task_7) status='running' from=xarm6@localhost
+2026-01-13 11:20:52,984 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:20:52,984 - agent:assembly_board-v1 - INFO - [Product] ACK (task_7) status='blocked' from=xarm6@localhost
+2026-01-13 11:21:13,596 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:21:16,325 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:21:16,326 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:21:16,326 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:21:22,086 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:21:22,087 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:21:42,711 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-13 11:21:42,712 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:21:42,719 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:21:42,719 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:22:49,670 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:22:52,415 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:22:52,415 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:22:52,415 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:22:55,980 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:22:55,982 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:23:15,966 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 8 LLM-generated task node(s).
+2026-01-13 11:23:15,968 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:23:15,974 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:23:15,974 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:28:07,706 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-01-13 11:28:10,461 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-4o, tools=[])
+2026-01-13 11:28:10,461 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-01-13 11:28:10,462 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-13 11:28:14,765 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-01-13 11:28:14,766 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_requirements.json
+2026-01-13 11:28:44,194 - agent:assembly_board-v1 - INFO - [Planner] Expanded to 10 LLM-generated task node(s).
+2026-01-13 11:28:44,196 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_plan.json
+2026-01-13 11:28:44,202 - agent:assembly_board-v1 - INFO - [Planner] Saved global FSA to /home/jongh/projects/cais-spade-llm/cais_spade_llm/plan/assembly_board-v1_global_fsa.json
+2026-01-13 11:28:44,202 - agent:assembly_board-v1 - INFO - [Product] Validating Plan (Attempt 1/3)...
+2026-01-13 11:29:17,648 - agent:assembly_board-v1 - WARNING - [Product] Plan FAILED safety check (1 violations). Triggering Re-plan...
+2026-01-13 11:29:17,649 - agent:assembly_board-v1 - INFO - [Planner] Triggering LLM Re-planning with safety feedback...

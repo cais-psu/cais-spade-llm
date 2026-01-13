@@ -1,0 +1,884 @@
+{
+  "A": {
+    "X": [
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=3,run=task_4:place_part),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,idle))",
+      "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,run=task_8:place_part))",
+      "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=4,idle))"
+    ],
+    "E": [
+      "task_1.done",
+      "task_1.start",
+      "task_2.done",
+      "task_2.start",
+      "task_3.done",
+      "task_3.start",
+      "task_4.done",
+      "task_4.start",
+      "task_5.done",
+      "task_5.start",
+      "task_6.done",
+      "task_6.start",
+      "task_7.done",
+      "task_7.start",
+      "task_8.done",
+      "task_8.start"
+    ],
+    "Tr": [
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,idle))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,idle))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,idle))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,idle))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,idle))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
+        "event": "task_5.start",
+        "readable_event": "move_to_pick_location(MCP).start",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle))",
+        "event": "task_1.start",
+        "readable_event": "move_to_pick_location(SG).start",
+        "to": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=task_5:move_to_pick_location))",
+        "event": "task_5.done",
+        "readable_event": "move_to_pick_location(MCP).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_5",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,idle))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=0,run=task_1:move_to_pick_location),xarm6@localhost=(k=3,idle))",
+        "event": "task_1.done",
+        "readable_event": "move_to_pick_location(SG).done",
+        "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_1",
+        "function_name": "move_to_pick_location"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
+        "event": "task_6.start",
+        "readable_event": "pick_part(MCP).start",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,idle))",
+        "event": "task_2.start",
+        "readable_event": "pick_part(SG).start",
+        "to": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=task_6:pick_part))",
+        "event": "task_6.done",
+        "readable_event": "pick_part(MCP).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_6",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=1,run=task_2:pick_part),xarm6@localhost=(k=3,idle))",
+        "event": "task_2.done",
+        "readable_event": "pick_part(SG).done",
+        "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_2",
+        "function_name": "pick_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
+        "event": "task_7.start",
+        "readable_event": "move_loaded_to_destination(MCP).start",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
+        "event": "task_3.start",
+        "readable_event": "move_loaded_to_destination(SG).start",
+        "to": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=task_7:move_loaded_to_destination))",
+        "event": "task_7.done",
+        "readable_event": "move_loaded_to_destination(MCP).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_7",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
+        "event": "task_3.done",
+        "readable_event": "move_loaded_to_destination(SG).done",
+        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_3",
+        "function_name": "move_loaded_to_destination"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
+        "event": "task_4.start",
+        "readable_event": "place_part(SG).start",
+        "to": "(ur5e@localhost=(k=3,run=task_4:place_part),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_4",
+        "function_name": "place_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=3,run=task_4:place_part),xarm6@localhost=(k=3,idle))",
+        "event": "task_4.done",
+        "readable_event": "place_part(SG).done",
+        "to": "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,idle))",
+        "resource_jid": "ur5e@localhost",
+        "task_id": "task_4",
+        "function_name": "place_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,idle))",
+        "event": "task_8.start",
+        "readable_event": "place_part(MCP).start",
+        "to": "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,run=task_8:place_part))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_8",
+        "function_name": "place_part"
+      },
+      {
+        "from": "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=3,run=task_8:place_part))",
+        "event": "task_8.done",
+        "readable_event": "place_part(MCP).done",
+        "to": "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=4,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "task_8",
+        "function_name": "place_part"
+      }
+    ],
+    "x0": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+    "Xm": [
+      "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=4,idle))"
+    ]
+  },
+  "meta": {
+    "resources": [
+      "ur5e@localhost",
+      "xarm6@localhost"
+    ],
+    "num_reachable_states": 53,
+    "num_transitions": 88,
+    "has_failure_states": false
+  }
+}

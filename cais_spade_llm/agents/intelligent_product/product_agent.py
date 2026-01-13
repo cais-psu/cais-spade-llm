@@ -63,6 +63,7 @@ class ProductAgent(LlmAgent):
         self.structured_requirements_path = base_plan_dir / f"{name}_requirements.json"
         # Reserved for later: full DAG task plan (requirements → task graph)
         self.plan_path = base_plan_dir / f"{name}_plan.json"
+        self.global_fsa_path = base_plan_dir / f"{name}_global_fsa.json"
 
         planner_resources = self._match_resource_objects(
             self._resource_agent_refs, self.resource_jids
@@ -80,15 +81,20 @@ class ProductAgent(LlmAgent):
     # ------------------------------------------------------------------ #
     # Persistence helper
     # ------------------------------------------------------------------ #
-    def _build_plan_validation_payload(self, nodes: list[dict[str, Any]]) -> dict:
-        """
-        Build the JSON payload to send to the CCA for offline plan validation.
-        This does NOT send anything; sending is done from behaviours.
-        """
+    def _build_plan_validation_payload(self):
+        fsa = self.process_planner.global_fsa
+        nodes = self.process_planner.nodes
+
+        if fsa is None:
+            raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
+
         return {
-            "plan": {"nodes": nodes},
+            "fsa": fsa,                      # <-- upload FSA here
             "product_jid": str(self.jid),
+            "plan": {"nodes": nodes},
         }
+
+
 
     def _persist_plan_snapshot(self) -> None:
         """Persist the current process planner graph to disk."""
@@ -209,22 +215,20 @@ class ProductAgent(LlmAgent):
         return None
 
     async def _build_plan(self, requirement_text: str, safety_text: str = ""):
-        """
-        Build structured requirements → save them → expand into task DAG → save DAG.
-        """
-        # 1. NL → structured requirements
+        # 1) NL → structured requirements
         await self.process_planner.build_high_level(requirement_text)
-
-        # (NEW) Save only structured requirements before expansion
         self.process_planner.save(self.structured_requirements_path)
 
-        # 2. Expand structured requirements → DAG tasks
+        # 2) Expand → DAG
         await self.process_planner.expand_requirements_to_tasks(safety_text=safety_text)
-
-        # 3. Save DAG plan separately
         self.process_planner.save(self.plan_path)
 
-        return self.process_planner.nodes
+        # 3) Compile + save FSA (also sets self.process_planner.global_fsa)
+        self.process_planner.save_global_fsa(self.global_fsa_path)
+
+        # 4) Return both artifacts
+        return self.process_planner.nodes, self.process_planner.global_fsa
+
 
 
     # --------------------------------------------------------------------- #
@@ -249,7 +253,7 @@ class ProductAgent(LlmAgent):
                 agent.logger.info(f"[Product] Validating Plan (Attempt {attempt}/{max_retries})...")
                 
                 # 1. Send to CCA
-                payload = agent._build_plan_validation_payload(agent.process_planner.nodes)
+                payload = agent._build_plan_validation_payload()
                 msg = Message(to=agent.cca_jid)
                 msg.set_metadata("type", "plan_safety_check")
                 msg.body = json.dumps(payload)

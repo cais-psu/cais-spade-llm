@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 from prompts import build_task_expansion_prompt, build_requirement_parse_prompt, build_replan_prompt
+from collections import defaultdict, deque
 
 class ProcessPlanner:
     """
@@ -18,6 +19,7 @@ class ProcessPlanner:
         self.logger = product_agent.logger
         self.nodes: List[Dict[str, Any]] = []
         self.phase_to_node: Dict[str, Dict[str, Any]] = {}
+        self.global_fsa: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------ #
     # 1. NL → High-level requirements
@@ -286,6 +288,8 @@ class ProcessPlanner:
             caps_overview=caps_overview,
         )
 
+        print(prompt)
+        
         raw = await self.product_agent.ask_llm(
             prompt=prompt,
             with_functions=False,
@@ -350,9 +354,13 @@ class ProcessPlanner:
                 if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
                 
                 # Overwrite edges if provided (LLM is authoritative on structure changes)
-                if "predecessors" in t: target["predecessors"] = t["predecessors"]
-                if "successors" in t: target["successors"] = t["successors"]
+                if "predecessors" in t:
+                    target["predecessors"] = t["predecessors"]
 
+                # Ignore successors edits for existing tasks (derive later)
+                if "successors" in t and tid not in node_map:
+                    target["successors"] = t["successors"]
+                    
                 if "change_reason" in t:
                     target["change_reason"] = t["change_reason"]
                     self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
@@ -372,6 +380,10 @@ class ProcessPlanner:
 
             if hasattr(self.product_agent, "plan_path"):
                 self.save(self.product_agent.plan_path)
+
+            # Invalidate any previously compiled automaton (IMPORTANT)
+            self.global_fsa = None
+            self.save_global_fsa(self.product_agent.global_fsa_path)
 
         except json.JSONDecodeError as exc:
             self.logger.error(f"[Planner] LLM Re-planning returned invalid JSON: {exc}")
@@ -449,3 +461,214 @@ class ProcessPlanner:
             payload = json.load(f)
         self.nodes = payload.get("nodes", [])
         self.logger.info(f"[Planner] Loaded plan from {p.resolve()}")
+
+    # ------------------------------------------------------------------ #
+    # Build Global FSA
+    # ------------------------------------------------------------------ #
+    def compile_global_fsa(self) -> Dict[str, Any]:
+
+        # ---- extract task nodes ----
+        tasks = [n for n in self.nodes if n.get("type") == "task"]
+        if not tasks:
+            raise ValueError("No task nodes exist in self.nodes (cannot compile FSA).")
+
+        by_id = {t["id"]: t for t in tasks}
+
+        # ---- deterministic per-resource local order ----
+        res_to_tasks: Dict[str, List[str]] = defaultdict(list)
+        for t in tasks:
+            res = t.get("resource_jid")
+            if not res:
+                raise ValueError(f"Task {t.get('id')} missing resource_jid.")
+            res_to_tasks[res].append(t["id"])
+
+        def sort_key(tid: str):
+            si = by_id[tid].get("sequence_index", None)
+            return (10**9 if si is None else int(si), tid)
+
+        for res in res_to_tasks:
+            res_to_tasks[res].sort(key=sort_key)
+
+        resources = sorted(res_to_tasks.keys())
+
+        pos: Dict[str, Dict[str, int]] = {
+            res: {tid: i for i, tid in enumerate(res_to_tasks[res])}
+            for res in resources
+        }
+
+        # ---- labeling helpers (NEW) ----
+        def task_sig(tid: str) -> str:
+            """
+            Human-readable task signature.
+            Example: 'pick_part(SG)' or 'move_loaded_to_destination(MCP)'.
+            """
+            t = by_id[tid]
+            fn = t.get("function_name") or "unknown_fn"
+            params = t.get("params") or {}
+
+            # Prefer showing the part if present (often the most informative)
+            part = params.get("part_name")
+            if part:
+                return f"{fn}({part})"
+            return fn
+
+        def readable_event(tid: str, phase: str) -> str:
+            """
+            Example: 'pick_part(SG).start' / 'pick_part(SG).done'
+            """
+            return f"{task_sig(tid)}.{phase}"
+
+        # ---- helpers ----
+        def _idx(res: str) -> int:
+            return resources.index(res)
+
+        def _get_local(x, res):
+            return x[_idx(res)]
+
+        def _set_local(x, res, new_local):
+            xl = list(x)
+            xl[_idx(res)] = new_local
+            return tuple(xl)
+
+        def is_completed(x, task_id):
+            t = by_id[task_id]
+            res = t["resource_jid"]
+            k, run = _get_local(x, res)
+
+            # task position in that resource's local list
+            task_pos = pos[res][task_id]
+
+            # done iff k has advanced past task_pos AND we aren't currently running it
+            return (k > task_pos) and not (run == task_pos)
+
+        def next_local_task_if_any(x, res):
+            k, run = _get_local(x, res)
+            local = res_to_tasks[res]
+            return None if k >= len(local) else local[k]
+
+        def is_next_task_enabled(x, tid):
+            preds = by_id[tid].get("predecessors", []) or []
+            for p in preds:
+                if p not in by_id:
+                    return False
+
+                # If predecessor is still running, block start
+                t = by_id[p]
+                res = t["resource_jid"]
+                k, run = _get_local(x, res)
+                if run is not None and res_to_tasks[res][run] == p:
+                    return False
+
+                # If predecessor not completed yet, block start
+                if not is_completed(x, p):
+                    return False
+
+            return True
+
+
+        # ---- initial / marked ----
+        x0 = tuple((0, None) for _ in resources)
+        x_marked = tuple((len(res_to_tasks[r]), None) for r in resources)
+
+        def state_name(x):
+            """
+            Make states readable by showing which task is running (by function_name + part)
+            instead of run index.
+            """
+            parts = []
+            for i, res in enumerate(resources):
+                k, run = x[i]
+                if run is None:
+                    parts.append(f"{res}=(k={k},idle)")
+                else:
+                    tid = res_to_tasks[res][run]
+                    fn = by_id[tid].get("function_name") or "unknown_fn"
+                    parts.append(f"{res}=(k={k},run={tid}:{fn})")
+            return "(" + ",".join(parts) + ")"
+
+        # ---- BFS ----
+        visited = {x0}
+        q = deque([x0])
+        name_map = {x0: state_name(x0)}
+        transitions = []
+
+        while q:
+            x = q.popleft()
+            sx = name_map[x]
+
+            for res in resources:
+                k, run = _get_local(x, res)
+
+                # IDLE → start
+                if run is None:
+                    tid = next_local_task_if_any(x, res)
+                    if tid and is_next_task_enabled(x, tid):
+                        e = f"{tid}.start"
+                        x_next = _set_local(x, res, (k, pos[res][tid]))
+
+                        if x_next not in visited:
+                            visited.add(x_next)
+                            name_map[x_next] = state_name(x_next)
+                            q.append(x_next)
+
+                        transitions.append({
+                            "from": sx,
+                            "event": e,  # canonical
+                            "readable_event": readable_event(tid, "start"),
+                            "to": name_map[x_next],
+                            "resource_jid": res,
+                            "task_id": tid,
+                            "function_name": by_id[tid].get("function_name"),
+                        })
+
+                # RUNNING → done
+                else:
+                    tid = res_to_tasks[res][run]
+                    e = f"{tid}.done"
+                    x_done = _set_local(x, res, (k + 1, None))
+
+                    if x_done not in visited:
+                        visited.add(x_done)
+                        name_map[x_done] = state_name(x_done)
+                        q.append(x_done)
+
+                    transitions.append({
+                        "from": sx,
+                        "event": e,  # canonical
+                        "readable_event": readable_event(tid, "done"),
+                        "to": name_map[x_done],
+                        "resource_jid": res,
+                        "task_id": tid,
+                        "function_name": by_id[tid].get("function_name"),
+                    })
+
+        fsa = {
+            "A": {
+                "X": sorted(name_map.values()),
+                "E": sorted({t["event"] for t in transitions}),
+                "Tr": transitions,
+                "x0": name_map[x0],
+                "Xm": [name_map[x_marked]],
+            },
+            "meta": {
+                "resources": resources,
+                "num_reachable_states": len(visited),
+                "num_transitions": len(transitions),
+                "has_failure_states": False,
+            },
+        }
+
+        self.global_fsa = fsa        # ← STORE IT
+        return fsa
+
+    def save_global_fsa(self, path: Path | str) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.global_fsa is None:
+            self.compile_global_fsa()
+
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(self.global_fsa, f, indent=2)
+
+        self.logger.info(f"[Planner] Saved global FSA to {p.resolve()}")

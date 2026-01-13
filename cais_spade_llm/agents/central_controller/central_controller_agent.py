@@ -12,7 +12,7 @@ from agents.shared_information.llm_agent import LlmAgent
 from agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
 from agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
-from agents.central_controller.offline_safety_validator import OfflineSafetyValidator
+from agents.central_controller.offline_fsa_safety_validator import OfflineFsaSafetyValidator
 
 class CentralControllerAgent(LlmAgent):
     """
@@ -215,9 +215,10 @@ class CentralControllerAgent(LlmAgent):
 
     class _PlanValidation(CyclicBehaviour):
         """
-        Behaviour that listens for 'plan_safety_check', uses OfflineSafetyValidator
-        to validate the plan, and (optionally) replies.
+        Behaviour that listens for 'plan_safety_check', uses OfflineFsaSafetyValidator
+        to validate a compiled FSA plan offline, and replies with the result.
         """
+
         async def run(self) -> None:
             agent: "CentralControllerAgent" = self.agent  # type: ignore
 
@@ -230,37 +231,88 @@ class CentralControllerAgent(LlmAgent):
 
             try:
                 data = json.loads(msg.body or "{}")
-                plan = data.get("plan")
+                fsa = data.get("fsa")            # REQUIRED
+                plan = data.get("plan")          # OPTIONAL (semantic AP mapping)
                 product_jid = data.get("product_jid")
             except Exception:
                 agent.logger.exception("[CCA] Malformed plan_safety_check.")
                 return
 
-            if not plan:
+            if not fsa:
+                agent.logger.warning("[CCA] No FSA provided for offline validation.")
                 return
 
-            # Delegate to Offline Validator (Sandbox)
-            #
+            # Delegate to Offline FSA Validator
             if agent.safety_logic and agent.safety_logic.rule_dfas:
-                validator = OfflineSafetyValidator(
+                validator = OfflineFsaSafetyValidator(
                     rules=agent.safety_rules,
                     dfa_map=agent.safety_logic.rule_dfas
                 )
-                ok, violations = validator.validate_plan_offline(plan, product_jid)
+
+                ok, violations = validator.validate_fsa_offline(
+                    fsa=fsa,
+                    plan=plan,
+                    product_jid=product_jid
+                )
             else:
                 agent.logger.warning("[CCA] Safety logic not ready; skipping validation.")
                 ok, violations = True, []
 
+            # ---- NEW: log summary + details ----
+            violated_rules = sorted({v.get("violated_rule_id") for v in violations if v.get("violated_rule_id")})
             agent.logger.info(
-                "[CCA] Offline Validation: %s (Violations: %d)", 
-                "OK" if ok else "FAIL", len(violations)
+                "[CCA] Offline FSA Validation: %s (Violated rules: %d, Witnesses: %d) product=%s",
+                "OK" if ok else "FAIL",
+                len(violated_rules),
+                len(violations),
+                product_jid,
             )
+
+            if not ok and violations:
+                # Cap to avoid log spam
+                max_witnesses = 3
+                for i, v in enumerate(violations[:max_witnesses], start=1):
+                    agent.logger.error(
+                        "[CCA] VIOLATION #%d | rule=%s | %s | ltlf=%s",
+                        i,
+                        v.get("violated_rule_id"),
+                        v.get("violation_text"),
+                        v.get("violation_logic"),
+                    )
+                    agent.logger.error(
+                        "[CCA]   witness_task_ids=%s witness_events=%s",
+                        v.get("witness_task_ids"),
+                        v.get("witness_events"),
+                    )
+
+                    # Per-transition debug (only present if you added _sigma/_q_from/_q_to in validator)
+                    for t in v.get("witness_transitions", [])[:50]:
+                        agent.logger.error(
+                            "[CCA]     ↳ from=%s --%s--> %s | task=%s | sigma=%s | DFA:%s→%s",
+                            t.get("from"),
+                            t.get("event"),
+                            t.get("to"),
+                            t.get("task_id"),
+                            t.get("_sigma"),   # may be None if you didn't patch validator
+                            t.get("_q_from"),  # may be None if you didn't patch validator
+                            t.get("_q_to"),    # may be None if you didn't patch validator
+                        )
+
+                if len(violations) > max_witnesses:
+                    agent.logger.error(
+                        "[CCA] ... %d more witness(es) suppressed",
+                        len(violations) - max_witnesses
+                    )
+            # ---- END NEW ----
 
             # Reply
             try:
                 reply = msg.make_reply()
                 reply.set_metadata("type", "plan_safety_result")
-                reply.body = json.dumps({"ok": ok, "violations": violations})
+                reply.body = json.dumps({
+                    "ok": ok,
+                    "violations": violations
+                })
                 await self.send(reply)
             except Exception:
                 agent.logger.exception("Failed to send reply.")

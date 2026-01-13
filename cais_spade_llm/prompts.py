@@ -332,7 +332,7 @@ SAFETY_AP_TEMPLATE_DOC = dedent("""
 Atomic propositions (APs) describe discrete system events or conditions.
 
 Use the format:
-  evt/<process>/<product>/<resource>/<event>/<context>
+  ap/<process>/<product>/<resource>/<event>/<context>
 
 Each segment is derived from:
   • the structured safety rule fields produced during parsing
@@ -463,7 +463,7 @@ Expected JSON structure:
   "rules": [
     {{
       "id": "<same id as input rule>",
-      "aps": ["evt/process/product/resource/event/context", ...],
+      "aps": ["ap/process/product/resource/event/context", ...],
       "ltlf": "<one LTLf formula over these APs>"
     }},
     ...
@@ -483,38 +483,51 @@ You are given an execution plan (a Directed Acyclic Graph) that violates specifi
 YOUR GOAL:
 Produce a corrected plan by applying the MINIMAL necessary Graph Operations (Edit, Insert, or Delete) to resolve the violations.
 
+GLOBAL CONSTRAINTS (MUST FOLLOW):
+- The repaired plan MUST remain a DAG (no cycles in predecessor relations).
+- NEVER add mutual/symmetric dependencies (do NOT add A as predecessor of B AND B as predecessor of A).
+- For edge repairs, ONLY edit `predecessors`. Do NOT edit `successors` (the system will rebuild successors automatically).
+- Do not remove required work: if a task contributes to satisfying a requirement, prefer re-ordering or coordination instead of deletion.
+
 STRICT RULES FOR MODIFICATION:
 1. ANALYZE THE VIOLATION LOGIC:
-   - **PROHIBITION / NEGATIVE CONSTRAINT** (e.g., "Action X is forbidden", "Resource Y cannot be used"):
-     -> ACTION: **DELETE** the violating task.
-   
-   - **MISSING PREREQUISITE / REQUIREMENT** (e.g., "Action A requires Setup B", "Action C must be followed by Cleanup D"):
-     -> ACTION: **INSERT** a new task to satisfy the requirement. Link it to the surrounding tasks.
-   
-   - **TEMPORAL / ORDERING CONSTRAINT** (e.g., "A must happen before B", "Parallel execution unsafe"):
-     -> ACTION: **MODIFY EDGES**. Add dependencies (add 'A' to B's `predecessors`).
-   
-   - **ATTRIBUTE / PARAMETER CONSTRAINT** (e.g., "Invalid parameter value", "Incapable agent assigned"):
-     -> ACTION: **MODIFY ATTRIBUTES**. Change `resource_jid` or specific `params`.
+   - PROHIBITION / NEGATIVE CONSTRAINT (e.g., "Action X is forbidden", "Resource Y cannot be used"):
+       -> DELETE ONLY if the task is fundamentally forbidden in ALL circumstances
+          (e.g., "never do X", "resource Y cannot ever perform Z").
+       -> If the task is required by the manufacturing objective, DO NOT delete it.
+          Instead, modify ordering or insert coordination steps.
+
+   - MISSING PREREQUISITE / REQUIREMENT (e.g., "Action A requires Setup B", "Action C must be followed by Cleanup D"):
+       -> INSERT a new task to satisfy the missing requirement and connect it appropriately.
+
+   - TEMPORAL / ORDERING / PARALLEL-UNSAFE CONSTRAINT (e.g., "A must happen before B", "Parallel execution unsafe", "Mutual Exclusion"):
+       -> MODIFY EDGES by adding a predecessor relation to serialize the unsafe actions.
+       -> Choose ONE direction (serialize) by adding a single dependency edge.
+          Do NOT add dependencies in both directions.
+       -> Prefer adding the cross-resource predecessor to the task that can logically wait
+          (i.e., the later/unsafe task), while preserving existing per-resource order.
+
+   - ATTRIBUTE / PARAMETER CONSTRAINT (e.g., "Invalid parameter value", "Incapable agent assigned"):
+       -> MODIFY ATTRIBUTES such as `resource_jid` or specific fields in `params`.
 
 2. CRITICAL - DATA CONSISTENCY:
-   - **Do not just describe the fix in `change_reason`.**
-   - YOU MUST PHYSICALLY UPDATE THE JSON STRUCTURE.
-   - If adding a dependency, the ID *must* appear in `predecessors`.
+   - Do not just describe the fix in `change_reason`; you must update the JSON fields.
+   - If adding a dependency, the predecessor ID MUST appear in `predecessors`.
    - If inserting a task, you must explicitly define its `predecessors` and `successors`.
+   - When modifying an existing task, do NOT overwrite unrelated fields.
 
 OUTPUT FORMAT:
-Return a JSON object containing **ONLY** the tasks you modified, added, or deleted.
+Return a JSON object containing ONLY the tasks you modified, added, or deleted.
 
-**1. TO MODIFY A TASK (Attribute or Edge fix):**
+1) TO MODIFY A TASK (Attribute or Edge fix):
 {
   "id": "TASK_ID",
-  "resource_jid": "NEW_AGENT_ID",      <-- Only include changed fields
-  "predecessors": ["NEW_PRED_ID"],     <-- Or changed edges
+  "resource_jid": "NEW_AGENT_ID",          // include only changed fields
+  "predecessors": ["EXISTING...", "NEW"],  // include full final predecessor list if you change it
   "change_reason": "Explanation of fix"
 }
 
-**2. TO INSERT A NEW TASK:**
+2) TO INSERT A NEW TASK:
 {
   "id": "NEW_UNIQUE_ID",
   "function_name": "REQUIRED_FUNCTION",
@@ -524,11 +537,11 @@ Return a JSON object containing **ONLY** the tasks you modified, added, or delet
   "change_reason": "INSERTION: Added missing required step."
 }
 
-**3. TO DELETE A TASK:**
+3) TO DELETE A TASK:
 {
   "id": "TASK_TO_REMOVE",
   "delete": true,
-  "change_reason": "DELETION: Task violates prohibition rule."
+  "change_reason": "DELETION: Task is fundamentally forbidden in all circumstances."
 }
 
 FINAL JSON STRUCTURE:
@@ -536,6 +549,7 @@ FINAL JSON STRUCTURE:
   "tasks": [ ... list of modified/added/deleted tasks ... ]
 }
 """)
+
 
 
 

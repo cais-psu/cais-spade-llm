@@ -2,31 +2,27 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "MCP must be place_part to assembly_board-v1 before SG is place_part to assembly_board-v1 (ordering constraint)",
-      "constraint_type": "ordering_constraint",
+      "raw_text": "xarm6 and ur5e should not place_parts at the same time",
+      "constraint_type": "mutual_exclusion",
       "process": "assembly",
-      "product": [
-        "MCP",
-        "SG"
-      ],
+      "product": [],
       "resources": [
-        "any"
+        "xarm6",
+        "ur5e"
       ],
-      "event": null,
-      "context": {
-        "destination": "assembly_board-v1"
-      },
+      "event": "place_part",
+      "context": null,
       "aps": [
         {
-          "label": "ap001",
-          "full": "evt/assembly/MCP/any/place_part/assembly_board-v1"
+          "label": "ap002",
+          "full": "ap/assembly/any/xarm6/place_part/any"
         },
         {
-          "label": "ap002",
-          "full": "evt/assembly/SG/any/place_part/assembly_board-v1"
+          "label": "ap001",
+          "full": "ap/assembly/any/ur5e/place_part/any"
         }
       ],
-      "ltlf": "(!ap002) U ap001"
+      "ltlf": "\"G !(ap002 & ap001)\""
     }
   ]
 }

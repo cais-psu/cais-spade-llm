@@ -1,1 +1,1 @@
-- MCP must be place_part to assembly_board-v1 before SG is place_part to assembly_board-v1 (ordering constraint)
+- xarm6 and ur5e should not place_parts at the same time
