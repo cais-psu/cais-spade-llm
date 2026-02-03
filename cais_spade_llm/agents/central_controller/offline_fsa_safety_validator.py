@@ -113,7 +113,7 @@ class OfflineFsaSafetyValidator(BaseSafetyChecker):
             # Keep only ONE witness per rule
             if violations:
                 all_violations.append(violations[0])
-
+        print(all_violations)
         return (len(all_violations) == 0), all_violations
 
     # ------------------------------------------------------------------ #

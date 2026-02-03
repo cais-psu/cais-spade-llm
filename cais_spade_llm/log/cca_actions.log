@@ -3570,3 +3570,629 @@ Previous tokens: Token('SYMBOL_NAME', 'evt')
 2026-01-13 11:29:17,635 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=task_9:place_part)) --task_3.start--> (ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,run=task_9:place_part)) | task=task_3 | sigma=['ap002'] | DFA:1→1
 2026-01-13 11:29:17,635 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,run=task_3:move_loaded_to_destination),xarm6@localhost=(k=3,run=task_9:place_part)) --task_3.done--> (ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=task_9:place_part)) | task=task_3 | sigma=['ap002'] | DFA:1→1
 2026-01-13 11:29:17,635 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=task_9:place_part)) --task_4.start--> (ur5e@localhost=(k=3,run=task_4:place_part),xarm6@localhost=(k=3,run=task_9:place_part)) | task=task_4 | sigma=['ap001', 'ap002'] | DFA:1→2
+2026-01-15 10:48:53,151 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 10:48:54,501 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 10:48:54,502 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 10:48:54,502 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 10:49:00,052 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 10:49:05,766 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2026-01-15 10:49:05,766 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 10:49:05,869 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 10:49:05,962 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 10:49:05,973 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 10:49:05,987 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 10:49:05,989 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 10:58:12,196 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 10:58:13,544 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 10:58:13,544 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 10:58:13,544 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 10:58:20,355 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 10:58:27,378 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 67
+2026-01-15 10:58:27,379 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 10:58:27,472 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 10:58:27,525 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 10:58:27,537 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 10:58:27,550 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 10:58:27,563 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 10:58:27,577 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 10:58:27,578 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 11:03:52,244 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 11:03:53,501 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 11:03:53,501 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 11:03:53,503 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 11:03:59,765 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 11:04:09,117 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 83
+2026-01-15 11:04:09,118 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 11:04:09,223 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 11:04:09,276 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 11:04:09,289 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 11:04:09,301 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 11:04:09,313 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 11:04:09,325 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 11:04:09,327 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 11:07:52,263 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 11:07:53,571 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 11:07:53,571 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 11:07:53,574 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 11:07:59,669 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 11:08:08,614 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 83
+2026-01-15 11:08:08,616 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 11:08:08,731 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 11:08:08,788 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 11:08:08,802 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 11:08:08,819 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 11:08:08,835 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 11:08:08,850 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 11:08:08,851 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 12:36:53,468 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:36:54,774 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:36:54,774 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:36:54,774 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:37:00,912 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:37:05,622 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 12:37:05,623 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:37:05,737 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:37:05,798 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:37:05,811 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:37:05,828 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:37:05,829 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:38:43,847 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:38:45,132 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:38:45,132 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:38:45,135 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:38:49,954 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:38:57,887 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 12:38:57,888 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:38:57,983 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:38:58,032 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:38:58,042 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:38:58,057 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:38:58,058 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:42:24,469 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:42:25,780 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:42:25,780 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:42:25,780 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:42:30,977 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:42:35,723 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 62
+2026-01-15 12:42:35,724 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:42:35,874 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:42:35,942 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:42:35,960 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:42:35,973 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:42:35,975 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:45:05,828 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:45:07,106 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:45:07,106 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:45:07,108 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:45:11,523 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:45:17,802 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 12:45:17,802 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:45:17,893 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:45:17,943 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:45:17,953 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:45:17,966 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:45:17,967 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:47:35,644 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:47:36,909 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:47:36,909 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:47:36,909 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:47:41,309 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:47:46,335 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 62
+2026-01-15 12:47:46,335 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:47:46,422 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:47:46,438 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:47:46,451 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:47:46,464 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:47:46,466 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:50:31,129 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:50:32,426 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:50:32,426 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:50:32,426 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:50:39,297 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:50:46,617 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 12:50:46,618 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:50:46,722 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:50:46,775 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:50:46,788 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:50:46,802 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:50:46,803 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 12:52:09,594 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:52:10,874 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:52:10,874 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:52:10,875 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:52:16,486 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:52:19,296 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 12:52:19,296 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 12:52:19,296 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 12:52:24,743 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 12:52:29,902 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 12:52:29,902 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 12:52:29,982 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 12:52:29,998 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 12:52:30,011 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 12:52:30,024 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 12:52:30,026 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 13:32:47,666 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:32:48,966 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 13:32:48,966 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 13:32:48,966 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:32:53,476 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 13:32:58,898 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 62
+2026-01-15 13:32:58,899 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 13:32:58,995 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 13:32:59,057 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 13:32:59,072 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 13:32:59,087 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 13:32:59,088 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 13:34:24,947 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:34:26,231 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 13:34:26,231 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 13:34:26,232 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:34:33,720 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 13:34:39,511 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 13:34:39,512 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 13:34:39,593 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 13:34:39,607 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 13:34:39,619 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 13:34:39,631 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 13:34:39,633 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 13:36:52,597 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:36:53,894 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 13:36:53,894 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 13:36:53,895 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 13:36:58,655 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 13:37:04,837 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 58
+2026-01-15 13:37:04,840 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 13:37:04,934 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 13:37:04,986 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 13:37:04,998 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 13:37:05,012 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 13:37:05,013 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 15:35:39,293 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:35:40,575 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:35:40,575 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:35:40,575 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:36:41,573 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:36:42,896 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:36:42,896 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:36:42,898 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:36:51,804 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 15:37:00,979 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 15:37:00,979 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:37:01,031 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:37:01,092 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:37:01,144 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:37:01,156 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:37:01,169 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:37:01,182 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:37:01,193 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 15:37:01,204 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 15:37:01,206 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 15:39:28,106 - agent:cca - INFO - [CCA] Offline FSA Validation: OK (Violated rules: 0, Witnesses: 0) product=assembly_board-v1@localhost
+2026-01-15 15:39:29,000 - agent:cca - INFO - [CCA] Safety OK: task=task_1 allowed.
+2026-01-15 15:43:23,776 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:43:25,097 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:43:25,097 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:43:25,098 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:43:33,362 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 15:43:40,886 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 15:43:40,887 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:43:40,941 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:43:40,995 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:43:41,045 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:43:41,057 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:43:41,069 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:43:41,081 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:43:41,091 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 15:43:41,103 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 15:43:41,104 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 15:45:04,913 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:45:06,197 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:45:06,197 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:45:06,197 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:45:14,101 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 15:45:21,551 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 15:45:21,552 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:45:21,603 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:45:21,620 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:45:21,675 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:45:21,701 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:45:21,720 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:45:21,736 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:45:21,756 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 15:45:21,770 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 15:45:21,771 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 15:46:36,483 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:46:37,748 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:46:37,748 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:46:37,748 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:46:46,036 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 15:46:53,254 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 15:46:53,255 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:46:53,302 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:46:53,317 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:46:53,364 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:46:53,377 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:46:53,391 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:46:53,405 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:46:53,417 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 15:46:53,429 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 15:46:53,430 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 15:47:24,404 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:47:25,658 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:47:25,658 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:47:25,659 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:47:32,261 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 15:47:38,362 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2026-01-15 15:47:38,363 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:47:38,454 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:47:38,468 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:47:38,479 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:47:38,492 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:47:38,503 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:47:38,514 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:47:38,515 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 15:48:21,451 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:48:22,719 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:48:22,719 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:48:22,719 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:48:29,917 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 15:48:37,003 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 64
+2026-01-15 15:48:37,004 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:48:37,085 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:48:37,097 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:48:37,110 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:48:37,124 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:48:37,135 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:48:37,147 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:48:37,149 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 15:49:20,663 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:49:21,920 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:49:21,920 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:49:21,920 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:49:28,225 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 15:49:36,699 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 79
+2026-01-15 15:49:36,700 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:49:36,746 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:49:36,760 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:49:36,810 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:49:36,822 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:49:36,835 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:49:36,848 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:49:36,858 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 15:49:36,870 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 15:49:36,871 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 15:55:11,338 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:55:12,657 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:55:12,657 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:55:12,657 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:55:17,744 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 15:55:22,536 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2026-01-15 15:55:22,537 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:55:22,615 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:55:22,630 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:55:22,643 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:55:22,655 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:55:22,665 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:55:22,677 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:55:22,678 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 15:56:17,235 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:56:20,091 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:56:20,091 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:56:20,092 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:56:25,173 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 15:56:30,258 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 64
+2026-01-15 15:56:30,259 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:56:30,346 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:56:30,360 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:56:30,372 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:56:30,384 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:56:30,395 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:56:30,406 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:56:30,407 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 15:57:52,691 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:57:53,982 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 15:57:53,982 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 15:57:53,983 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 15:58:00,694 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 15:58:06,622 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2026-01-15 15:58:06,623 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 15:58:06,713 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 15:58:06,727 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 15:58:06,739 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 15:58:06,752 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 15:58:06,764 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 15:58:06,776 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 15:58:06,777 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 16:06:03,742 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:06:05,035 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:06:05,035 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:06:05,038 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:06:11,147 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 16:06:19,995 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 64
+2026-01-15 16:06:19,996 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:06:20,098 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:06:20,156 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:06:20,171 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:06:20,184 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:06:20,196 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:06:20,207 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:06:20,209 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 16:08:50,024 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:08:51,321 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:08:51,321 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:08:51,323 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:08:58,168 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 16:09:04,422 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 64
+2026-01-15 16:09:04,422 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:09:04,532 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:09:04,592 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:09:04,609 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:09:04,623 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:09:04,635 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:09:04,648 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:09:04,650 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 16:09:14,487 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:09:15,694 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:09:15,694 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:09:15,695 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:09:21,739 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 16:09:35,004 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 64
+2026-01-15 16:09:35,005 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:09:35,114 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:09:35,134 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:09:35,149 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:09:35,164 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:09:35,180 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:09:35,195 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:09:35,197 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 16:11:11,810 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:11:13,213 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:11:13,213 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:11:13,213 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:11:16,992 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
+2026-01-15 16:11:19,548 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 20
+2026-01-15 16:11:19,549 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:11:19,653 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:11:19,710 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:11:19,711 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-01-15 16:12:37,753 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:12:38,925 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:12:38,925 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:12:38,925 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:12:43,378 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 16:12:47,448 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 43
+2026-01-15 16:12:47,449 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:12:47,536 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:12:47,552 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:12:47,565 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:12:47,578 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:12:47,579 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 16:15:11,844 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:15:13,203 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:15:13,203 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:15:13,204 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:15:19,427 - agent:cca - INFO - [SafetyLogic] Parsed 3 structured safety rule(s) via LLM.
+2026-01-15 16:15:24,816 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 3 rule(s). Global safety formula length: 66
+2026-01-15 16:15:24,817 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:15:24,893 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:15:24,906 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:15:24,919 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:15:24,930 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:15:24,941 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:15:24,953 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:15:24,954 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 3 rules.
+2026-01-15 16:17:14,598 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:17:15,912 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:17:15,912 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:17:15,913 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:17:23,022 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:17:30,506 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:17:30,507 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:17:30,588 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:17:30,601 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:17:30,612 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:17:30,623 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:17:30,634 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:17:30,645 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:17:30,657 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:17:30,670 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:17:30,672 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:18:33,353 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:18:34,744 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:18:34,745 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:18:34,745 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:18:41,856 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:18:48,560 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:18:48,561 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:18:48,638 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:18:48,651 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:18:48,663 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:18:48,675 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:18:48,686 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:18:48,697 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:18:48,710 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:18:48,724 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:18:48,725 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:20:09,437 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:20:10,757 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:20:10,758 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:20:10,758 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:20:19,151 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:20:25,705 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:20:25,706 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:20:25,780 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:20:25,792 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:20:25,804 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:20:25,816 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:20:25,827 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:20:25,838 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:20:25,850 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:20:25,863 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:20:25,864 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:39:22,698 - agent:cca - INFO - [CCA] Offline FSA Validation: FAIL (Violated rules: 4, Witnesses: 4) product=assembly_board-v1@localhost
+2026-01-15 16:39:22,702 - agent:cca - ERROR - [CCA] VIOLATION #1 | rule=SAFE_1 | xarm6 and ur5e should not pick_parts at the same time. | ltlf=G !(ap006 & ap002)
+2026-01-15 16:39:22,702 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_5', 'TASK_5', 'TASK_6'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start']
+2026-01-15 16:39:22,702 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,702 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_6 | sigma=['ap002', 'ap006'] | DFA:1→2
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA] VIOLATION #2 | rule=SAFE_2 | ur5e and xarm6 should not place_parts at the same time. | ltlf=G !(ap003 & ap007)
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_2', 'TASK_3', 'TASK_3', 'TASK_4', 'TASK_5', 'TASK_5', 'TASK_6', 'TASK_6', 'TASK_7', 'TASK_7', 'TASK_8'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_2.done', 'TASK_3.start', 'TASK_3.done', 'TASK_4.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start', 'TASK_6.done', 'TASK_7.start', 'TASK_7.done', 'TASK_8.start']
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,703 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_2.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) --TASK_3.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) --TASK_3.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) --TASK_4.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_4 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.done--> (ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.start--> (ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,704 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.done--> (ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:39:22,705 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_8.start--> (ur5e@localhost=(k=3,run=TASK_8:place_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_8 | sigma=['ap003', 'ap007'] | DFA:1→2
+2026-01-15 16:39:22,705 - agent:cca - ERROR - [CCA] VIOLATION #3 | rule=SAFE_3 | xarm6 must move_to_pick_location before xarm6 move_to_pick_location. | ltlf=(!ap005) U ap005
+2026-01-15 16:39:22,705 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1'] witness_events=['TASK_1.start']
+2026-01-15 16:39:22,705 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=['ap005'] | DFA:1→2
+2026-01-15 16:39:22,705 - agent:cca - ERROR - [CCA] ... 1 more witness(es) suppressed
+2026-01-15 16:41:17,311 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:41:18,620 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:41:18,620 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:41:18,622 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:41:28,104 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:41:34,717 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:41:34,717 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:41:34,808 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:41:34,865 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:41:34,876 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:41:34,888 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:41:34,899 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:41:34,911 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:41:34,923 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:41:34,936 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:41:34,937 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:42:57,506 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:42:58,756 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:42:58,756 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:42:58,757 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:43:07,326 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:43:14,941 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:43:14,942 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:43:15,043 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:43:15,097 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:43:15,108 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:43:15,125 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:43:15,143 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:43:15,159 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:43:15,172 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:43:15,184 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:43:15,185 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:43:42,393 - agent:cca - INFO - [CCA] Offline FSA Validation: FAIL (Violated rules: 4, Witnesses: 4) product=assembly_board-v1@localhost
+2026-01-15 16:43:42,394 - agent:cca - ERROR - [CCA] VIOLATION #1 | rule=SAFE_1 | xarm6 and ur5e should not pick_parts at the same time. | ltlf=G !(ap006 & ap002)
+2026-01-15 16:43:42,394 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_5', 'TASK_5', 'TASK_6'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start']
+2026-01-15 16:43:42,394 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,394 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,394 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_6 | sigma=['ap002', 'ap006'] | DFA:1→2
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA] VIOLATION #2 | rule=SAFE_2 | ur5e and xarm6 should not place_parts at the same time. | ltlf=G !(ap003 & ap007)
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_2', 'TASK_3', 'TASK_3', 'TASK_4', 'TASK_5', 'TASK_5', 'TASK_6', 'TASK_6', 'TASK_7', 'TASK_7', 'TASK_8'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_2.done', 'TASK_3.start', 'TASK_3.done', 'TASK_4.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start', 'TASK_6.done', 'TASK_7.start', 'TASK_7.done', 'TASK_8.start']
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,395 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_2.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) --TASK_3.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) --TASK_3.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) --TASK_4.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_4 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.done--> (ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.start--> (ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.done--> (ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:43:42,396 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_8.start--> (ur5e@localhost=(k=3,run=TASK_8:place_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_8 | sigma=['ap003', 'ap007'] | DFA:1→2
+2026-01-15 16:43:42,397 - agent:cca - ERROR - [CCA] VIOLATION #3 | rule=SAFE_3 | xarm6 must move_to_pick_location before xarm6 move_to_pick_location. | ltlf=(!ap005) U ap005
+2026-01-15 16:43:42,397 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1'] witness_events=['TASK_1.start']
+2026-01-15 16:43:42,397 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=['ap005'] | DFA:1→2
+2026-01-15 16:43:42,397 - agent:cca - ERROR - [CCA] ... 1 more witness(es) suppressed
+2026-01-15 16:45:13,731 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:45:15,036 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:45:15,036 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:45:15,038 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:45:23,588 - agent:cca - INFO - [SafetyLogic] Parsed 4 structured safety rule(s) via LLM.
+2026-01-15 16:45:30,889 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 4 rule(s). Global safety formula length: 85
+2026-01-15 16:45:30,890 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:45:30,988 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:45:31,040 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:45:31,051 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:45:31,063 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:45:31,075 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_3 built and saved to cais_spade_llm/safety/SAFE_3_dfa.dot
+2026-01-15 16:45:31,088 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_3 rendered to cais_spade_llm/safety/SAFE_3_dfa.png
+2026-01-15 16:45:31,100 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_4 built and saved to cais_spade_llm/safety/SAFE_4_dfa.dot
+2026-01-15 16:45:31,113 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_4 rendered to cais_spade_llm/safety/SAFE_4_dfa.png
+2026-01-15 16:45:31,115 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 4 rules.
+2026-01-15 16:45:48,342 - agent:cca - INFO - [CCA] Offline FSA Validation: FAIL (Violated rules: 3, Witnesses: 3) product=assembly_board-v1@localhost
+2026-01-15 16:45:48,342 - agent:cca - ERROR - [CCA] VIOLATION #1 | rule=SAFE_1 | xarm6 and ur5e should not pick_parts at the same time. | ltlf=G !(ap006 & ap002)
+2026-01-15 16:45:48,345 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_5', 'TASK_5', 'TASK_6'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start']
+2026-01-15 16:45:48,345 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,345 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,345 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:45:48,345 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:45:48,346 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap006'] | DFA:1→1
+2026-01-15 16:45:48,346 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_6 | sigma=['ap002', 'ap006'] | DFA:1→2
+2026-01-15 16:45:48,347 - agent:cca - ERROR - [CCA] VIOLATION #2 | rule=SAFE_2 | ur5e and xarm6 should not place_parts at the same time. | ltlf=G !(ap003 & ap007)
+2026-01-15 16:45:48,347 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_2', 'TASK_3', 'TASK_3', 'TASK_4', 'TASK_5', 'TASK_5', 'TASK_6', 'TASK_6', 'TASK_7', 'TASK_7', 'TASK_8'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_2.done', 'TASK_3.start', 'TASK_3.done', 'TASK_4.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start', 'TASK_6.done', 'TASK_7.start', 'TASK_7.done', 'TASK_8.start']
+2026-01-15 16:45:48,347 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,347 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,347 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_2.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) --TASK_3.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) --TASK_3.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) | task=TASK_3 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,idle)) --TASK_4.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_4 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_5 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_6.done--> (ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_6 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,348 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.start--> (ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=2,run=TASK_7:move_loaded_to_destination),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_7.done--> (ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_7 | sigma=['ap007'] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=TASK_4:place_part)) --TASK_8.start--> (ur5e@localhost=(k=3,run=TASK_8:place_part),xarm6@localhost=(k=3,run=TASK_4:place_part)) | task=TASK_8 | sigma=['ap003', 'ap007'] | DFA:1→2
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA] VIOLATION #3 | rule=SAFE_4 | ur5e must move_loaded_to_destination before xarm6 move_loaded_to_destination. | ltlf=(!ap004) U ap001
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_2', 'TASK_3'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_2.done', 'TASK_3.start']
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_2.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:45:48,349 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) --TASK_3.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) | task=TASK_3 | sigma=['ap004'] | DFA:1→3
+2026-01-15 16:52:45,068 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:52:46,377 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-4o, tools=[])
+2026-01-15 16:52:46,377 - agent:cca - INFO - [CCA] setup completed.
+2026-01-15 16:52:46,378 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-01-15 16:52:50,343 - agent:cca - INFO - [SafetyLogic] Parsed 2 structured safety rule(s) via LLM.
+2026-01-15 16:52:54,400 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 2 rule(s). Global safety formula length: 41
+2026-01-15 16:52:54,401 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-01-15 16:52:54,497 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-01-15 16:52:54,546 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-01-15 16:52:54,557 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_2 built and saved to cais_spade_llm/safety/SAFE_2_dfa.dot
+2026-01-15 16:52:54,569 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_2 rendered to cais_spade_llm/safety/SAFE_2_dfa.png
+2026-01-15 16:52:54,570 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 2 rules.
+2026-01-15 16:53:24,809 - agent:cca - INFO - [CCA] Offline FSA Validation: FAIL (Violated rules: 2, Witnesses: 2) product=assembly_board-v1@localhost
+2026-01-15 16:53:24,809 - agent:cca - ERROR - [CCA] VIOLATION #1 | rule=SAFE_1 | xarm6 and ur5e should not pick_parts at the same time. | ltlf=G !(ap004 & ap002)
+2026-01-15 16:53:24,809 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_5', 'TASK_5', 'TASK_6'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_5.start', 'TASK_5.done', 'TASK_6.start']
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=['ap004'] | DFA:1→1
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.start--> (ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap004'] | DFA:1→1
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,run=TASK_5:move_to_pick_location),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_5.done--> (ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_5 | sigma=['ap004'] | DFA:1→1
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_6.start--> (ur5e@localhost=(k=1,run=TASK_6:pick_part),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_6 | sigma=['ap002', 'ap004'] | DFA:1→2
+2026-01-15 16:53:24,810 - agent:cca - ERROR - [CCA] VIOLATION #2 | rule=SAFE_2 | ur5e must move_loaded_to_destination before xarm6 move_loaded_to_destination. | ltlf=(!ap003) U ap001
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]   witness_task_ids=['TASK_1', 'TASK_1', 'TASK_2', 'TASK_2', 'TASK_3'] witness_events=['TASK_1.start', 'TASK_1.done', 'TASK_2.start', 'TASK_2.done', 'TASK_3.start']
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle)) --TASK_1.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,run=TASK_1:move_to_pick_location)) --TASK_1.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) | task=TASK_1 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,idle)) --TASK_2.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=1,run=TASK_2:pick_part)) --TASK_2.done--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) | task=TASK_2 | sigma=[] | DFA:1→1
+2026-01-15 16:53:24,811 - agent:cca - ERROR - [CCA]     ↳ from=(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,idle)) --TASK_3.start--> (ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=TASK_3:move_loaded_to_destination)) | task=TASK_3 | sigma=['ap003'] | DFA:1→3

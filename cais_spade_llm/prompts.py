@@ -100,14 +100,20 @@ GENERAL RULES:
 - If a parameter value is not specified, set it to null (never invent data).
 - Within each requirement, sequence_index should increase in logical order.
 - You MAY create cross-requirement dependencies if needed to reflect natural ordering implied by the requirements.
-- You are provided with safety rules for context. Try to generate a plan that respects them.
+- You are provided with safety rules for context. You must generate a plan that respects them.
 - Return ONLY valid JSON (no extra commentary).
+
+PARALLELISM DEFAULT (IMPORTANT):
+- Requirements are independent by default. If there is no explicit safety rule linking two requirements, DO NOT add any cross-requirement predecessors between them.
+- This means the first task of each requirement MUST have predecessors: [] (the robot may start immediately if idle).
+- Do NOT serialize entire task pipelines across requirements. Only add the minimal ordering edge required by the safety rule and anchor it to the specific function_name involved.
 
 OUTPUT FORMAT:
 
 {
   "tasks": [
     {
+      "req_id": "...",                   
       "id": "...",
       "requirement_id": "...",
       "function_name": "...",

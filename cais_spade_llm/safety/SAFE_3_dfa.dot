@@ -8,9 +8,9 @@ digraph MONA_DFA {
  node [shape = circle]; 1;
  init [shape = plaintext, label = ""];
  init -> 1;
- 1 -> 1 [label="~ap001 & ~ap003"];
- 1 -> 2 [label="ap001"];
- 1 -> 3 [label="ap003 & ~ap001"];
+ 1 -> 1 [label="~ap005 & ~ap006"];
+ 1 -> 2 [label="ap005"];
+ 1 -> 3 [label="ap006 & ~ap005"];
  2 -> 2 [label="true"];
  3 -> 3 [label="true"];
 }
