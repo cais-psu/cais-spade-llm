@@ -1,0 +1,1 @@
+- xarm6 and ur5e should not pick_parts at the same time.

@@ -1,13 +1,17 @@
+"""Small utility helpers for file IO and task identifiers."""
+
 import json
 import os
 import time, hashlib
 
 def load_json_data(file_path):
+    """Load and return JSON from a file path."""
     with open(file_path, 'r') as file:
         return json.load(file)
 
 # Get the paths of all JSON files in the specified directory.
 def get_init_files(directory_path):
+    """Return a list of .json files within a directory (non-recursive)."""
     json_file_paths = []
     for filename in os.listdir(directory_path):
         if filename.endswith('.json'):
@@ -16,6 +20,7 @@ def get_init_files(directory_path):
     return json_file_paths
 
 def load_specification(file_path):
+    """Read a specification text file relative to the current working directory."""
     try:
         current_directory = os.getcwd()
         spec_path = current_directory + file_path
@@ -25,6 +30,7 @@ def load_specification(file_path):
         return "File not found."
 
 def get_task_identifier(sender, content):
+    """Create a stable task ID using the sender and a short hash of content."""
     content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
     task_identifier = f"{sender}_{content_hash}"
 

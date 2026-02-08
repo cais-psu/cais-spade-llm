@@ -2,51 +2,29 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "xarm6 and ur5e should not pick_parts at the same time.",
-      "constraint_type": "no_concurrent_pick",
+      "raw_text": "MCP must be place_part before SG is place_part",
+      "constraint_type": "ordering_place_before",
       "process": "assembly",
-      "product": [],
+      "product": [
+        "mcp",
+        "sg"
+      ],
       "resources": [
-        "xarm6",
-        "ur5e"
+        "any"
       ],
-      "event": "pick_part",
-      "context": null,
-      "aps": [
-        {
-          "label": "ap004",
-          "full": "ap/assembly/any/xarm6/pick_part/none"
-        },
-        {
-          "label": "ap002",
-          "full": "ap/assembly/any/ur5e/pick_part/none"
-        }
-      ],
-      "ltlf": "G !(ap004 & ap002)"
-    },
-    {
-      "id": "SAFE_2",
-      "raw_text": "ur5e must move_loaded_to_destination before xarm6 move_loaded_to_destination.",
-      "constraint_type": "order_of_operations",
-      "process": "assembly",
-      "product": [],
-      "resources": [
-        "ur5e",
-        "xarm6"
-      ],
-      "event": "move_loaded_to_destination",
+      "event": "place_part",
       "context": null,
       "aps": [
         {
           "label": "ap001",
-          "full": "ap/assembly/any/ur5e/move_loaded_to_destination/none"
+          "full": "ap/assembly/mcp/any/place_part/any"
         },
         {
-          "label": "ap003",
-          "full": "ap/assembly/any/xarm6/move_loaded_to_destination/none"
+          "label": "ap002",
+          "full": "ap/assembly/sg/any/place_part/any"
         }
       ],
-      "ltlf": "(!ap003) U ap001"
+      "ltlf": "(!ap002) U ap001"
     }
   ]
 }

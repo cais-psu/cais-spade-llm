@@ -1,8 +1,13 @@
+"""Prompt templates and builders for the LLM-facing planning/safety flows."""
+
 # prompts.py
 import json
 from textwrap import dedent
 from typing import Any, Dict
 
+# ----------------------------------------------------------------------
+# Core agent instructions
+# ----------------------------------------------------------------------
 PROMPT_MAS_AGENT = dedent("""\
 You are a helpful agent in a cooperative Multi-Agent System.
 If you can provide a requested service, do it. If not, ask peers for help.
@@ -66,6 +71,9 @@ ROLE_BLOCKS = {
     "central": CENTRAL_CONTROLLER_AGENT_INSTRUCTIONS,
 }
 
+# ----------------------------------------------------------------------
+# Instruction helpers
+# ----------------------------------------------------------------------
 def build_agent_instructions(*, agent_name: str, agent_role: str, overrides: str | None = None) -> str:
     base = PROMPT_MAS_AGENT + "\n" + BASE_INSTRUCTIONS
     role_block = ROLE_BLOCKS.get(agent_role.lower(), "")
@@ -128,6 +136,9 @@ OUTPUT FORMAT:
 """)
 
 
+# ----------------------------------------------------------------------
+# Task expansion prompt
+# ----------------------------------------------------------------------
 def build_task_expansion_prompt(
     *,
     requirements: list,
@@ -161,6 +172,9 @@ SAFETY CONSTRAINTS:
 import json
 from textwrap import dedent
 
+# ----------------------------------------------------------------------
+# Requirement parsing prompt
+# ----------------------------------------------------------------------
 REQUIREMENT_PARSE_PROMPT = dedent("""
 You convert natural-language *manufacturing* instructions into a minimal structured form.
 
@@ -220,6 +234,9 @@ Convert the following instructions into structured requirements:
 {requirement_text}
 """)
 
+# ----------------------------------------------------------------------
+# Safety parsing prompt
+# ----------------------------------------------------------------------
 SAFETY_PARSE_PROMPT = dedent("""
 You convert natural-language safety statements into structured rule objects.
 
@@ -273,6 +290,8 @@ FIELD RULES
   - Include all relevant context dimensions in:
         "context": { "<key>": "<value>", ... }
   - If no meaningful contextual information applies, set context to null.
+  - Do NOT invent a synthetic "ordering" or "before/after" context; for ordering-only rules,
+    leave context null unless the text explicitly specifies a concrete location/zone/tool context.
 
 • product
   - List ALL specific referenced products/parts (e.g. ["pin", "gear"]).
@@ -367,6 +386,7 @@ as long as it remains concise and semantically meaningful.
 
 APs should not introduce any new processes, events, resources, or context
 information that are not present in the parsed rule or TOOLS_CATALOGUE.
+If the rule has no context (null), use "any" for the context segment.
 """).strip()
 
 SAFETY_LTLF_TEMPLATE_DOC = dedent("""
@@ -421,6 +441,9 @@ APs: a, b   # a = earlier event, b = later event
 LTLf: (!b) U a
 """).strip()
 
+# ----------------------------------------------------------------------
+# Safety logic prompt
+# ----------------------------------------------------------------------
 def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> str:
     """
     Prompt to convert structured safety rules -> AP strings + LTLf.
@@ -482,6 +505,9 @@ INPUT RULES:
 {rules_json}
 """).strip()
 
+# ----------------------------------------------------------------------
+# Replanning prompt
+# ----------------------------------------------------------------------
 REPLAN_WITH_FEEDBACK_INSTRUCTIONS = dedent("""\
 You are a Plan Repair Expert.
 You are given an execution plan (a Directed Acyclic Graph) that violates specific safety rules.
@@ -556,10 +582,9 @@ FINAL JSON STRUCTURE:
 }
 """)
 
-
-
-
-
+# ----------------------------------------------------------------------
+# Replanning prompt builder
+# ----------------------------------------------------------------------
 def build_replan_prompt(
     *,
     failed_plan_nodes: list,

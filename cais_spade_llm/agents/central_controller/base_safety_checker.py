@@ -1,3 +1,5 @@
+"""Shared DFA parsing and AP-mapping utilities for safety checking."""
+
 from __future__ import annotations
 import logging
 import re
@@ -15,6 +17,7 @@ class BaseSafetyChecker:
     """
 
     def __init__(self, dfa_map: Dict[str, str], safety_rules: List[Dict[str, Any]]) -> None:
+        """Load safety rules and parse DFA DOT sources into transition tables."""
         self.logger = logging.getLogger(self.__class__.__name__)
         self.safety_rules = safety_rules
         
@@ -53,6 +56,7 @@ class BaseSafetyChecker:
             or params.get("product")
             or "any"
         )
+        task_product = str(task_product).lower()
 
         # Normalize all param values to strings for comparison
         param_value_strings = {str(v) for v in params.values() if v is not None}
@@ -84,7 +88,7 @@ class BaseSafetyChecker:
                     continue
 
                 # 3) Product match (MCP vs SG, etc.)
-                if ap_product != "any" and ap_product != task_product:
+                if ap_product != "any" and str(ap_product).lower() != task_product:
                     continue
 
                 # 4) Context match (generic, no function_name branching)
@@ -135,7 +139,7 @@ class BaseSafetyChecker:
             return False
 
         # Prepare expression for Python eval
-        expr = label.replace("&", " and ").replace("|", " or ").replace("~", " not ")
+        expr = label.replace("&", " and ").replace("|", " or ").replace("~", " not ").replace("!", " not ")
         expr = re.sub(r"\btrue\b", "True", expr, flags=re.IGNORECASE)
         expr = re.sub(r"\bfalse\b", "False", expr, flags=re.IGNORECASE)
 

@@ -1,3 +1,4 @@
+// CAD model: small_circular_pin
 // === CYLINDER PARAMETERS ===
 cylinder_diameter = 8;
 cylinder_height = 12;

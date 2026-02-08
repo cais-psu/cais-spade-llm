@@ -1,3 +1,4 @@
+// CAD model: large_rectangular_pin
 // === RECTANGULAR PIN PARAMETERS ===
 pin_length = 300;
 pin_width = 16;

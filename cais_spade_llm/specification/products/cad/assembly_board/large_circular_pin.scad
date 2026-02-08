@@ -1,3 +1,4 @@
+// CAD model: large_circular_pin
 // === CYLINDER PARAMETERS ===
 cylinder_diameter = 6;
 cylinder_height = 90;

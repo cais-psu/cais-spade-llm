@@ -1,3 +1,5 @@
+"""Central Controller Agent (CCA) orchestrating safety checks and replanning."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,16 +9,19 @@ from typing import Any, Optional, Iterable
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
+from spade.template import Template
 
 from agents.shared_information.llm_agent import LlmAgent
 from agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
 from agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
-from agents.central_controller.offline_fsa_safety_validator import OfflineFsaSafetyValidator
+from agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
+from cais_spade_llm.agents.central_controller.offline_safety_validator import OfflineSafetyValidator
 
 class CentralControllerAgent(LlmAgent):
     """
-    Central Controller Agent (CCA)
+    Central Controller Agent (CCA).
+    Coordinates safety validation, online monitoring, and replanning signals.
     """
 
     agent_role = "controller"
@@ -31,6 +36,7 @@ class CentralControllerAgent(LlmAgent):
         safety_file: str | None = None,
         **kw: Any,
     ) -> None:
+        """Initialize controller state, safety logic, and monitoring scaffolding."""
         super().__init__(jid, password, name=name, agent_role="controller", **kw)
 
         self.agent_name = name
@@ -48,6 +54,9 @@ class CentralControllerAgent(LlmAgent):
         
         # We use the NEW OnlineSafetyMonitor
         self.safety_monitor: Optional[OnlineSafetyMonitor] = None
+
+        # Runtime Plan FSA monitor
+        self.plan_fsa_monitor: Optional[OnlineFsaMonitor] = None
         
         # NOTE: self.running_aps is removed; the monitor tracks it now.
         
@@ -59,11 +68,69 @@ class CentralControllerAgent(LlmAgent):
         )
 
     async def setup(self) -> None:
+        """Attach startup, runtime monitor, and offline plan validation behaviours."""
         await super().setup()
         self.logger.info("[CCA] setup completed.")
         self.add_behaviour(self._InitCCA())
-        self.add_behaviour(self._Monitor())
-        self.add_behaviour(self._PlanValidation())
+        t_resource = Template()
+        t_resource.set_metadata("type", "resource_event")
+        self.add_behaviour(self._Monitor(), t_resource)
+
+        t_plan = Template()
+        t_plan.set_metadata("type", "plan_safety_check")
+        self.add_behaviour(self._PlanValidation(), t_plan)
+
+    async def _send_replan_request(
+        self,
+        *,
+        product_jid: str,
+        reason: str,
+        event: dict[str, Any],
+        safety_info: Optional[dict[str, Any]],
+    ) -> None:
+        """Send a structured replanning request to a ProductAgent."""
+        plan_ctx = {}
+        if self.plan_fsa_monitor:
+            plan_ctx = self.plan_fsa_monitor.build_replan_context(
+                failure_event={
+                    "failed_task_id": event.get("task_id"),
+                    "task_id": event.get("task_id"),
+                }
+            )
+
+        # Failure-focused safety context: keep only what helps replanning decisions.
+        safety_ctx = {}
+        if safety_info:
+            safety_ctx = {
+                "violated_rule_id": safety_info.get("violated_rule"),
+                "violated_from": safety_info.get("violated_from"),
+                "violated_to": safety_info.get("violated_to"),
+                "candidate_aps": safety_info.get("candidate_aps") or [],
+                "running_aps": safety_info.get("running_snapshot") or [],
+            }
+
+        # Debug log: capture the full context we are about to send for replanning.
+        # Keep logs bounded to avoid flooding if the context grows large.
+        self.logger.info(
+            "[CCA] Replan request -> %s reason=%s task_id=%s plan_ctx=%s safety_ctx=%s",
+            product_jid,
+            reason,
+            event.get("task_id"),
+            json.dumps(plan_ctx, ensure_ascii=False)[:2000],
+            json.dumps(safety_ctx, ensure_ascii=False)[:2000],
+        )
+
+        msg = Message(to=str(product_jid))
+        msg.set_metadata("type", "replan_request")
+        msg.body = json.dumps(
+            {
+                "reason": reason,
+                "event": event,
+                "plan_ctx": plan_ctx,
+                "safety_ctx": safety_ctx,
+            }
+        )
+        await self.send(msg)
 
     # ------------------------------------------------------------------ #
     # Behaviours
@@ -81,9 +148,6 @@ class CentralControllerAgent(LlmAgent):
             if not msg:
                 return
 
-            if msg.metadata.get("type") != "resource_event":
-                return
-
             # Safety guard: ensure monitor is loaded
             if not agent.safety_monitor:
                 agent.logger.warning("[CCA] SafetyMonitor not loaded yet.")
@@ -98,50 +162,141 @@ class CentralControllerAgent(LlmAgent):
             task_id = event["task_id"]
             status = event["status"]
             resource_jid = event["resource_jid"]
+            function_name = event["function_name"]
+            product_jid = (event.get("params") or {}).get("product_jid")
 
             # 2. HANDLE 'SAFETY_CHECK' (Start Event)
             if status == "safety_check":
-                #
-                allowed, info = agent.safety_monitor.process_start_event(event)
-
-                if not allowed:
-                    violated_rule = info.get("violated_rule")
-                    running_snapshot = info.get("running_snapshot", [])
-                    
-                    agent.logger.warning(
-                        "[CCA] SAFETY VIOLATION: task=%s rule=%s (running=%s)",
-                        task_id, violated_rule, running_snapshot
-                    )
-
-                    # Queue the task to retry later
-                    if not hasattr(agent, "blocked_tasks"):
-                        agent.blocked_tasks = {}
-                    
-                    agent.blocked_tasks[task_id] = {
-                        "event": event,
-                        "violated_rule": violated_rule
-                    }
-                    
-                    agent.logger.info(
-                        "[CCA] Queued task=%s as temporarily unsafe.", task_id
-                    )
-                    # Do NOT send a reply yet; resource waits.
-                    return
-
-                # If allowed
-                agent.logger.info("[CCA] Safety OK: task=%s allowed.", task_id)
-                await self._send_decision(resource_jid, task_id, "allow")
+                await self._handle_safety_check(
+                    event=event,
+                    task_id=task_id,
+                    resource_jid=resource_jid,
+                    product_jid=product_jid,
+                )
                 return
 
+            await self._handle_runtime_event(
+                event=event,
+                task_id=task_id,
+                status=status,
+                resource_jid=resource_jid,
+                function_name=function_name,
+                product_jid=product_jid,
+            )
+
+        async def _handle_safety_check(
+            self,
+            *,
+            event: dict[str, Any],
+            task_id: str,
+            resource_jid: str,
+            product_jid: Optional[str],
+        ) -> None:
+            agent: "CentralControllerAgent" = self.agent  # type: ignore
+
+            allowed, info = agent.safety_monitor.process_start_event(event)
+
+            if not allowed:
+                violated_rule = info.get("violated_rule")
+                running_snapshot = info.get("running_snapshot", [])
+
+                agent.logger.warning(
+                    "[CCA] SAFETY VIOLATION: task=%s rule=%s (running=%s)",
+                    task_id, violated_rule, running_snapshot
+                )
+
+                # Queue the task to retry later
+                agent.blocked_tasks[task_id] = {
+                    "event": event,
+                    "violated_rule": violated_rule
+                }
+
+                agent.logger.info(
+                    "[CCA] Queued task=%s as temporarily unsafe.", task_id
+                )
+
+                if product_jid:
+                    await agent._send_replan_request(
+                        product_jid=product_jid,
+                        reason="safety_block",
+                        event=event,
+                        safety_info=info,
+                    )
+                # Do NOT send a reply yet; resource waits.
+                return
+
+            # If allowed
+            agent.logger.info("[CCA] Safety OK: task=%s allowed.", task_id)
+            await self._send_decision(resource_jid, task_id, "allow")
+
+        async def _handle_runtime_event(
+            self,
+            *,
+            event: dict[str, Any],
+            task_id: str,
+            status: str,
+            resource_jid: str,
+            function_name: str,
+            product_jid: Optional[str],
+        ) -> None:
+            agent: "CentralControllerAgent" = self.agent  # type: ignore
+
+            # ----- PLAN FSA TRACE: START EVENT ----- #
+            if status == "running" and agent.plan_fsa_monitor:
+                agent.plan_fsa_monitor.process_event(
+                    event_type="start",
+                    task_id=task_id,
+                    function_name=function_name,
+                    resource_jid=resource_jid,
+                    status=status,
+                )
+
             # 3. HANDLE 'FINISHED' / 'FAILED' (End Event)
-            if status in ["finished", "failed"]:
-                #
-                agent.safety_monitor.process_finish_event(event)
-                
-                agent.logger.info("[CCA] Task %s finished. State updated.", task_id)
+            # Treat any "failed:*" status as a failed end event.
+            is_failed = (status == "failed") or (isinstance(status, str) and status.startswith("failed"))
+            is_completed = status in ("completed", "finished")
+            if is_completed or is_failed:
+                # ----- PLAN FSA TRACE: END EVENT ----- #
+                if agent.plan_fsa_monitor:
+                    agent.plan_fsa_monitor.process_event(
+                        event_type=("fail" if is_failed else "done"),
+                        task_id=task_id,
+                        function_name=function_name,
+                        resource_jid=resource_jid,
+                        status=status,
+                    )
+                if is_failed:
+                    agent.safety_monitor.process_fail_event(event)
+                    agent.logger.info("[CCA] Task %s failed. State updated.", task_id)
+                else:
+                    agent.safety_monitor.process_finish_event(event)
+                    agent.logger.info("[CCA] Task %s finished. State updated.", task_id)
 
                 # Retry any blocked tasks now that state has changed
                 await self._retry_blocked_tasks()
+
+                # Deadlock detection:
+                # no enabled starts, not in a marked state, and nothing currently running.
+                if agent.plan_fsa_monitor and product_jid:
+                    pm = agent.plan_fsa_monitor
+                    cur_state = pm.current_state
+                    if cur_state:
+                        marked = set((pm.fsa or {}).get("A", {}).get("Xm") or [])
+                        if cur_state not in marked:
+                            resource_state = pm._parse_state(cur_state)
+                            any_running = any(
+                                info.get("status") == "running"
+                                for info in resource_state.values()
+                            )
+                            if not any_running:
+                                next_task_ids = pm._next_task_ids_from_state(cur_state)
+                                if not next_task_ids:
+                                    await agent._send_replan_request(
+                                        product_jid=product_jid,
+                                        reason="deadlock",
+                                        event=event,
+                                        safety_info=None,
+                                    )
 
         async def _retry_blocked_tasks(self) -> None:
             """
@@ -226,9 +381,6 @@ class CentralControllerAgent(LlmAgent):
             if not msg:
                 return
 
-            if msg.metadata.get("type") != "plan_safety_check":
-                return
-
             try:
                 data = json.loads(msg.body or "{}")
                 fsa = data.get("fsa")            # REQUIRED
@@ -242,9 +394,12 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.warning("[CCA] No FSA provided for offline validation.")
                 return
 
+            # Initialize plan FSA monitor for runtime tracing
+            agent.plan_fsa_monitor = OnlineFsaMonitor(fsa)
+
             # Delegate to Offline FSA Validator
             if agent.safety_logic and agent.safety_logic.rule_dfas:
-                validator = OfflineFsaSafetyValidator(
+                validator = OfflineSafetyValidator(
                     rules=agent.safety_rules,
                     dfa_map=agent.safety_logic.rule_dfas
                 )

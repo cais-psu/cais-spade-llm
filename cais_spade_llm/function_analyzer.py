@@ -39,6 +39,7 @@ class FunctionAnalyzer:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _json_schema(py_type) -> dict:
+        """Convert a Python type annotation into a minimal JSON Schema fragment."""
         origin = typing.get_origin(py_type)
 
         # list[...] / List[...]

@@ -1,7 +1,9 @@
 """SPADe entry point that collects initialization data, spins up agents, and keeps them running."""
 
 from __future__ import annotations
-import os, asyncio, logging
+import os, asyncio, logging, shutil
+from datetime import datetime, timezone
+from pathlib import Path
 from spade import run as spade_run
 import utils, agent_creator
 from function_analyzer import FunctionAnalyzer
@@ -17,8 +19,32 @@ RESOURCE_DIR = "cais_spade_llm/initialization/resources/"
 TOOLS_OUT    = "cais_spade_llm/initialization/tools.json"
 CCA_INIT     = "cais_spade_llm/initialization/cca.json"
 
+def _archive_dir(dir_path: Path, pattern: str, *, label: str) -> None:
+    """Archive matching files under dir_path into dir_path/archive/<timestamp>/."""
+    if not dir_path.exists():
+        return
+    files = [p for p in dir_path.glob(pattern) if p.is_file()]
+    if not files:
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_archive = dir_path / "archive" / stamp
+    run_archive.mkdir(parents=True, exist_ok=True)
+    for p in files:
+        try:
+            shutil.move(str(p), str(run_archive / p.name))
+        except Exception:
+            logging.getLogger("spade_main").exception(
+                "Failed to archive %s file: %s", label, p
+            )
+
 async def spade_main():
     """Orchestrate the entire SPADE session: load configs, spawn agents, register tools, and keep the loop alive."""
+    # Archive previous history logs (if any) at startup
+    _archive_dir(Path("cais_spade_llm/history"), "*.jsonl", label="history")
+
+    # Archive previous plan artifacts (if any) at startup
+    _archive_dir(Path("cais_spade_llm/plan"), "*.json", label="plan")
+
     # Collect initialization payloads describing products and hardware resources.
     prod_files = utils.get_init_files(PRODUCT_DIR)
     res_files  = utils.get_init_files(RESOURCE_DIR)

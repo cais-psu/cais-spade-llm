@@ -1,100 +1,94 @@
+"""Offline verifier that checks a compiled plan FSA against DFA safety rules."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Set, FrozenSet
-
+from typing import Any, Dict, List, Tuple, Set, FrozenSet, Optional
+from collections import defaultdict, deque
+import re
 from agents.central_controller.base_safety_checker import BaseSafetyChecker
 
 
 class OfflineSafetyValidator(BaseSafetyChecker):
     """
-    Offline validation of a plan (DAG) against LTLf-based DFA safety rules,
-    extended to handle rules involving multiple related events (3+ parts).
+    Offline validation of a *compiled FSA plan* against LTLf-based DFA safety rules.
 
-    Algorithm (per rule):
+    Plant model:
+      - Input is an FSA JSON of the form:
+          fsa["A"] = { "X": [...], "E": [...], "Tr": [...], "x0": "...", "Xm": ["..."] }
 
-      1) PROJECT:
-         - Keep only the tasks that actually emit APs used by this rule.
-           (All other tasks are irrelevant for this rule's DFA.)
+      - Transitions contain at least:
+          { "from": <state_name>, "event": <event_str>, "to": <state_name>, ... }
 
-      2) STRUCTURE:
-         - Use the full plan DAG to compute the induced partial order among
-           those relevant tasks (which relevant task must precede which).
+    Verification model (per rule):
+      - Explore ALL reachable product states (x, q) where:
+          x : plant (FSA) state
+          q : DFA state for the rule
+      - For each enabled plant transition (x --e--> x'):
+          sigma := AP-set emitted by that transition, projected to this rule's AP alphabet
+          q' := delta_rule(q, sigma)
+          if q' reaches violation_state => violation with witness trace
+      - Also apply an end-of-plan empty step (sigma=∅) whenever reaching a marked plant state x∈Xm
+        to catch eventualities.
 
-      3) PROJECTED DFS (small state space):
-         - Run a DFS only over the relevant tasks (usually small: 2–5),
-           exploring all valid topological orders consistent with the
-           induced partial order.
-         - For each explored schedule prefix, step the rule's DFA with the
-           APs emitted by the selected task.
-         - If the DFA reaches its violation_state at any prefix (including
-           the "end-of-plan" empty step), we report a violation with a
-           witness trace (list of task IDs).
+    AP mapping:
+      - Preferred: semantic mapping using BaseSafetyChecker._map_task_to_aps(resource, fn, params)
+        This requires either:
+          (a) transition carries resource_jid/function_name/params, OR
+          (b) you provide the original DAG plan (nodes) so we can look up task_id -> node.
 
-    This is:
-      - Rule-agnostic (no hard-coded constraint_type).
-      - Complete for that rule (if any schedule can violate it, we find one).
-      - Efficient, because we only explore interleavings of tasks that
-        actually matter to that rule.
+    Notes:
+      - This is *complete* wrt the FSA language: if any FSA path can violate a rule, we find one.
     """
 
-    # You can tune this if you ever worry about explosion.
-    MAX_RELEVANT_TASKS: int = 5
+    # Guardrail: stop if product graph explodes (tune as needed)
+    MAX_PRODUCT_STATES: int = 200_000
 
     def __init__(self, rules: List[Dict[str, Any]], dfa_map: Dict[str, str]) -> None:
-        """
-        rules   : list of structured rules with fields like:
-                  - id, raw_text, aps, ltlf, ...
-        dfa_map : { rule_id: dot_string } from ltlf2dfa
-
-        BaseSafetyChecker.__init__ will:
-          - parse all DOT strings into self.dfas[rule_id]
-          - store rules in self.safety_rules
-          - provide shared helpers: _map_task_to_aps, _delta, etc.
-        """
         # BaseSafetyChecker signature is (dfa_map, rules)
         super().__init__(dfa_map, rules)
+        self.rule_lookup: Dict[str, Dict[str, Any]] = {r["id"]: r for r in rules if r.get("id")}
 
-        # Quick lookup table: rule_id -> rule dict
-        self.rule_lookup: Dict[str, Dict[str, Any]] = {
-            r["id"]: r for r in rules if "id" in r
-        }
     # ------------------------------------------------------------------ #
     # PUBLIC ENTRY POINT
     # ------------------------------------------------------------------ #
-    def validate_plan_offline(
+    def validate_fsa_offline(
         self,
-        plan: dict,
+        fsa: Dict[str, Any],
+        plan: Optional[Dict[str, Any]] = None,
         product_jid: str | None = None,
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
-        Validate a static plan (JSON DAG) against all DFA safety rules.
+        Validate a compiled FSA against all DFA safety rules.
 
         Args:
-            plan        : dict with "nodes": [ {id, predecessors, ...}, ... ]
-            product_jid : optional identifier for logging.
+            fsa         : compiled FSA JSON dict (must contain fsa["A"])
+            plan        : optional original DAG plan dict (with "nodes") used for AP mapping
+            product_jid : optional identifier for logging
 
         Returns:
             (is_valid, violations)
-              - is_valid   : bool, True if no rule can be violated by any
-                             schedule consistent with the DAG.
-              - violations : list of violation entries (possibly empty).
         """
-        nodes = plan.get("nodes") or []
-        if not nodes:
+        A = (fsa or {}).get("A") or {}
+        Tr = A.get("Tr") or []
+        x0 = A.get("x0")
+        Xm = set(A.get("Xm") or [])
+
+        if not x0 or not Tr:
             return True, []
 
         self.logger.info(
-            "[OfflineValidator] Projected DFS validation for %s (%d tasks)...",
+            "[OfflineValidator] Validating FSA for %s (|Tr|=%d)...",
             product_jid,
-            len(nodes),
+            len(Tr),
         )
 
-        # 1) Build full DAG once: allows us to query reachability between tasks.
-        id_to_node, pred_map, succ_map = self._build_global_graph(nodes)
+        enabled = self._index_enabled(Tr)
+
+        # Optional: task_id -> node lookup from plan
+        task_lookup = self._build_task_lookup(plan)
 
         all_violations: List[Dict[str, Any]] = []
 
-        # 2) Check each safety rule independently.
         for rule in self.safety_rules:
             rule_id = rule.get("id")
             if not rule_id:
@@ -102,237 +96,158 @@ class OfflineSafetyValidator(BaseSafetyChecker):
 
             dfa = self.dfas.get(rule_id)
             if not dfa:
-                # No DFA available for this rule → skip.
                 continue
 
-            # AP labels used by this rule's DFA.
             aps_for_rule: Set[str] = set(dfa.get("ap_symbols", []))
             if not aps_for_rule:
-                # Rule has no APs to match → skip.
                 continue
 
-            # --- Step 2.1: PROJECT plan to tasks relevant for this rule ---
-            rel_nodes = self._relevant_nodes_for_rule(nodes, aps_for_rule)
-            if not rel_nodes:
-                # No events in this plan can trigger this rule.
-                continue
-
-            if len(rel_nodes) > self.MAX_RELEVANT_TASKS:
-                # Guardrail: relevant set unexpectedly large.
-                self.logger.warning(
-                    "[OfflineValidator] Rule %s has %d relevant tasks (> %d). "
-                    "Skipping exhaustive projected DFS for this rule.",
-                    rule_id,
-                    len(rel_nodes),
-                    self.MAX_RELEVANT_TASKS,
-                )
-                # You can choose to:
-                #  - skip (potential false negatives), or
-                #  - fall back to a simpler heuristic.
-                # For now, we skip to avoid explosion.
-                continue
-
-            # --- Step 2.2: STRUCTURE: induced partial order among relevant tasks ---
-            rel_pred_map = self._build_rel_pred_map(rel_nodes, pred_map, succ_map)
-
-            # --- Step 2.3: Precompute sigma (AP-set) per relevant task (for this rule) ---
-            sigma_for_node: Dict[str, FrozenSet[str]] = {}
-            for n in rel_nodes:
-                nid = str(n["id"])
-                full_sigma = self._aps_for_node(n)  # all APs triggered by this node
-                sigma_for_node[nid] = frozenset(
-                    ap for ap in full_sigma if ap in aps_for_rule
-                )
-
-            # --- Step 2.4: PROJECTED DFS over relevant tasks for this rule ---
-            violations = self._check_rule_projected_dfs(
+            violations = self._check_rule_on_fsa_product(
                 rule_id=rule_id,
                 rule=rule,
-                rel_nodes=rel_nodes,
-                rel_pred_map=rel_pred_map,
-                sigma_for_node=sigma_for_node,
+                x0=x0,
+                Xm=Xm,
+                enabled=enabled,
+                aps_for_rule=aps_for_rule,
+                task_lookup=task_lookup,
             )
-            all_violations.extend(violations)
 
-        is_valid = len(all_violations) == 0
-        return is_valid, all_violations
+            # Keep only ONE witness per rule
+            if violations:
+                all_violations.append(violations[0])
+        return (len(all_violations) == 0), all_violations
 
     # ------------------------------------------------------------------ #
-    # GLOBAL GRAPH BUILDERS
+    # INDEXING
     # ------------------------------------------------------------------ #
-    def _build_global_graph(
-        self,
-        nodes: List[Dict[str, Any]],
-    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Set[str]], Dict[str, Set[str]]]:
-        """
-        Build the full DAG structure from the plan nodes.
-
-        Returns:
-            id_to_node : { task_id -> node dict }
-            pred_map   : { task_id -> set(immediate predecessor ids) }
-            succ_map   : { task_id -> set(immediate successor ids) }
-        """
-        id_to_node: Dict[str, Dict[str, Any]] = {}
-        pred_map: Dict[str, Set[str]] = {}
-        succ_map: Dict[str, Set[str]] = {}
-
-        # Register all nodes and initialize pred/succ sets
-        for n in nodes:
-            nid = str(n.get("id"))
-            if not nid:
+    def _index_enabled(self, transitions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        enabled: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for t in transitions:
+            frm = t.get("from")
+            if frm is None:
                 continue
-            id_to_node[nid] = n
-            pred_map.setdefault(nid, set())
-            succ_map.setdefault(nid, set())
+            enabled[str(frm)].append(t)
+        return enabled
 
-        # Populate predecessors and successors from "predecessors" field
+    def _build_task_lookup(self, plan: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """
+        Build task_id -> node dict from DAG plan (optional).
+        """
+        if not plan:
+            return {}
+        nodes = plan.get("nodes") or []
+        out: Dict[str, Dict[str, Any]] = {}
         for n in nodes:
-            nid = str(n.get("id"))
-            if nid not in id_to_node:
-                continue
-            for p in n.get("predecessors", []):
-                pid = str(p)
-                if pid in id_to_node:
-                    pred_map[nid].add(pid)
-                    succ_map.setdefault(pid, set()).add(nid)
-
-        return id_to_node, pred_map, succ_map
-
-    def _reachable_in_full(
-        self,
-        succ_map: Dict[str, Set[str]],
-        src: str,
-        dst: str,
-    ) -> bool:
-        """
-        Check if there is a path src -> ... -> dst in the full DAG using succ_map.
-
-        This is used to compute the induced partial order among relevant tasks.
-        """
-        if src == dst:
-            return True
-
-        stack = [src]
-        seen: Set[str] = set()
-
-        while stack:
-            curr = stack.pop()
-            if curr == dst:
-                return True
-            for nxt in succ_map.get(curr, []):
-                if nxt not in seen:
-                    seen.add(nxt)
-                    stack.append(nxt)
-
-        return False
+            nid = n.get("id")
+            if nid:
+                out[str(nid)] = n
+        return out
 
     # ------------------------------------------------------------------ #
-    # PROJECTION HELPERS
+    # AP (SIGMA) MAPPING FOR FSA TRANSITIONS
     # ------------------------------------------------------------------ #
-    def _aps_for_node(self, node: Dict[str, Any]) -> List[str]:
-        """
-        Convenience wrapper: map a full task node to AP labels.
-
-        Uses BaseSafetyChecker._map_task_to_aps, which inspects:
-          - resource_jid
-          - function_name
-          - params
-        and matches them against rule["aps"][i]["full"] strings.
-        """
-        return self._map_task_to_aps(
-            node.get("resource_jid", "") or "",
-            node.get("function_name", "") or "",
-            node.get("params") or {},
-        )
-
-    def _relevant_nodes_for_rule(
+    def _sigma_for_transition(
         self,
-        nodes: List[Dict[str, Any]],
+        t: Dict[str, Any],
         aps_for_rule: Set[str],
-    ) -> List[Dict[str, Any]]:
+        task_lookup: Dict[str, Dict[str, Any]],
+    ) -> FrozenSet[str]:
         """
-        PROJECT step:
-          - Keep only tasks that emit at least one AP from aps_for_rule.
+        Compute sigma (AP label set) emitted by a plant transition, projected to this rule's AP alphabet.
 
-        This prunes away all nodes that cannot affect this rule's DFA state.
+        Preferred:
+          - Use semantic mapping from task metadata (resource/function/params) via BaseSafetyChecker._map_task_to_aps.
+        Fallback:
+          - If we cannot map, return empty sigma (safe but may cause false negatives).
         """
-        rel_nodes: List[Dict[str, Any]] = []
-        for n in nodes:
-            sigma = self._aps_for_node(n)
-            if any(ap in aps_for_rule for ap in sigma):
-                rel_nodes.append(n)
-        return rel_nodes
+        # Try to obtain task metadata from transition itself
+        resource_jid = t.get("resource_jid") or ""
+        function_name = t.get("function_name") or ""
+        params = t.get("params") or None
 
-    def _build_rel_pred_map(
+        # If not present, try plan lookup by task_id
+        if (not function_name or params is None or not resource_jid) and t.get("task_id"):
+            node = task_lookup.get(str(t["task_id"]))
+            if node:
+                resource_jid = resource_jid or (node.get("resource_jid") or "")
+                function_name = function_name or (node.get("function_name") or "")
+                if params is None:
+                    params = node.get("params") or {}
+
+        if params is None:
+            params = {}
+
+        if not resource_jid or not function_name:
+            # No semantic info → cannot map APs reliably in your current framework
+            return frozenset()
+
+        full_sigma = self._map_task_to_aps(resource_jid, function_name, params)
+        return frozenset(ap for ap in full_sigma if ap in aps_for_rule)
+
+
+    # ------------------------------------------------------------------ #
+    # AP (SIGMA) MAPPING FOR FSA STATES
+    # ------------------------------------------------------------------ #
+    def _sigma_for_state(
         self,
-        rel_nodes: List[Dict[str, Any]],
-        global_pred_map: Dict[str, Set[str]],
-        succ_map: Dict[str, Set[str]],
-    ) -> Dict[str, Set[str]]:
+        x: str,
+        aps_for_rule: Set[str],
+        ap_defs: Dict[str, str],  # label -> full AP string
+    ) -> FrozenSet[str]:
         """
-        STRUCTURE step:
-          - Given the subset of relevant tasks for a rule, build the induced
-            partial order among them.
+        State-based labeling: return the set of AP labels that are TRUE in global plant state x.
 
-        For each pair (A, B) of relevant tasks:
-          - If there is a path A -> ... -> B in the full DAG, then A must
-            precede B for this rule. We record A in rel_pred_map[B].
-
-        Output:
-          rel_pred_map[nid] = set of relevant task IDs that must precede nid.
+        Assumption: global state encodes running like:
+            "<resource>@...=(...,run=task_id:function_name)"
+        and state APs use:
+            st/<process>/<product>/<resource>/<event>/<context>
         """
-        rel_ids = [str(n["id"]) for n in rel_nodes]
-        rel_pred_map: Dict[str, Set[str]] = {nid: set() for nid in rel_ids}
+        # Map (resource, event) -> ap_label for this rule
+        key_to_label: Dict[Tuple[str, str], str] = {}
+        for label, full in ap_defs.items():
+            parts = str(full).split("/")
+            # expected: st/<process>/<product>/<resource>/<event>/<context>
+            if len(parts) >= 6 and parts[0] == "ap":
+                resource = parts[3]
+                event = parts[4]
+                key_to_label[(resource, event)] = label
 
-        for i, ida in enumerate(rel_ids):
-            for j, idb in enumerate(rel_ids):
-                if i == j:
-                    continue
-                # Check reachability in full DAG: ida →* idb?
-                if self._reachable_in_full(succ_map, ida, idb):
-                    rel_pred_map[idb].add(ida)
+        sigma: Set[str] = set()
 
-        return rel_pred_map
+        # Extract currently running (resource,event) from the global state string
+        for m in re.finditer(
+            r"([A-Za-z0-9_-]+)@[^=]*=\([^)]*?run=[^:,\)]+:([A-Za-z0-9_-]+)",
+            str(x),
+        ):
+            resource = m.group(1)
+            event = m.group(2)
+            label = key_to_label.get((resource, event))
+            if label and label in aps_for_rule:
+                sigma.add(label)
+
+        return frozenset(sigma)
+
 
     # ------------------------------------------------------------------ #
-    # PROJECTED DFS PER RULE
+    # PRODUCT SEARCH PER RULE
     # ------------------------------------------------------------------ #
-    def _check_rule_projected_dfs(
+    def _check_rule_on_fsa_product(
         self,
         rule_id: str,
         rule: Dict[str, Any],
-        rel_nodes: List[Dict[str, Any]],
-        rel_pred_map: Dict[str, Set[str]],
-        sigma_for_node: Dict[str, FrozenSet[str]],
+        x0: str,
+        Xm: Set[str],
+        enabled: Dict[str, List[Dict[str, Any]]],
+        aps_for_rule: Set[str],
+        task_lookup: Dict[str, Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        Explore all valid schedules over the relevant tasks for a rule, and
-        step that rule's DFA along each schedule.
-
-        State in DFS:
-          - done_mask : bitmask over relevant tasks (which have executed)
-          - q         : current DFA state
-          - trace     : list of task IDs (witness sequence of relevant events)
-
-        Transitions:
-          - At a given state, a relevant task T is 'enabled' if:
-              • T is not yet done, and
-              • all relevant predecessors of T (per rel_pred_map) are done.
-
-          - Picking T advances the DFA with sigma_for_node[T].
-          - If DFA hits violation_state at any prefix, we record a violation
-            with the current trace (including T) and do not expand that branch.
-          - When all relevant tasks are done, we also apply an "end-of-plan"
-            empty step (sigma = ∅) to catch rules that require some eventuality.
-
-        visited set:
-          - We memoize (done_mask, q) to avoid re-exploring identical prefixes.
+        Explore reachable (x,q) states and detect any violation.
         """
         dfa = self.dfas[rule_id]
-        initial_state: str = dfa["initial"]
+        q0: str = dfa["initial"]
         violation_state: str | None = dfa.get("violation_state")
 
-        # For reporting: AP label -> full AP string.
         rule_info = self.rule_lookup.get(rule_id, {})
         ap_defs = {
             ap["label"]: ap.get("full", "")
@@ -340,156 +255,143 @@ class OfflineSafetyValidator(BaseSafetyChecker):
             if ap.get("label")
         }
 
-        # Map relevant IDs to indices in bitmask.
-        rel_ids = [str(n["id"]) for n in rel_nodes]
-        idx_of: Dict[str, int] = {nid: i for i, nid in enumerate(rel_ids)}
-        n_rel = len(rel_ids)
-        full_mask = (1 << n_rel) - 1
+        start = (str(x0), str(q0))
+        parent: Dict[Tuple[str, str], Optional[Tuple[str, str]]] = {start: None}
+        parent_edge: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {start: None}
+
+        stack = deque([start])
+        seen: Set[Tuple[str, str]] = {start}
 
         violations: List[Dict[str, Any]] = []
 
-        # DFS stack: (done_mask, q, trace_of_task_ids)
-        stack: List[Tuple[int, str, List[str]]] = [(0, initial_state, [])]
-
-        # Visited set to prune identical prefixes: (done_mask, q)
-        visited: Set[Tuple[int, str]] = {(0, initial_state)}
-
         while stack:
-            done_mask, q, trace = stack.pop()
+            x, q = stack.pop()
 
-            # --- End-of-plan check: all relevant tasks done ---
-            if done_mask == full_mask:
-                # Apply empty sigma once after finishing all relevant tasks.
-                empty_sigma: FrozenSet[str] = frozenset()
-                q_end = self._delta(rule_id, q, empty_sigma)
-
+            # End-of-plan check when plant is in a marked state
+            if x in Xm:
+                q_end = self._delta(rule_id, q, frozenset())
                 if violation_state and q_end == violation_state:
-                    violations.append(self._build_violation_entry_with_trace(
+                    trace = self._reconstruct_trace((x, q), parent, parent_edge)
+                    violations.append(self._build_fsa_violation_entry(
                         rule_id=rule_id,
                         rule=rule_info,
                         ap_defs=ap_defs,
-                        trace=trace,
-                        rel_nodes=rel_nodes,
-                        rel_pred_map=rel_pred_map,
-                        sigma_for_node=sigma_for_node,
+                        witness=trace,
                     ))
-                # No further expansion from fully-done state.
-                continue
-
-            # --- Determine which relevant tasks are enabled at this prefix ---
-            enabled_ids: List[str] = []
-            for nid in rel_ids:
-                i = idx_of[nid]
-                if (done_mask >> i) & 1:
-                    # Already done.
+                    # You can continue searching to find more witnesses; usually one is enough.
                     continue
 
-                preds = rel_pred_map.get(nid, set())
-                # All relevant predecessors must be in done_mask.
-                all_preds_done = True
-                for p in preds:
-                    pi = idx_of[p]
-                    if not ((done_mask >> pi) & 1):
-                        all_preds_done = False
-                        break
+            # Expand all enabled plant transitions from x
+            for t in enabled.get(x, []):
+                x2 = str(t.get("to"))
+                if not x2:
+                    continue
 
-                if all_preds_done:
-                    enabled_ids.append(nid)
+                #sigma = self._sigma_for_transition(t, aps_for_rule, task_lookup)
+                #q2 = self._delta(rule_id, q, sigma)
+                sigma = self._sigma_for_state(x2, aps_for_rule, ap_defs)
+                q2 = self._delta(rule_id, q, sigma)
 
-            # --- Try each enabled task as the next event in the schedule ---
-            for nid in enabled_ids:
-                sigma = sigma_for_node.get(nid, frozenset())
-                new_q = self._delta(rule_id, q, sigma)
-                new_trace = trace + [nid]
+                if violation_state and q2 == violation_state:
+                    # Found violation witness
+                    # record (x2,q2) as the violating product state for trace reconstruction
+                    violating = (x2, q2)
+                    if violating not in parent:
+                        parent[violating] = (x, q)
+                        
+                        t_dbg = dict(t)
+                        t_dbg["_sigma"] = sorted(list(sigma))
+                        t_dbg["_q_from"] = q
+                        t_dbg["_q_to"] = q2
+                        parent_edge[violating] = t_dbg
+                        
+                    trace = self._reconstruct_trace(violating, parent, parent_edge)
 
-                # Immediate violation at this prefix?
-                if violation_state and new_q == violation_state:
-                    violations.append(self._build_violation_entry_with_trace(
+                    violations.append(self._build_fsa_violation_entry(
                         rule_id=rule_id,
                         rule=rule_info,
                         ap_defs=ap_defs,
-                        trace=new_trace,
-                        rel_nodes=rel_nodes,
-                        rel_pred_map=rel_pred_map,
-                        sigma_for_node=sigma_for_node,
+                        witness=trace,
                     ))
-                    # Do not expand this branch further.
-                    continue
-                new_mask = done_mask | (1 << idx_of[nid])
-                state_sig = (new_mask, new_q)
-
-                if state_sig in visited:
-                    # Already explored this (mask, DFA state) combination.
+                    # Do not expand this violating successor
                     continue
 
-                visited.add(state_sig)
-                stack.append((new_mask, new_q, new_trace))
+                s2 = (x2, q2)
+                if s2 in seen:
+                    continue
+
+                seen.add(s2)
+                parent[s2] = (x, q)
+                                
+                t_dbg = dict(t)
+                t_dbg["_sigma"] = sorted(list(sigma))
+                t_dbg["_q_from"] = q
+                t_dbg["_q_to"] = q2
+                parent_edge[s2] = t_dbg
+
+                stack.append(s2)
+
+                if len(seen) > self.MAX_PRODUCT_STATES:
+                    self.logger.warning(
+                        "[OfflineValidator] Product state limit reached (%d). "
+                        "Stopping exploration for rule %s.",
+                        self.MAX_PRODUCT_STATES,
+                        rule_id,
+                    )
+                    return violations
 
         return violations
 
+    def _reconstruct_trace(
+        self,
+        end_state: Tuple[str, str],
+        parent: Dict[Tuple[str, str], Optional[Tuple[str, str]]],
+        parent_edge: Dict[Tuple[str, str], Optional[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Reconstruct witness as a list of plant transitions (dicts) along the product path.
+        """
+        path: List[Dict[str, Any]] = []
+        cur = end_state
+        while True:
+            pe = parent_edge.get(cur)
+            if pe is not None:
+                path.append(pe)
+            prev = parent.get(cur)
+            if prev is None:
+                break
+            cur = prev
+        path.reverse()
+        return path
+
     # ------------------------------------------------------------------ #
-    # VIOLATION ENTRY BUILDER
+    # VIOLATION REPORT
     # ------------------------------------------------------------------ #
-    def _build_violation_entry_with_trace(
-            self,
-            rule_id: str,
-            rule: Dict[str, Any],
-            ap_defs: Dict[str, str],
-            trace: List[str],
-            *,
-            rel_nodes: List[Dict[str, Any]] | None = None,
-            rel_pred_map: Dict[str, Set[str]] | None = None,
-            sigma_for_node: Dict[str, FrozenSet[str]] | None = None,
-        ) -> Dict[str, Any]:
-            """
-            Build a rich violation entry for reporting, including:
+    def _build_fsa_violation_entry(
+        self,
+        rule_id: str,
+        rule: Dict[str, Any],
+        ap_defs: Dict[str, str],
+        witness: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Build a violation entry including a witness transition sequence.
 
-            - violated_rule_id
-            - human-readable rule text and logic
-            - AP definitions (label -> full string)
-            - witness_trace       : list of task IDs that lead to violation
+        witness_transitions: list of transitions (from,event,to,task_id,...)
+        witness_events:      list of event strings
+        witness_task_ids:    list of task_ids (if present)
+        """
+        witness_events = [str(t.get("event", "")) for t in witness if t.get("event")]
+        witness_task_ids = [str(t.get("task_id")) for t in witness if t.get("task_id")]
 
-            Optionally, we also include a small projected subgraph for this rule:
+        return {
+            "violated_rule_id": rule_id,
+            "violation_text": rule.get("raw_text", ""),
+            "violation_logic": rule.get("ltlf", ""),
+            "ap_definitions": ap_defs,
 
-            - relevant_tasks      : list of task dicts involved in this rule
-            - relevant_pred_map   : {task_id -> [relevant predecessor ids]}
-            - sigma_per_task      : {task_id -> [AP labels for this rule]}
-            - witness_tasks       : the subset of relevant_tasks that lie on
-                                    the witness_trace (in the same order)
-            """
-            entry: Dict[str, Any] = {
-                "violated_rule_id": rule_id,
-                "violation_text": rule.get("raw_text", ""),
-                "violation_logic": rule.get("ltlf", ""),
-                "ap_definitions": ap_defs,
-                "witness_trace": trace,
-            }
-
-            id_to_node: Dict[str, Dict[str, Any]] = {}
-
-            if rel_nodes is not None:
-                # Shallow copy so later mutations to the plan do not affect this snapshot.
-                rel_copies = [dict(n) for n in rel_nodes]
-                entry["relevant_tasks"] = rel_copies
-
-                id_to_node = {str(n.get("id")): n for n in rel_copies}
-
-                # Tasks on the witness trace (in order)
-                entry["witness_tasks"] = [
-                    id_to_node[tid] for tid in trace if tid in id_to_node
-                ]
-
-            if rel_pred_map is not None:
-                entry["relevant_pred_map"] = {
-                    nid: sorted(list(preds)) for nid, preds in rel_pred_map.items()
-                }
-
-            if sigma_for_node is not None:
-                # If we know the relevant tasks, limit to those IDs; otherwise use all.
-                keys = list(id_to_node.keys()) if id_to_node else list(sigma_for_node.keys())
-                entry["sigma_per_task"] = {
-                    nid: sorted(list(sigma_for_node.get(nid, frozenset())))
-                    for nid in keys
-                }
-
-            return entry
+            # Witness info
+            "witness_events": witness_events,
+            "witness_task_ids": witness_task_ids,
+            "witness_transitions": [dict(t) for t in witness],  # shallow copies
+        }

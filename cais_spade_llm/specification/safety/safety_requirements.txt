@@ -1,2 +1,1 @@
-- xarm6 and ur5e should not pick_parts at the same time.
-- ur5e must move_loaded_to_destination before xarm6 move_loaded_to_destination.
+- MCP must be place_part before SG is place_part

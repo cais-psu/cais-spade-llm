@@ -1,3 +1,5 @@
+"""Safety rule parsing and LTLf/DFA generation utilities."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,6 +25,7 @@ class SafetyLogic:
     """
 
     def __init__(self, controller_agent, safety_file: str | Path) -> None:
+        """Bind to a controller agent and set up safety rule storage paths."""
         self.controller_agent = controller_agent
         self.logger = controller_agent.logger
         self.safety_file = Path(safety_file)

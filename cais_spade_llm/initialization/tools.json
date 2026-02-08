@@ -33,6 +33,39 @@
     "description": "Move the loaded part to its destination location."
   },
   {
+    "function": "pick_part",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "printed",
+    "out_state": "picked",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Pick a printed part from an origin location."
+  },
+  {
     "function": "place_part",
     "function_owner_agent": "xarm6",
     "process": "assembly",
@@ -97,39 +130,6 @@
       }
     },
     "description": "Move empty gripper to the part's origin location."
-  },
-  {
-    "function": "pick_part",
-    "function_owner_agent": "xarm6",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "printed",
-    "out_state": "picked",
-    "required_context_keys": [
-      "origin"
-    ],
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper configuration."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Pick a printed part from an origin location."
   },
   {
     "function": "move_loaded_to_destination",
@@ -165,6 +165,39 @@
     "description": "Move the loaded part to its destination location."
   },
   {
+    "function": "pick_part",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "printed",
+    "out_state": "picked",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Pick a printed part from an origin location."
+  },
+  {
     "function": "place_part",
     "function_owner_agent": "ur5e",
     "process": "assembly",
@@ -229,38 +262,5 @@
       }
     },
     "description": "Move empty gripper to the part's origin location."
-  },
-  {
-    "function": "pick_part",
-    "function_owner_agent": "ur5e",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "printed",
-    "out_state": "picked",
-    "required_context_keys": [
-      "origin"
-    ],
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper configuration."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Pick a printed part from an origin location."
   }
 ]

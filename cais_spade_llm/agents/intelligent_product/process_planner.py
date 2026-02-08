@@ -1,3 +1,5 @@
+"""Process planner that turns requirements into tasks and plan automata."""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +16,7 @@ class ProcessPlanner:
     """
 
     def __init__(self, product_agent, resource_agents: Iterable[Any]):
+        """Initialize planner state with agent references and empty node graphs."""
         self.product_agent = product_agent
         self.resource_agents = list(resource_agents)
         self.logger = product_agent.logger
@@ -69,6 +72,7 @@ class ProcessPlanner:
 
 
     async def _llm_parse_requirements(self, requirement_text: str) -> list[dict[str, Any]]:
+        """Call the LLM to parse requirements into a structured list."""
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
 
         prompt = build_requirement_parse_prompt(requirement_text, tools_catalog)
@@ -230,33 +234,38 @@ class ProcessPlanner:
 
 
     # ------------------------------------------------------------------ #
-    # 3. REPLAN WHEN SAFETY VIOLATION OCCURS
+    # 3. REPLAN WHEN SAFETY VIOLATION OR ONLINE FAILURE OCCURS
     # ------------------------------------------------------------------ #
-    async def replan_with_feedback(self, violations: list[dict]) -> None:
-        self.logger.info("[Planner] Triggering LLM Re-planning with safety feedback...")
+    async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
+        """Offline replan using safety validator feedback."""
+        await self._replan_with_feedback(violations, source="offline")
+
+    async def replan_with_feedback_online(self, violations: list[dict]) -> None:
+        """Online replan using runtime failure/block feedback."""
+        await self._replan_with_feedback(violations, source="online")
+
+    async def _replan_with_feedback(self, violations: list[dict], *, source: str) -> None:
+        """Shared replanning routine used by both offline and online feedback flows."""
+        self.logger.info("[Planner] Triggering LLM Re-planning with %s feedback...", source)
         
         # 1. Gather all tasks
         failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
 
         # 2. Extract the "Conflict Set" - IDs of tasks involved in violations
-        conflict_task_ids = set()
-        for v in violations:
-            # Add tasks from the witness trace
-            conflict_task_ids.update(v.get("witness_trace", []))
-            
-            # Optionally add relevant tasks if provided by the validator
-            rel_tasks = v.get("relevant_tasks", [])
-            for rt in rel_tasks:
-                if "id" in rt:
-                    conflict_task_ids.add(rt["id"])
+        conflict_task_ids = self._extract_conflict_task_ids(violations, source=source)
 
         # 3. Mark the nodes in the payload so the LLM knows what to focus on
         plan_payload = []
         for node in failed_nodes:
             node_copy = node.copy()
-            if node_copy["id"] in conflict_task_ids:
+            if conflict_task_ids and node_copy["id"] in conflict_task_ids:
                 node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
             plan_payload.append(node_copy)
+
+        if not conflict_task_ids:
+            self.logger.warning(
+                "[Planner] No conflict task IDs found in feedback; sending full plan context."
+            )
 
         # --- DEFINITIONS RESTORED HERE ---
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
@@ -288,8 +297,6 @@ class ProcessPlanner:
             caps_overview=caps_overview,
         )
 
-        print(prompt)
-        
         raw = await self.product_agent.ask_llm(
             prompt=prompt,
             with_functions=False,
@@ -392,6 +399,58 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     # Scheduling helpers
     # ------------------------------------------------------------------ #
+    def _extract_conflict_task_ids(self, violations: list[dict], *, source: str) -> Set[str]:
+        """Normalize offline/online feedback into a conflict task ID set."""
+        conflict_task_ids: Set[str] = set()
+
+        def _add_ids(values: Any) -> None:
+            if isinstance(values, (list, tuple, set)):
+                for v in values:
+                    if v:
+                        conflict_task_ids.add(str(v))
+            elif isinstance(values, str) and values:
+                conflict_task_ids.add(values)
+
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+
+            if source == "offline":
+                _add_ids(v.get("witness_trace"))
+                _add_ids(v.get("witness_task_ids"))
+                _add_ids(v.get("conflict_task_ids"))
+
+                witness_transitions = v.get("witness_transitions") or []
+                for t in witness_transitions:
+                    tid = t.get("task_id") if isinstance(t, dict) else None
+                    if tid:
+                        conflict_task_ids.add(str(tid))
+
+                rel_tasks = v.get("affected_tasks", [])
+                if isinstance(rel_tasks, list):
+                    for rt in rel_tasks:
+                        if isinstance(rt, dict) and "id" in rt:
+                            conflict_task_ids.add(str(rt["id"]))
+            else:
+                _add_ids(v.get("failed_task_id"))
+                _add_ids(v.get("task_id"))
+                _add_ids(v.get("blocked_task_ids"))
+                _add_ids(v.get("unreachable_task_ids"))
+                _add_ids(v.get("impact_task_ids"))
+                _add_ids(v.get("affected_task_ids"))
+
+                rel_tasks = v.get("affected_tasks", [])
+                if isinstance(rel_tasks, list):
+                    for rt in rel_tasks:
+                        if isinstance(rt, dict) and "id" in rt:
+                            conflict_task_ids.add(str(rt["id"]))
+                dep_tasks = v.get("dependent_tasks", [])
+                if isinstance(dep_tasks, list):
+                    for rt in dep_tasks:
+                        if isinstance(rt, dict) and "id" in rt:
+                            conflict_task_ids.add(str(rt["id"]))
+
+        return conflict_task_ids
     def _ensure_graph_consistency(self) -> None:
         """
         Helper to ensure that if A lists B as a predecessor, 
@@ -420,12 +479,20 @@ class ProcessPlanner:
                         s_node.setdefault("predecessors", []).append(nid)
 
     def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Return the first node with the matching id (or None)."""
         for n in self.nodes:
             if n.get("id") == node_id:
                 return n
         return None
 
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
+        """Select the next task whose predecessors are all satisfied."""
+        def _pred_satisfied(status: Any) -> bool:
+            # Allow successors to proceed even if a predecessor failed.
+            if status == "completed":
+                return True
+            return isinstance(status, str) and status.startswith("failed")
+
         for node in self.nodes:
             if node.get("type") != "task":
                 continue
@@ -436,7 +503,7 @@ class ProcessPlanner:
             if not preds:
                 return node
 
-            if all(self._find_node(pid).get("status") == "completed" for pid in preds):
+            if all(_pred_satisfied(self._find_node(pid).get("status")) for pid in preds):
                 return node
 
         return None
@@ -466,6 +533,7 @@ class ProcessPlanner:
     # Build Global FSA
     # ------------------------------------------------------------------ #
     def compile_global_fsa(self) -> Dict[str, Any]:
+        """Compile the task DAG into a global plan FSA for offline/online monitoring."""
 
         # ---- extract task nodes ----
         tasks = [n for n in self.nodes if n.get("type") == "task"]

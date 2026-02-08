@@ -82,6 +82,7 @@ class ProductAgent(LlmAgent):
     # Persistence helper
     # ------------------------------------------------------------------ #
     def _build_plan_validation_payload(self):
+        """Package plan + FSA for offline safety validation by the CCA."""
         fsa = self.process_planner.global_fsa
         nodes = self.process_planner.nodes
 
@@ -120,6 +121,11 @@ class ProductAgent(LlmAgent):
         t_ack = Template()
         t_ack.set_metadata("type", "ack")
         self.add_behaviour(self._AckInbox(), t_ack)
+
+        # Replan request inbox (from CCA)
+        t_replan = Template()
+        t_replan.set_metadata("type", "replan_request")
+        self.add_behaviour(self._ReplanInbox(), t_replan)
 
         # Plan executor (runs cycles, dispatches DAG tasks)
         # self.add_behaviour(self._PlanExecutor())
@@ -215,6 +221,7 @@ class ProductAgent(LlmAgent):
         return None
 
     async def _build_plan(self, requirement_text: str, safety_text: str = ""):
+        """Build requirements, expand to tasks, and compile the global FSA."""
         # 1) NL → structured requirements
         await self.process_planner.build_high_level(requirement_text)
         self.process_planner.save(self.structured_requirements_path)
@@ -280,7 +287,7 @@ class ProductAgent(LlmAgent):
                 agent.logger.warning(f"[Product] Plan FAILED safety check ({len(violations)} violations). Triggering Re-plan...")
                 
                 # Call the new Re-planning method
-                await agent.process_planner.replan_with_feedback(violations)
+                await agent.process_planner.replan_with_feedback_offline(violations)
                 
                 # Loop continues to validate the NEW plan
 
@@ -323,6 +330,51 @@ class ProductAgent(LlmAgent):
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
             )
+
+    class _ReplanInbox(CyclicBehaviour):
+        """Handle online replan requests from the CCA."""
+
+        async def run(self):
+            agent: "ProductAgent" = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning("[Product] Malformed replan_request body.")
+                return
+
+            reason = payload.get("reason", "unknown")
+            event = payload.get("event") or {}
+            plan_ctx = payload.get("plan_ctx") or {}
+            safety_ctx = payload.get("safety_ctx") or {}
+            failure_ctx = event.get("failure_context") or {}
+
+            failed_task_id = event.get("task_id") or plan_ctx.get("failed_task_id")
+            if not failed_task_id:
+                agent.logger.warning("[Product] Replan request missing failed_task_id.")
+                return
+
+            violations = agent._build_online_replan_violations(
+                reason=reason,
+                failed_task_id=str(failed_task_id),
+                plan_ctx=plan_ctx,
+                safety_ctx=safety_ctx,
+                failure_ctx=failure_ctx,
+            )
+
+            agent.logger.info(
+                "[Product] Online replan payload: %s", json.dumps(violations, ensure_ascii=False)
+            )
+            agent.logger.warning(
+                "[Product] Online replan requested (%s) for failed task %s.",
+                reason,
+                failed_task_id,
+            )
+            await agent.process_planner.replan_with_feedback_online(violations)
+            agent._persist_plan_snapshot()
 
     class _PlanExecutor(CyclicBehaviour):
         """
@@ -403,3 +455,62 @@ class ProductAgent(LlmAgent):
             if agent_jid and agent_jid in target_jids_lower:
                 matched.append(agent)
         return matched
+
+    def _collect_descendants(self, root_id: str) -> list[str]:
+        """Return all descendant task IDs in the current planner DAG."""
+        succ_map: dict[str, list[str]] = {}
+        for node in self.process_planner.nodes:
+            if node.get("type") != "task":
+                continue
+            nid = node.get("id")
+            if not nid:
+                continue
+            succs = node.get("successors") or []
+            succ_map[str(nid)] = [str(s) for s in succs if s]
+
+        seen: set[str] = set()
+        stack = [root_id]
+        while stack:
+            cur = stack.pop()
+            for nxt in succ_map.get(cur, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return sorted(seen)
+
+    def _build_online_replan_violations(
+        self,
+        *,
+        reason: str,
+        failed_task_id: str,
+        plan_ctx: dict,
+        safety_ctx: dict,
+        failure_ctx: dict,
+    ) -> list[dict]:
+        """
+        Build a standardized online replanning payload for the planner.
+        """
+        descendants = self._collect_descendants(failed_task_id)
+        # Prefer explicit failed-task descendants; fall back to legacy names if present.
+        unreachable = (
+            plan_ctx.get("failed_task_descendant_ids")
+            or plan_ctx.get("failure_blocked_task_ids")
+            or plan_ctx.get("blocked_by_failure_task_ids")
+            or plan_ctx.get("unreachable_task_ids")
+            or []
+        )
+        # Ensure the failed task itself is included if present.
+        failed_task_id = plan_ctx.get("failed_task_id")
+        if failed_task_id:
+            unreachable = sorted(set(unreachable) | {str(failed_task_id)})
+        affected_task_ids = sorted(set(unreachable) | set(descendants))
+
+        return [
+            {
+                "type": reason,
+                "failed_task_id": str(failed_task_id),
+                "affected_task_ids": affected_task_ids,
+                "failure_context": failure_ctx,
+                "safety_ctx": safety_ctx,
+            }
+        ]

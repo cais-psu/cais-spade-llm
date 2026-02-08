@@ -1,3 +1,4 @@
+// CAD model: medium_gear
 // Single spur gear example using BOSL2
 
 include <BOSL2/std.scad>;

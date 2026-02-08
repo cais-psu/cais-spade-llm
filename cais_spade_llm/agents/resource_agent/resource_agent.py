@@ -84,6 +84,44 @@ class ResourceAgent(LlmAgent):
         t_safety.set_metadata("type", "safety_decision")
         self.add_behaviour(self._SafetyDecisionInbox(), t_safety)
 
+    def _snapshot_state(self) -> Dict[str, Any]:
+        """
+        Best-effort snapshot of resource state for failure context.
+        Subclasses can override to provide richer state.
+        """
+        return {}
+
+    def _build_failure_context(
+        self,
+        *,
+        fn_name: str,
+        fn_args: Dict[str, Any],
+        result: Dict[str, Any] | None,
+        final_status: str,
+        state_before: Dict[str, Any],
+        state_after: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build a generic, non-hardcoded failure context payload.
+        """
+        failure_context: Dict[str, Any] = {}
+
+        if isinstance(result, dict) and isinstance(result.get("failure_context"), dict):
+            failure_context.update(result.get("failure_context") or {})
+
+        if isinstance(final_status, str) and final_status.startswith("failed"):
+            failure_context.setdefault("function_name", fn_name)
+            failure_context.setdefault(
+                "failure_mode",
+                final_status.split(":", 1)[1] if ":" in final_status else final_status,
+            )
+            if state_before:
+                failure_context.setdefault("state_before", state_before)
+            if state_after:
+                failure_context.setdefault("state_after", state_after)
+
+        return failure_context
+
     async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
         """
         Block until a safety_decision is available for this task_id.
@@ -145,30 +183,39 @@ class ResourceAgent(LlmAgent):
             # Confirm receipt immediately so the ProductAgent can show progress even before execution.
             await self._ack(msg, task_id=task_id, status="accepted")
 
-            # ----- LLM tool selection ----- #
-            try:
-                # Force the LLM to pick an explicit tool so we never free-text a task.
-                llm_resp = await asyncio.wait_for(
-                    agent.ask_llm(
-                        instruction,
-                        with_functions=True,
-                        force_tool=True,
-                    ),
-                    timeout=agent.llm_timeout_s,
-                )
-            except asyncio.TimeoutError:
-                await self._ack(msg, task_id=task_id, status="llm_timeout")
-                return
-            except Exception as e:
-                agent.logger.exception("[Resource] LLM failure")
-                await self._ack(
-                    msg,
-                    task_id=task_id,
-                    status=f"failed:llm:{type(e).__name__}",
-                )
-                return
+            # ----- Tool selection ----- #
+            # If the instruction already specifies a tool, honor it and skip the LLM.
+            fn_name = None
+            fn_args: Dict[str, Any] = {}
+            if isinstance(instruction, dict):
+                fn_name = instruction.get("function_name") or instruction.get("function")
+                if isinstance(instruction.get("params"), dict):
+                    fn_args = dict(instruction.get("params") or {})
 
-            fn_name, fn_args = _parse_function_call(llm_resp)
+            if not fn_name:
+                try:
+                    # Force the LLM to pick an explicit tool so we never free-text a task.
+                    llm_resp = await asyncio.wait_for(
+                        agent.ask_llm(
+                            instruction,
+                            with_functions=True,
+                            force_tool=True,
+                        ),
+                        timeout=agent.llm_timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    await self._ack(msg, task_id=task_id, status="llm_timeout")
+                    return
+                except Exception as e:
+                    agent.logger.exception("[Resource] LLM failure")
+                    await self._ack(
+                        msg,
+                        task_id=task_id,
+                        status=f"failed:llm:{type(e).__name__}",
+                    )
+                    return
+
+                fn_name, fn_args = _parse_function_call(llm_resp)
             if not fn_name:
                 agent.logger.info(
                     f"[Resource] ({task_id}) no_tool_match; responding."
@@ -222,7 +269,7 @@ class ResourceAgent(LlmAgent):
             # ---------------------------
             await self._ack(msg, task_id=task_id, status="running")
 
-            running_msg = Message(to="cca@localhost")
+            running_msg = Message(to=agent.cca_jid)
             running_msg.set_metadata("type", "resource_event")
             running_msg.body = json.dumps({
                 "task_id": task_id,
@@ -237,15 +284,26 @@ class ResourceAgent(LlmAgent):
             #  EXECUTE THE TOOL
             # ---------------------------
             try:
+                state_before = agent._snapshot_state()
                 result = await asyncio.wait_for(
                     func(**fn_args),
                     timeout=agent.tool_timeout_s,
                 )
+                state_after = agent._snapshot_state()
                 final_status = (result or {}).get("status") or "completed"
 
                 # ----- RESOURCE EVENT: TASK FINISHED (notify CCA) ----- #
                 try:
-                    done_msg = Message(to="cca@localhost")
+                    failure_context = agent._build_failure_context(
+                        fn_name=fn_name,
+                        fn_args=fn_args,
+                        result=result if isinstance(result, dict) else None,
+                        final_status=final_status,
+                        state_before=state_before,
+                        state_after=state_after,
+                    )
+
+                    done_msg = Message(to=agent.cca_jid)
                     done_msg.set_metadata("type", "resource_event")
                     done_msg.body = json.dumps({
                         "task_id": task_id,
@@ -253,6 +311,7 @@ class ResourceAgent(LlmAgent):
                         "function_name": fn_name,
                         "params": fn_args,
                         "status": final_status,  # e.g. "completed", "blocked", etc.
+                        "failure_context": failure_context,
                     })
                     # fire-and-forget so we don't block on CCA
                     asyncio.create_task(self.send(done_msg))
@@ -263,10 +322,28 @@ class ResourceAgent(LlmAgent):
 
             except asyncio.TimeoutError:
                 agent.logger.exception("[Resource] Tool execution timeout")
-                final_status = "tool_timeout"
+                final_status = "failed:tool_timeout"
             except Exception as e:
                 agent.logger.exception("[Resource] Tool execution failed")
                 final_status = f"failed:tool:{type(e).__name__}"
+
+            # Notify CCA of failure so it can clean up running_aps / FSA state.
+            if isinstance(final_status, str) and final_status.startswith("failed"):
+                try:
+                    fail_msg = Message(to=agent.cca_jid)
+                    fail_msg.set_metadata("type", "resource_event")
+                    fail_msg.body = json.dumps({
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": final_status,
+                    })
+                    await self.send(fail_msg)
+                except Exception:
+                    agent.logger.exception(
+                        "[Resource] Failed to send fail resource_event to CCA."
+                    )
 
             # ---------------------------
             #  SEND FINAL ACK TO PA

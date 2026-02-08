@@ -30,8 +30,10 @@ class LlmAgent(Agent):
         *,
         name: Optional[str] = None,
         agent_role: str = "",
-        model: str = "gpt-4o",
-        non_function_model: str = "gpt-4o-mini",
+        #model: str = "gpt-4o",
+        #non_function_model: str = "gpt-4o",
+        model: str = "gpt-5",
+        non_function_model: str = "gpt-5",        
         instructions: Optional[str] = None,
         function_names: Optional[List[str]] = None,
     ) -> None:
@@ -217,13 +219,15 @@ class LlmAgent(Agent):
                             messages=msgs,
                             tools=tools,
                             tool_choice=("required" if force_tool else "auto"),
-                            temperature=temperature,
+                            reasoning_effort="low",
+                            #temperature=temperature,
                         )
                     else:
                         r = _client.chat.completions.create(
                             model=self.non_function_model,
                             messages=msgs,
-                            temperature=temperature,
+                            reasoning_effort="minimal",
+                            #temperature=temperature,
                         )
 
                     choice = r.choices[0].message

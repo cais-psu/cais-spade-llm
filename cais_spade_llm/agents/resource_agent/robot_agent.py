@@ -250,6 +250,13 @@ class RobotAgent(ResourceAgent):
                 part_name, self._held_part
             )
 
+        # Simulate slippage for MCP placement (hard-coded).
+        # Keep holding the part to reflect a failed place action.
+        if (part_name or self._held_part) == "MCP":
+            msg = "Simulated slippage: MCP failed to seat during placement."
+            self.logger.error("[Robot] %s", msg)
+            return {"status": "failed:slippage", "content": msg}
+
         await self._simulate_action(
             f"Placing {self._held_part} at {destination_location} "
             f"(orientation={orientation or 'default'})"
@@ -258,6 +265,74 @@ class RobotAgent(ResourceAgent):
         self._held_part = None
         return {"status": "completed", "content": f"Placed {placed}."}
 
+    '''
+    async def place_part(
+        self,
+        destination_location: str,
+        part_name: str,
+        *,
+        orientation: Optional[str] = None,
+        product_jid: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        ---
+        process: assembly
+        resource_type: robot
+
+        in_state: positioned
+        out_state: placed
+
+        required_context_keys: [destination]
+
+        params:
+          destination_location:
+            type: string
+            description: Target placement location.
+          part_name:
+            type: string
+            description: Name of the part being placed.
+          orientation:
+            type: string
+            description: Optional placement orientation.
+          product_jid:
+            type: string
+            description: JID of the ProductAgent that owns this task.
+          task_id:
+            type: string
+
+        description: Place the currently held part at a destination.
+        ---
+        """
+
+        if not self._held_part:
+            msg = "No part currently held; run pick_part first."
+            self.logger.warning("[Robot] %s", msg)
+            return {"status": "blocked", "content": msg}
+
+        # Consistency check
+        if part_name and self._held_part != part_name:
+            self.logger.warning(
+                "[Robot] Requested to place '%s' but currently holding '%s'. Placing held part.",
+                part_name, self._held_part
+            )
+
+        # Simulate slippage for MCP placement (hard-coded).
+        # Keep holding the part to reflect a failed place action.
+        if (part_name or self._held_part) == "MCP":
+            msg = "Simulated slippage: MCP failed to seat during placement."
+            self.logger.error("[Robot] %s", msg)
+            return {"status": "failed:slippage", "content": msg}
+
+        await self._simulate_action(
+            f"Placing {self._held_part} at {destination_location} "
+            f"(orientation={orientation or 'default'})"
+        )
+        placed = self._held_part
+        self._held_part = None
+        return {"status": "completed", "content": f"Placed {placed}."}
+    '''
+    
     async def move_home(
         self,
         *,
@@ -296,6 +371,10 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def _snapshot_state(self) -> Dict[str, Any]:
+        """Robot-specific state snapshot (override)."""
+        return {"held_part": self._held_part}
+
     async def _simulate_action(self, description: str, *, duration: float = 5.0):
         """
         Simulate a long-running robot action while printing progress every 5 seconds,
