@@ -6,7 +6,7 @@ import asyncio
 import json
 import os, uuid
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
@@ -57,6 +57,9 @@ class ProductAgent(LlmAgent):
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = instruction_override
 
+        # Cache safety text for use during replanning
+        self.safety_text: str = ""
+
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/plan")
         # For now: requirements file (NL → structured requirements)
@@ -75,6 +78,15 @@ class ProductAgent(LlmAgent):
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
         self.task_states: dict[str, str] = {}
+
+        # Runtime tracking for replanning context (PRODUCT STATE ONLY)
+        self.part_tracker: dict[str, dict[str, Any]] = {}  # part_name -> {location, state, last_task}
+        self.execution_timeline: list[dict[str, Any]] = []  # [{timestamp, task_id, status, ...}]
+        # NOTE: Robot states are queried directly from ResourceAgents, not cached here
+        self._plan_result_inbox_registered = False
+        self._runtime_repair_inflight = False
+        self._runtime_repair_fail_streak = 0
+        self._runtime_repair_max_attempts = 3
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -98,14 +110,60 @@ class ProductAgent(LlmAgent):
 
 
     def _persist_plan_snapshot(self) -> None:
-        """Persist the current process planner graph to disk."""
+        """Persist the current process planner graph AND product state to disk."""
         if not self.plan_path:
             return
 
         try:
-            self.process_planner.save(self.plan_path)
+            # Save plan nodes AND product state (separation of concerns)
+            from datetime import datetime, timezone
+            import json
+
+            snapshot = {
+                "nodes": self.process_planner.nodes,
+                "product_state": {  # Product-specific state (not resource state)
+                    "part_tracker": self.part_tracker,
+                    "execution_timeline": self.execution_timeline,
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                }
+            }
+
+            self.plan_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.plan_path.open("w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+
+            self.logger.info(f"[Product] Saved plan + product state to {self.plan_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist plan snapshot.")
+
+    def _restore_product_state(self) -> None:
+        """Restore product state (part tracker, timeline) from persisted plan file."""
+        if not self.plan_path or not self.plan_path.exists():
+            return
+
+        try:
+            import json
+            with self.plan_path.open("r", encoding="utf-8") as f:
+                snapshot = json.load(f)
+
+            # Restore product state if present
+            product_state = snapshot.get("product_state", {})
+            if product_state:
+                self.part_tracker = product_state.get("part_tracker", {})
+                self.execution_timeline = product_state.get("execution_timeline", [])
+                self.logger.info(
+                    f"[Product] Restored product state: {len(self.part_tracker)} parts, "
+                    f"{len(self.execution_timeline)} timeline events"
+                )
+
+            # Also restore nodes into ProcessPlanner
+            nodes = snapshot.get("nodes", [])
+            if nodes:
+                self.process_planner.nodes = nodes
+                self.logger.info(f"[Product] Restored {len(nodes)} plan nodes")
+
+        except Exception:
+            self.logger.exception("[Product] Failed to restore product state.")
 
     # --------------------------------------------------------------------- #
     # SPADE lifecycle
@@ -197,6 +255,75 @@ class ProductAgent(LlmAgent):
         msg.body = json.dumps(body)
         return msg
 
+    def _build_product_state(self) -> Dict[str, Any]:
+        """
+        Build product-specific state for replanning context.
+
+        NOTE: This only includes product/part state. System coordination state
+        (robot states, running tasks, FSA states) is provided by CentralControllerAgent.
+
+        Includes:
+        - Part locations and states
+        - Execution timeline
+        - Requirements progress
+        """
+        requirements_status: Dict[str, Dict[str, Any]] = {}
+        task_nodes = [n for n in self.process_planner.nodes if n.get("type") == "task"]
+
+        # Seed from explicit requirement nodes when available.
+        for node in self.process_planner.nodes:
+            if node.get("type") != "requirement":
+                continue
+            req_id = node.get("id")
+            if not req_id:
+                continue
+            requirements_status[str(req_id)] = {
+                "goal": node.get("description") or node.get("raw_text", ""),
+                "status": "unknown",
+                "completion": 0,
+            }
+
+        # Ensure every requirement_id referenced by tasks is represented.
+        req_ids_from_tasks = {
+            str(n.get("requirement_id"))
+            for n in task_nodes
+            if n.get("requirement_id")
+        }
+        for req_id in req_ids_from_tasks:
+            requirements_status.setdefault(
+                req_id,
+                {"goal": "", "status": "unknown", "completion": 0},
+            )
+
+        # Aggregate per-requirement progress from task statuses.
+        for req_id in req_ids_from_tasks:
+            req_tasks = [n for n in task_nodes if str(n.get("requirement_id")) == req_id]
+            total_tasks = len(req_tasks)
+            completed_tasks = sum(1 for n in req_tasks if n.get("status") == "completed")
+            has_failed = any(
+                isinstance(n.get("status"), str) and n.get("status", "").startswith("failed")
+                for n in req_tasks
+            )
+            all_completed = bool(req_tasks) and all(n.get("status") == "completed" for n in req_tasks)
+
+            if total_tasks > 0:
+                requirements_status[req_id]["completion"] = int((completed_tasks / total_tasks) * 100)
+
+            if has_failed:
+                requirements_status[req_id]["status"] = "failed"
+            elif all_completed:
+                requirements_status[req_id]["status"] = "completed"
+            elif completed_tasks > 0:
+                requirements_status[req_id]["status"] = "in_progress"
+            else:
+                requirements_status[req_id]["status"] = "pending"
+
+        return {
+            "parts": dict(self.part_tracker),
+            "execution_timeline": list(self.execution_timeline[-20:]),  # Last 20 events
+            "requirements_status": requirements_status,
+        }
+
     def _extract_requirement_text(self) -> Optional[str]:
         """
         Load requirement snippets from either an override path or the default
@@ -219,6 +346,43 @@ class ProductAgent(LlmAgent):
                     exc,
                 )
         return None
+
+    def _ensure_plan_result_inbox(self) -> None:
+        """Register runtime plan_safety_result inbox exactly once."""
+        if self._plan_result_inbox_registered:
+            return
+        t_plan_result = Template()
+        t_plan_result.set_metadata("type", "plan_safety_result")
+        self.add_behaviour(self._PlanSafetyResultInbox(), t_plan_result)
+        self._plan_result_inbox_registered = True
+
+    def _reactivate_blocked_tasks(
+        self,
+        *,
+        candidate_task_ids: Optional[set[str]] = None,
+    ) -> int:
+        """
+        Convert blocked tasks back to pending so they can be retried after
+        replanning. If candidate_task_ids is provided, only reactivate those.
+        """
+        if candidate_task_ids is not None:
+            candidate_task_ids = {str(tid) for tid in candidate_task_ids if tid}
+
+        reactivated = 0
+        for node in self.process_planner.nodes:
+            if node.get("type") != "task":
+                continue
+            if node.get("status") != "blocked":
+                continue
+
+            node_id = str(node.get("id") or "")
+            if candidate_task_ids is not None and node_id not in candidate_task_ids:
+                continue
+
+            node["status"] = "pending"
+            reactivated += 1
+
+        return reactivated
 
     async def _build_plan(self, requirement_text: str, safety_text: str = ""):
         """Build requirements, expand to tasks, and compile the global FSA."""
@@ -248,6 +412,7 @@ class ProductAgent(LlmAgent):
             # Initial Plan Build
             instruction = agent._extract_requirement_text()
             safety_text = agent._read_safety_text()
+            agent.safety_text = safety_text  # Store for later use in replanning
 
             dag_nodes = await agent._build_plan(instruction, safety_text)
             
@@ -280,6 +445,7 @@ class ProductAgent(LlmAgent):
 
                 if is_safe:
                     agent.logger.info("[Product] Plan PASSED safety validation.")
+                    agent._ensure_plan_result_inbox()
                     agent.add_behaviour(agent._PlanExecutor())
                     return # Exit Kickoff successfully
                 
@@ -316,13 +482,48 @@ class ProductAgent(LlmAgent):
 
             # 2) ALSO update node status in the planner DAG if exists
             updated_node = False
+            task_node = None
             for node in agent.process_planner.nodes:
                 if node.get("id") == task_id:
                     # Map RA status → planner status; for now use it directly
                     if node.get("status") != status:
                         node["status"] = status
                         updated_node = True
+                    task_node = node
                     break
+
+            # 3) Track execution timeline
+            from datetime import datetime, timezone
+            agent.execution_timeline.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "task_id": task_id,
+                "status": status,
+                "resource_jid": str(msg.sender),
+            })
+
+            # 4) Update part location tracking
+            if task_node and status == "completed":
+                function_name = task_node.get("function_name", "")
+                params = task_node.get("params", {})
+                part_name = params.get("part_name")
+
+                if part_name:
+                    if part_name not in agent.part_tracker:
+                        agent.part_tracker[part_name] = {"state": "unknown", "location": None}
+
+                    # Update based on function type
+                    if function_name == "pick_part":
+                        agent.part_tracker[part_name]["state"] = "picked"
+                        agent.part_tracker[part_name]["location"] = f"{msg.sender}_gripper"
+                        agent.part_tracker[part_name]["last_successful_task"] = task_id
+                    elif function_name == "place_part":
+                        destination = params.get("destination_location") or payload.get("placed_location")
+                        agent.part_tracker[part_name]["state"] = "placed"
+                        agent.part_tracker[part_name]["location"] = destination
+                        agent.part_tracker[part_name]["last_successful_task"] = task_id
+
+            # NOTE: Robot states are NOT cached here - they're collected by CentralControllerAgent
+            # and provided in the replan_request message (system_coordination_state)
 
             if updated_node:
                 agent._persist_plan_snapshot()
@@ -351,6 +552,7 @@ class ProductAgent(LlmAgent):
             plan_ctx = payload.get("plan_ctx") or {}
             safety_ctx = payload.get("safety_ctx") or {}
             failure_ctx = event.get("failure_context") or {}
+            system_coordination_state = payload.get("system_coordination_state") or {}
 
             failed_task_id = event.get("task_id") or plan_ctx.get("failed_task_id")
             if not failed_task_id:
@@ -373,8 +575,125 @@ class ProductAgent(LlmAgent):
                 reason,
                 failed_task_id,
             )
-            await agent.process_planner.replan_with_feedback_online(violations)
+            await agent.process_planner.replan_with_feedback_online(
+                violations,
+                system_coordination_state=system_coordination_state
+            )
+
+            # After online replan, let previously blocked tasks be re-evaluated via
+            # fresh safety_check when they are dispatched again.
+            candidate_ids: set[str] = set()
+            for v in violations:
+                if not isinstance(v, dict):
+                    continue
+                for k in ("failed_task_id", "task_id"):
+                    tid = v.get(k)
+                    if tid:
+                        candidate_ids.add(str(tid))
+                for k in ("affected_task_ids", "blocked_task_ids", "unreachable_task_ids"):
+                    vals = v.get(k)
+                    if isinstance(vals, (list, tuple, set)):
+                        candidate_ids.update(str(x) for x in vals if x)
+
+            reactivated = agent._reactivate_blocked_tasks(
+                candidate_task_ids=(candidate_ids or None)
+            )
+            if reactivated:
+                agent.logger.info(
+                    "[Product] Reactivated %d blocked task(s) to pending after online replan.",
+                    reactivated,
+                )
+
+            # Rebuild + re-register runtime FSA monitor context at CCA
+            # so online monitoring tracks the repaired plan structure.
+            try:
+                agent.process_planner.compile_global_fsa()
+                agent.process_planner.save_global_fsa(agent.global_fsa_path)
+
+                payload = agent._build_plan_validation_payload()
+                agent._ensure_plan_result_inbox()
+                msg_check = Message(to=agent.cca_jid)
+                msg_check.set_metadata("type", "plan_safety_check")
+                msg_check.body = json.dumps(payload)
+                await self.send(msg_check)
+
+                agent.logger.info(
+                    "[Product] Recompiled plan FSA after online replan and sent plan_safety_check to CCA."
+                )
+            except Exception:
+                agent.logger.exception(
+                    "[Product] Failed to rebuild/re-register FSA after online replan."
+                )
+
             agent._persist_plan_snapshot()
+
+    class _PlanSafetyResultInbox(CyclicBehaviour):
+        """Handle runtime plan_safety_result replies from CCA."""
+
+        async def run(self):
+            agent: "ProductAgent" = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning("[Product] Malformed plan_safety_result body.")
+                return
+
+            ok = bool(payload.get("ok", False))
+            violations = payload.get("violations")
+            if not isinstance(violations, list):
+                violations = []
+
+            if ok:
+                if agent._runtime_repair_fail_streak:
+                    agent.logger.info(
+                        "[Product] Runtime plan validation recovered after %d repair attempt(s).",
+                        agent._runtime_repair_fail_streak,
+                    )
+                agent._runtime_repair_fail_streak = 0
+                return
+
+            if agent._runtime_repair_inflight:
+                agent.logger.warning(
+                    "[Product] Runtime plan validation failed while repair is already in progress; ignoring duplicate result."
+                )
+                return
+
+            if agent._runtime_repair_fail_streak >= agent._runtime_repair_max_attempts:
+                agent.logger.error(
+                    "[Product] Runtime plan validation still failing after %d repair attempt(s); giving up automatic retries.",
+                    agent._runtime_repair_fail_streak,
+                )
+                return
+
+            agent._runtime_repair_inflight = True
+            agent._runtime_repair_fail_streak += 1
+            try:
+                agent.logger.warning(
+                    "[Product] Runtime plan validation failed (%d violation(s)); triggering corrective replan attempt %d/%d.",
+                    len(violations),
+                    agent._runtime_repair_fail_streak,
+                    agent._runtime_repair_max_attempts,
+                )
+                await agent.process_planner.replan_with_feedback_offline(violations)
+                agent.process_planner.compile_global_fsa()
+                agent.process_planner.save_global_fsa(agent.global_fsa_path)
+
+                check_payload = agent._build_plan_validation_payload()
+                check_msg = Message(to=agent.cca_jid)
+                check_msg.set_metadata("type", "plan_safety_check")
+                check_msg.body = json.dumps(check_payload)
+                await self.send(check_msg)
+                agent._persist_plan_snapshot()
+            except Exception:
+                agent.logger.exception(
+                    "[Product] Corrective runtime replan attempt failed."
+                )
+            finally:
+                agent._runtime_repair_inflight = False
 
     class _PlanExecutor(CyclicBehaviour):
         """
@@ -500,7 +819,9 @@ class ProductAgent(LlmAgent):
             or []
         )
         # Ensure the failed task itself is included if present.
-        failed_task_id = plan_ctx.get("failed_task_id")
+        plan_failed_task_id = plan_ctx.get("failed_task_id")
+        if plan_failed_task_id:
+            failed_task_id = str(plan_failed_task_id)
         if failed_task_id:
             unreachable = sorted(set(unreachable) | {str(failed_task_id)})
         affected_task_ids = sorted(set(unreachable) | set(descendants))

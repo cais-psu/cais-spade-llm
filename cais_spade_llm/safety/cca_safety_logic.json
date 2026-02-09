@@ -2,12 +2,12 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "MCP must be place_part before SG is place_part",
-      "constraint_type": "ordering_place_before",
+      "raw_text": "SG must be place_part before MCP is place_part",
+      "constraint_type": "ordering_place_part_before",
       "process": "assembly",
       "product": [
-        "mcp",
-        "sg"
+        "sg",
+        "mcp"
       ],
       "resources": [
         "any"
@@ -16,15 +16,15 @@
       "context": null,
       "aps": [
         {
-          "label": "ap001",
-          "full": "ap/assembly/mcp/any/place_part/any"
-        },
-        {
           "label": "ap002",
           "full": "ap/assembly/sg/any/place_part/any"
+        },
+        {
+          "label": "ap001",
+          "full": "ap/assembly/mcp/any/place_part/any"
         }
       ],
-      "ltlf": "(!ap002) U ap001"
+      "ltlf": "(!ap001) U ap002"
     }
   ]
 }

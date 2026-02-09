@@ -80,6 +80,10 @@ def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str
             if kind == "printing":
                 agent = PrintingAgent(jid, pw, **common)
             elif kind == "robot":
+                if "sg_slippage_mode" in meta:
+                    common["sg_slippage_mode"] = meta.get("sg_slippage_mode")
+                if "sg_slippage_scope" in meta:
+                    common["sg_slippage_scope"] = meta.get("sg_slippage_scope")
                 agent = RobotAgent(jid, pw, **common)
             else:
                 print(

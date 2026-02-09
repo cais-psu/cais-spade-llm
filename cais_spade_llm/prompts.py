@@ -508,6 +508,236 @@ INPUT RULES:
 # ----------------------------------------------------------------------
 # Replanning prompt
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Shared replanning instructions (common to both offline and online)
+# ----------------------------------------------------------------------
+_REPLAN_SHARED_CONSTRAINTS = dedent("""\
+GLOBAL CONSTRAINTS (MUST FOLLOW):
+- The repaired plan MUST remain a DAG (no cycles in predecessor relations).
+- NEVER add mutual/symmetric dependencies (do NOT add A as predecessor of B AND B as predecessor of A).
+- For edge repairs, ONLY edit `predecessors`. Do NOT edit `successors` (the system will rebuild successors automatically).
+- Do not remove required work: if a task contributes to satisfying a requirement, prefer re-ordering or coordination instead of deletion.
+""")
+
+_REPLAN_DATA_CONSISTENCY = dedent("""\
+CRITICAL - DATA CONSISTENCY:
+- **SAYING ≠ DOING**: Do not just describe the fix in `change_reason`; you MUST update the actual JSON fields!
+- If your `change_reason` says "removed dependency on X", then X MUST NOT be in `predecessors`.
+- If your `change_reason` says "added dependency on Y", then Y MUST be in `predecessors`.
+- If inserting a task, you must explicitly define its `predecessors` and `successors`.
+- When modifying an existing task, provide the COMPLETE FINAL `predecessors` list, not a diff.
+""")
+
+_REPLAN_OUTPUT_FORMAT = dedent("""\
+OUTPUT FORMAT:
+Return a JSON object containing ONLY the tasks you modified, added, or deleted.
+
+1) TO MODIFY A TASK (Attribute or Edge fix):
+{
+  "id": "TASK_ID",
+  "resource_jid": "NEW_AGENT_ID",          // include only changed fields
+  "predecessors": ["EXISTING...", "NEW"],  // include full final predecessor list if you change it
+  "change_reason": "Explanation of fix"
+}
+
+2) TO INSERT A NEW TASK:
+{
+  "id": "NEW_UNIQUE_ID",
+  "function_name": "REQUIRED_FUNCTION",
+  "params": { ... },
+  "predecessors": ["PREVIOUS_TASK_ID"],
+  "successors": ["NEXT_TASK_ID"],
+  "change_reason": "INSERTION: Added missing required step."
+}
+
+3) TO DELETE A TASK:
+{
+  "id": "TASK_TO_REMOVE",
+  "delete": true,
+  "change_reason": "DELETION: Task is fundamentally forbidden in all circumstances."
+}
+
+FINAL JSON STRUCTURE:
+{
+  "tasks": [ ... list of modified/added/deleted tasks ... ]
+}
+""")
+
+_REPLAN_FAILURE_CONTEXT_GUIDANCE = dedent("""\
+FAILURE CONTEXT USAGE (RUNTIME):
+- For each online failure, read `failure_context` first.
+- `failure_context` follows a normalized schema:
+  - failure_class: execution_failure | resource_failure | environment_failure | coordination_failure
+  - failure_mode: e.g., slippage | breakdown | timeout | collision | unreachable | ...
+  - retryable: boolean
+  - severity: low | medium | high
+  - affected_entities: list of impacted entities (part/resource/task)
+  - observations: auxiliary runtime details and state snapshots
+
+Decision policy:
+- If retryable=true and no safety conflict: prefer retry insertion.
+- If retryable=false or severity=high: avoid direct retry; reroute work to alternate resources/capabilities.
+- Use affected_entities + observations to preserve world-state consistency.
+- Never ignore failure_context when selecting recovery actions.
+""")
+
+# ----------------------------------------------------------------------
+# OFFLINE replanning instructions (pre-execution, FSA violations)
+# ----------------------------------------------------------------------
+REPLAN_OFFLINE_INSTRUCTIONS = dedent(f"""\
+You are a Plan Repair Expert (PRE-EXECUTION MODE).
+You are given a PROPOSED execution plan that violates safety rules BEFORE any execution has started.
+
+CONTEXT:
+- NO tasks have executed yet - this is pure static analysis.
+- Violations come from FSA (Finite State Automaton) verification.
+- You will see "witness traces" showing problematic execution paths in the FSA.
+
+YOUR GOAL:
+Fix the plan structure to satisfy ALL safety rules before execution begins.
+
+{_REPLAN_SHARED_CONSTRAINTS}
+
+STRICT RULES FOR MODIFICATION:
+1. ANALYZE THE VIOLATION LOGIC:
+   - TEMPORAL / ORDERING CONSTRAINT (e.g., "A must happen before B"):
+       -> MODIFY EDGES by adding a predecessor relation to enforce ordering.
+       -> Example: If "place_MCP" must precede "place_SG", add "place_MCP_task_id" to predecessors of "place_SG_task_id".
+
+   - MISSING PREREQUISITE (e.g., "Action A requires Setup B"):
+       -> INSERT a new task to satisfy the requirement and connect it appropriately.
+
+   - ATTRIBUTE / PARAMETER CONSTRAINT (e.g., "Invalid resource assignment"):
+       -> MODIFY ATTRIBUTES such as `resource_jid` or `params`.
+
+2. {_REPLAN_DATA_CONSISTENCY}
+
+{_REPLAN_OUTPUT_FORMAT}
+""")
+
+# ----------------------------------------------------------------------
+# ONLINE replanning instructions (during execution, runtime failures)
+# ----------------------------------------------------------------------
+REPLAN_ONLINE_INSTRUCTIONS = dedent(f"""\
+You are a Plan Recovery Expert (RUNTIME MODE).
+You are given a PARTIALLY EXECUTED plan that encountered a runtime failure.
+
+CONTEXT:
+- Some tasks have ALREADY COMPLETED successfully (status="completed").
+- At least one task has FAILED (status="failed:*").
+- You MUST preserve all completed work.
+- You may see safety violations caused by the failure.
+
+YOUR GOAL:
+Repair the plan to recover from the failure and complete the remaining work safely.
+
+{_REPLAN_SHARED_CONSTRAINTS}
+
+ADDITIONAL RUNTIME CONSTRAINTS:
+- NEVER modify or delete tasks with status="completed" - they already executed!
+- NEVER create dependencies on tasks with status="failed:*" - they will never complete!
+{_REPLAN_FAILURE_CONTEXT_GUIDANCE}
+
+STRICT RULES FOR MODIFICATION:
+1. ANALYZE THE FAILURE:
+   - FAILED TASK WITH DEPENDENTS (e.g., Task B depends on failed Task A):
+       -> **CRITICAL**: You have 3 options:
+          a) OPTION 1 (PREFERRED): INSERT a retry task to replace the failed one
+             Example:
+             ```json
+             {{
+               "id": "TASK_A_RETRY",
+               "function_name": "same_as_failed_task",
+               "params": {{ "part_name": "MCP", ... }},
+               "predecessors": ["TASK_BEFORE_FAILED"],
+               "change_reason": "INSERTION: Retry after failure"
+             }},
+             {{
+               "id": "TASK_B",
+               "predecessors": ["TASK_A_RETRY"],  // ← Depend on retry
+               "change_reason": "Updated to depend on retry instead of failed task"
+             }}
+             ```
+          b) OPTION 2: REMOVE the failed task from predecessors (only if safety allows)
+             Example:
+             ```json
+             {{
+               "id": "TASK_B",
+               "predecessors": ["OTHER_DEPS"],  // ← Failed task removed
+               "change_reason": "Removed dependency on failed task (safety rule relaxed)"
+             }}
+             ```
+          c) OPTION 3: DELETE the dependent task (if work cannot be completed)
+             Example:
+             ```json
+             {{
+               "id": "TASK_B",
+               "delete": true,
+               "change_reason": "DELETION: Cannot proceed without failed prerequisite"
+             }}
+             ```
+       -> **YOU MUST ACTUALLY UPDATE THE `predecessors` ARRAY**!
+
+   - TEMPORAL / ORDERING CONSTRAINT (triggered by failure):
+       -> Same as offline: MODIFY EDGES to enforce ordering.
+
+   - MISSING PREREQUISITE (discovered at runtime):
+       -> INSERT a new task to satisfy the requirement.
+
+2. COMPOSITIONAL RECOVERY WITH SPATIAL REASONING:
+   When a robot fails and leaves a part in an unreachable location, use EXISTING capabilities:
+
+   a) STATE-BASED FUNCTION CHAINING:
+      - Each function in tools_catalog has `in_state` and `out_state` fields
+      - CHAIN functions by matching output state to input state
+      - State transition examples:
+        * pick_part: in_state="printed" → out_state="picked"
+        * move_loaded_to_destination: in_state="picked" → out_state="positioned"
+        * place_part: in_state="positioned" → out_state="placed"
+      - Build multi-step sequences by connecting compatible states
+      - Example: To relocate a part: pick_part (→picked) → move_loaded (→positioned) → place_part (→placed)
+
+   b) CHECK WORKSPACE BOUNDARIES:
+      - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
+      - Use these to determine which robot can reach the failed part location
+      - SELECT the robot whose workspace_boundaries.x_range/y_range/z_range contains the part coordinates
+
+   c) USE STAGING AREAS:
+      - Each robot has `staging_areas` in static_capabilities with coordinates and `accessible_by` list
+      - INSTEAD of creating new functions, use existing `place_part` with staging locations
+      - Example recovery pattern:
+        ```json
+        {{
+          "id": "RECOVER_FAILED_PART",
+          "function_name": "pick_part",
+          "params": {{ "part_name": "SG", "location": "failed_position" }},
+          "resource_jid": "ur5e@localhost",  // ← Selected because part is in UR5e's workspace
+          "change_reason": "INSERTION: UR5e picks failed part (in UR5e workspace, not xArm6)"
+        }},
+        {{
+          "id": "STAGE_FOR_XARM",
+          "function_name": "place_part",
+          "params": {{ "part_name": "SG", "location": "staging_zone_neutral" }},
+          "resource_jid": "ur5e@localhost",
+          "predecessors": ["RECOVER_FAILED_PART"],
+          "change_reason": "INSERTION: Stage part in neutral zone for xArm6 to access"
+        }}
+        ```
+
+   d) COMPOSITIONAL REASONING PRINCIPLES:
+      - PREFER using existing primitives in new sequences over inventing new functions
+      - A robot holding a part (out_state="picked") can `place_part` at a staging area, then `pick_part` elsewhere
+      - Staging enables coordination between robots without collision
+      - CONSULT function_owner_agent field to verify which robot has which capability
+
+3. {_REPLAN_DATA_CONSISTENCY}
+
+{_REPLAN_OUTPUT_FORMAT}
+""")
+
+# ----------------------------------------------------------------------
+# Legacy unified instructions (for backward compatibility)
+# ----------------------------------------------------------------------
 REPLAN_WITH_FEEDBACK_INSTRUCTIONS = dedent("""\
 You are a Plan Repair Expert.
 You are given an execution plan (a Directed Acyclic Graph) that violates specific safety rules.
@@ -542,11 +772,27 @@ STRICT RULES FOR MODIFICATION:
    - ATTRIBUTE / PARAMETER CONSTRAINT (e.g., "Invalid parameter value", "Incapable agent assigned"):
        -> MODIFY ATTRIBUTES such as `resource_jid` or specific fields in `params`.
 
+   - FAILED TASK DEPENDENCY (e.g., "Task B depends on failed Task A"):
+       -> **CRITICAL**: If a task has status="failed:*" in its predecessors:
+          a) OPTION 1: INSERT a retry task to replace the failed one, OR
+          b) OPTION 2: REMOVE the failed task from predecessors list (if safety allows)
+          c) OPTION 3: DELETE the dependent task (if it cannot proceed without the failed prerequisite)
+       -> **YOU MUST ACTUALLY UPDATE THE `predecessors` ARRAY**, not just say you will in `change_reason`!
+       -> Example: If task X has predecessors: ["A", "FAILED_B", "C"], and you decide to remove FAILED_B:
+          ```json
+          {
+            "id": "X",
+            "predecessors": ["A", "C"],  // ← FAILED_B actually removed from list
+            "change_reason": "Removed dependency on failed task FAILED_B"
+          }
+          ```
+
 2. CRITICAL - DATA CONSISTENCY:
-   - Do not just describe the fix in `change_reason`; you must update the JSON fields.
-   - If adding a dependency, the predecessor ID MUST appear in `predecessors`.
+   - **SAYING ≠ DOING**: Do not just describe the fix in `change_reason`; you MUST update the actual JSON fields!
+   - If your `change_reason` says "removed dependency on X", then X MUST NOT be in `predecessors`.
+   - If your `change_reason` says "added dependency on Y", then Y MUST be in `predecessors`.
    - If inserting a task, you must explicitly define its `predecessors` and `successors`.
-   - When modifying an existing task, do NOT overwrite unrelated fields.
+   - When modifying an existing task, provide the COMPLETE FINAL `predecessors` list, not a diff.
 
 OUTPUT FORMAT:
 Return a JSON object containing ONLY the tasks you modified, added, or deleted.
@@ -592,51 +838,109 @@ def build_replan_prompt(
     tools_catalog: list,
     resource_infos: list,
     caps_overview: str,
+    source: str = "offline",  # "offline" or "online"
+    safety_text: str = "",   # Assembly constraints and safety rules
+    system_state: dict | None = None,  # Runtime state (robots, parts, timeline, requirements)
 ) -> str:
     """
     Create the LLM prompt for RE-PLANNING based on safety feedback.
+
+    Args:
+        source: "offline" (pre-execution FSA violations) or "online" (runtime failures)
+        safety_text: Natural language safety constraints (e.g., assembly ordering)
+        system_state: Runtime system state including robot states, part locations, timeline
     """
 
-    # Optional: de-duplicate violations by rule id so we show at most
+    # Select appropriate instructions based on context
+    if source == "online":
+        instructions = REPLAN_ONLINE_INSTRUCTIONS
+    else:
+        instructions = REPLAN_OFFLINE_INSTRUCTIONS
+
+    # Optional: de-duplicate offline violations by rule id so we show at most
     # one entry per violated_rule_id to the LLM.
-    by_rule: Dict[str, Dict[str, Any]] = {}
-    for v in violations:
-        rid = v.get("violated_rule_id")
-        if rid and rid not in by_rule:
-            by_rule[rid] = v
-    if by_rule:
-        violations = list(by_rule.values())
+    if source != "online":
+        by_rule: Dict[str, Dict[str, Any]] = {}
+        for v in violations:
+            rid = v.get("violated_rule_id")
+            if rid and rid not in by_rule:
+                by_rule[rid] = v
+        if by_rule:
+            violations = list(by_rule.values())
 
     # Format violations for readability
     violation_text: list[str] = []
     for v in violations:
-        rule_text = v.get("violation_text", "Unknown rule")
-        rule_logic = v.get("violation_logic", "")
-        witness = v.get("witness_trace", [])
-        relevant_tasks = v.get("relevant_tasks", [])
-        relevant_pred_map = v.get("relevant_pred_map", {})
-
-        violation_text.append(
-            "- Rule ID: {rid}\n"
-            "  Requirement: {rule}\n"
-            "  Logic: {logic}\n"
-            "  Witness trace (task_ids): {wt}\n"
-            "  Relevant tasks (projected subgraph for this rule):\n"
-            "{tasks_json}\n"
-            "  Relevant predecessor map (within this rule): {pred_map}".format(
-                rid=v.get("violated_rule_id"),
-                rule=rule_text,
-                logic=rule_logic,
-                wt=witness,
-                tasks_json=json.dumps(relevant_tasks, indent=2),
-                pred_map=json.dumps(relevant_pred_map, indent=2),
+        if source == "online":
+            failure_ctx = v.get("failure_context") or {}
+            fc_mode = failure_ctx.get("failure_mode")
+            fc_class = failure_ctx.get("failure_class")
+            fc_retryable = failure_ctx.get("retryable")
+            fc_severity = failure_ctx.get("severity")
+            violation_text.append(
+                "- Type: {vtype}\n"
+                "  Failed task: {failed}\n"
+                "  Affected task IDs: {affected}\n"
+                "  Failure summary: mode={mode}, class={klass}, retryable={retryable}, severity={severity}\n"
+                "  Failure context:\n"
+                "{failure_ctx}\n"
+                "  Safety context:\n"
+                "{safety_ctx}".format(
+                    vtype=v.get("type", "online_failure"),
+                    failed=v.get("failed_task_id") or v.get("task_id"),
+                    affected=v.get("affected_task_ids") or v.get("unreachable_task_ids") or [],
+                    mode=fc_mode,
+                    klass=fc_class,
+                    retryable=fc_retryable,
+                    severity=fc_severity,
+                    failure_ctx=json.dumps(failure_ctx, indent=2),
+                    safety_ctx=json.dumps(v.get("safety_ctx") or {}, indent=2),
+                )
             )
-        )
+        else:
+            rule_text = v.get("violation_text", "Unknown rule")
+            rule_logic = v.get("violation_logic", "")
+            witness = v.get("witness_trace", [])
+            relevant_tasks = v.get("relevant_tasks", [])
+            relevant_pred_map = v.get("relevant_pred_map", {})
+
+            violation_text.append(
+                "- Rule ID: {rid}\n"
+                "  Requirement: {rule}\n"
+                "  Logic: {logic}\n"
+                "  Witness trace (task_ids): {wt}\n"
+                "  Relevant tasks (projected subgraph for this rule):\n"
+                "{tasks_json}\n"
+                "  Relevant predecessor map (within this rule): {pred_map}".format(
+                    rid=v.get("violated_rule_id"),
+                    rule=rule_text,
+                    logic=rule_logic,
+                    wt=witness,
+                    tasks_json=json.dumps(relevant_tasks, indent=2),
+                    pred_map=json.dumps(relevant_pred_map, indent=2),
+                )
+            )
 
     formatted_violations = "\n".join(violation_text) if violation_text else "(none)"
 
+    # Format safety constraints
+    safety_section = ""
+    if safety_text.strip():
+        safety_section = f"""
+SAFETY CONSTRAINTS (MUST PRESERVE):
+{safety_text.strip()}
+"""
+
+    # Format system state (runtime context)
+    state_section = ""
+    if system_state:
+        state_section = f"""
+RUNTIME SYSTEM STATE:
+{json.dumps(system_state, indent=2)}
+"""
+
     return dedent(f"""\
-{REPLAN_WITH_FEEDBACK_INSTRUCTIONS}
+{instructions}
 
 === FAILED PLAN (Do not repeat this exactly, FIX IT) ===
 {json.dumps(failed_plan_nodes, indent=2)}
@@ -653,4 +957,6 @@ RESOURCE_AGENTS:
 
 RESOURCE_CAPABILITIES_OVERVIEW:
 {caps_overview}
+{safety_section}
+{state_section}
 """)

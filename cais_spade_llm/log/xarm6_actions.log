@@ -1441,3 +1441,59 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-04 23:09:58,861 - agent:xarm6 - INFO - [xarm6] Placing SG at assembly_board-v1 (orientation=default) (estimated 5.0 sec)
 2026-02-04 23:10:03,861 - agent:xarm6 - INFO - [xarm6] ... Placing SG at assembly_board-v1 (orientation=default) (5.0 / 5.0 sec)
 2026-02-04 23:10:03,861 - agent:xarm6 - INFO - [xarm6] Finished: Placing SG at assembly_board-v1 (orientation=default)
+2026-02-09 11:44:04,232 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part']
+2026-02-09 11:44:04,814 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 11:44:24,285 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:24,292 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T1
+2026-02-09 11:44:24,387 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk3 for SG (speed=default) (estimated 5.0 sec)
+2026-02-09 11:44:29,388 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk3 for SG (speed=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:29,388 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk3 for SG (speed=default)
+2026-02-09 11:44:29,492 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:29,493 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T2
+2026-02-09 11:44:29,593 - agent:xarm6 - INFO - [xarm6] Picking SG from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 11:44:34,595 - agent:xarm6 - INFO - [xarm6] ... Picking SG from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:34,595 - agent:xarm6 - INFO - [xarm6] Finished: Picking SG from prusa-mk3 (gripper=default)
+2026-02-09 11:44:34,702 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:34,704 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T3
+2026-02-09 11:44:34,803 - agent:xarm6 - INFO - [xarm6] Move loaded part SG to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 11:44:39,804 - agent:xarm6 - INFO - [xarm6] ... Move loaded part SG to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:39,804 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part SG to assembly_board-v1 (speed=default)
+2026-02-09 11:45:11,279 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:08,561 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part']
+2026-02-09 12:15:09,151 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 12:15:35,378 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:35,380 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T1
+2026-02-09 12:15:35,479 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk3 for SG (speed=default) (estimated 5.0 sec)
+2026-02-09 12:15:40,479 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk3 for SG (speed=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:40,480 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk3 for SG (speed=default)
+2026-02-09 12:15:40,584 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:40,585 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T2
+2026-02-09 12:15:40,685 - agent:xarm6 - INFO - [xarm6] Picking SG from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 12:15:45,686 - agent:xarm6 - INFO - [xarm6] ... Picking SG from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:45,686 - agent:xarm6 - INFO - [xarm6] Finished: Picking SG from prusa-mk3 (gripper=default)
+2026-02-09 12:15:45,791 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:45,792 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T3
+2026-02-09 12:15:45,892 - agent:xarm6 - INFO - [xarm6] Move loaded part SG to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 12:15:50,893 - agent:xarm6 - INFO - [xarm6] ... Move loaded part SG to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:50,893 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part SG to assembly_board-v1 (speed=default)
+2026-02-09 12:18:23,360 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:00:53,458 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-09 17:00:54,014 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 17:01:11,300 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:01:11,303 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T1
+2026-02-09 17:01:11,402 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk3 for SG (speed=default) (estimated 5.0 sec)
+2026-02-09 17:01:16,403 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk3 for SG (speed=default) (5.0 / 5.0 sec)
+2026-02-09 17:01:16,403 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk3 for SG (speed=default)
+2026-02-09 17:01:56,452 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:01:56,454 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T2
+2026-02-09 17:01:56,552 - agent:xarm6 - INFO - [xarm6] Picking SG from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 17:02:01,552 - agent:xarm6 - INFO - [xarm6] ... Picking SG from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 17:02:01,553 - agent:xarm6 - INFO - [xarm6] Finished: Picking SG from prusa-mk3 (gripper=default)
+2026-02-09 17:02:01,651 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:02:01,652 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T3
+2026-02-09 17:02:01,752 - agent:xarm6 - INFO - [xarm6] Move loaded part SG to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 17:02:06,752 - agent:xarm6 - INFO - [xarm6] ... Move loaded part SG to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 17:02:06,753 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part SG to assembly_board-v1 (speed=default)
+2026-02-09 17:02:06,861 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:02:06,863 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T4
+2026-02-09 17:02:06,963 - agent:xarm6 - ERROR - [Robot] Simulated slippage: SG failed to seat during placement.

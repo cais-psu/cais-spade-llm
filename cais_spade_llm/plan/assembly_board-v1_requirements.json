@@ -9,7 +9,8 @@
       "product": "SG",
       "context": {
         "origin": "prusa-mk3",
-        "destination": "assembly_board-v1"
+        "destination": "assembly_board-v1",
+        "part_name": "SG"
       }
     },
     {
@@ -21,7 +22,8 @@
       "product": "MCP",
       "context": {
         "origin": "prusa-mk3",
-        "destination": "assembly_board-v1"
+        "destination": "assembly_board-v1",
+        "part_name": "MCP"
       }
     }
   ]

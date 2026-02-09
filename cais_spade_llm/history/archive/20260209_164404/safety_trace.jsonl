@@ -1,0 +1,3 @@
+{"ts": "2026-02-05T04:09:58.158792+00:00", "rule_id": "SAFE_1", "event": "start", "reason": "start", "from": "1", "to": "2", "running_aps": ["ap001"], "candidate_aps": ["ap001"], "violated": false}
+{"ts": "2026-02-05T04:09:58.762177+00:00", "rule_id": "SAFE_1", "event": "start", "reason": "start", "from": "2", "to": "2", "running_aps": ["ap002"], "candidate_aps": ["ap002"], "violated": false}
+{"ts": "2026-02-05T04:10:03.863734+00:00", "rule_id": "SAFE_1", "event": "finish", "reason": "finish", "from": "2", "to": "2", "running_aps": [], "candidate_aps": [], "violated": false}

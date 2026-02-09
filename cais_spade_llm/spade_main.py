@@ -13,6 +13,10 @@ from agent_creator import ALLOWED_FUNCS
 for n in ("pyjabber", "winloop", "asyncio"):
     logging.getLogger(n).setLevel(logging.CRITICAL)
 
+# Suppress SPADE/slixmpp stanza warnings (harmless "Unknown stanza interface: id")
+import warnings
+warnings.filterwarnings("ignore", message="Unknown stanza interface")
+
 # Static filesystem locations for initialization payloads and generated tool catalogues.
 PRODUCT_DIR  = "cais_spade_llm/initialization/products/"
 RESOURCE_DIR = "cais_spade_llm/initialization/resources/"

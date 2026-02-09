@@ -102,25 +102,127 @@ class ResourceAgent(LlmAgent):
         state_after: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Build a generic, non-hardcoded failure context payload.
+        Build a normalized failure context payload for any failure type.
+
+        Canonical schema:
+          - failure_class
+          - failure_mode
+          - retryable
+          - severity
+          - affected_entities (optional)
+          - observations (optional)
         """
         failure_context: Dict[str, Any] = {}
 
         if isinstance(result, dict) and isinstance(result.get("failure_context"), dict):
             failure_context.update(result.get("failure_context") or {})
 
-        if isinstance(final_status, str) and final_status.startswith("failed"):
-            failure_context.setdefault("function_name", fn_name)
-            failure_context.setdefault(
-                "failure_mode",
-                final_status.split(":", 1)[1] if ":" in final_status else final_status,
-            )
-            if state_before:
-                failure_context.setdefault("state_before", state_before)
-            if state_after:
-                failure_context.setdefault("state_after", state_after)
+        is_failed = isinstance(final_status, str) and final_status.startswith("failed")
+        if not is_failed:
+            return failure_context
 
-        return failure_context
+        raw_mode = final_status.split(":", 1)[1] if ":" in final_status else final_status
+        raw_mode = str(raw_mode).strip().lower()
+        requested_mode = str(
+            failure_context.get("failure_mode") or raw_mode
+        ).strip().lower()
+
+        # Canonical failure taxonomy used across all resources/tools.
+        canonical_modes = {
+            "slippage",
+            "breakdown",
+            "timeout",
+            "collision",
+            "unreachable",
+            "safety_block",
+            "unknown",
+        }
+        mode_aliases = {
+            "tool_timeout": "timeout",
+            "llm_timeout": "timeout",
+            "resource_lost": "breakdown",
+            "hardware_fault": "breakdown",
+            "gripper_jam": "breakdown",
+            "jam": "breakdown",
+            "safety_violation": "safety_block",
+            "blocked": "safety_block",
+            "coordination_block": "safety_block",
+            "path_blocked": "unreachable",
+        }
+        normalized_mode = mode_aliases.get(requested_mode, requested_mode)
+        failure_mode = normalized_mode if normalized_mode in canonical_modes else "unknown"
+
+        default_class_by_mode = {
+            "breakdown": "resource_failure",
+            "collision": "environment_failure",
+            "unreachable": "environment_failure",
+            "safety_block": "coordination_failure",
+            "timeout": "execution_failure",
+            "slippage": "execution_failure",
+            "unknown": "execution_failure",
+        }
+        failure_class = str(
+            failure_context.get("failure_class")
+            or default_class_by_mode.get(failure_mode, "execution_failure")
+        )
+
+        non_retryable_modes = {"breakdown", "collision"}
+        retryable = failure_context.get("retryable")
+        if not isinstance(retryable, bool):
+            retryable = failure_mode not in non_retryable_modes
+
+        default_severity_by_mode = {
+            "breakdown": "high",
+            "collision": "high",
+            "unreachable": "medium",
+            "safety_block": "medium",
+            "timeout": "medium",
+            "slippage": "medium",
+            "unknown": "medium",
+        }
+        severity = str(
+            failure_context.get("severity")
+            or default_severity_by_mode.get(failure_mode, "medium")
+        )
+
+        affected_entities = failure_context.get("affected_entities")
+        if not isinstance(affected_entities, list):
+            affected_entities = []
+        if not affected_entities and fn_args.get("part_name"):
+            affected_entities = [
+                {
+                    "entity_type": "part",
+                    "entity_id": str(fn_args.get("part_name")),
+                    "state": "unknown",
+                }
+            ]
+
+        observations = failure_context.get("observations")
+        if not isinstance(observations, dict):
+            observations = {}
+        observations.setdefault("function_name", fn_name)
+        observations.setdefault("status", str(final_status))
+        observations.setdefault("raw_failure_mode", requested_mode)
+        if state_before:
+            observations.setdefault("state_before", state_before)
+        if state_after:
+            observations.setdefault("state_after", state_after)
+
+        canonical = {
+            "failure_class": failure_class,
+            "failure_mode": failure_mode,
+            "retryable": retryable,
+            "severity": severity,
+            "affected_entities": affected_entities,
+            "observations": observations,
+        }
+
+        # Preserve custom extension fields while keeping canonical keys stable.
+        for k, v in failure_context.items():
+            if k not in canonical:
+                canonical[k] = v
+
+        return canonical
 
     async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
         """
@@ -283,8 +385,10 @@ class ResourceAgent(LlmAgent):
             # ---------------------------
             #  EXECUTE THE TOOL
             # ---------------------------
+            state_before = agent._snapshot_state()
+            state_after = state_before
+            result: Dict[str, Any] | None = None
             try:
-                state_before = agent._snapshot_state()
                 result = await asyncio.wait_for(
                     func(**fn_args),
                     timeout=agent.tool_timeout_s,
@@ -330,6 +434,15 @@ class ResourceAgent(LlmAgent):
             # Notify CCA of failure so it can clean up running_aps / FSA state.
             if isinstance(final_status, str) and final_status.startswith("failed"):
                 try:
+                    state_after = agent._snapshot_state()
+                    failure_context = agent._build_failure_context(
+                        fn_name=fn_name,
+                        fn_args=fn_args,
+                        result=result if isinstance(result, dict) else None,
+                        final_status=final_status,
+                        state_before=state_before,
+                        state_after=state_after,
+                    )
                     fail_msg = Message(to=agent.cca_jid)
                     fail_msg.set_metadata("type", "resource_event")
                     fail_msg.body = json.dumps({
@@ -338,6 +451,7 @@ class ResourceAgent(LlmAgent):
                         "function_name": fn_name,
                         "params": fn_args,
                         "status": final_status,
+                        "failure_context": failure_context,
                     })
                     await self.send(fail_msg)
                 except Exception:

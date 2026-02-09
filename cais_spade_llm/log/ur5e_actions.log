@@ -1650,3 +1650,60 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-04 23:09:58,157 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T4) from=assembly_board-v1@localhost proto=plan/1.0
 2026-02-04 23:09:58,159 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T4
 2026-02-04 23:09:58,259 - agent:ur5e - ERROR - [Robot] Simulated slippage: MCP failed to seat during placement.
+2026-02-09 11:44:04,238 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part']
+2026-02-09 11:44:05,286 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 11:44:24,387 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:24,392 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T1
+2026-02-09 11:44:24,488 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk3 for MCP (speed=default) (estimated 5.0 sec)
+2026-02-09 11:44:29,488 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk3 for MCP (speed=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:29,488 - agent:ur5e - INFO - [ur5e] Finished: Travel empty to pick location prusa-mk3 for MCP (speed=default)
+2026-02-09 11:44:29,595 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:29,599 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T2
+2026-02-09 11:44:29,696 - agent:ur5e - INFO - [ur5e] Picking MCP from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 11:44:34,698 - agent:ur5e - INFO - [ur5e] ... Picking MCP from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:34,699 - agent:ur5e - INFO - [ur5e] Finished: Picking MCP from prusa-mk3 (gripper=default)
+2026-02-09 11:44:34,804 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:34,806 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T3
+2026-02-09 11:44:34,906 - agent:ur5e - INFO - [ur5e] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 11:44:39,907 - agent:ur5e - INFO - [ur5e] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 11:44:39,907 - agent:ur5e - INFO - [ur5e] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2026-02-09 11:44:39,914 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 11:44:39,918 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T4
+2026-02-09 11:44:40,015 - agent:ur5e - ERROR - [Robot] Simulated slippage: MCP failed to seat during placement.
+2026-02-09 12:15:08,566 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part']
+2026-02-09 12:15:09,611 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 12:15:35,480 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:35,483 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T1
+2026-02-09 12:15:35,580 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk3 for MCP (speed=default) (estimated 5.0 sec)
+2026-02-09 12:15:40,581 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk3 for MCP (speed=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:40,581 - agent:ur5e - INFO - [ur5e] Finished: Travel empty to pick location prusa-mk3 for MCP (speed=default)
+2026-02-09 12:15:40,687 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:40,690 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T2
+2026-02-09 12:15:40,787 - agent:ur5e - INFO - [ur5e] Picking MCP from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 12:15:45,788 - agent:ur5e - INFO - [ur5e] ... Picking MCP from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:45,788 - agent:ur5e - INFO - [ur5e] Finished: Picking MCP from prusa-mk3 (gripper=default)
+2026-02-09 12:15:45,893 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:45,894 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T3
+2026-02-09 12:15:45,993 - agent:ur5e - INFO - [ur5e] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 12:15:50,995 - agent:ur5e - INFO - [ur5e] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 12:15:50,995 - agent:ur5e - INFO - [ur5e] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
+2026-02-09 12:15:51,006 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 12:15:51,008 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T4
+2026-02-09 12:15:51,108 - agent:ur5e - ERROR - [Robot] Simulated slippage: MCP failed to seat during placement.
+2026-02-09 17:00:53,464 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-09 17:00:54,477 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'place_part'])
+2026-02-09 17:01:11,404 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:01:11,405 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T1
+2026-02-09 17:01:11,504 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk3 for MCP (speed=default) (estimated 5.0 sec)
+2026-02-09 17:01:56,431 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk3 for MCP (speed=default) (5.0 / 5.0 sec)
+2026-02-09 17:01:56,432 - agent:ur5e - INFO - [ur5e] Finished: Travel empty to pick location prusa-mk3 for MCP (speed=default)
+2026-02-09 17:01:56,544 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:01:56,545 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T2
+2026-02-09 17:01:56,646 - agent:ur5e - INFO - [ur5e] Picking MCP from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-09 17:02:01,646 - agent:ur5e - INFO - [ur5e] ... Picking MCP from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-09 17:02:01,647 - agent:ur5e - INFO - [ur5e] Finished: Picking MCP from prusa-mk3 (gripper=default)
+2026-02-09 17:02:01,756 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-09 17:02:01,761 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T3
+2026-02-09 17:02:01,857 - agent:ur5e - INFO - [ur5e] Move loaded part MCP to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-09 17:02:06,857 - agent:ur5e - INFO - [ur5e] ... Move loaded part MCP to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-09 17:02:06,857 - agent:ur5e - INFO - [ur5e] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)

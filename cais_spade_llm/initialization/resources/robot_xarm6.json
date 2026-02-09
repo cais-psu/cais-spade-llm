@@ -6,8 +6,34 @@
       "domain": "localhost",      
       "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
       "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "place_part"],
+      "sg_slippage_mode": "once",
+      "sg_slippage_scope": "xarm6",
       "static_capabilities":{
-        "reachability": ["prusa-mk4-1", "prusa-mk3", "assembly_board-v1"]
+        "reachability": ["prusa-mk4-1", "prusa-mk3", "assembly_board-v1"],
+        "workspace_boundaries": {
+          "type": "rectangular",
+          "x_range": [-150, 650],
+          "y_range": [-550, 100],
+          "z_range": [0, 600],
+          "units": "mm",
+          "description": "Cartesian workspace boundaries in robot base frame"
+        },
+        "staging_areas": {
+          "staging_zone_1": {
+            "x": 200,
+            "y": -250,
+            "z": 172,
+            "description": "Primary staging area for xArm6, reachable by UR5e for recovery",
+            "accessible_by": ["xarm6", "ur5e"]
+          },
+          "staging_zone_neutral": {
+            "x": 300,
+            "y": -150,
+            "z": 172,
+            "description": "Shared neutral zone between both robots",
+            "accessible_by": ["xarm6", "ur5e"]
+          }
+        }
       },                
       "gripper_file": "cais_spade_llm/specification/resources/parameters/xArm-gripper.pdf",
       "ip": "192.168.1.240",

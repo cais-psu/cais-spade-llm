@@ -240,11 +240,25 @@ class ProcessPlanner:
         """Offline replan using safety validator feedback."""
         await self._replan_with_feedback(violations, source="offline")
 
-    async def replan_with_feedback_online(self, violations: list[dict]) -> None:
+    async def replan_with_feedback_online(
+        self,
+        violations: list[dict],
+        system_coordination_state: dict | None = None
+    ) -> None:
         """Online replan using runtime failure/block feedback."""
-        await self._replan_with_feedback(violations, source="online")
+        await self._replan_with_feedback(
+            violations,
+            source="online",
+            system_coordination_state=system_coordination_state
+        )
 
-    async def _replan_with_feedback(self, violations: list[dict], *, source: str) -> None:
+    async def _replan_with_feedback(
+        self,
+        violations: list[dict],
+        *,
+        source: str,
+        system_coordination_state: dict | None = None
+    ) -> None:
         """Shared replanning routine used by both offline and online feedback flows."""
         self.logger.info("[Planner] Triggering LLM Re-planning with %s feedback...", source)
         
@@ -288,13 +302,26 @@ class ProcessPlanner:
         ]
         # ---------------------------------
 
-        # 4. Build Prompt
+        # 4. Build runtime system state for context (online only)
+        # Combine coordination state (from CCA) with product state (from ProductAgent)
+        system_state = None
+        if source == "online":
+            product_state = self.product_agent._build_product_state()
+            system_state = {
+                **(system_coordination_state or {}),  # Robot states, running tasks, FSA states
+                **product_state,  # Parts, timeline, requirements
+            }
+
+        # 5. Build Prompt (use specialized instructions for offline vs online)
         prompt = build_replan_prompt(
-            failed_plan_nodes=plan_payload, 
+            failed_plan_nodes=plan_payload,
             violations=violations,
             tools_catalog=tools_catalog,
             resource_infos=resource_infos,
             caps_overview=caps_overview,
+            source=source,  # "offline" or "online"
+            safety_text=self.product_agent.safety_text,  # Include safety constraints
+            system_state=system_state,  # Include runtime state for online replanning
         )
 
         raw = await self.product_agent.ask_llm(
@@ -488,10 +515,15 @@ class ProcessPlanner:
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
         """Select the next task whose predecessors are all satisfied."""
         def _pred_satisfied(status: Any) -> bool:
-            # Allow successors to proceed even if a predecessor failed.
-            if status == "completed":
-                return True
-            return isinstance(status, str) and status.startswith("failed")
+            # Recovery flow should explicitly repair failed dependencies;
+            # only completed predecessors unlock successors.
+            return status == "completed"
+
+        def _pred_ready(pred_id: str) -> bool:
+            pred = self._find_node(pred_id)
+            if pred is None:
+                return False
+            return _pred_satisfied(pred.get("status"))
 
         for node in self.nodes:
             if node.get("type") != "task":
@@ -503,7 +535,7 @@ class ProcessPlanner:
             if not preds:
                 return node
 
-            if all(_pred_satisfied(self._find_node(pid).get("status")) for pid in preds):
+            if all(_pred_ready(pid) for pid in preds):
                 return node
 
         return None

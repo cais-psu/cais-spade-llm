@@ -80,15 +80,116 @@ class CentralControllerAgent(LlmAgent):
         t_plan.set_metadata("type", "plan_safety_check")
         self.add_behaviour(self._PlanValidation(), t_plan)
 
-    async def _send_replan_request(
+    def _collect_system_coordination_state(self) -> dict[str, Any]:
+        """
+        Collect system-level coordination state for replanning context.
+
+        This includes:
+        - Robot states from ResourceAgents
+        - Running tasks from safety monitor
+        - Plan FSA state
+        - Safety DFA states
+
+        Returns:
+            Dictionary containing system coordination state
+        """
+        coord_state: dict[str, Any] = {}
+
+        # 1. Collect robot states from ResourceAgents
+        robots_state = {}
+        for ra in self.resource_agents:
+            if hasattr(ra, '_snapshot_state'):
+                robots_state[str(ra.jid)] = ra._snapshot_state()
+            else:
+                # Fallback for agents without _snapshot_state
+                robots_state[str(ra.jid)] = {
+                    "current_state": "unknown",
+                    "held_part": getattr(ra, '_held_part', None),
+                }
+        coord_state["robots"] = robots_state
+
+        # 2. Collect running tasks from safety monitor
+        if self.safety_monitor:
+            # running_aps is a set of AP labels; keep it JSON-serializable and stable.
+            coord_state["running_tasks"] = sorted(self.safety_monitor.running_aps)
+        else:
+            coord_state["running_tasks"] = []
+
+        # 3. Collect plan FSA state
+        if self.plan_fsa_monitor:
+            coord_state["plan_fsa_state"] = self.plan_fsa_monitor.current_state
+            coord_state["plan_fsa_completed_tasks"] = list(
+                self.plan_fsa_monitor.completed_tasks
+            )
+        else:
+            coord_state["plan_fsa_state"] = None
+            coord_state["plan_fsa_completed_tasks"] = []
+
+        # 4. Collect safety DFA states (per-rule DFA states)
+        safety_dfa_states = {}
+        if self.safety_monitor:
+            # OnlineSafetyMonitor stores current DFA pointers in current_states.
+            if hasattr(self.safety_monitor, "current_states"):
+                safety_dfa_states = dict(getattr(self.safety_monitor, "current_states", {}))
+            # Fallback for alternate monitor implementations.
+            elif hasattr(self.safety_monitor, "dfa_map"):
+                for rule_id, dfa_obj in getattr(self.safety_monitor, "dfa_map", {}).items():
+                    if hasattr(dfa_obj, "current_state"):
+                        safety_dfa_states[rule_id] = dfa_obj.current_state
+        coord_state["safety_dfa_states"] = safety_dfa_states
+
+        return coord_state
+
+    def _classify_replan_reason(
+        self,
+        *,
+        current_state: str,
+        marked_states: set,
+        next_task_ids: list,
+        any_running: bool,
+        failed_status: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Classify why replanning is needed based on FSA state.
+
+        Returns:
+            None if no replanning needed, otherwise a reason string:
+            - "plan_completed": Reached accepting state
+            - "plan_executing": Tasks still running
+            - "plan_stuck_non_accepting": In non-accepting state with no outgoing transitions
+            - "plan_exhausted": All tasks done but not in accepting state (shouldn't happen)
+            - "task_failure": Previous task failed (use failed_status for details)
+        """
+        # CRITICAL: Check for task failure FIRST before other conditions
+        # A failure always requires replanning, even if FSA has next tasks available
+        if failed_status and failed_status.startswith("failed"):
+            # Task just failed - main trigger for replanning
+            return f"task_failure:{failed_status}"
+
+        if current_state in marked_states:
+            # Success case - in accepting state
+            return None  # or "plan_completed" if you want to signal completion
+
+        if any_running:
+            # Normal case - waiting for tasks
+            return None  # or "plan_executing"
+
+        if next_task_ids:
+            # Normal case - have tasks ready to execute
+            return None
+
+        # Stuck in non-accepting state with no way forward
+        return "plan_stuck_non_accepting"
+
+    def _build_replan_message(
         self,
         *,
         product_jid: str,
         reason: str,
         event: dict[str, Any],
         safety_info: Optional[dict[str, Any]],
-    ) -> None:
-        """Send a structured replanning request to a ProductAgent."""
+    ) -> Message:
+        """Build a structured replanning request message for a ProductAgent."""
         plan_ctx = {}
         if self.plan_fsa_monitor:
             plan_ctx = self.plan_fsa_monitor.build_replan_context(
@@ -101,23 +202,27 @@ class CentralControllerAgent(LlmAgent):
         # Failure-focused safety context: keep only what helps replanning decisions.
         safety_ctx = {}
         if safety_info:
-            safety_ctx = {
-                "violated_rule_id": safety_info.get("violated_rule"),
-                "violated_from": safety_info.get("violated_from"),
-                "violated_to": safety_info.get("violated_to"),
-                "candidate_aps": safety_info.get("candidate_aps") or [],
-                "running_aps": safety_info.get("running_snapshot") or [],
-            }
+            # Preserve all provided fields so runtime context is not dropped.
+            safety_ctx = dict(safety_info)
+
+            # Add normalized aliases expected by replanning prompt builders.
+            safety_ctx.setdefault("violated_rule_id", safety_info.get("violated_rule"))
+            safety_ctx.setdefault("running_aps", safety_info.get("running_snapshot") or safety_info.get("running_tasks") or [])
+            safety_ctx.setdefault("candidate_aps", safety_info.get("candidate_aps") or [])
+
+        # Collect system coordination state (robot states, running tasks, FSA states)
+        system_coordination_state = self._collect_system_coordination_state()
 
         # Debug log: capture the full context we are about to send for replanning.
         # Keep logs bounded to avoid flooding if the context grows large.
         self.logger.info(
-            "[CCA] Replan request -> %s reason=%s task_id=%s plan_ctx=%s safety_ctx=%s",
+            "[CCA] Replan request -> %s reason=%s task_id=%s plan_ctx=%s safety_ctx=%s coord_state=%s",
             product_jid,
             reason,
             event.get("task_id"),
-            json.dumps(plan_ctx, ensure_ascii=False)[:2000],
-            json.dumps(safety_ctx, ensure_ascii=False)[:2000],
+            json.dumps(plan_ctx, ensure_ascii=False)[:1000],
+            json.dumps(safety_ctx, ensure_ascii=False)[:1000],
+            json.dumps(system_coordination_state, ensure_ascii=False)[:1000],
         )
 
         msg = Message(to=str(product_jid))
@@ -128,9 +233,10 @@ class CentralControllerAgent(LlmAgent):
                 "event": event,
                 "plan_ctx": plan_ctx,
                 "safety_ctx": safety_ctx,
+                "system_coordination_state": system_coordination_state,
             }
         )
-        await self.send(msg)
+        return msg
 
     # ------------------------------------------------------------------ #
     # Behaviours
@@ -215,14 +321,18 @@ class CentralControllerAgent(LlmAgent):
                     "[CCA] Queued task=%s as temporarily unsafe.", task_id
                 )
 
+                # Immediately respond to the waiting resource so this task attempt
+                # terminates cleanly while replanning proceeds.
+                await self._send_decision(resource_jid, task_id, "block")
+
                 if product_jid:
-                    await agent._send_replan_request(
+                    replan_msg = agent._build_replan_message(
                         product_jid=product_jid,
                         reason="safety_block",
                         event=event,
                         safety_info=info,
                     )
-                # Do NOT send a reply yet; resource waits.
+                    await self.send(replan_msg)
                 return
 
             # If allowed
@@ -275,61 +385,91 @@ class CentralControllerAgent(LlmAgent):
                 # Retry any blocked tasks now that state has changed
                 await self._retry_blocked_tasks()
 
-                # Deadlock detection:
-                # no enabled starts, not in a marked state, and nothing currently running.
+                # Progress detection: check if plan can continue or needs replanning
                 if agent.plan_fsa_monitor and product_jid:
                     pm = agent.plan_fsa_monitor
                     cur_state = pm.current_state
                     if cur_state:
                         marked = set((pm.fsa or {}).get("A", {}).get("Xm") or [])
-                        if cur_state not in marked:
-                            resource_state = pm._parse_state(cur_state)
-                            any_running = any(
-                                info.get("status") == "running"
-                                for info in resource_state.values()
+                        resource_state = pm._parse_state(cur_state)
+                        any_running = any(
+                            info.get("status") == "running"
+                            for info in resource_state.values()
+                        )
+                        next_task_ids = pm._next_task_ids_from_state(cur_state)
+
+                        # Classify if replanning is needed
+                        replan_reason = agent._classify_replan_reason(
+                            current_state=cur_state,
+                            marked_states=marked,
+                            next_task_ids=next_task_ids,
+                            any_running=any_running,
+                            failed_status=status if is_failed else None,
+                        )
+
+                        if replan_reason:
+                            replan_msg = agent._build_replan_message(
+                                product_jid=product_jid,
+                                reason=replan_reason,
+                                event=event,
+                                safety_info={
+                                    "current_state": cur_state,
+                                    "marked_states": list(marked),
+                                    "available_tasks": next_task_ids,
+                                    "running_tasks": [
+                                        tid for tid, info in resource_state.items()
+                                        if info.get("status") == "running"
+                                    ]
+                                },
                             )
-                            if not any_running:
-                                next_task_ids = pm._next_task_ids_from_state(cur_state)
-                                if not next_task_ids:
-                                    await agent._send_replan_request(
-                                        product_jid=product_jid,
-                                        reason="deadlock",
-                                        event=event,
-                                        safety_info=None,
-                                    )
+                            await self.send(replan_msg)
 
         async def _retry_blocked_tasks(self) -> None:
             """
-            Iterate through blocked tasks and check if they are now allowed.
+            Re-evaluate queued blocked tasks and prune entries that are no longer
+            blocked. We intentionally do NOT send deferred "allow" decisions:
+            resources must always receive allow/block only as a response to a
+            fresh safety_check request for that task attempt.
             """
             agent: "CentralControllerAgent" = self.agent # type: ignore
             
             if not agent.blocked_tasks or not agent.safety_monitor:
                 return
 
-            to_release = []
+            to_clear = []
 
-            # Check all blocked tasks against the NEW state
+            # Check all blocked tasks against the NEW state.
             for task_id, data in agent.blocked_tasks.items():
                 event = data["event"]
                 
-                # Check again
-                allowed, info = agent.safety_monitor.process_start_event(event)
+                # Re-check safety status WITHOUT mutating running_aps/current DFA state.
+                try:
+                    candidate_aps = agent.safety_monitor._map_task_to_aps(
+                        event["resource_jid"],
+                        event["function_name"],
+                        event.get("params") or {},
+                    )
+                    allowed, _ = agent.safety_monitor.online_safety_validation(candidate_aps)
+                except Exception:
+                    agent.logger.exception(
+                        "[CCA] Failed to non-mutating re-check for blocked task=%s; keeping queued.",
+                        task_id,
+                    )
+                    continue
 
                 if allowed:
                     agent.logger.info(
-                        "[CCA] Unblocking task=%s (rule %s no longer violated).",
+                        "[CCA] Clearing blocked queue entry task=%s (rule %s no longer violated). "
+                        "Waiting for fresh safety_check before allowing execution.",
                         task_id, data.get("violated_rule")
                     )
-                    # Send allow decision
-                    await self._send_decision(event["resource_jid"], task_id, "allow")
-                    to_release.append(task_id)
+                    to_clear.append(task_id)
                 else:
-                    # Still blocked, do nothing
+                    # Still blocked, keep queued.
                     pass
 
             # Cleanup
-            for tid in to_release:
+            for tid in to_clear:
                 agent.blocked_tasks.pop(tid, None)
 
         async def _send_decision(self, to_jid: str, task_id: str, decision: str):
