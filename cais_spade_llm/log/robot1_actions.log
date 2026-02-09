@@ -1,0 +1,6 @@
+2026-02-09 16:42:14,889 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-09 16:44:12,264 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-09 16:45:10,036 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-09 16:45:59,596 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-09 16:47:49,158 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-09 16:51:37,737 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']

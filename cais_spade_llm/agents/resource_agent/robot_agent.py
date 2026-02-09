@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Dict, Optional
 
 from agents.resource_agent.resource_agent import ResourceAgent
+from xarmlib.wrapper import XArmAPI
 
 
 class RobotAgent(ResourceAgent):
@@ -13,7 +14,7 @@ class RobotAgent(ResourceAgent):
 
     agent_role = "robot"
 
-    def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
+    def __init__(self, jid: str, password: str, *, name: str, robotIP: str, **kw: Any) -> None:
         kw.setdefault(
             "function_names",
             [
@@ -28,18 +29,56 @@ class RobotAgent(ResourceAgent):
 
         self.agent_name = name
         self._held_part: Optional[str] = None
+        self.arm = None
+        self.params = {}
+        self.setup_arm(ip = robotIP)
         self.logger.info(
             "RobotAgent '%s' initialized. tools=%s",
             name,
             list(self.executables.keys()),
         )
 
+    def setup_arm(self, ip: str):
+        """Initialize connection to the robot arm hardware."""
+
+        self.logger.info("[Robot] Setting up robot arm connection...", self.agent_name)
+        print("Setting up robot arm connection...")
+
+        self.arm = XArmAPI(ip, baud_checkset=False)
+
+        self.params = {
+            'grip_speed': 800,
+            'radius': -1,
+            'auto_enable': True,
+            'wait': True,
+            'speed': 100,
+            'acc': 10000,
+            'angle_speed': 20,
+            'angle_acc': 500,
+            'quit': False,
+        }
+
+        # Move the arm to the initial position
+        self.arm.set_position(x=330,y=-111, z=283, rx=-178, ry=3, rz=5,
+                              speed=self.params['speed'], mvacc=self.params['acc'], 
+                              radius=self.params['radius'], wait=True)
+
+        self.arm.motion_enable(enable=True)
+        self.arm.set_mode(0)
+        self.arm.set_state(0)
+
+        self.arm.set_gripper_position(300)
+
+        print("Robot arm setup complete.")
+
+        pass
 
     async def move_to_pick_location(
         self,
         origin_resource_location: str,
         part_name: str,
         *,
+        position: Optional[Dict[str, float]] = {"x": 250, "y": -150, "z": 400, "roll": 180.0, "pitch": 0.0, "yaw": 0.0},
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -289,6 +328,7 @@ class RobotAgent(ResourceAgent):
             msg = "Cannot move home while still holding a part; place it first."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
+        
 
         await self._simulate_action("Moving arm to home position")
         return {"status": "completed", "content": "At home position."}
@@ -316,3 +356,33 @@ class RobotAgent(ResourceAgent):
             )
 
         self.logger.info("[%s] Finished: %s", robot, description)
+
+    async def _perform_action(self, description: str, *, move:Dict[str, float], other_params: Dict[str, Any],duration: float = 5.0):
+        """
+        Simulate a long-running robot action while printing progress every 5 seconds,
+        including robot name for clarity when multiple robots run in parallel.
+        """
+        robot = self.agent_name
+        
+        self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
+
+        ##start the actual robot action here using the move and other_params
+        self.arm.set_position(330,-111, 283, -178, 3, 5)
+
+        interval = 2.0  
+        elapsed = 0.0
+
+        while not self.arm.is_stopped():
+            while elapsed < duration:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                self.logger.info(
+                    "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
+                )
+
+        ##Track the overall time it takes to perform the action and print progress every 5 seconds
+
+        self.logger.info("[%s] Finished: %s", robot, description)
+
+
+   
