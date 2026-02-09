@@ -33,39 +33,6 @@
     "description": "Move empty gripper to the part's origin location."
   },
   {
-    "function": "place_part",
-    "function_owner_agent": "xarm6",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "positioned",
-    "out_state": "placed",
-    "required_context_keys": [
-      "destination"
-    ],
-    "params": {
-      "destination_location": {
-        "type": "string",
-        "description": "Target placement location."
-      },
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part being placed."
-      },
-      "orientation": {
-        "type": "string",
-        "description": "Optional placement orientation."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Place the currently held part at a destination."
-  },
-  {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "xarm6",
     "process": "assembly",
@@ -97,6 +64,39 @@
       }
     },
     "description": "Move the loaded part to its destination location."
+  },
+  {
+    "function": "place_part",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "positioned",
+    "out_state": "placed",
+    "required_context_keys": [
+      "destination"
+    ],
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Target placement location."
+      },
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part being placed."
+      },
+      "orientation": {
+        "type": "string",
+        "description": "Optional placement orientation."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Place the currently held part at a destination."
   },
   {
     "function": "pick_part",
@@ -165,39 +165,6 @@
     "description": "Move empty gripper to the part's origin location."
   },
   {
-    "function": "place_part",
-    "function_owner_agent": "ur5e",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "positioned",
-    "out_state": "placed",
-    "required_context_keys": [
-      "destination"
-    ],
-    "params": {
-      "destination_location": {
-        "type": "string",
-        "description": "Target placement location."
-      },
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part being placed."
-      },
-      "orientation": {
-        "type": "string",
-        "description": "Optional placement orientation."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Place the currently held part at a destination."
-  },
-  {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "ur5e",
     "process": "assembly",
@@ -229,6 +196,39 @@
       }
     },
     "description": "Move the loaded part to its destination location."
+  },
+  {
+    "function": "place_part",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "positioned",
+    "out_state": "placed",
+    "required_context_keys": [
+      "destination"
+    ],
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Target placement location."
+      },
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part being placed."
+      },
+      "orientation": {
+        "type": "string",
+        "description": "Optional placement orientation."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Place the currently held part at a destination."
   },
   {
     "function": "pick_part",

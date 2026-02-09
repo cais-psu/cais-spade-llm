@@ -4750,3 +4750,28 @@ Previous tokens: Token('SYMBOL_NAME', 'evt')
 2026-02-09 17:02:06,863 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T4 allowed.
 2026-02-09 17:02:06,969 - agent:cca - INFO - [CCA] Task REQ_1_T4 failed. State updated.
 2026-02-09 17:02:06,970 - agent:cca - INFO - [CCA] Task REQ_1_T4 failed. State updated.
+2026-02-09 17:07:44,244 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-09 17:07:45,631 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5, tools=[])
+2026-02-09 17:07:45,631 - agent:cca - INFO - [CCA] setup completed.
+2026-02-09 17:07:45,631 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-09 17:07:48,311 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
+2026-02-09 17:07:50,507 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 18
+2026-02-09 17:07:50,508 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-02-09 17:07:50,547 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-02-09 17:07:50,612 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-02-09 17:07:50,613 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-02-09 17:08:01,597 - agent:cca - INFO - [CCA] Offline FSA Validation: OK (Violated rules: 0, Witnesses: 0) product=assembly_board-v1@localhost
+2026-02-09 17:08:01,599 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T1 allowed.
+2026-02-09 17:08:01,703 - agent:cca - INFO - [CCA] Safety OK: task=REQ_2_T1 allowed.
+2026-02-09 17:08:06,701 - agent:cca - INFO - [CCA] Task REQ_1_T1 finished. State updated.
+2026-02-09 17:08:06,805 - agent:cca - INFO - [CCA] Task REQ_2_T1 finished. State updated.
+2026-02-09 17:08:06,806 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T2 allowed.
+2026-02-09 17:08:06,908 - agent:cca - INFO - [CCA] Safety OK: task=REQ_2_T2 allowed.
+2026-02-09 17:08:11,909 - agent:cca - INFO - [CCA] Task REQ_1_T2 finished. State updated.
+2026-02-09 17:08:12,011 - agent:cca - INFO - [CCA] Task REQ_2_T2 finished. State updated.
+2026-02-09 17:08:12,022 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T3 allowed.
+2026-02-09 17:08:12,126 - agent:cca - INFO - [CCA] Safety OK: task=REQ_2_T3 allowed.
+2026-02-09 17:08:17,127 - agent:cca - INFO - [CCA] Task REQ_1_T3 finished. State updated.
+2026-02-09 17:08:17,228 - agent:cca - INFO - [CCA] Task REQ_2_T3 finished. State updated.
+2026-02-09 17:08:17,238 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T4 allowed.
+2026-02-09 17:08:17,341 - agent:cca - INFO - [CCA] Task REQ_1_T4 failed. State updated.
