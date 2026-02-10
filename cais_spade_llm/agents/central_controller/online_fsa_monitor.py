@@ -40,7 +40,7 @@ class OnlineFsaMonitor:
                 self._all_task_ids.add(str(tr.get("task_id")))
 
         # Runtime plan FSA history log (JSONL)
-        history_dir = Path("cais_spade_llm/history")
+        history_dir = Path("cais_spade_llm/monitor/history")
         history_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = history_dir / "online_fsa_trace.jsonl"
         self.last_event: Optional[Dict[str, Any]] = None
@@ -205,6 +205,22 @@ class OnlineFsaMonitor:
             for tr in self._from_map.get(state or "", [])
             if tr.get("task_id") and str(tr.get("event", "")).endswith(".start")
         })
+
+    def has_blocked_descendants(self, task_id: str) -> bool:
+        """
+        Return True if the failure of task_id blocks any future tasks.
+
+        Logic: compare tasks reachable from the current FSA state
+        (1) unrestricted, vs (2) when task_id's .done transition is blocked.
+        Any task that disappears from the reachable set when we block
+        task_id.done is a task that depended on task_id completing.
+        """
+        cur = self.current_state
+        reachable, _ = self._reachable_from_state(cur)
+        reachable_without, _ = self._reachable_from_state_filtered(
+            cur, blocked_events={f"{task_id}.done"}
+        )
+        return bool(set(reachable) - set(reachable_without))
 
     def build_replan_context(
         self,

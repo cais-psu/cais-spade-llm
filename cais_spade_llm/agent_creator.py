@@ -13,6 +13,16 @@ from agents.intelligent_product.product_agent import ProductAgent
 from agents.resource_agent.printing_agent import PrintingAgent
 from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
+from sensors.camera_module import CameraModule
+
+# Mock camera observations for simulation.
+# SG: slipped into ur5e-only territory (x=750 > xarm6 upper bound of 650).
+# MCP: correctly placed at assembly board position.
+# Workspace boundaries (mm): xarm6 x=[-150,650], ur5e x=[100,900].
+_MOCK_CAMERA = CameraModule(mock_observations={
+    "SG":  {"x": 750.0, "y": -200.0, "z": 50.0},
+    "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
+})
 
 # FunctionAnalyzer consults this registry to decide which methods each agent is allowed to expose.
 ALLOWED_FUNCS: dict[str, set[str]] = defaultdict(set)
@@ -141,7 +151,8 @@ def create_product_agents(
                 function_names=fn_names,
                 resource_jids=resource_jids,
                 resource_agents=resource_agents,
-                cca_jid=cca_jid,  # <-- pass CCA JID into every resource agent
+                cca_jid=cca_jid,
+                camera=_MOCK_CAMERA,
             )
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.

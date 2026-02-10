@@ -24,7 +24,7 @@
           "full": "ap/assembly/mcp/any/place_part/any"
         }
       ],
-      "ltlf": "(!ap001) U ap002"
+      "ltlf": "((!ap001) U ap002)"
     }
   ]
 }

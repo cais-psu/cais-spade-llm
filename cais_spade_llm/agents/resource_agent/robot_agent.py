@@ -74,70 +74,6 @@ class RobotAgent(ResourceAgent):
             return ref
         return f"{ref}@{self._jid_domain()}"
 
-    def _select_slippage_drop_site(self) -> Dict[str, Any]:
-        """
-        Pick a data-driven drop site from static capabilities.
-        Prefer shared staging sites (accessible by multiple robots).
-        """
-        caps = self.static_capabilities or {}
-        staging_areas = caps.get("staging_areas") if isinstance(caps, dict) else {}
-        if not isinstance(staging_areas, dict):
-            staging_areas = {}
-
-        my_name = self._robot_scope_name()
-        shared_candidates: list[tuple[str, Dict[str, Any]]] = []
-        fallback_candidates: list[tuple[str, Dict[str, Any]]] = []
-
-        for site_name, raw_site in staging_areas.items():
-            if not isinstance(raw_site, dict):
-                continue
-            site = dict(raw_site)
-            accessible_by_raw = site.get("accessible_by")
-            accessible_by = [
-                str(x).strip().lower()
-                for x in (accessible_by_raw or [])
-                if str(x).strip()
-            ]
-            site["accessible_by"] = accessible_by
-            fallback_candidates.append((str(site_name), site))
-            if len(set(accessible_by)) >= 2 or any(a != my_name for a in accessible_by):
-                shared_candidates.append((str(site_name), site))
-
-        if shared_candidates:
-            site_name, site = shared_candidates[0]
-        elif fallback_candidates:
-            site_name, site = fallback_candidates[0]
-        else:
-            # Last-resort defaults are derived from current runtime state.
-            return {
-                "site_name": "unknown_site",
-                "drop_region": "unknown_region",
-                "drop_location": "unknown_location",
-                "position": dict(self._position),
-                "recoverable_by": [str(self.jid)],
-            }
-
-        recoverable_by = [
-            self._agent_ref_to_jid(name) for name in site.get("accessible_by", [])
-        ]
-        recoverable_by = [jid for jid in recoverable_by if jid] or [str(self.jid)]
-
-        x = site.get("x")
-        y = site.get("y")
-        z = site.get("z")
-        if all(isinstance(v, (int, float)) for v in (x, y, z)):
-            position = {"x": float(x), "y": float(y), "z": float(z)}
-        else:
-            position = dict(self._position)
-
-        return {
-            "site_name": site_name,
-            "drop_region": f"{site_name}_region",
-            "drop_location": site_name,
-            "position": position,
-            "recoverable_by": recoverable_by,
-        }
-
     def _should_inject_sg_slippage(self, target_part_name: str) -> bool:
         """Return True if SG slippage should be injected for this placement."""
         if str(target_part_name) != "SG":
@@ -159,6 +95,7 @@ class RobotAgent(ResourceAgent):
         *,
         failure_mode: str,
         affected_entities: Optional[list[dict[str, Any]]] = None,
+        observations: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build a generic failure context payload usable across modes
@@ -170,6 +107,8 @@ class RobotAgent(ResourceAgent):
         }
         if affected_entities:
             context["affected_entities"] = affected_entities
+        if observations:
+            context["observations"] = observations
         return context
 
     async def move_to_pick_location(
@@ -247,6 +186,15 @@ class RobotAgent(ResourceAgent):
 
         required_context_keys: [origin]
 
+        part_transition:
+          completed:
+            state: picked
+            location_template: "{robot_jid}_gripper"
+          failed:
+            state: lost
+            observation_required: true
+            last_known_template: "{robot_jid}_workspace"
+
         params:
           part_name:
             type: string
@@ -299,6 +247,15 @@ class RobotAgent(ResourceAgent):
         out_state: positioned
 
         required_context_keys: [destination]
+
+        part_transition:
+          completed:
+            state: in_transit
+            location_template: "{robot_jid}_gripper"
+          failed:
+            state: lost
+            observation_required: true
+            last_known_template: "{robot_jid}_workspace"
 
         params:
           destination_location:
@@ -363,6 +320,16 @@ class RobotAgent(ResourceAgent):
 
         required_context_keys: [destination]
 
+        part_transition:
+          completed:
+            state: verified
+            verify_camera: true
+            location_param: destination_location
+          "failed:misplaced":
+            state: untracked
+            camera_locate: true
+            last_known_param: destination_location
+
         params:
           destination_location:
             type: string
@@ -400,13 +367,11 @@ class RobotAgent(ResourceAgent):
         if self._should_inject_sg_slippage(placed_target):
             msg = "Simulated slippage: SG failed to seat during placement."
             self.logger.error("[Robot] %s", msg)
-            drop_site = self._select_slippage_drop_site()
 
-            # Part is no longer held after slippage.
+            # Part is no longer held — actual location is unknown until observed.
             self._held_part = None
             self._current_state = "recovery_required"
             self._gripper_state = "open"
-            self._position = dict(drop_site.get("position") or self._position)
 
             affected = []
             if placed_target:
@@ -414,16 +379,21 @@ class RobotAgent(ResourceAgent):
                     {
                         "entity_type": "part",
                         "entity_id": str(placed_target),
-                        "state": "unplaced",
+                        "state": "untracked",
                     }
                 )
 
             return {
-                "status": "failed:slippage",
+                "status": "failed:misplaced",
                 "content": msg,
                 "failure_context": self._build_generic_failure_context(
                     failure_mode="slippage",
                     affected_entities=affected,
+                    observations={
+                        "part_state": "untracked",
+                        "last_known_position": dict(self._position),
+                        "observation_required": True,
+                    },
                 ),
             }
 
@@ -440,81 +410,6 @@ class RobotAgent(ResourceAgent):
             "content": f"Placed {placed}.",
             "placed_location": destination_location,  # For part tracking
         }
-
-    '''
-    async def place_part(
-        self,
-        destination_location: str,
-        part_name: str,
-        *,
-        orientation: Optional[str] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: positioned
-        out_state: placed
-
-        required_context_keys: [destination]
-
-        params:
-          destination_location:
-            type: string
-            description: Target placement location.
-          part_name:
-            type: string
-            description: Name of the part being placed.
-          orientation:
-            type: string
-            description: Optional placement orientation.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Place the currently held part at a destination.
-        ---
-        """
-
-        if not self._held_part:
-            msg = "No part currently held; run pick_part first."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        # Consistency check
-        if part_name and self._held_part != part_name:
-            self.logger.warning(
-                "[Robot] Requested to place '%s' but currently holding '%s'. Placing held part.",
-                part_name, self._held_part
-            )
-
-        # Simulate slippage for MCP placement (hard-coded).
-        # Keep holding the part to reflect a failed place action.
-        if (part_name or self._held_part) == "MCP":
-            msg = "Simulated slippage: MCP failed to seat during placement."
-            self.logger.error("[Robot] %s", msg)
-            # State remains "positioned" with gripper still closed
-            return {"status": "failed:slippage", "content": msg}
-
-        await self._simulate_action(
-            f"Placing {self._held_part} at {destination_location} "
-            f"(orientation={orientation or 'default'})"
-        )
-        placed = self._held_part
-        self._held_part = None
-        self._current_state = "placed"
-        self._gripper_state = "open"
-        return {
-            "status": "completed",
-            "content": f"Placed {placed}.",
-            "placed_location": destination_location,  # For part tracking
-        }
-    '''
     
     async def move_home(
         self,

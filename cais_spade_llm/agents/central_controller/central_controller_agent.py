@@ -61,6 +61,9 @@ class CentralControllerAgent(LlmAgent):
         # NOTE: self.running_aps is removed; the monitor tracks it now.
         
         self.blocked_tasks: dict[str, dict[str, Any]] = {}
+        # Stores the most recent task failure event so plan_block replans can
+        # include the root-cause failure context, not just the blocked task's event.
+        self.last_failure_event: Optional[dict[str, Any]] = None
 
         self.logger.info(
             "CentralControllerAgent '%s' initialized. safety_file=%s",
@@ -119,7 +122,7 @@ class CentralControllerAgent(LlmAgent):
         if self.plan_fsa_monitor:
             coord_state["plan_fsa_state"] = self.plan_fsa_monitor.current_state
             coord_state["plan_fsa_completed_tasks"] = list(
-                self.plan_fsa_monitor.completed_tasks
+                self.plan_fsa_monitor.completed_task_ids
             )
         else:
             coord_state["plan_fsa_state"] = None
@@ -147,38 +150,25 @@ class CentralControllerAgent(LlmAgent):
         marked_states: set,
         next_task_ids: list,
         any_running: bool,
-        failed_status: Optional[str] = None,
     ) -> Optional[str]:
         """
-        Classify why replanning is needed based on FSA state.
+        Classify why replanning is needed based on FSA state (completion path only).
+        Task-failure replanning is handled separately via the safety monitor.
 
         Returns:
-            None if no replanning needed, otherwise a reason string:
-            - "plan_completed": Reached accepting state
-            - "plan_executing": Tasks still running
-            - "plan_stuck_non_accepting": In non-accepting state with no outgoing transitions
-            - "plan_exhausted": All tasks done but not in accepting state (shouldn't happen)
-            - "task_failure": Previous task failed (use failed_status for details)
+            None if no replanning needed, otherwise:
+            - "plan_stuck_non_accepting": FSA has no forward transitions and is not
+              in an accepting state — plan cannot progress after a completion.
         """
-        # CRITICAL: Check for task failure FIRST before other conditions
-        # A failure always requires replanning, even if FSA has next tasks available
-        if failed_status and failed_status.startswith("failed"):
-            # Task just failed - main trigger for replanning
-            return f"task_failure:{failed_status}"
-
         if current_state in marked_states:
-            # Success case - in accepting state
-            return None  # or "plan_completed" if you want to signal completion
-
-        if any_running:
-            # Normal case - waiting for tasks
-            return None  # or "plan_executing"
-
-        if next_task_ids:
-            # Normal case - have tasks ready to execute
             return None
 
-        # Stuck in non-accepting state with no way forward
+        if any_running:
+            return None
+
+        if next_task_ids:
+            return None
+
         return "plan_stuck_non_accepting"
 
     def _build_replan_message(
@@ -300,6 +290,35 @@ class CentralControllerAgent(LlmAgent):
         ) -> None:
             agent: "CentralControllerAgent" = self.agent  # type: ignore
 
+            # --- FSA check: is this task enabled given the current plan state? ---
+            # If a predecessor failed, the FSA is stuck and this task won't be enabled.
+            if agent.plan_fsa_monitor:
+                enabled = agent.plan_fsa_monitor._next_task_ids_from_state(
+                    agent.plan_fsa_monitor.current_state
+                )
+                if task_id not in enabled:
+                    agent.logger.warning(
+                        "[CCA] PLAN BLOCK: task=%s not enabled in FSA (predecessor may have failed).",
+                        task_id,
+                    )
+                    await self._send_decision(resource_jid, task_id, "block")
+                    if product_jid:
+                        # Use the root-cause failure event so the LLM gets the
+                        # actual failure_context (mode, retryable, etc.), not
+                        # the empty safety_check event of the blocked task.
+                        failure_event = agent.last_failure_event or event
+                        replan_msg = agent._build_replan_message(
+                            product_jid=product_jid,
+                            reason="plan_block",
+                            event=failure_event,
+                            safety_info={
+                                "running_tasks": sorted(agent.safety_monitor.running_aps),
+                                "blocked_task_id": task_id,
+                            },
+                        )
+                        await self.send(replan_msg)
+                    return
+
             allowed, info = agent.safety_monitor.process_start_event(event)
 
             if not allowed:
@@ -321,8 +340,6 @@ class CentralControllerAgent(LlmAgent):
                     "[CCA] Queued task=%s as temporarily unsafe.", task_id
                 )
 
-                # Immediately respond to the waiting resource so this task attempt
-                # terminates cleanly while replanning proceeds.
                 await self._send_decision(resource_jid, task_id, "block")
 
                 if product_jid:
@@ -377,6 +394,7 @@ class CentralControllerAgent(LlmAgent):
                     )
                 if is_failed:
                     agent.safety_monitor.process_fail_event(event)
+                    agent.last_failure_event = event
                     agent.logger.info("[CCA] Task %s failed. State updated.", task_id)
                 else:
                     agent.safety_monitor.process_finish_event(event)
@@ -385,26 +403,20 @@ class CentralControllerAgent(LlmAgent):
                 # Retry any blocked tasks now that state has changed
                 await self._retry_blocked_tasks()
 
-                # Progress detection: check if plan can continue or needs replanning
-                if agent.plan_fsa_monitor and product_jid:
+                # Progress detection for completions: check if plan can continue
+                if is_completed and agent.plan_fsa_monitor and product_jid:
                     pm = agent.plan_fsa_monitor
                     cur_state = pm.current_state
                     if cur_state:
                         marked = set((pm.fsa or {}).get("A", {}).get("Xm") or [])
-                        resource_state = pm._parse_state(cur_state)
-                        any_running = any(
-                            info.get("status") == "running"
-                            for info in resource_state.values()
-                        )
+                        any_running = bool(agent.safety_monitor.running_aps)
                         next_task_ids = pm._next_task_ids_from_state(cur_state)
 
-                        # Classify if replanning is needed
                         replan_reason = agent._classify_replan_reason(
                             current_state=cur_state,
                             marked_states=marked,
                             next_task_ids=next_task_ids,
                             any_running=any_running,
-                            failed_status=status if is_failed else None,
                         )
 
                         if replan_reason:
@@ -416,10 +428,7 @@ class CentralControllerAgent(LlmAgent):
                                     "current_state": cur_state,
                                     "marked_states": list(marked),
                                     "available_tasks": next_task_ids,
-                                    "running_tasks": [
-                                        tid for tid, info in resource_state.items()
-                                        if info.get("status") == "running"
-                                    ]
+                                    "running_tasks": sorted(agent.safety_monitor.running_aps),
                                 },
                             )
                             await self.send(replan_msg)

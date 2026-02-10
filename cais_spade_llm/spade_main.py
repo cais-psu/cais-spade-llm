@@ -43,11 +43,11 @@ def _archive_dir(dir_path: Path, pattern: str, *, label: str) -> None:
 
 async def spade_main():
     """Orchestrate the entire SPADE session: load configs, spawn agents, register tools, and keep the loop alive."""
-    # Archive previous history logs (if any) at startup
-    _archive_dir(Path("cais_spade_llm/history"), "*.jsonl", label="history")
-
-    # Archive previous plan artifacts (if any) at startup
-    _archive_dir(Path("cais_spade_llm/plan"), "*.json", label="plan")
+    # Archive previous monitor outputs at startup
+    _archive_dir(Path("cais_spade_llm/monitor/history"), "*.jsonl", label="history")
+    _archive_dir(Path("cais_spade_llm/monitor/plan"),    "*.json",  label="plan")
+    _archive_dir(Path("cais_spade_llm/monitor/state"),   "*.json",  label="state")
+    _archive_dir(Path("cais_spade_llm/monitor/debug"),   "*.md",    label="debug")
 
     # Collect initialization payloads describing products and hardware resources.
     prod_files = utils.get_init_files(PRODUCT_DIR)

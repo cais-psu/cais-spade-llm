@@ -837,7 +837,6 @@ def build_replan_prompt(
     violations: list,
     tools_catalog: list,
     resource_infos: list,
-    caps_overview: str,
     source: str = "offline",  # "offline" or "online"
     safety_text: str = "",   # Assembly constraints and safety rules
     system_state: dict | None = None,  # Runtime state (robots, parts, timeline, requirements)
@@ -923,6 +922,13 @@ def build_replan_prompt(
 
     formatted_violations = "\n".join(violation_text) if violation_text else "(none)"
 
+    # Filter plan: only show non-completed nodes so the LLM focuses on what needs repair.
+    # Completed nodes are preserved in execution_timeline in system_state.
+    actionable_nodes = [
+        n for n in failed_plan_nodes
+        if n.get("status") != "completed"
+    ]
+
     # Format safety constraints
     safety_section = ""
     if safety_text.strip():
@@ -931,19 +937,44 @@ SAFETY CONSTRAINTS (MUST PRESERVE):
 {safety_text.strip()}
 """
 
-    # Format system state (runtime context)
+    # Format system state: surface robot availability and part positions prominently,
+    # then append the full state for completeness.
     state_section = ""
     if system_state:
+        robots = system_state.get("robots") or {}
+        parts  = system_state.get("parts") or {}
+
+        robot_lines = []
+        for jid, rs in robots.items():
+            held    = rs.get("held_part") or "nothing"
+            state   = rs.get("current_state", "unknown")
+            gripper = rs.get("gripper_state", "unknown")
+            robot_lines.append(f"  {jid}: holding={held}, state={state}, gripper={gripper}")
+
+        part_lines = []
+        for pname, ps in parts.items():
+            pos = ps.get("position")
+            loc = ps.get("location") or ps.get("last_known_location") or "unknown"
+            pstate = ps.get("state", "unknown")
+            pos_str = f"position={pos}" if pos else f"last_known={loc}"
+            part_lines.append(f"  {pname}: state={pstate}, {pos_str}")
+
         state_section = f"""
-RUNTIME SYSTEM STATE:
-{json.dumps(system_state, indent=2)}
+CURRENT ROBOT AVAILABILITY:
+{chr(10).join(robot_lines) if robot_lines else "  (none)"}
+
+CURRENT PART LOCATIONS:
+{chr(10).join(part_lines) if part_lines else "  (none)"}
+
+FULL RUNTIME STATE:
+{json.dumps({k: v for k, v in system_state.items() if k not in ("robots", "parts")}, indent=2)}
 """
 
     return dedent(f"""\
 {instructions}
 
-=== FAILED PLAN (Do not repeat this exactly, FIX IT) ===
-{json.dumps(failed_plan_nodes, indent=2)}
+=== FAILED PLAN (pending/failed tasks only — completed tasks are in execution_timeline) ===
+{json.dumps(actionable_nodes, indent=2)}
 
 === SAFETY VIOLATIONS (Must be resolved) ===
 {formatted_violations}
@@ -952,11 +983,8 @@ RUNTIME SYSTEM STATE:
 TOOLS_CATALOG:
 {json.dumps(tools_catalog, indent=2)}
 
-RESOURCE_AGENTS:
+RESOURCE_AGENTS (workspace boundaries and staging areas):
 {json.dumps(resource_infos, indent=2)}
-
-RESOURCE_CAPABILITIES_OVERVIEW:
-{caps_overview}
 {safety_section}
 {state_section}
 """)

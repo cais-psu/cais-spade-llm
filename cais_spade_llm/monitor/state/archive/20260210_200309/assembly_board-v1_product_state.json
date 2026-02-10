@@ -1,0 +1,149 @@
+{
+  "part_tracker": {
+    "SG": {
+      "state": "misplaced",
+      "location": null,
+      "last_successful_task": "REQ_1_T2",
+      "last_known_location": "assembly_board-v1",
+      "position": {
+        "x": 750.0,
+        "y": -200.0,
+        "z": 50.0
+      }
+    },
+    "MCP": {
+      "state": "in_transit",
+      "location": "ur5e@localhost_gripper",
+      "last_successful_task": "REQ_2_T2"
+    }
+  },
+  "execution_timeline": [
+    {
+      "timestamp": "2026-02-10T19:55:05.549810+00:00",
+      "task_id": "REQ_1_T0",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:05.650792+00:00",
+      "task_id": "REQ_1_T0",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:05.652728+00:00",
+      "task_id": "REQ_2_T0",
+      "status": "accepted",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:05.753445+00:00",
+      "task_id": "REQ_2_T0",
+      "status": "running",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.651855+00:00",
+      "task_id": "REQ_1_T0",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.755023+00:00",
+      "task_id": "REQ_2_T0",
+      "status": "completed",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.759081+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.860067+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.861502+00:00",
+      "task_id": "REQ_2_T1",
+      "status": "accepted",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:10.962632+00:00",
+      "task_id": "REQ_2_T1",
+      "status": "running",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:15.861528+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:15.964009+00:00",
+      "task_id": "REQ_2_T1",
+      "status": "completed",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:15.967294+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:16.066157+00:00",
+      "task_id": "REQ_2_T2",
+      "status": "accepted",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:16.067885+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:16.166099+00:00",
+      "task_id": "REQ_2_T2",
+      "status": "running",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:21.068941+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:21.168735+00:00",
+      "task_id": "REQ_2_T2",
+      "status": "completed",
+      "resource_jid": "ur5e@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:21.170574+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:21.274350+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-02-10T19:55:21.277054+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "failed:misplaced",
+      "resource_jid": "xarm6@localhost"
+    }
+  ],
+  "last_updated": "2026-02-10T19:55:21.278113+00:00"
+}

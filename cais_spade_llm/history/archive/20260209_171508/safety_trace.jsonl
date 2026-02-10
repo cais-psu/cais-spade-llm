@@ -1,4 +1,0 @@
-{"ts": "2026-02-09T16:44:39.917237+00:00", "rule_id": "SAFE_1", "event": "start", "reason": "start_validated", "from": "1", "to": "2", "running_aps": ["ap001"], "candidate_aps": ["ap001"], "violated": false}
-{"ts": "2026-02-09T16:44:47.894357+00:00", "rule_id": "SAFE_1", "event": "fail", "reason": "fail_no_advance", "from": "1", "to": "1", "running_aps": [], "candidate_aps": ["ap001"], "violated": false}
-{"ts": "2026-02-09T16:45:07.940043+00:00", "rule_id": "SAFE_1", "event": "fail", "reason": "fail_no_advance", "from": "1", "to": "1", "running_aps": [], "candidate_aps": ["ap001"], "violated": false}
-{"ts": "2026-02-09T16:45:11.282559+00:00", "rule_id": "SAFE_1", "event": "start", "reason": "start_blocked", "from": "1", "to": "3", "running_aps": [], "candidate_aps": ["ap002"], "violated": true}

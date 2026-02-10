@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 from prompts import build_task_expansion_prompt, build_requirement_parse_prompt, build_replan_prompt
@@ -282,15 +283,9 @@ class ProcessPlanner:
             )
 
         # --- DEFINITIONS RESTORED HERE ---
-        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
-
-        # Get capability overview string
-        caps_overview = ""
-        if hasattr(self.product_agent, "_static_caps_overview"):
-            try:
-                caps_overview = self.product_agent._static_caps_overview()
-            except Exception:
-                caps_overview = ""
+        tools_catalog = self._deduplicate_tools_catalog(
+            getattr(self.product_agent, "tools_catalog", [])
+        )
 
         # Get resource agent info
         resource_infos = [
@@ -318,16 +313,32 @@ class ProcessPlanner:
             violations=violations,
             tools_catalog=tools_catalog,
             resource_infos=resource_infos,
-            caps_overview=caps_overview,
             source=source,  # "offline" or "online"
             safety_text=self.product_agent.safety_text,  # Include safety constraints
             system_state=system_state,  # Include runtime state for online replanning
+        )
+
+        self._dump_replan_debug(
+            source=source,
+            prompt=prompt,
+            violations=violations,
+            resource_infos=resource_infos,
+            system_state=system_state,
         )
 
         raw = await self.product_agent.ask_llm(
             prompt=prompt,
             with_functions=False,
             temperature=0.0, # Keep temp low for deterministic fixes
+        )
+
+        self._dump_replan_debug(
+            source=source,
+            prompt=prompt,
+            violations=violations,
+            resource_infos=resource_infos,
+            system_state=system_state,
+            llm_response=raw,
         )
 
         try:
@@ -424,6 +435,103 @@ class ProcessPlanner:
 
 
     # ------------------------------------------------------------------ #
+    # Prompt helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _deduplicate_tools_catalog(catalog: list) -> list:
+        """
+        Merge per-robot tool entries into one entry per function.
+        function_owner_agent is replaced by capable_agents: [robot1, robot2, ...]
+        so the LLM sees each capability once and knows which robots can execute it.
+        """
+        seen: Dict[str, Dict[str, Any]] = {}
+        for row in catalog:
+            fn = row.get("function")
+            if not fn:
+                continue
+            if fn not in seen:
+                merged = {k: v for k, v in row.items() if k != "function_owner_agent"}
+                merged["capable_agents"] = [row["function_owner_agent"]] if row.get("function_owner_agent") else []
+                seen[fn] = merged
+            else:
+                agent = row.get("function_owner_agent")
+                if agent and agent not in seen[fn]["capable_agents"]:
+                    seen[fn]["capable_agents"].append(agent)
+        return list(seen.values())
+
+    # ------------------------------------------------------------------ #
+    # Debug helpers
+    # ------------------------------------------------------------------ #
+    def _dump_replan_debug(
+        self,
+        *,
+        source: str,
+        prompt: str,
+        violations: list,
+        resource_infos: list,
+        system_state: dict | None,
+        llm_response: str | None = None,
+    ) -> None:
+        """Write a timestamped Markdown report to cais_spade_llm/monitor/debug/ for each replan."""
+        try:
+            debug_dir = Path("cais_spade_llm/monitor/debug")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+            suffix = "response" if llm_response is not None else "input"
+            fname = debug_dir / f"replan_{source}_{ts}_{suffix}.md"
+
+            def _json_block(obj: Any) -> str:
+                return "```json\n" + json.dumps(obj, indent=2, default=str) + "\n```"
+
+            lines = [
+                f"# Replan Debug — {source.upper()} | {datetime.now(timezone.utc).isoformat()}",
+                "",
+                "---",
+                "",
+                "## Violations (what triggered the replan)",
+                "",
+                _json_block(violations),
+                "",
+                "## Resource Agents (capabilities available to LLM)",
+                "",
+                _json_block(resource_infos),
+                "",
+                "## System State (runtime context: robot states, part tracker, timeline)",
+                "",
+                _json_block(system_state) if system_state else "_No system state (offline replan)._",
+                "",
+                "## Prompt (full text sent to LLM)",
+                "",
+                "```",
+                prompt,
+                "```",
+                "",
+            ]
+
+            if llm_response is not None:
+                lines += [
+                    "## LLM Response (raw)",
+                    "",
+                    "```",
+                    llm_response,
+                    "```",
+                    "",
+                    "## LLM Response (parsed)",
+                    "",
+                ]
+                try:
+                    lines.append(_json_block(json.loads(llm_response)))
+                except json.JSONDecodeError:
+                    lines.append("_Response was not valid JSON._")
+                lines.append("")
+
+            fname.write_text("\n".join(lines), encoding="utf-8")
+            self.logger.info("[Planner] Debug report written to %s", fname)
+        except Exception:
+            self.logger.exception("[Planner] Failed to write replan debug report.")
+
+    # ------------------------------------------------------------------ #
     # Scheduling helpers
     # ------------------------------------------------------------------ #
     def _extract_conflict_task_ids(self, violations: list[dict], *, source: str) -> Set[str]:
@@ -515,9 +623,11 @@ class ProcessPlanner:
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
         """Select the next task whose predecessors are all satisfied."""
         def _pred_satisfied(status: Any) -> bool:
-            # Recovery flow should explicitly repair failed dependencies;
-            # only completed predecessors unlock successors.
-            return status == "completed"
+            # A failed predecessor also unlocks its successor so the successor
+            # can be dispatched and hit the CCA's reactive FSA safety check.
+            # The CCA will block it (FSA not enabled after failure) → replan.
+            s = str(status) if status else ""
+            return s == "completed" or s.startswith("failed")
 
         def _pred_ready(pred_id: str) -> bool:
             pred = self._find_node(pred_id)

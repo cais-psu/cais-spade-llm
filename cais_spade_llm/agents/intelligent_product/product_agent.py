@@ -14,6 +14,7 @@ from spade.template import Template
 
 from agents.shared_information.llm_agent import LlmAgent
 from agents.intelligent_product.process_planner import ProcessPlanner
+from sensors.camera_module import CameraModule
 
 
 class ProductAgent(LlmAgent):
@@ -38,6 +39,7 @@ class ProductAgent(LlmAgent):
         safety_file: Optional[str] = None,
         instruction_override: Optional[str] = None,
         cca_jid: Optional[str] = None,
+        camera: Optional["CameraModule"] = None,
         **kw,
     ) -> None:
         """
@@ -61,12 +63,16 @@ class ProductAgent(LlmAgent):
         self.safety_text: str = ""
 
         # Planner scaffolding
-        base_plan_dir = Path("cais_spade_llm/plan")
+        base_plan_dir = Path("cais_spade_llm/monitor/plan")
+        base_state_dir = Path("cais_spade_llm/monitor/state")
         # For now: requirements file (NL → structured requirements)
         self.structured_requirements_path = base_plan_dir / f"{name}_requirements.json"
         # Reserved for later: full DAG task plan (requirements → task graph)
         self.plan_path = base_plan_dir / f"{name}_plan.json"
         self.global_fsa_path = base_plan_dir / f"{name}_global_fsa.json"
+        # Runtime snapshots (overwritten each step)
+        self.product_state_path = base_state_dir / f"{name}_product_state.json"
+        self.resource_state_path = base_state_dir / f"{name}_resource_state.json"
 
         planner_resources = self._match_resource_objects(
             self._resource_agent_refs, self.resource_jids
@@ -78,6 +84,9 @@ class ProductAgent(LlmAgent):
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
         self.task_states: dict[str, str] = {}
+
+        # Sensor: camera module for post-placement verification
+        self.camera = camera if camera is not None else CameraModule()
 
         # Runtime tracking for replanning context (PRODUCT STATE ONLY)
         self.part_tracker: dict[str, dict[str, Any]] = {}  # part_name -> {location, state, last_task}
@@ -110,60 +119,183 @@ class ProductAgent(LlmAgent):
 
 
     def _persist_plan_snapshot(self) -> None:
-        """Persist the current process planner graph AND product state to disk."""
+        """Persist the current process planner graph (DAG nodes only) to disk."""
         if not self.plan_path:
             return
 
         try:
-            # Save plan nodes AND product state (separation of concerns)
-            from datetime import datetime, timezone
             import json
-
-            snapshot = {
-                "nodes": self.process_planner.nodes,
-                "product_state": {  # Product-specific state (not resource state)
-                    "part_tracker": self.part_tracker,
-                    "execution_timeline": self.execution_timeline,
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                }
-            }
 
             self.plan_path.parent.mkdir(parents=True, exist_ok=True)
             with self.plan_path.open("w", encoding="utf-8") as f:
-                json.dump(snapshot, f, indent=2)
+                json.dump({"nodes": self.process_planner.nodes}, f, indent=2)
 
-            self.logger.info(f"[Product] Saved plan + product state to {self.plan_path.resolve()}")
+            self.logger.info(f"[Product] Saved plan to {self.plan_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist plan snapshot.")
 
-    def _restore_product_state(self) -> None:
-        """Restore product state (part tracker, timeline) from persisted plan file."""
-        if not self.plan_path or not self.plan_path.exists():
+    def _persist_product_state(self) -> None:
+        """Persist product state (part tracker, execution timeline) to disk."""
+        if not self.product_state_path:
+            return
+
+        try:
+            from datetime import datetime, timezone
+            import json
+
+            payload = {
+                "part_tracker": self.part_tracker,
+                "execution_timeline": self.execution_timeline,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+            self.product_state_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.product_state_path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+
+            self.logger.info(f"[Product] Saved product state to {self.product_state_path.resolve()}")
+        except Exception:
+            self.logger.exception("[Product] Failed to persist product state.")
+
+    def _persist_resource_state(self) -> None:
+        """Persist each resource agent's current state snapshot to disk."""
+        if not self.resource_state_path:
             return
 
         try:
             import json
-            with self.plan_path.open("r", encoding="utf-8") as f:
-                snapshot = json.load(f)
 
-            # Restore product state if present
-            product_state = snapshot.get("product_state", {})
-            if product_state:
-                self.part_tracker = product_state.get("part_tracker", {})
-                self.execution_timeline = product_state.get("execution_timeline", [])
-                self.logger.info(
-                    f"[Product] Restored product state: {len(self.part_tracker)} parts, "
-                    f"{len(self.execution_timeline)} timeline events"
+            state = {str(ra.jid): ra._snapshot_state() for ra in self.resource_agents}
+            self.resource_state_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.resource_state_path.open("w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+
+            self.logger.info(f"[Product] Saved resource state to {self.resource_state_path.resolve()}")
+        except Exception:
+            self.logger.exception("[Product] Failed to persist resource state.")
+
+
+    def _get_part_transition(self, function_name: str) -> Dict[str, Any]:
+        """Look up the part_transition map for a function from the shared tools catalogue."""
+        self.__class__._load_shared_tools_catalogue()
+        row = LlmAgent._TOOLS_BY_FUNC.get(function_name, {})
+        return row.get("part_transition", {})
+
+    def _apply_part_tracker_update(
+        self,
+        part_name: str,
+        function_name: str,
+        status: str,
+        params: Dict[str, Any],
+        robot_jid: str,
+        task_id: str,
+    ) -> None:
+        """Generic interpreter: applies the part_transition declared in each function's docstring."""
+        transition_map = self._get_part_transition(function_name)
+        if not transition_map:
+            return  # function has no declared part_transition — nothing to track
+
+        # Most-specific match wins: "failed:misplaced" → "failed" → nothing
+        transition = transition_map.get(status) or transition_map.get(status.split(":")[0])
+        if not transition:
+            return
+
+        self.part_tracker.setdefault(part_name, {"state": "unknown", "location": None})
+        entry: Dict[str, Any] = {"state": transition["state"]}
+
+        if "location_template" in transition:
+            entry["location"] = transition["location_template"].format(robot_jid=robot_jid)
+
+        if "location_param" in transition:
+            entry["location"] = params.get(transition["location_param"])
+
+        if transition.get("verify_camera"):
+            position = self.camera.observe(part_name)
+            if position is not None:
+                entry["state"] = "verified"
+                entry["position"] = position
+            else:
+                entry["state"] = "untracked"
+                entry["observation_required"] = True
+                self.logger.error(
+                    "[Product] %s is untracked after placement — camera cannot locate it. Human intervention required.",
+                    part_name,
                 )
 
-            # Also restore nodes into ProcessPlanner
-            nodes = snapshot.get("nodes", [])
-            if nodes:
-                self.process_planner.nodes = nodes
-                self.logger.info(f"[Product] Restored {len(nodes)} plan nodes")
+        if transition.get("camera_locate"):
+            # Camera is the authority on where the part actually ended up.
+            # Found → misplaced with coordinates; not found → untracked, human required.
+            last_known = (
+                params.get(transition["last_known_param"])
+                if "last_known_param" in transition else None
+            )
+            position = self.camera.observe(part_name)
+            entry["location"] = None
+            if last_known:
+                entry["last_known_location"] = last_known
+            if position is not None:
+                entry["state"] = "misplaced"
+                entry["position"] = position
+            else:
+                entry["state"] = "untracked"
+                entry["observation_required"] = True
+                self.logger.error(
+                    "[Product] %s is untracked — camera cannot locate it. Human intervention required.",
+                    part_name,
+                )
 
-        except Exception:
-            self.logger.exception("[Product] Failed to restore product state.")
+        if transition.get("observation_required"):
+            entry["observation_required"] = True
+            entry["location"] = None
+            if "last_known_param" in transition:
+                entry["last_known_location"] = params.get(transition["last_known_param"])
+            elif "last_known_template" in transition:
+                entry["last_known_location"] = transition["last_known_template"].format(robot_jid=robot_jid)
+
+        if status == "completed":
+            entry["last_successful_task"] = task_id
+
+        self.part_tracker[part_name].update(entry)
+
+
+
+    def _restore_product_state(self) -> None:
+        """Restore product state (part tracker, timeline) and plan nodes from disk."""
+        import json
+
+        # --- Restore product state ---
+        # Prefer the dedicated product_state file; fall back to legacy plan.json key.
+        product_state: dict = {}
+        if self.product_state_path and self.product_state_path.exists():
+            try:
+                with self.product_state_path.open("r", encoding="utf-8") as f:
+                    product_state = json.load(f)
+            except Exception:
+                self.logger.exception("[Product] Failed to read product state file.")
+        elif self.plan_path and self.plan_path.exists():
+            try:
+                with self.plan_path.open("r", encoding="utf-8") as f:
+                    product_state = json.load(f).get("product_state", {})
+            except Exception:
+                self.logger.exception("[Product] Failed to read legacy product state from plan file.")
+
+        if product_state:
+            self.part_tracker = product_state.get("part_tracker", {})
+            self.execution_timeline = product_state.get("execution_timeline", [])
+            self.logger.info(
+                f"[Product] Restored product state: {len(self.part_tracker)} parts, "
+                f"{len(self.execution_timeline)} timeline events"
+            )
+
+        # --- Restore plan nodes ---
+        if self.plan_path and self.plan_path.exists():
+            try:
+                with self.plan_path.open("r", encoding="utf-8") as f:
+                    nodes = json.load(f).get("nodes", [])
+                if nodes:
+                    self.process_planner.nodes = nodes
+                    self.logger.info(f"[Product] Restored {len(nodes)} plan nodes")
+            except Exception:
+                self.logger.exception("[Product] Failed to restore plan nodes.")
 
     # --------------------------------------------------------------------- #
     # SPADE lifecycle
@@ -318,9 +450,14 @@ class ProductAgent(LlmAgent):
             else:
                 requirements_status[req_id]["status"] = "pending"
 
+        final_timeline = [
+            e for e in self.execution_timeline
+            if e.get("status", "") in {"completed", "blocked"}
+            or str(e.get("status", "")).startswith("failed:")
+        ]
         return {
             "parts": dict(self.part_tracker),
-            "execution_timeline": list(self.execution_timeline[-20:]),  # Last 20 events
+            "execution_timeline": final_timeline,
             "requirements_status": requirements_status,
         }
 
@@ -502,31 +639,28 @@ class ProductAgent(LlmAgent):
             })
 
             # 4) Update part location tracking
-            if task_node and status == "completed":
+            if task_node:
                 function_name = task_node.get("function_name", "")
                 params = task_node.get("params", {})
                 part_name = params.get("part_name")
 
                 if part_name:
-                    if part_name not in agent.part_tracker:
-                        agent.part_tracker[part_name] = {"state": "unknown", "location": None}
-
-                    # Update based on function type
-                    if function_name == "pick_part":
-                        agent.part_tracker[part_name]["state"] = "picked"
-                        agent.part_tracker[part_name]["location"] = f"{msg.sender}_gripper"
-                        agent.part_tracker[part_name]["last_successful_task"] = task_id
-                    elif function_name == "place_part":
-                        destination = params.get("destination_location") or payload.get("placed_location")
-                        agent.part_tracker[part_name]["state"] = "placed"
-                        agent.part_tracker[part_name]["location"] = destination
-                        agent.part_tracker[part_name]["last_successful_task"] = task_id
+                    agent._apply_part_tracker_update(
+                        part_name=part_name,
+                        function_name=function_name,
+                        status=status,
+                        params=params,
+                        robot_jid=str(msg.sender),
+                        task_id=task_id,
+                    )
 
             # NOTE: Robot states are NOT cached here - they're collected by CentralControllerAgent
             # and provided in the replan_request message (system_coordination_state)
 
             if updated_node:
                 agent._persist_plan_snapshot()
+                agent._persist_product_state()
+                agent._persist_resource_state()
 
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
@@ -626,6 +760,8 @@ class ProductAgent(LlmAgent):
                 )
 
             agent._persist_plan_snapshot()
+            agent._persist_product_state()
+            agent._persist_resource_state()
 
     class _PlanSafetyResultInbox(CyclicBehaviour):
         """Handle runtime plan_safety_result replies from CCA."""
@@ -688,6 +824,8 @@ class ProductAgent(LlmAgent):
                 check_msg.body = json.dumps(check_payload)
                 await self.send(check_msg)
                 agent._persist_plan_snapshot()
+                agent._persist_product_state()
+                agent._persist_resource_state()
             except Exception:
                 agent.logger.exception(
                     "[Product] Corrective runtime replan attempt failed."

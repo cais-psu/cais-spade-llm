@@ -1,2 +1,0 @@
-{"ts": "2026-02-09T22:08:17.238700+00:00", "rule_id": "SAFE_1", "event": "start", "reason": "start_validated", "from": "1", "to": "2", "running_aps": ["ap002"], "candidate_aps": ["ap002"], "violated": false}
-{"ts": "2026-02-09T22:08:17.341893+00:00", "rule_id": "SAFE_1", "event": "fail", "reason": "fail_no_advance", "from": "1", "to": "1", "running_aps": [], "candidate_aps": ["ap002"], "violated": false}
