@@ -307,7 +307,36 @@ class ProcessPlanner:
                 **product_state,  # Parts, timeline, requirements
             }
 
-        # 5. Build Prompt (use specialized instructions for offline vs online)
+        # 5. Try PDDL replanner first (online only)
+        if source == "online" and system_state is not None:
+            try:
+                from cais_spade_llm.pddl import replan as pddl_replan
+
+                pddl_patch = await pddl_replan(
+                    ask_llm=self.product_agent.ask_llm,
+                    violations=violations,
+                    system_state=system_state,
+                    tools_catalog=tools_catalog,
+                    resource_infos=resource_infos,
+                    safety_text=self.product_agent.safety_text,
+                    failed_plan_nodes=plan_payload,
+                    product_jid=str(self.product_agent.jid),
+                    existing_task_ids={n["id"] for n in self.nodes},
+                )
+
+                if pddl_patch is not None:
+                    self.logger.info(
+                        "[Planner] PDDL replanner succeeded (%d tasks); applying patch.",
+                        len(pddl_patch.get("tasks", [])),
+                    )
+                    self._apply_replan_patch(pddl_patch["tasks"])
+                    return
+
+                self.logger.info("[Planner] PDDL returned no solution; falling back to LLM replan.")
+            except Exception:
+                self.logger.exception("[Planner] PDDL replanner failed; falling back to LLM replan.")
+
+        # 6. Build Prompt (LLM fallback — use specialized instructions for offline vs online)
         prompt = build_replan_prompt(
             failed_plan_nodes=plan_payload,
             violations=violations,
@@ -348,91 +377,87 @@ class ProcessPlanner:
             if not modified_tasks:
                 self.logger.warning("[Planner] LLM returned no modified tasks. Plan remains unchanged.")
                 return
-            
-            # --- MERGE STRATEGY (Supports Modification, Insertion, Deletion) ---
-            node_map = {n["id"]: n for n in self.nodes}
 
-            for t in modified_tasks:
-                tid = t.get("id")
-                if not tid: 
-                    continue
-
-                # CASE A: DELETION
-                if t.get("delete") is True:
-                    if tid in node_map:
-                        self.logger.info(f"[Planner] DELETING task {tid}: {t.get('change_reason')}")
-                        del node_map[tid]
-                        # Cleanup: Remove edges pointing to the deleted node
-                        for other in node_map.values():
-                            if tid in other.get("predecessors", []):
-                                other["predecessors"].remove(tid)
-                            if tid in other.get("successors", []):
-                                other["successors"].remove(tid)
-                    continue
-
-                # CASE B: MODIFICATION / INSERTION
-                
-                # Prepare params: use existing if modifying, empty if new
-                params = t.get("params") or {}
-                if tid in node_map and not t.get("params"):
-                    params = node_map[tid].get("params", {})
-                
-                # Ensure product_jid is always present
-                params["product_jid"] = str(self.product_agent.jid)
-
-                # Initialize new node if it doesn't exist
-                if tid not in node_map:
-                    node_map[tid] = {
-                        "id": tid,
-                        "type": "task",
-                        "status": "pending",
-                        "predecessors": [],
-                        "successors": []
-                    }
-
-                target = node_map[tid]
-
-                # Update fields ONLY if they are present in the LLM output
-                if "function_name" in t: target["function_name"] = t["function_name"]
-                if "params" in t: target["params"] = params
-                if "resource_jid" in t: target["resource_jid"] = t["resource_jid"]
-                if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
-                
-                # Overwrite edges if provided (LLM is authoritative on structure changes)
-                if "predecessors" in t:
-                    target["predecessors"] = t["predecessors"]
-
-                # Ignore successors edits for existing tasks (derive later)
-                if "successors" in t and tid not in node_map:
-                    target["successors"] = t["successors"]
-                    
-                if "change_reason" in t:
-                    target["change_reason"] = t["change_reason"]
-                    self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
-
-                # Reset status so it runs again
-                target["status"] = "pending" 
-
-            self.nodes = list(node_map.values())
-            
-            # 5. Consistency Check (Auto-repair bidirectional links)
-            self._ensure_graph_consistency()
-
-            self.logger.info(
-                "[Planner] Re-planning successful. Merged %d modifications.",
-                len(modified_tasks),
-            )
-
-            if hasattr(self.product_agent, "plan_path"):
-                self.save(self.product_agent.plan_path)
-
-            # Invalidate any previously compiled automaton (IMPORTANT)
-            self.global_fsa = None
-            self.save_global_fsa(self.product_agent.global_fsa_path)
+            self._apply_replan_patch(modified_tasks)
 
         except json.JSONDecodeError as exc:
             self.logger.error(f"[Planner] LLM Re-planning returned invalid JSON: {exc}")
 
+    def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:
+        """
+        Merge task modifications into self.nodes.
+
+        Supports MODIFICATION, INSERTION, and DELETION.
+        Called by both PDDL replanner and pure-LLM replanner paths.
+        """
+        node_map = {n["id"]: n for n in self.nodes}
+
+        for t in modified_tasks:
+            tid = t.get("id")
+            if not tid:
+                continue
+
+            # CASE A: DELETION
+            if t.get("delete") is True:
+                if tid in node_map:
+                    self.logger.info(f"[Planner] DELETING task {tid}: {t.get('change_reason')}")
+                    del node_map[tid]
+                    for other in node_map.values():
+                        if tid in other.get("predecessors", []):
+                            other["predecessors"].remove(tid)
+                        if tid in other.get("successors", []):
+                            other["successors"].remove(tid)
+                continue
+
+            # CASE B: MODIFICATION / INSERTION
+            params = t.get("params") or {}
+            if tid in node_map and not t.get("params"):
+                params = node_map[tid].get("params", {})
+
+            params["product_jid"] = str(self.product_agent.jid)
+
+            if tid not in node_map:
+                node_map[tid] = {
+                    "id": tid,
+                    "type": "task",
+                    "status": "pending",
+                    "predecessors": [],
+                    "successors": [],
+                }
+
+            target = node_map[tid]
+
+            if "function_name" in t: target["function_name"] = t["function_name"]
+            if "params" in t: target["params"] = params
+            if "resource_jid" in t: target["resource_jid"] = t["resource_jid"]
+            if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
+
+            if "predecessors" in t:
+                target["predecessors"] = t["predecessors"]
+
+            if "successors" in t and tid not in node_map:
+                target["successors"] = t["successors"]
+
+            if "change_reason" in t:
+                target["change_reason"] = t["change_reason"]
+                self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
+
+            target["status"] = "pending"
+
+        self.nodes = list(node_map.values())
+
+        self._ensure_graph_consistency()
+
+        self.logger.info(
+            "[Planner] Re-planning successful. Merged %d modifications.",
+            len(modified_tasks),
+        )
+
+        if hasattr(self.product_agent, "plan_path"):
+            self.save(self.product_agent.plan_path)
+
+        self.global_fsa = None
+        self.save_global_fsa(self.product_agent.global_fsa_path)
 
     # ------------------------------------------------------------------ #
     # Prompt helpers
