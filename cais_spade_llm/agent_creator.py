@@ -153,6 +153,7 @@ def create_product_agents(
                 resource_agents=resource_agents,
                 cca_jid=cca_jid,
                 camera=_MOCK_CAMERA,
+                replan_mode=meta.get("replan_mode", "llm"),
             )
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.

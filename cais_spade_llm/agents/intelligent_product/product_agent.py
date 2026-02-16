@@ -40,12 +40,15 @@ class ProductAgent(LlmAgent):
         instruction_override: Optional[str] = None,
         cca_jid: Optional[str] = None,
         camera: Optional["CameraModule"] = None,
+        replan_mode: str = "pddl",
         **kw,
     ) -> None:
         """
         :param resource_jids: List of RA JIDs to target (first is used).
         :param product_specification_file: Path to spec text (utf-8). Optional.
         :param instruction_override: If provided, this text is used instead of reading a file.
+        :param replan_mode: Online replanning strategy — "llm" (prompt-level guidance, default)
+            or "pddl" (LLM-generated PDDL solved by classical planner).
         """
         super().__init__(jid, password, name=name, agent_role="product", **kw)
 
@@ -61,6 +64,9 @@ class ProductAgent(LlmAgent):
 
         # Cache safety text for use during replanning
         self.safety_text: str = ""
+
+        # Online replanning strategy: "llm" or "pddl"
+        self.replan_mode = replan_mode
 
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/monitor/plan")
@@ -709,10 +715,16 @@ class ProductAgent(LlmAgent):
                 reason,
                 failed_task_id,
             )
-            await agent.process_planner.replan_with_feedback_online(
-                violations,
-                system_coordination_state=system_coordination_state
-            )
+            if agent.replan_mode == "pddl":
+                await agent.process_planner.replan_with_feedback_online_pddl(
+                    violations,
+                    system_coordination_state=system_coordination_state
+                )
+            else:
+                await agent.process_planner.replan_with_feedback_online(
+                    violations,
+                    system_coordination_state=system_coordination_state
+                )
 
             # After online replan, let previously blocked tasks be re-evaluated via
             # fresh safety_check when they are dispatched again.

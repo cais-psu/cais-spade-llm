@@ -16,9 +16,11 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from cais_spade_llm.pddl.solver import PlannerNoSolutionError, solve
+from cais_spade_llm.agents.intelligent_product.pddl.solver import PlannerNoSolutionError, solve
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,88 @@ async def replan(
         "[PDDL] Recovery plan: %d tasks",
         len(patch["tasks"]),
     )
+    _dump_pddl_debug(
+        prompt=prompt,
+        raw_response=raw_response,
+        domain_pddl=domain_pddl,
+        problem_pddl=problem_pddl,
+        plan=plan,
+        patch=patch,
+    )
     return patch
+
+
+# ---------------------------------------------------------------------------
+# Debug helper
+# ---------------------------------------------------------------------------
+
+def _dump_pddl_debug(
+    *,
+    prompt: str,
+    raw_response: str,
+    domain_pddl: str | None,
+    problem_pddl: str | None,
+    plan: list[tuple[str, list[str]]] | None,
+    patch: dict[str, Any] | None,
+) -> None:
+    """Write a timestamped Markdown report to cais_spade_llm/monitor/debug/pddl/."""
+    try:
+        debug_dir = Path("cais_spade_llm/monitor/debug/pddl")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        fname = debug_dir / f"pddl_{ts}.md"
+
+        plan_lines = (
+            "\n".join(f"  {i+1}. ({action} {' '.join(params)})" for i, (action, params) in enumerate(plan))
+            if plan else "  (no plan)"
+        )
+
+        lines = [
+            f"# PDDL Debug — {datetime.now(timezone.utc).isoformat()}",
+            "",
+            "---",
+            "",
+            "## Prompt (sent to LLM)",
+            "",
+            "```",
+            prompt,
+            "```",
+            "",
+            "## LLM Raw Response",
+            "",
+            "```",
+            raw_response,
+            "```",
+            "",
+            "## Parsed PDDL Domain",
+            "",
+            "```lisp",
+            domain_pddl or "(not extracted)",
+            "```",
+            "",
+            "## Parsed PDDL Problem",
+            "",
+            "```lisp",
+            problem_pddl or "(not extracted)",
+            "```",
+            "",
+            "## Solved Plan (pyperplan)",
+            "",
+            plan_lines,
+            "",
+            "## Translated Task Patch",
+            "",
+            "```json",
+            json.dumps(patch, indent=2, default=str) if patch else "(none)",
+            "```",
+            "",
+        ]
+
+        fname.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("[PDDL] Debug report written to %s", fname)
+    except Exception:
+        logger.exception("[PDDL] Failed to write debug report.")
 
 
 # ---------------------------------------------------------------------------

@@ -20,14 +20,14 @@ Expected recovery (what PDDL should find):
   10. UR5e places MCP on assembly board ← done
 
 Run with:
-    python -m cais_spade_llm.pddl.test_deadlock_scenario
+    python -m cais_spade_llm.agents.intelligent_product.pddl.test_deadlock_scenario
 """
 
 import asyncio
 import json
 
-from cais_spade_llm.pddl.replanner import _parse_pddl_blocks, _translate_plan, replan
-from cais_spade_llm.pddl.solver import solve
+from cais_spade_llm.agents.intelligent_product.pddl.replanner import _parse_pddl_blocks, _translate_plan, replan
+from cais_spade_llm.agents.intelligent_product.pddl.solver import solve
 
 
 # ---------------------------------------------------------------------------

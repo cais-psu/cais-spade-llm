@@ -246,12 +246,77 @@ class ProcessPlanner:
         violations: list[dict],
         system_coordination_state: dict | None = None
     ) -> None:
-        """Online replan using runtime failure/block feedback."""
+        """Online replan using runtime failure/block feedback (prompt-level LLM guidance)."""
         await self._replan_with_feedback(
             violations,
             source="online",
             system_coordination_state=system_coordination_state
         )
+
+    async def replan_with_feedback_online_pddl(
+        self,
+        violations: list[dict],
+        system_coordination_state: dict | None = None
+    ) -> None:
+        """Online replan using PDDL solved by a classical planner."""
+        from cais_spade_llm.agents.intelligent_product.pddl import replan as pddl_replan
+
+        self.logger.info(
+            "[Planner] Triggering PDDL Re-planning with online feedback (%d violations)...",
+            len(violations),
+        )
+
+        # 1. Gather tasks and mark conflict set
+        failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
+        conflict_task_ids = self._extract_conflict_task_ids(violations, source="online")
+
+        plan_payload = []
+        for node in failed_nodes:
+            node_copy = node.copy()
+            if conflict_task_ids and node_copy["id"] in conflict_task_ids:
+                node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
+            plan_payload.append(node_copy)
+
+        # 2. Build tools catalog and resource info
+        tools_catalog = self._deduplicate_tools_catalog(
+            getattr(self.product_agent, "tools_catalog", [])
+        )
+        resource_infos = [
+            {
+                "jid": str(getattr(ra, "jid", "")),
+                "static_capabilities": getattr(ra, "static_capabilities", {}),
+            }
+            for ra in self.resource_agents
+        ]
+
+        # 3. Build system state (coordination + product)
+        product_state = self.product_agent._build_product_state()
+        system_state = {
+            **(system_coordination_state or {}),
+            **product_state,
+        }
+
+        # 4. Call PDDL replanner
+        pddl_patch = await pddl_replan(
+            ask_llm=self.product_agent.ask_llm,
+            violations=violations,
+            system_state=system_state,
+            tools_catalog=tools_catalog,
+            resource_infos=resource_infos,
+            safety_text=self.product_agent.safety_text,
+            failed_plan_nodes=plan_payload,
+            product_jid=str(self.product_agent.jid),
+            existing_task_ids={n["id"] for n in self.nodes},
+        )
+
+        if pddl_patch is not None:
+            self.logger.info(
+                "[Planner] PDDL replanner succeeded (%d tasks); applying patch.",
+                len(pddl_patch.get("tasks", [])),
+            )
+            self._apply_replan_patch(pddl_patch["tasks"])
+        else:
+            self.logger.warning("[Planner] PDDL replanner returned no solution.")
 
     async def _replan_with_feedback(
         self,
@@ -307,36 +372,7 @@ class ProcessPlanner:
                 **product_state,  # Parts, timeline, requirements
             }
 
-        # 5. Try PDDL replanner first (online only)
-        if source == "online" and system_state is not None:
-            try:
-                from cais_spade_llm.pddl import replan as pddl_replan
-
-                pddl_patch = await pddl_replan(
-                    ask_llm=self.product_agent.ask_llm,
-                    violations=violations,
-                    system_state=system_state,
-                    tools_catalog=tools_catalog,
-                    resource_infos=resource_infos,
-                    safety_text=self.product_agent.safety_text,
-                    failed_plan_nodes=plan_payload,
-                    product_jid=str(self.product_agent.jid),
-                    existing_task_ids={n["id"] for n in self.nodes},
-                )
-
-                if pddl_patch is not None:
-                    self.logger.info(
-                        "[Planner] PDDL replanner succeeded (%d tasks); applying patch.",
-                        len(pddl_patch.get("tasks", [])),
-                    )
-                    self._apply_replan_patch(pddl_patch["tasks"])
-                    return
-
-                self.logger.info("[Planner] PDDL returned no solution; falling back to LLM replan.")
-            except Exception:
-                self.logger.exception("[Planner] PDDL replanner failed; falling back to LLM replan.")
-
-        # 6. Build Prompt (LLM fallback — use specialized instructions for offline vs online)
+        # 5. Build Prompt (use specialized instructions for offline vs online)
         prompt = build_replan_prompt(
             failed_plan_nodes=plan_payload,
             violations=violations,
@@ -345,14 +381,6 @@ class ProcessPlanner:
             source=source,  # "offline" or "online"
             safety_text=self.product_agent.safety_text,  # Include safety constraints
             system_state=system_state,  # Include runtime state for online replanning
-        )
-
-        self._dump_replan_debug(
-            source=source,
-            prompt=prompt,
-            violations=violations,
-            resource_infos=resource_infos,
-            system_state=system_state,
         )
 
         raw = await self.product_agent.ask_llm(

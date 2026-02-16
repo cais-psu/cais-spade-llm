@@ -6,9 +6,7 @@
     "resource_type": "robot",
     "in_state": "idle",
     "out_state": "at_pick",
-    "required_context_keys": [
-      "origin"
-    ],
+    "required_context_keys": ["origin"],
     "params": {
       "origin_resource_location": {
         "type": "string",
@@ -37,14 +35,13 @@
     "function_owner_agent": "xarm6",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "printed",
+    "in_state": "at_pick",
     "out_state": "picked",
-    "required_context_keys": [
-      "origin"
-    ],
+    "part_in_state": "printed",
+    "required_context_keys": ["origin"],
     "part_transition": {
       "completed": {
-        "state": "picked",
+        "state": "in_gripper",
         "location_template": "{robot_jid}_gripper"
       },
       "failed": {
@@ -74,7 +71,7 @@
         "type": "string"
       }
     },
-    "description": "Pick a printed part from an origin location."
+    "description": "Pick a part from an origin location."
   },
   {
     "function": "move_loaded_to_destination",
@@ -83,9 +80,8 @@
     "resource_type": "robot",
     "in_state": "picked",
     "out_state": "positioned",
-    "required_context_keys": [
-      "destination"
-    ],
+    "part_in_state": "in_gripper",
+    "required_context_keys": ["destination"],
     "part_transition": {
       "completed": {
         "state": "in_transit",
@@ -126,14 +122,12 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "positioned",
-    "out_state": "placed",
-    "required_context_keys": [
-      "destination"
-    ],
+    "out_state": "idle",
+    "part_in_state": "in_transit",
+    "required_context_keys": ["destination"],
     "part_transition": {
       "completed": {
-        "state": "verified",
-        "verify_camera": true,
+        "state": "printed",
         "location_param": "destination_location"
       },
       "failed:misplaced": {
@@ -163,7 +157,51 @@
         "type": "string"
       }
     },
-    "description": "Place the currently held part at a destination."
+    "description": "Place the currently held part at a location (temporary staging — part returns to pickable state)."
+  },
+  {
+    "function": "assemble_part",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "positioned",
+    "out_state": "idle",
+    "part_in_state": "in_transit",
+    "required_context_keys": ["destination"],
+    "part_transition": {
+      "completed": {
+        "state": "verified",
+        "verify_camera": true,
+        "location_param": "destination_location"
+      },
+      "failed:misplaced": {
+        "state": "untracked",
+        "camera_locate": true,
+        "last_known_param": "destination_location"
+      }
+    },
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Final assembly location for the part."
+      },
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part being assembled."
+      },
+      "orientation": {
+        "type": "string",
+        "description": "Optional placement orientation."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Assemble the currently held part at its final destination (verified placement)."
   },
   {
     "function": "move_to_pick_location",
@@ -172,9 +210,7 @@
     "resource_type": "robot",
     "in_state": "idle",
     "out_state": "at_pick",
-    "required_context_keys": [
-      "origin"
-    ],
+    "required_context_keys": ["origin"],
     "params": {
       "origin_resource_location": {
         "type": "string",
@@ -203,14 +239,13 @@
     "function_owner_agent": "ur5e",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "printed",
+    "in_state": "at_pick",
     "out_state": "picked",
-    "required_context_keys": [
-      "origin"
-    ],
+    "part_in_state": "printed",
+    "required_context_keys": ["origin"],
     "part_transition": {
       "completed": {
-        "state": "picked",
+        "state": "in_gripper",
         "location_template": "{robot_jid}_gripper"
       },
       "failed": {
@@ -240,7 +275,7 @@
         "type": "string"
       }
     },
-    "description": "Pick a printed part from an origin location."
+    "description": "Pick a part from an origin location."
   },
   {
     "function": "move_loaded_to_destination",
@@ -249,9 +284,8 @@
     "resource_type": "robot",
     "in_state": "picked",
     "out_state": "positioned",
-    "required_context_keys": [
-      "destination"
-    ],
+    "part_in_state": "in_gripper",
+    "required_context_keys": ["destination"],
     "part_transition": {
       "completed": {
         "state": "in_transit",
@@ -292,14 +326,12 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "positioned",
-    "out_state": "placed",
-    "required_context_keys": [
-      "destination"
-    ],
+    "out_state": "idle",
+    "part_in_state": "in_transit",
+    "required_context_keys": ["destination"],
     "part_transition": {
       "completed": {
-        "state": "verified",
-        "verify_camera": true,
+        "state": "printed",
         "location_param": "destination_location"
       },
       "failed:misplaced": {
@@ -329,6 +361,50 @@
         "type": "string"
       }
     },
-    "description": "Place the currently held part at a destination."
+    "description": "Place the currently held part at a location (temporary staging — part returns to pickable state)."
+  },
+  {
+    "function": "assemble_part",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "positioned",
+    "out_state": "idle",
+    "part_in_state": "in_transit",
+    "required_context_keys": ["destination"],
+    "part_transition": {
+      "completed": {
+        "state": "verified",
+        "verify_camera": true,
+        "location_param": "destination_location"
+      },
+      "failed:misplaced": {
+        "state": "untracked",
+        "camera_locate": true,
+        "last_known_param": "destination_location"
+      }
+    },
+    "params": {
+      "destination_location": {
+        "type": "string",
+        "description": "Final assembly location for the part."
+      },
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part being assembled."
+      },
+      "orientation": {
+        "type": "string",
+        "description": "Optional placement orientation."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Assemble the currently held part at its final destination (verified placement)."
   }
 ]

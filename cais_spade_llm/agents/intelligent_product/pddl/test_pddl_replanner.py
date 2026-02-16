@@ -4,11 +4,11 @@ Tests for the generic PDDL replanner.
 Deterministic tests — no LLM needed. Tests the solver, parser, and translator.
 
 Run with:
-    python -m cais_spade_llm.pddl.test_pddl_replanner
+    python -m cais_spade_llm.agents.intelligent_product.pddl.test_pddl_replanner
 """
 
-from cais_spade_llm.pddl.replanner import _parse_pddl_blocks, _translate_plan
-from cais_spade_llm.pddl.solver import solve
+from cais_spade_llm.agents.intelligent_product.pddl.replanner import _parse_pddl_blocks, _translate_plan
+from cais_spade_llm.agents.intelligent_product.pddl.solver import solve
 
 
 # ---------------------------------------------------------------------------

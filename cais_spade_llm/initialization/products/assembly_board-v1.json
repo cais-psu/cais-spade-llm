@@ -19,6 +19,7 @@
       "large_rectangular_pin.scad"
     ],
     "product_specification_file": "cais_spade_llm/specification/products/requirements/assembly_board-v1.txt",
-    "safety_file": "cais_spade_llm/specification/safety/safety_requirements.txt"
+    "safety_file": "cais_spade_llm/specification/safety/safety_requirements.txt",
+    "replan_mode": "pddl"
   }
 }

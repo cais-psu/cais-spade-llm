@@ -34,6 +34,7 @@ class RobotAgent(ResourceAgent):
                 "move_loaded_to_destination",
                 "move_home",
                 "place_part",
+                "assemble_part",
             ],
         )
         super().__init__(jid, password, name=name, **kw)
@@ -181,14 +182,15 @@ class RobotAgent(ResourceAgent):
         process: assembly
         resource_type: robot
 
-        in_state: printed
+        in_state: at_pick
         out_state: picked
+        part_in_state: printed
 
         required_context_keys: [origin]
 
         part_transition:
           completed:
-            state: picked
+            state: in_gripper
             location_template: "{robot_jid}_gripper"
           failed:
             state: lost
@@ -245,6 +247,7 @@ class RobotAgent(ResourceAgent):
 
         in_state: picked
         out_state: positioned
+        part_in_state: in_gripper
 
         required_context_keys: [destination]
 
@@ -316,14 +319,14 @@ class RobotAgent(ResourceAgent):
         resource_type: robot
 
         in_state: positioned
-        out_state: placed
+        out_state: idle
+        part_in_state: in_transit
 
         required_context_keys: [destination]
 
         part_transition:
           completed:
-            state: verified
-            verify_camera: true
+            state: printed
             location_param: destination_location
           "failed:misplaced":
             state: untracked
@@ -403,14 +406,111 @@ class RobotAgent(ResourceAgent):
         )
         placed = self._held_part
         self._held_part = None
-        self._current_state = "placed"
+        self._current_state = "idle"
         self._gripper_state = "open"
         return {
             "status": "completed",
             "content": f"Placed {placed}.",
             "placed_location": destination_location,  # For part tracking
         }
-    
+
+    async def assemble_part(
+        self,
+        destination_location: str,
+        part_name: str,
+        *,
+        orientation: Optional[str] = None,
+        product_jid: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        ---
+        process: assembly
+        resource_type: robot
+
+        in_state: positioned
+        out_state: idle
+        part_in_state: in_transit
+
+        required_context_keys: [destination]
+
+        part_transition:
+          completed:
+            state: verified
+            verify_camera: true
+            location_param: destination_location
+          "failed:misplaced":
+            state: untracked
+            camera_locate: true
+            last_known_param: destination_location
+
+        params:
+          destination_location:
+            type: string
+            description: Final assembly location for the part.
+          part_name:
+            type: string
+            description: Name of the part being assembled.
+          orientation:
+            type: string
+            description: Optional placement orientation.
+          product_jid:
+            type: string
+            description: JID of the ProductAgent that owns this task.
+          task_id:
+            type: string
+
+        description: Assemble the currently held part at its final destination (verified placement).
+        ---
+        """
+
+        if not self._held_part:
+            msg = "No part currently held; run pick_part first."
+            self.logger.warning("[Robot] %s", msg)
+            return {"status": "blocked", "content": msg}
+
+        placed_target = part_name or self._held_part
+        if self._should_inject_sg_slippage(placed_target):
+            msg = "Simulated slippage: SG failed to seat during assembly."
+            self.logger.error("[Robot] %s", msg)
+            self._held_part = None
+            self._current_state = "recovery_required"
+            self._gripper_state = "open"
+            affected = []
+            if placed_target:
+                affected.append({
+                    "entity_type": "part",
+                    "entity_id": str(placed_target),
+                    "state": "untracked",
+                })
+            return {
+                "status": "failed:misplaced",
+                "content": msg,
+                "failure_context": self._build_generic_failure_context(
+                    failure_mode="slippage",
+                    affected_entities=affected,
+                    observations={
+                        "part_state": "untracked",
+                        "last_known_position": dict(self._position),
+                        "observation_required": True,
+                    },
+                ),
+            }
+
+        await self._simulate_action(
+            f"Assembling {self._held_part} at {destination_location} "
+            f"(orientation={orientation or 'default'})"
+        )
+        placed = self._held_part
+        self._held_part = None
+        self._current_state = "idle"
+        self._gripper_state = "open"
+        return {
+            "status": "completed",
+            "content": f"Assembled {placed} at {destination_location}.",
+            "placed_location": destination_location,
+        }
+
     async def move_home(
         self,
         *,
