@@ -41,7 +41,7 @@ class RobotAgent(ResourceAgent):
     def setup_arm(self, ip: str):
         """Initialize connection to the robot arm hardware."""
 
-        self.logger.info("[Robot] Setting up robot arm connection...", self.agent_name)
+        self.logger.info("[Robot] Setting up robot arm connection...")
         print("Setting up robot arm connection...")
 
         self.arm = XArmAPI(ip, baud_checkset=False)
@@ -50,8 +50,8 @@ class RobotAgent(ResourceAgent):
             'grip_speed': 800,
             'radius': -1,
             'auto_enable': True,
-            'wait': True,
-            'speed': 100,
+            'wait': False,
+            'speed': 20,
             'acc': 10000,
             'angle_speed': 20,
             'angle_acc': 500,
@@ -59,14 +59,12 @@ class RobotAgent(ResourceAgent):
         }
 
         # Move the arm to the initial position
-        self.arm.set_position(x=330,y=-111, z=283, rx=-178, ry=3, rz=5,
-                              speed=self.params['speed'], mvacc=self.params['acc'], 
-                              radius=self.params['radius'], wait=True)
+        print("Moving arm to initial position...")
+        asyncio.run(self.move_home())
 
         self.arm.motion_enable(enable=True)
         self.arm.set_mode(0)
         self.arm.set_state(0)
-
         self.arm.set_gripper_position(300)
 
         print("Robot arm setup complete.")
@@ -118,9 +116,10 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
-        await self._simulate_action(
+        await self._perform_action(
             f"Travel empty to pick location {origin_resource_location} for {part_name} "
-            f"(speed={speed or 'default'})"
+            f"(speed={speed or 'default'})", 
+            move=position, duration=10.0
         )
         return {
             "status": "completed",
@@ -133,6 +132,8 @@ class RobotAgent(ResourceAgent):
         origin_resource_location: str,
         *,
         gripper: Optional[str] = None,
+        position: Optional[Dict[str, float]] = None,
+        speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -171,9 +172,16 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
-        await self._simulate_action(
+        if position is not None:
+            await self._perform_action(
+                f"Travel empty to pick point {origin_resource_location} for {part_name} "
+                f"(speed={speed or 'default'})", 
+                move=position, duration=10.0
+            )
+
+        await self._perform_gripper_action(
             f"Picking {part_name} from {origin_resource_location} "
-            f"(gripper={gripper or 'default'})"
+            f"(gripper={gripper or 'default'})", openFactor=200
         )
         self._held_part = part_name
         return {"status": "completed", "content": f"Picked {part_name}."}
@@ -183,6 +191,7 @@ class RobotAgent(ResourceAgent):
         destination_location: str,
         part_name: str,
         *,
+        position: Optional[Dict[str, float]] = {"x": 250, "y": -150, "z": 400, "roll": 180.0, "pitch": 0.0, "yaw": 0.0},
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -229,9 +238,10 @@ class RobotAgent(ResourceAgent):
                 part_name, self._held_part
             )
 
-        await self._simulate_action(
+        await self._perform_action_action(
             f"Move loaded part {self._held_part} to {destination_location} "
-            f"(speed={speed or 'default'})"
+            f"(speed={speed or 'default'})",
+            move=position, duration=10.0
         )
         return {
             "status": "completed",
@@ -244,6 +254,8 @@ class RobotAgent(ResourceAgent):
         part_name: str,
         *,
         orientation: Optional[str] = None,
+        position: Optional[Dict[str, float]] = None,
+        speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -289,9 +301,16 @@ class RobotAgent(ResourceAgent):
                 part_name, self._held_part
             )
 
-        await self._simulate_action(
+        if position is not None:
+            await self._perform_action(
+                f"Travel full to place point {destination_location} for {part_name} "
+                f"(speed={speed or 'default'})", 
+                move=position, duration=10.0
+            )
+
+        await self._perform_gripper_action(
             f"Placing {self._held_part} at {destination_location} "
-            f"(orientation={orientation or 'default'})"
+            f"(orientation={orientation or 'default'})", openFactor=300
         )
         placed = self._held_part
         self._held_part = None
@@ -323,14 +342,15 @@ class RobotAgent(ResourceAgent):
         description: Robot arm move to its home position.
         ---
         """
-
+        
         if self._held_part:
             msg = "Cannot move home while still holding a part; place it first."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
         
 
-        await self._simulate_action("Moving arm to home position")
+        await self._perform_action("Moving arm to home position", 
+                                   move={"x": 250, "y": 0, "z": 450, "roll": 180.0, "pitch": 0.0, "yaw": 0.0}, duration=10.0)
         return {"status": "completed", "content": "At home position."}
 
     # ------------------------------------------------------------------ #
@@ -351,13 +371,39 @@ class RobotAgent(ResourceAgent):
         while elapsed < duration:
             await asyncio.sleep(interval)
             elapsed += interval
+            print(f"[{robot}] ... {description} ({elapsed:.1f} / {duration:.1f} sec)")
             self.logger.info(
                 "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
             )
 
         self.logger.info("[%s] Finished: %s", robot, description)
 
-    async def _perform_action(self, description: str, *, move:Dict[str, float], other_params: Dict[str, Any],duration: float = 5.0):
+    async def _perform_gripper_action(self, description: str, *, duration: float = 5.0, openFactor:int = 300):
+        """
+        Simulate a gripper action (pick/place) while printing progress every 5 seconds,
+        including robot name for clarity when multiple robots run in parallel.
+        """
+        robot = self.agent_name
+
+        self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
+
+        # Start the gripper action
+        self.arm.set_gripper_position(openFactor, wait=False)
+
+        interval = 1.0   # print every 5 seconds
+        elapsed = 0.0
+
+        while elapsed < duration:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            print(f"[{robot}] ... {description} ({elapsed:.1f} / {duration:.1f} sec)")
+            self.logger.info(
+                "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
+            )
+
+        self.logger.info("[%s] Finished: %s", robot, description)
+
+    async def _perform_action(self, description: str, *, move:Dict[str, float], duration: float = 5.0, speed: Optional[float] = None, other_params: Optional[Dict[str, Any]] = None):
         """
         Simulate a long-running robot action while printing progress every 5 seconds,
         including robot name for clarity when multiple robots run in parallel.
@@ -366,23 +412,25 @@ class RobotAgent(ResourceAgent):
         
         self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
 
-        ##start the actual robot action here using the move and other_params
-        self.arm.set_position(330,-111, 283, -178, 3, 5)
+        useSpeed = self.params['speed']
+        if speed is not None:
+            useSpeed = speed
 
-        interval = 2.0  
+        ##start the actual robot action here using the move and other_params
+        self.arm.set_position(move['x'], move['y'], move['z'], move['roll'], move['pitch'], move['yaw'],
+                                speed= useSpeed, wait= False)
+
+        interval = 1.0  
         elapsed = 0.0
 
-        while not self.arm.is_stopped():
-            while elapsed < duration:
-                await asyncio.sleep(interval)
-                elapsed += interval
-                self.logger.info(
-                    "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
-                )
+        while self.arm.get_is_moving():
+            await asyncio.sleep(interval)
+            elapsed += interval
+            print(f"[{robot}] ... {description} ({elapsed:.1f} sec elapsed)")
+            self.logger.info(
+                "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
+            )
 
         ##Track the overall time it takes to perform the action and print progress every 5 seconds
 
         self.logger.info("[%s] Finished: %s", robot, description)
-
-
-   

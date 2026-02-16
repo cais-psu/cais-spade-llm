@@ -4,3 +4,55 @@
 2026-02-09 16:45:59,596 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
 2026-02-09 16:47:49,158 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
 2026-02-09 16:51:37,737 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 14:08:04,827 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 14:12:20,102 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 14:18:48,432 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 14:21:27,424 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 14:21:27,432 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 14:21:27,952 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 14:22:15,338 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 14:22:15,345 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 14:22:15,874 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 16:04:14,739 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 16:04:14,771 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 16:04:22,031 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 16:04:22,518 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 16:09:56,017 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 16:09:56,065 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 16:09:56,077 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 16:09:56,944 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 16:10:21,981 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 16:10:22,020 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 16:10:30,801 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 16:10:30,923 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 16:11:06,060 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 16:11:06,119 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 16:11:13,573 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 16:11:14,083 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 16:15:46,240 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 16:15:46,275 - agent:robot1 - INFO - [robot1] Moving arm to initial position (estimated 10.0 sec)
+2026-02-11 16:15:47,320 - agent:robot1 - INFO - [robot1] ... Moving arm to initial position (1.0 / 10.0 sec)
+2026-02-11 16:15:48,336 - agent:robot1 - INFO - [robot1] ... Moving arm to initial position (2.0 / 10.0 sec)
+2026-02-11 16:15:48,339 - agent:robot1 - INFO - [robot1] Finished: Moving arm to initial position
+2026-02-11 16:15:48,822 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 17:11:50,371 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 17:12:09,208 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 17:12:09,240 - agent:robot1 - INFO - [robot1] Moving arm to home position (estimated 10.0 sec)
+2026-02-11 17:12:56,333 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 17:12:56,384 - agent:robot1 - INFO - [robot1] Moving arm to home position (estimated 10.0 sec)
+2026-02-11 17:12:57,396 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (1.0 / 10.0 sec)
+2026-02-11 17:12:57,397 - agent:robot1 - INFO - [robot1] Finished: Moving arm to home position
+2026-02-11 17:12:57,516 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
+2026-02-11 17:13:27,263 - agent:robot1 - INFO - [Robot] Setting up robot arm connection...
+2026-02-11 17:13:27,280 - agent:robot1 - INFO - [robot1] Moving arm to home position (estimated 10.0 sec)
+2026-02-11 17:13:28,297 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (1.0 / 10.0 sec)
+2026-02-11 17:13:29,304 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (2.0 / 10.0 sec)
+2026-02-11 17:13:30,321 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (3.0 / 10.0 sec)
+2026-02-11 17:13:31,332 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (4.0 / 10.0 sec)
+2026-02-11 17:13:32,342 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (5.0 / 10.0 sec)
+2026-02-11 17:13:33,350 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (6.0 / 10.0 sec)
+2026-02-11 17:13:34,363 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (7.0 / 10.0 sec)
+2026-02-11 17:13:35,369 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (8.0 / 10.0 sec)
+2026-02-11 17:13:36,380 - agent:robot1 - INFO - [robot1] ... Moving arm to home position (9.0 / 10.0 sec)
+2026-02-11 17:13:36,382 - agent:robot1 - INFO - [robot1] Finished: Moving arm to home position
+2026-02-11 17:13:36,890 - agent:robot1 - INFO - RobotAgent 'robot1' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'place_part']
