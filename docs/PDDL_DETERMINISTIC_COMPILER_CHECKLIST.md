@@ -150,7 +150,7 @@ Expected deterministic compile outcome:
    - parts: `sg`, `mcp`
    - locations: failed location + destination + relevant reachable/staging locations
 2. Init includes:
-   - `UR5e` occupied (`carrying` or `resource-positioned`), not `idle`
+   - `UR5e` occupied (`carrying` or `resource-positioned`), not `idle``
    - `SG` at failed symbolic location
    - reachability facts from capabilities
 3. Goals include unmet placements:
