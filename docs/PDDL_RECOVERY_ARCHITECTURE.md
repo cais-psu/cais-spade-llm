@@ -572,7 +572,7 @@ The compiler produces a domain from `tools.json` (5 actions, dual state machines
 **Problem** (compiled from runtime state):
 
 ```pddl
-(define (problem recover-assembly-deadlock)
+(define (problem recovery)
   (:domain manufacturing)
   (:objects
     ur5e-localhost xarm6-localhost - resource
@@ -729,7 +729,7 @@ System state at failure:
 **Step 2 — Compile problem:**
 
 ```pddl
-(define (problem reroute-after-xarm6-offline)
+(define (problem recovery)
   (:domain manufacturing)
   (:objects
     ur5e-localhost xarm6-localhost - resource
