@@ -9,10 +9,10 @@ This document explains the recovery planning architecture for the CAIS-SPADE-LLM
 ## Scenario (used throughout this document)
 
 **Assembly requirement:**
-- Assemble part SG (small gear) from picking location prusa-mk4-1 to assembly_board-v1
-- Assemble part MCP (medium circular pin) from picking location prusa-mk4-2 to assembly_board-v1
+- Place part SG (small gear) from picking location prusa-mk4-1 to assembly-board-v1
+- Place part MCP (medium circular pin) from picking location prusa-mk4-2 to assembly-board-v1
 
-**Safety constraint:** SG must be assembled before MCP.
+**Safety constraint:** SG must be placed before MCP.
 
 **Resources:**
 
@@ -29,26 +29,25 @@ This document explains the recovery planning architecture for the CAIS-SPADE-LLM
 | 2 | `pick_part` | `at_pick` → `picked` | `printed` → `in_gripper` | `origin_resource_location`, `part_name` |
 | 3 | `move_loaded_to_destination` | `picked` → `positioned` | `in_gripper` → `in_transit` | `destination_location`, `part_name` |
 | 4 | `place_part` | `positioned` → `idle` | `in_transit` → `printed` | `destination_location`, `part_name` |
-| 5 | `assemble_part` | `positioned` → `idle` | `in_transit` → `verified` | `destination_location`, `part_name` |
 
-Key distinction: `place_part` is **temporary staging** — the part returns to `printed` (re-pickable). `assemble_part` is **final assembly** — the part reaches `verified` (done). Safety constraints gate `assemble_part`, not `place_part`.
+`place_part` returns the part to `printed` state at the destination location. The part is technically re-pickable — the system distinguishes "placed at assembly board" from "at printer" by **location**, not by part state. Safety constraints gate `place_part` via `(placement-allowed ?p)`.
 
 **Unexpected disruption:**
-- xarm6 fails to assemble SG at assembly-board-v1 (task T4: `assemble_part`)
+- xarm6 fails to place SG at assembly-board-v1 (task T4: `place_part`)
 - SG is now physically at ur5e-workspace (misplaced)
 - ur5e is in state `positioned`, holding MCP (part state: `in_transit`)
-- ur5e cannot assemble MCP (safety: SG must go first)
-- **System deadlock — no agent can make progress toward the goal**
+- ur5e cannot place MCP anywhere — `(placement-allowed mcp)` is FALSE until SG is at assembly-board-v1
+- **System deadlock — no agent can make progress**
 
-Note: ur5e CAN `place_part` MCP (temporary staging, no safety check) to unstick itself. But SG is in an unnamed state — no catalog action can produce `(part-state-verified sg)` from it.
+Note: because `placement-allowed` gates ALL uses of `place_part`, ur5e cannot even stage MCP back at the printer. ur5e is completely trapped.
 
 **Assumption:** failure is observable (sensors report data, but no pre-labeled failure states).
 
 **Ideal recovery:**
-1. ur5e places MCP back at prusa-mk4-2 (temporary staging via `place_part`)
+1. ur5e releases MCP back at prusa-mk4-2 (bypassing safety — this is staging, not final placement)
 2. ur5e locates the dropped SG at ur5e-workspace
-3. ur5e picks and assembles SG at assembly-board-v1 (safety satisfied)
-4. ur5e resumes MCP assembly
+3. ur5e picks and places SG at assembly-board-v1 (safety satisfied, unlocks MCP)
+4. ur5e resumes MCP placement
 
 ---
 
@@ -66,7 +65,7 @@ PDDL (Planning Domain Definition Language) is a formal language that describes a
 **Problem** — the current situation (what IS true, what you WANT):
 - **Objects**: specific entities that exist (ur5e, xarm6, SG, MCP, prusa-mk4-1, ...)
 - **Init**: currently true facts (ur5e is positioned, holding MCP, ...)
-- **Goal**: desired facts (SG verified at assembly-board-v1, MCP verified at assembly-board-v1)
+- **Goal**: desired facts (SG at assembly-board-v1, MCP at assembly-board-v1)
 
 A **classical planner** (pyperplan BFS in this system) searches for an ordered sequence of actions that transforms init into goal. The plan is **provably valid** — every action's preconditions are guaranteed satisfied before it executes. No hallucinated steps, no skipped prerequisites, no safety violations.
 
@@ -79,28 +78,30 @@ The `tools.json` catalog defines two coupled automata:
 | DES concept | PDDL mapping | tools.json source |
 |---|---|---|
 | State set Q_r | Robot state predicates | `in_state`/`out_state`: {idle, at_pick, picked, positioned} |
-| Event set Σ | Actions | 5 functions: {move_to_pick_location, pick_part, move_loaded_to_destination, place_part, assemble_part} |
+| Event set Σ | Actions | 4 functions: {move_to_pick_location, pick_part, move_loaded_to_destination, place_part} |
 | Transition δ_r | Precondition → effect | `in_state` → precondition, `out_state` → effect |
 
 **Part automaton** G_p = (Q_p, Σ, δ_p):
 
 | DES concept | PDDL mapping | tools.json source |
 |---|---|---|
-| State set Q_p | Part state predicates | `part_in_state` / completed state: {printed, in_gripper, in_transit, verified} |
-| Event set Σ | Same actions | Same 5 functions (shared alphabet) |
+| State set Q_p | Part state predicates | `part_in_state` / completed state: {printed, in_gripper, in_transit} |
+| Event set Σ | Same actions | Same 4 functions (shared alphabet) |
 | Transition δ_p | `part_in_state` → completed state | `part_transition.completed.state` |
 
 The forward-path automata:
 
 ```
 Robot:   idle ──► at_pick ──► picked ──► positioned ──► idle (cycle)
-                  move_to     pick       move_loaded    place/assemble
-                  _pick_loc   _part      _to_dest       _part
+                  move_to     pick       move_loaded    place_part
+                  _pick_loc   _part      _to_dest
 
-Part:  printed ──► in_gripper ──► in_transit ──┬──► printed  (place_part: staging)
-                    pick_part      move_loaded  │
-                                   _to_dest     └──► verified (assemble_part: final)
+Part:  printed ──► in_gripper ──► in_transit ──► printed (cycle back)
+                    pick_part      move_loaded    place_part
+                                   _to_dest
 ```
+
+The part state cycles back to `printed` after placement. Goal completion is tracked by **location** (`part-at sg assembly-board-v1`), not by part state.
 
 With only happy-path declarations, the automata have no representation for failure states. When a failure occurs, a part can enter a state q? ∉ Q_p — the automaton has no vocabulary for it, no predicate to describe it, and no transition out of it.
 
@@ -124,13 +125,13 @@ When a task fails mid-execution, the system has **structured state** (robot posi
 
 Compared to ad-hoc recovery logic:
 - PDDL **cannot skip prerequisites** — `pick_part` requires `at_pick`; the planner cannot jump from `idle` to `picked`
-- PDDL **cannot violate safety** — if MCP assembly is blocked by a safety predicate, no valid plan includes it before SG
+- PDDL **cannot violate safety** — if MCP placement is blocked by a safety predicate, no valid plan includes it before SG
 - PDDL **cannot hallucinate actions** — only actions defined in the domain exist
 - The planner either finds a **provably valid** sequence, or reports no solution
 
 Compared to pure LLM replanning:
 - An LLM might propose "pick SG" while ur5e is holding MCP — physically impossible
-- An LLM might assemble MCP before SG — violating safety
+- An LLM might place MCP before SG — violating safety
 - PDDL makes these errors structurally impossible through precondition enforcement
 
 PDDL is used for **recovery planning only**, not initial planning, because:
@@ -171,7 +172,7 @@ Specifically, the LLM does three things no compiler can when failure states are 
 
 **1. Interpret raw observations into a state description.** Without declared failure states, the system receives raw sensor data (gripper force, camera detections, confidence scores). The LLM reasons about the physical meaning: "force=0 means released, camera found part upright and undamaged means graspable."
 
-**2. Extend the state vocabulary.** The compiled domain has no predicate for what SG is after a failed assembly. The LLM creates one (e.g., `part-state-displaced`) — defining a new element of Q that did not exist in the automaton.
+**2. Extend the state vocabulary.** The compiled domain has no predicate for what SG is after a failed placement. The LLM creates one (e.g., `part-state-displaced`) — defining a new element of Q that did not exist in the automaton.
 
 **3. Design recovery actions grounded in physical capabilities.** The LLM proposes actions using known resource capabilities (camera, gripper) that bridge the new failure state back to the forward path. It decides preconditions, effects, and target states based on physical reasoning about the specific situation.
 
@@ -226,16 +227,16 @@ INITIAL PLANNING (no PDDL)
 ├─ NL requirements ──LLM──► structured requirements ──LLM──► task DAG ──► FSA
 │
 PARALLEL EXECUTION (FSA monitors)
-├─ xarm6: T1 ✓ → T2 ✓ → T3 ✓ → T4 ✗ FAILED (assemble SG)
+├─ xarm6: T1 ✓ → T2 ✓ → T3 ✓ → T4 ✗ FAILED (place SG)
 ├─ ur5e:  T5 ✓ → T6 ✓ → T7 ✓ → T8 ○ BLOCKED (safety: SG first)
 │
-DEADLOCK DETECTED (CCA: no agent can progress toward goal)
+DEADLOCK DETECTED (CCA: no agent can progress)
 │
-├── LAYER 1: Compiled PDDL ──► pyperplan ──► partial solution only
-│   (ur5e can unstick via place_part, but SG has no representable state)
+├── LAYER 1: Compiled PDDL ──► pyperplan ──► no solution
+│   (SG has no representable state; ur5e trapped by placement-allowed)
 │
 ├── LAYER 2: LLM extends domain ──► pyperplan ──► full recovery plan ✓
-│   (LLM interprets SG displacement, adds predicate and recovery action)
+│   (LLM adds: release-to-storage + locate-and-recover)
 │   CCA safety check ──► PASS
 │
 │   If Layer 2 also fails:
@@ -287,8 +288,8 @@ RECOVERY EXECUTION
    │ LAYER 1: Compiled PDDL                                    │
    │                                                            │
    │  tools.json (happy path) ──► Domain                        │
-   │    5 catalog actions (2 state machines: robot + part)      │
-   │    safety constraint encoding (gates assemble_part only)   │
+   │    4 catalog actions (2 state machines: robot + part)      │
+   │    safety constraint encoding (gates place_part)           │
    │                                                            │
    │  system_state ──► Problem                                  │
    │    robot states, part states, known locations, goal        │
@@ -300,7 +301,7 @@ RECOVERY EXECUTION
    │                    │                                       │
    │  Gap analysis:                                             │
    │    "SG not representable — no predicate for its state.     │
-   │     Goal (part-state-verified sg) unreachable."            │
+   │     ur5e trapped — placement-allowed(mcp) is FALSE."       │
    └────────────────────┬───────────────────────────────────────┘
                         │ gap analysis + raw failure observations
                         ▼
@@ -379,10 +380,10 @@ Excluded features and why:
 
 ### Safety encoding
 
-- Predicate: `(assembly-allowed ?p - part)` — is this part cleared for final assembly?
-- Init: `(assembly-allowed sg)` — SG can be assembled. MCP is NOT listed.
-- Unlock action: `unlock-mcp-assembly` fires when `(part-state-verified sg)` becomes true, setting `(assembly-allowed mcp)`
-- Only `assemble-part` checks `(assembly-allowed ?p)`. `place-part` (temporary staging) does NOT — any robot can stage any part at any time.
+- Predicate: `(placement-allowed ?p - part)` — is this part cleared for placement?
+- Init: `(placement-allowed sg)` — SG can be placed. MCP is NOT listed.
+- Unlock action: `unlock-mcp-placement` fires when `(part-at sg assembly-board-v1)` becomes true, setting `(placement-allowed mcp)`
+- `place-part` checks `(placement-allowed ?p)` — **all placement is gated**, not just final assembly. This means a part without placement clearance cannot be put down anywhere.
 
 ### Which failures each layer handles
 
@@ -394,9 +395,13 @@ Example: xarm6 goes offline before picking SG. SG is still `printed` at prusa-mk
 
 **Layer 2 — LLM extension (new events for states outside the vocabulary):**
 
-Handles failures where entities enter states not modeled in the forward path.
+Handles failures where entities enter states not modeled in the forward path, or where the compiled safety encoding creates traps.
 
-Example: the deadlock scenario. SG is in an unnamed state (misplaced, not in any cataloged state). The LLM interprets sensor data, creates a new predicate (`part-state-displaced`), and designs a recovery action (`locate-and-recover`) that bridges the unnamed state back to the forward path (`printed`).
+Example: the deadlock scenario. Two problems the LLM must solve:
+1. SG is in an unnamed state (misplaced) — no catalog action can operate on it
+2. ur5e is trapped by `placement-allowed` — cannot put MCP down anywhere
+
+The LLM designs `release-to-storage` (placement without safety gate) and `locate-and-recover` (displaced → printed), bridging both gaps.
 
 **Layer 3 — Human intervention (beyond system capability):**
 
@@ -424,8 +429,8 @@ xarm6 handles SG (from prusa-mk4-1):
                                                                    part:  printed → in_gripper
   T3: move_loaded_to_destination(xarm6, SG, assembly-board-v1)    robot: picked → positioned
                                                                    part:  in_gripper → in_transit
-  T4: assemble_part(xarm6, SG, assembly-board-v1)                 robot: positioned → idle
-                                                                   part:  in_transit → verified
+  T4: place_part(xarm6, SG, assembly-board-v1)                    robot: positioned → idle
+                                                                   part:  in_transit → printed
 
 ur5e handles MCP (from prusa-mk4-2), parallel start:
   T5: move_to_pick_location(ur5e, MCP, prusa-mk4-2)              robot: idle → at_pick
@@ -433,8 +438,8 @@ ur5e handles MCP (from prusa-mk4-2), parallel start:
                                                                    part:  printed → in_gripper
   T7: move_loaded_to_destination(ur5e, MCP, assembly-board-v1)    robot: picked → positioned
                                                                    part:  in_gripper → in_transit
-  T8: assemble_part(ur5e, MCP, assembly-board-v1)                 robot: positioned → idle
-                                                                   part:  in_transit → verified
+  T8: place_part(ur5e, MCP, assembly-board-v1)                    robot: positioned → idle
+                                                                   part:  in_transit → printed
 
 DAG: T1→T2→T3→T4, T5→T6→T7→T8, T4→T8 (safety: SG before MCP)
 ```
@@ -452,8 +457,8 @@ System state after failure:
 
 | Entity | Robot state | Part state | Detail |
 |---|---|---|---|
-| xarm6 | idle | — | Gripper released after failed assembly |
-| ur5e | positioned | — | Waiting to assemble MCP |
+| xarm6 | idle | — | Gripper released after failed placement |
+| ur5e | positioned | — | Holding MCP, waiting to place |
 | SG | — | ??? | Raw sensor data only — no labeled state |
 | MCP | — | in_transit | Last successful: move_loaded_to_destination |
 
@@ -461,9 +466,9 @@ Raw failure report from xarm6:
 ```json
 {
   "task_id": "T4",
-  "function": "assemble_part",
+  "function": "place_part",
   "status": "failed",
-  "error": "assembly verification failed",
+  "error": "placement verification failed",
   "observations": {
     "gripper_force": 0.0,
     "camera_detection": {
@@ -478,11 +483,17 @@ Raw failure report from xarm6:
 }
 ```
 
-Why it is a deadlock (in DES terms): the system is in a state where no event in Σ can reach the goal. ur5e CAN `place_part` MCP back to storage (temporary staging, no safety check), but SG has no representable state — it is not `printed`, not `in_gripper`, not `in_transit`, not `verified`. No action's `part_in_state` precondition matches SG. The goal `(part-state-verified sg)` is unreachable.
+Why it is a deadlock (in DES terms): the system is in a state where no event in Σ can reach the goal.
+
+- **SG is unrepresentable.** It is not `printed`, not `in_gripper`, not `in_transit`. No action's `part_in_state` precondition matches it.
+- **ur5e is trapped.** `place-part` requires `(placement-allowed mcp)`, which is FALSE. ur5e cannot put MCP down anywhere — not at the assembly board, not at the printer, nowhere.
+- **xarm6 is idle but useless.** xarm6 cannot reach ur5e-workspace where SG landed.
+
+Two independent blockages: SG has no state, and ur5e has no legal action. The compiled automaton has no transitions from this configuration.
 
 ### Phase C: Layer 1 — Compiled PDDL (no LLM)
 
-The compiler produces a domain from `tools.json` (5 actions, dual state machines for robot + part, safety encoding) and a problem from system state.
+The compiler produces a domain from `tools.json` (4 actions, dual state machines for robot + part, safety encoding) and a problem from system state.
 
 **Domain** (compiled mechanically from `tools.json`):
 
@@ -501,13 +512,12 @@ The compiler produces a domain from `tools.json` (5 actions, dual state machines
     (part-state-printed ?p - part)
     (part-state-in-gripper ?p - part)
     (part-state-in-transit ?p - part)
-    (part-state-verified ?p - part)
     ;; Relations
     (holding ?r - resource ?p - part)
     (part-at ?p - part ?l - location)
     (can-reach ?r - resource ?l - location)
     (resource-available ?r - resource)
-    (assembly-allowed ?p - part)
+    (placement-allowed ?p - part)
   )
 
   (:action move-to-pick-location
@@ -543,29 +553,18 @@ The compiler produces a domain from `tools.json` (5 actions, dual state machines
     :parameters (?r - resource ?p - part ?l - location)
     :precondition (and
       (robot-state-positioned ?r) (holding ?r ?p)
-      (part-state-in-transit ?p) (can-reach ?r ?l))
+      (part-state-in-transit ?p) (can-reach ?r ?l)
+      (placement-allowed ?p))
     :effect (and
       (robot-state-idle ?r) (resource-available ?r)
       (part-state-printed ?p) (part-at ?p ?l)
       (not (robot-state-positioned ?r)) (not (holding ?r ?p))
       (not (part-state-in-transit ?p))))
 
-  (:action assemble-part
-    :parameters (?r - resource ?p - part ?l - location)
-    :precondition (and
-      (robot-state-positioned ?r) (holding ?r ?p)
-      (part-state-in-transit ?p) (can-reach ?r ?l)
-      (assembly-allowed ?p))
-    :effect (and
-      (robot-state-idle ?r) (resource-available ?r)
-      (part-state-verified ?p) (part-at ?p ?l)
-      (not (robot-state-positioned ?r)) (not (holding ?r ?p))
-      (not (part-state-in-transit ?p))))
-
-  (:action unlock-mcp-assembly
+  (:action unlock-mcp-placement
     :parameters ()
-    :precondition (part-state-verified sg)
-    :effect (assembly-allowed mcp))
+    :precondition (part-at sg assembly-board-v1)
+    :effect (placement-allowed mcp))
 )
 ```
 
@@ -594,23 +593,23 @@ The compiler produces a domain from `tools.json` (5 actions, dual state machines
     (can-reach ur5e-localhost assembly-board-v1)
     (can-reach ur5e-localhost ur5e-workspace)
 
-    ;; SG: no representable state — not printed, not in_gripper, not in_transit, not verified
+    ;; SG: no representable state — not printed, not in_gripper, not in_transit
     ;; MCP: in transit (held by ur5e, after move_loaded_to_destination)
     (part-state-in-transit mcp)
 
-    ;; Safety: SG is allowed for assembly (but unreachable), MCP is not yet allowed
-    (assembly-allowed sg))
+    ;; Safety: SG is allowed for placement (but unreachable), MCP is not yet allowed
+    (placement-allowed sg))
   (:goal (and
-    (part-state-verified sg) (part-at sg assembly-board-v1)
-    (part-state-verified mcp) (part-at mcp assembly-board-v1)))
+    (part-at sg assembly-board-v1)
+    (part-at mcp assembly-board-v1)))
 )
 ```
 
-**Result: NO SOLUTION.** SG has no state predicate — no action's precondition matches it, so no chain of actions can produce `(part-state-verified sg)`. The goal is unreachable.
+**Result: NO SOLUTION.** Two reasons:
+1. SG has no state predicate — no action can operate on it, so `(part-at sg assembly-board-v1)` is unreachable.
+2. ur5e's only action is `place-part`, which requires `(placement-allowed mcp)` = FALSE. ur5e is completely stuck.
 
-Note: the compiled PDDL CAN unstick ur5e — `place-part(ur5e, mcp, prusa-mk4-2)` would transition ur5e back to idle and MCP back to printed. But this alone does not solve the goal because SG remains unrepresentable.
-
-**Gap analysis:** "SG has no representable state. Goal `(part-state-verified sg)` unreachable. Raw failure data available for Layer 2."
+**Gap analysis:** "SG has no representable state. ur5e is trapped — placement-allowed(mcp) is FALSE, no legal action. Raw failure data available for Layer 2."
 
 ### Phase D: Layer 2 — LLM reasoning
 
@@ -628,10 +627,26 @@ The LLM receives: compiled domain + gap analysis + raw failure observations + re
 (part-at sg ur5e-workspace)
 ```
 
-**LLM Step 3 — Design recovery action:**
+**LLM Step 3 — Design recovery actions:**
 
 ```pddl
-;; RECOVERY ACTION: locate-and-recover
+;; RECOVERY ACTION 1: release-to-storage
+;; Robot opens gripper to release a held part as temporary storage.
+;; Part returns to "printed" (re-pickable). NO placement-allowed
+;; check — this is emergency staging, not goal placement.
+;; Physical basis: same gripper-open action as place_part.
+(:action release-to-storage
+  :parameters (?r - resource ?p - part ?l - location)
+  :precondition (and
+    (robot-state-positioned ?r) (holding ?r ?p)
+    (part-state-in-transit ?p) (can-reach ?r ?l))
+  :effect (and
+    (robot-state-idle ?r) (resource-available ?r)
+    (part-state-printed ?p) (part-at ?p ?l)
+    (not (robot-state-positioned ?r)) (not (holding ?r ?p))
+    (not (part-state-in-transit ?p))))
+
+;; RECOVERY ACTION 2: locate-and-recover
 ;; Robot uses camera to visually locate a displaced part and
 ;; confirms it is graspable. Transitions to "printed" (pickable).
 ;; Physical basis: camera perception (declared in resource capabilities).
@@ -644,33 +659,35 @@ The LLM receives: compiled domain + gap analysis + raw failure observations + re
     (part-state-printed ?p) (not (part-state-displaced ?p))))
 ```
 
-Note: only ONE recovery action is needed. `release-to-storage` (from the earlier version of this doc) is no longer necessary — `place-part` in the catalog already does temporary staging (returns part to `printed` without safety checks). The LLM only needs to bridge the gap the catalog truly cannot express: the displaced-to-printed transition.
+Note: TWO recovery actions are needed because the compiled domain has two independent blockages:
+- `release-to-storage` — identical to `place-part` but without the `(placement-allowed ?p)` check. Frees ur5e from the safety trap.
+- `locate-and-recover` — bridges the unnamed `displaced` state back to `printed`. Makes SG operable again.
 
-In DES terms: Q_p is extended with one new state (`displaced`). Σ is extended with one new event (`locate-and-recover`). A new transition connects the `displaced` dead-end back to the live portion of the automaton (`printed`).
+In DES terms: Q_p is extended with one new state (`displaced`). Σ is extended with two new events (`release-to-storage`, `locate-and-recover`). New transitions connect the dead-ends back to the live portion of the automaton.
 
 **pyperplan solves the extended domain:**
 
 ```
-Step  Action                                                     Robot state    Part state
-────  ──────────────────────────────────────────────────────────  ─────────────  ────────────
- 1    place-part(ur5e, mcp, prusa-mk4-2)                         positioned→idle  in_transit→printed
+Step  Action                                                     Robot state      Part state
+────  ──────────────────────────────────────────────────────────  ───────────────  ────────────
+ 1    release-to-storage(ur5e, mcp, prusa-mk4-2)                 positioned→idle  in_transit→printed
  2    locate-and-recover(ur5e, sg, ur5e-workspace)                idle (no change) displaced→printed
  3    move-to-pick-location(ur5e, sg, ur5e-workspace)             idle→at_pick     —
  4    pick-part(ur5e, sg, ur5e-workspace)                         at_pick→picked   printed→in_gripper
  5    move-loaded-to-destination(ur5e, sg, assembly-board-v1)     picked→positioned in_gripper→in_transit
- 6    assemble-part(ur5e, sg, assembly-board-v1)                  positioned→idle  in_transit→verified
-      unlock-mcp-assembly()                                       —               —
+ 6    place-part(ur5e, sg, assembly-board-v1)                     positioned→idle  in_transit→printed
+      unlock-mcp-placement()                                      —               —
  7    move-to-pick-location(ur5e, mcp, prusa-mk4-2)              idle→at_pick     —
  8    pick-part(ur5e, mcp, prusa-mk4-2)                          at_pick→picked   printed→in_gripper
- 9    move-loaded-to-destination(ur5e, mcp, assembly-board-v1)   picked→positioned in_gripper→in_transit
-10    assemble-part(ur5e, mcp, assembly-board-v1)                positioned→idle  in_transit→verified
+ 9    move-loaded-to-destination(ur5e, mcp, assembly-board-v1)    picked→positioned in_gripper→in_transit
+10    place-part(ur5e, mcp, assembly-board-v1)                    positioned→idle  in_transit→printed
 ```
 
 This matches the ideal recovery:
-1. ur5e puts MCP back at printer (step 1 — catalog `place_part`, no safety check)
-2. ur5e locates dropped SG (step 2 — LLM recovery action)
-3. ur5e picks and assembles SG (steps 3-6 — catalog actions, safety satisfied at step 6)
-4. ur5e resumes MCP assembly (steps 7-10 — catalog actions)
+1. ur5e releases MCP back at printer (step 1 — LLM action, bypasses safety)
+2. ur5e locates dropped SG (step 2 — LLM action)
+3. ur5e picks and places SG (steps 3-6 — catalog actions, safety satisfied at step 6)
+4. ur5e resumes MCP placement (steps 7-10 — catalog actions)
 
 **Validation chain before execution:**
 
@@ -682,7 +699,7 @@ CHECK 1: PDDL syntax (pyperplan parser)
 CHECK 2: Plan validity (pyperplan BFS)
      │    Catches: impossible precondition chains, unreachable goals
 CHECK 3: Safety (CCA DFA from LTLf spec)
-     │    Catches: safety violations (e.g., MCP assembled before SG)
+     │    Catches: safety violations (e.g., MCP placed before SG)
 CHECK 4: Catalog mapping (_translate_plan via tools.json)
      │    Catches: actions with no physical basis in resource capabilities
 CHECK 5: Execution (resource agent)
@@ -698,10 +715,10 @@ Camera detects nothing in any robot workspace. LLM cannot propose any recovery �
 Object detected at two locations simultaneously (sensor fault). LLM cannot determine SG state with confidence. Human visually inspects, confirms actual location. System re-enters Layer 2.
 
 **ur5e gripper also faults (cascading failure):**
-ur5e cannot open gripper. `place-part` is physically infeasible. xarm6 cannot reach ur5e-workspace. Zero feasible recovery events. Human manually releases gripper and retrieves parts. System reset.
+ur5e cannot open gripper. `release-to-storage` is physically infeasible. xarm6 cannot reach ur5e-workspace. Zero feasible recovery events. Human manually releases gripper and retrieves parts. System reset.
 
 **SG is damaged (goal unachievable):**
-Camera detects SG but reports visible damage (teeth broken). Assembling it produces a defective product. LLM reports options: reprint (2hr), use spare, partial assembly, abort. Human makes business decision. System receives new goal.
+Camera detects SG but reports visible damage (teeth broken). Placing it produces a defective product. LLM reports options: reprint (2hr), use spare, partial assembly, abort. Human makes business decision. System receives new goal.
 
 **xarm6 position uncertain (safety unverifiable):**
 xarm6 encoder faulted after failure, position unknown. LLM proposes recovery plan for ur5e. CCA cannot verify xarm6 is clear of ur5e-workspace — collision risk unverifiable. Plan rejected. Human confirms xarm6 position. CCA can now verify safety. System re-enters Layer 2.
@@ -724,7 +741,7 @@ System state at failure:
   MCP:   printed at prusa-mk4-2 (untouched)
 ```
 
-**Step 1 — Compile domain:** Same 5-action domain from tools.json (identical to Phase C above).
+**Step 1 — Compile domain:** Same 4-action domain from tools.json (identical to Phase C above).
 
 **Step 2 — Compile problem:**
 
@@ -756,10 +773,10 @@ System state at failure:
     (part-at mcp prusa-mk4-2)
 
     ;; Safety: SG allowed, MCP not yet
-    (assembly-allowed sg))
+    (placement-allowed sg))
   (:goal (and
-    (part-state-verified sg) (part-at sg assembly-board-v1)
-    (part-state-verified mcp) (part-at mcp assembly-board-v1)))
+    (part-at sg assembly-board-v1)
+    (part-at mcp assembly-board-v1)))
 )
 ```
 
@@ -773,12 +790,12 @@ Step  Action                                                     Resource  Part
  1    move-to-pick-location(ur5e, sg, prusa-mk4-1)               ur5e      SG
  2    pick-part(ur5e, sg, prusa-mk4-1)                            ur5e      SG
  3    move-loaded-to-destination(ur5e, sg, assembly-board-v1)     ur5e      SG
- 4    assemble-part(ur5e, sg, assembly-board-v1)                  ur5e      SG
-      unlock-mcp-assembly()
+ 4    place-part(ur5e, sg, assembly-board-v1)                     ur5e      SG
+      unlock-mcp-placement()
  5    move-to-pick-location(ur5e, mcp, prusa-mk4-2)              ur5e      MCP
  6    pick-part(ur5e, mcp, prusa-mk4-2)                           ur5e      MCP
  7    move-loaded-to-destination(ur5e, mcp, assembly-board-v1)    ur5e      MCP
- 8    assemble-part(ur5e, mcp, assembly-board-v1)                 ur5e      MCP
+ 8    place-part(ur5e, mcp, assembly-board-v1)                    ur5e      MCP
 ```
 
 **Result: SOLVED.** No new predicates, no new actions, no LLM. The failure only changed which resources are available — the automaton vocabulary was sufficient.
@@ -789,7 +806,7 @@ Step  Action                                                     Resource  Part
 
 ### Scenario B: LLM required (displaced part, deadlock)
 
-**Failure:** xarm6 fails `assemble_part` for SG. SG displaced to ur5e-workspace. ur5e holding MCP. Deadlock.
+**Failure:** xarm6 fails `place_part` for SG. SG displaced to ur5e-workspace. ur5e holding MCP. Deadlock.
 
 ```
 System state at failure:
@@ -799,15 +816,17 @@ System state at failure:
   MCP:   in_transit (held by ur5e)
 ```
 
-**Step 1 — Compile domain:** Same 5-action domain (identical).
+**Step 1 — Compile domain:** Same 4-action domain (identical).
 
 **Step 2 — Compile problem:** SG has no state predicate. MCP is `in_transit`.
 
-**Step 3 — pyperplan BFS:** NO SOLUTION. `(part-state-verified sg)` is unreachable — no action can fire on SG because no precondition matches it.
+**Step 3 — pyperplan BFS:** NO SOLUTION. Two blockages:
+- `(part-at sg assembly-board-v1)` is unreachable — no action can operate on SG
+- ur5e has no legal action — `place-part` requires `(placement-allowed mcp)` = FALSE
 
-**Step 4 — Gap analysis → Layer 2:** "SG has no representable state."
+**Step 4 — Gap analysis → Layer 2:** "SG has no representable state. ur5e is trapped by placement-allowed gate."
 
-**Step 5 — LLM extends domain:** Adds `(part-state-displaced ?p)`, `locate-and-recover` action. Sets `(part-state-displaced sg)` and `(part-at sg ur5e-workspace)` in init.
+**Step 5 — LLM extends domain:** Adds `(part-state-displaced ?p)`, `release-to-storage` action (place without safety gate), and `locate-and-recover` action (displaced → printed). Sets `(part-state-displaced sg)` and `(part-at sg ur5e-workspace)` in init.
 
 **Step 6 — pyperplan BFS on extended domain:** SOLVED in 10 steps (see Phase D above).
 
@@ -819,14 +838,14 @@ System state at failure:
 |---|---|---|
 | **Failure type** | Resource offline | Part displaced to unknown state |
 | **All states in Q?** | Yes — all entities in cataloged states | No — SG in uncataloged state |
-| **Domain changes** | None | +1 predicate, +1 action |
+| **Domain changes** | None | +1 predicate, +2 actions |
 | **Problem changes** | Remove `resource-available` | +2 init facts (displaced, location) |
-| **LLM needed?** | No | Yes — to interpret and name the new state |
+| **LLM needed?** | No | Yes — to interpret failure and design recovery |
 | **Solution length** | 8 steps | 10 steps (+2 for recovery) |
 | **Latency** | ~0ms (compiled + BFS) | ~2-3s (LLM call + BFS) |
 | **Guarantee** | Same as forward path | Same (after LLM output validated by BFS + CCA) |
 
-The dividing line is clear: **if every entity is in a state the catalog declares, compiled PDDL suffices. If any entity is in a state the catalog has no name for, the LLM must extend the vocabulary.**
+The dividing line is clear: **if every entity is in a state the catalog declares, compiled PDDL suffices. If any entity is in a state the catalog has no name for — or if the safety encoding traps an agent — the LLM must extend the vocabulary and/or design bypass actions.**
 
 ---
 
@@ -862,13 +881,10 @@ move-loaded-to-destination has 3 parameters:
 place-part has 3 parameters:
   → 2 × 2 × 3 = 12 grounded instances
 
-assemble-part has 3 parameters:
-  → 2 × 2 × 3 = 12 grounded instances
-
-unlock-mcp-assembly has 0 parameters:
+unlock-mcp-placement has 0 parameters:
   → 1 grounded instance
 
-Total: 61 grounded actions
+Total: 49 grounded actions
 ```
 
 Most of these will never fire — their preconditions will never be satisfied (e.g., `pick-part(xarm6, sg, assembly-board-v1)` requires SG to be at assembly-board-v1, which is the destination, not the origin). BFS only expands actions whose preconditions match the current state.
@@ -882,10 +898,10 @@ Abbreviations:
   ri(R) = robot-state-idle(R)        rap(R) = robot-state-at-pick(R)
   rpk(R) = robot-state-picked(R)     rps(R) = robot-state-positioned(R)
   pp(P) = part-state-printed(P)      pig(P) = part-state-in-gripper(P)
-  pit(P) = part-state-in-transit(P)  pv(P) = part-state-verified(P)
+  pit(P) = part-state-in-transit(P)
   pa(P,L) = part-at(P,L)            h(R,P) = holding(R,P)
   cr(R,L) = can-reach(R,L)          ra(R) = resource-available(R)
-  aa(P) = assembly-allowed(P)
+  pla(P) = placement-allowed(P)
 ```
 
 **Initial state S₀:**
@@ -893,12 +909,12 @@ Abbreviations:
 { ri(ur5e), ra(ur5e), cr(ur5e,mk4-1), cr(ur5e,mk4-2), cr(ur5e,asm),
   ri(xarm6), cr(xarm6,mk4-1), cr(xarm6,asm),     ← NOTE: no ra(xarm6)
   pp(sg), pa(sg,mk4-1), pp(mcp), pa(mcp,mk4-2),
-  aa(sg) }
+  pla(sg) }
 ```
 
 **Goal:**
 ```
-{ pv(sg), pa(sg,asm), pv(mcp), pa(mcp,asm) }
+{ pa(sg,asm), pa(mcp,asm) }
 ```
 
 ---
@@ -908,7 +924,7 @@ Abbreviations:
 Queue: `[S₀]`
 Visited: `{}`
 
-Pop S₀. Check goal: NO (no `pv` predicates). Find applicable actions:
+Pop S₀. Check goal: NO (no `pa(sg,asm)` or `pa(mcp,asm)`). Find applicable actions:
 
 | # | Action | Why applicable |
 |---|--------|---------------|
@@ -916,7 +932,7 @@ Pop S₀. Check goal: NO (no `pv` predicates). Find applicable actions:
 | 2 | `move-to-pick-location(ur5e, mcp, mk4-2)` | ri(ur5e) ✓, ra(ur5e) ✓, cr(ur5e,mk4-2) ✓, pa(mcp,mk4-2) ✓, pp(mcp) ✓ |
 | — | `move-to-pick-location(xarm6, ...)` | BLOCKED: no ra(xarm6) |
 
-All other actions (pick, move-loaded, place, assemble) also blocked — wrong robot states or missing preconditions.
+All other actions (pick, move-loaded, place) also blocked — wrong robot states or missing preconditions.
 
 Generate successors:
 - S₁ = apply action 1 to S₀: `ri(ur5e)` removed, `rap(ur5e)` added
@@ -969,14 +985,15 @@ S₄ (ur5e picked mcp) → `move-loaded-to-destination(ur5e, mcp, asm)` → S₆
 Applicable actions:
 | # | Action | Why applicable |
 |---|--------|---------------|
-| 1 | `assemble-part(ur5e, sg, asm)` | rps(ur5e) ✓, h(ur5e,sg) ✓, pit(sg) ✓, cr(ur5e,asm) ✓, **aa(sg) ✓** |
-| 2 | `place-part(ur5e, sg, asm)` | rps(ur5e) ✓, h(ur5e,sg) ✓, pit(sg) ✓, cr(ur5e,asm) ✓ (no aa check) |
-| 3 | `place-part(ur5e, sg, mk4-1)` | Same but different location |
-| ... | other place-part locations | Also applicable |
+| 1 | `place-part(ur5e, sg, asm)` | rps(ur5e) ✓, h(ur5e,sg) ✓, pit(sg) ✓, cr(ur5e,asm) ✓, **pla(sg) ✓** |
+| 2 | `place-part(ur5e, sg, mk4-1)` | Same but different location |
+| 3 | `place-part(ur5e, sg, mk4-2)` | Same but different location |
 
-BFS explores ALL of these. But `assemble-part` leads toward the goal (produces `pv(sg)`), while `place-part` leads backward (returns sg to `printed`). BFS will find the `assemble-part` path first because it is shorter.
+BFS explores ALL of these. But `place-part(ur5e, sg, asm)` places SG at the assembly board — directly toward the goal. The other options place SG back at printers, requiring re-picking (longer path). BFS finds the shortest path first.
 
-S₇ = assemble-part(ur5e, sg, asm): `pv(sg)`, `pa(sg,asm)`, ur5e → idle.
+S₇ = place-part(ur5e, sg, asm): `pp(sg)` restored, `pa(sg,asm)` added, ur5e → idle.
+
+Check goal on S₇: `pa(sg,asm)` ✓ but no `pa(mcp,asm)` — not done yet.
 
 ---
 
@@ -985,20 +1002,40 @@ S₇ = assemble-part(ur5e, sg, asm): `pv(sg)`, `pa(sg,asm)`, ur5e → idle.
 Applicable:
 | # | Action | Why |
 |---|--------|-----|
-| 1 | `assemble-part(ur5e, mcp, asm)` | BLOCKED: **aa(mcp) is FALSE** — safety constraint |
-| 2 | `place-part(ur5e, mcp, ...)` | Applicable (no safety check) → returns MCP to printed |
+| 1 | `place-part(ur5e, mcp, asm)` | BLOCKED: **pla(mcp) is FALSE** — safety constraint |
+| 2 | `place-part(ur5e, mcp, mk4-2)` | BLOCKED: **pla(mcp) is FALSE** |
+| — | ALL place-part for mcp | BLOCKED: pla(mcp) is FALSE everywhere |
 
-So this branch can only stage MCP and start over. It's a longer path — BFS will find the SG-first path from S₇ before this becomes relevant.
+No legal action for ur5e in this state. S₆ is a dead end — MCP-first path is impossible (safety blocks all MCP placement until SG is at assembly board).
 
 ---
 
-**Iteration 7 — expand S₇ (SG verified, ur5e idle):**
+**Iteration 7 — expand S₇ (SG at assembly-board, ur5e idle):**
 
-`unlock-mcp-assembly()` is now applicable: `pv(sg)` ✓. Produces S₈ with `aa(mcp)`.
+`unlock-mcp-placement()` is now applicable: `pa(sg,asm)` ✓. Produces S₈ with `pla(mcp)`.
 
-Then: move-to-pick(ur5e, mcp, mk4-2) → pick(ur5e, mcp, mk4-2) → move-loaded(ur5e, mcp, asm) → assemble(ur5e, mcp, asm).
+Then BFS continues from S₈:
+- `move-to-pick-location(ur5e, mcp, mk4-2)` → S₉
+- `pick-part(ur5e, mcp, mk4-2)` → S₁₀
+- `move-loaded-to-destination(ur5e, mcp, asm)` → S₁₁
+- `place-part(ur5e, mcp, asm)` → S₁₂
 
-Final state satisfies goal: `pv(sg)`, `pa(sg,asm)`, `pv(mcp)`, `pa(mcp,asm)`. **DONE.**
+Check goal on S₁₂: `pa(sg,asm)` ✓, `pa(mcp,asm)` ✓ — **GOAL REACHED. DONE.**
+
+---
+
+### BFS trace summary
+
+```
+S₀ ──move-to-pick(ur5e,sg,mk4-1)──► S₁ ──pick(ur5e,sg,mk4-1)──► S₃
+  └──move-to-pick(ur5e,mcp,mk4-2)──► S₂ ──pick(ur5e,mcp,mk4-2)──► S₄
+                                                                      └──► S₆ (DEAD END: pla(mcp)=F)
+S₃ ──move-loaded(ur5e,sg,asm)──► S₅ ──place(ur5e,sg,asm)──► S₇
+                                   └──place(ur5e,sg,mk4-1)──► (longer path, explored later)
+S₇ ──unlock-mcp──► S₈ ──move-to-pick(ur5e,mcp,mk4-2)──► S₉ ──pick──► S₁₀ ──move-loaded──► S₁₁ ──place──► S₁₂ ✓ GOAL
+```
+
+Total states explored: ~12. Total actions in solution: 8 + unlock = 9. BFS found this in microseconds.
 
 ---
 
@@ -1009,7 +1046,7 @@ Final state satisfies goal: `pv(sg)`, `pa(sg,asm)`, `pv(mcp)`, `pa(mcp,asm)`. **
 | **Complete** | If a solution exists, BFS will find it. If it returns no solution, none exists. |
 | **Optimal** | BFS finds the shortest plan (fewest actions). No unnecessary detours. |
 | **No heuristic needed** | Unlike A* or FF, BFS requires no domain-specific heuristic. Important because recovery domains are LLM-generated — no time to tune heuristics. |
-| **Exponential worst case** | O(b^d) where b = branching factor, d = solution depth. For our domains (~60 grounded actions, ~10 step solutions), this is tractable (<1ms). |
+| **Exponential worst case** | O(b^d) where b = branching factor, d = solution depth. For our domains (~49 grounded actions, ~8 step solutions), this is tractable (<1ms). |
 | **Deterministic** | Same domain + problem always produces the same plan. Reproducible for testing and debugging. |
 
 ### Why BFS works for manufacturing recovery
