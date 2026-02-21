@@ -91,7 +91,7 @@ def build_init(
         resource_states: JID → current resource state token.
                          e.g. {"ur5e@localhost": "idle", "xarm6@localhost": "recovery_required"}
         part_states:     Part name → current part state token.
-                         e.g. {"SG": "printed", "MCP": "in_transit"}
+                         e.g. {"SG": "ready", "MCP": "in_transit"}
         reachability:    JID → list of context names the resource can reach.
                          e.g. {"ur5e@localhost": ["prusa-mk4-2", "ur5e-region", "assembly-board-v1"]}
                          These become (reachable ?r ?c) facts.
@@ -162,7 +162,7 @@ def collect_states_from_tools(
 
 def build_goal(
     part_names: list[str],
-    target_state: str = "verified",
+    target_state: str = "assembled",
 ) -> str:
     """
     Build the (:goal ...) block.
@@ -170,7 +170,7 @@ def build_goal(
     Args:
         part_names:   Names of all parts that must reach the target state.
         target_state: The part-state token all parts must be in at plan end.
-                      Defaults to "verified" (the final state in tools.json).
+                      Defaults to "assembled" (the final state in tools.json).
 
     Returns:
         PDDL (:goal ...) string.

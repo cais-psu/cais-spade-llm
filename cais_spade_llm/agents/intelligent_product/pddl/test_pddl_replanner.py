@@ -88,7 +88,7 @@ DOMAIN = """\
     :precondition (and (resource-available ?r) (carrying ?r ?p) (reachable ?r ?l))
     :effect (and (resource-positioned ?r ?p) (not (carrying ?r ?p)))
   )
-  (:action place-part
+  (:action assemble-part
     :parameters (?r - resource ?p - part ?l - location)
     :precondition (and (resource-available ?r) (resource-positioned ?r ?p) (reachable ?r ?l))
     :effect (and (part-placed ?p ?l) (idle ?r) (not (resource-positioned ?r ?p)))
@@ -123,7 +123,7 @@ def test_solve():
     assert plan[0][0] == "move-to-pick-location"
     assert plan[1][0] == "pick-part"
     assert plan[2][0] == "move-loaded-to-destination"
-    assert plan[3][0] == "place-part"
+    assert plan[3][0] == "assemble-part"
 
     # Verify parameters
     for _, params in plan:
@@ -166,7 +166,7 @@ def test_translate():
             },
         },
         {
-            "function": "place_part",
+            "function": "assemble_part",
             "params": {
                 "destination_location": {"type": "string"},
                 "part_name": {"type": "string"},
@@ -195,8 +195,8 @@ def test_translate():
         failed_plan_nodes=[
             {
                 "id": "REQ_1_T4",
-                "status": "failed:misplaced",
-                "function_name": "place_part",
+                "status": "failed",
+                "function_name": "assemble_part",
                 "params": {"part_name": "SG"},
                 "predecessors": ["REQ_1_T3"],
                 "successors": [],
@@ -211,7 +211,7 @@ def test_translate():
     assert tasks[0]["function_name"] == "move_to_pick_location"
     assert tasks[1]["function_name"] == "pick_part"
     assert tasks[2]["function_name"] == "move_loaded_to_destination"
-    assert tasks[3]["function_name"] == "place_part"
+    assert tasks[3]["function_name"] == "assemble_part"
 
     # Verify resource JID mapping
     for t in tasks[:4]:

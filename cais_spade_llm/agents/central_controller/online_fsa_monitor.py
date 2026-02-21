@@ -115,7 +115,7 @@ class OnlineFsaMonitor:
         """
         Parse a plan FSA state string into per-resource info.
         Example state:
-          "(ur5e@localhost=(k=3,run=REQ_2_T3:place_part),xarm6@localhost=(k=3,idle))"
+          "(ur5e@localhost=(k=3,run=REQ_2_T3:assemble_part),xarm6@localhost=(k=3,idle))"
 
         Output per resource:
           {
@@ -123,7 +123,7 @@ class OnlineFsaMonitor:
               "k": 3,
               "status": "running",
               "run_task_id": "REQ_2_T3",
-              "run_function": "place_part",
+              "run_function": "assemble_part",
             },
             "xarm6@localhost": {
               "k": 3,

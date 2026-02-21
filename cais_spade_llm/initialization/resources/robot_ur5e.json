@@ -5,7 +5,7 @@
       "password": "none",
       "domain": "localhost",
       "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly board.",
-      "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "place_part"],
+      "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "assemble_part"],
       "sg_slippage_mode": "off",
       "sg_slippage_scope": "ur5e",
       "static_capabilities":{

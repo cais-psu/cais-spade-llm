@@ -217,7 +217,7 @@ class ProductAgent(LlmAgent):
         if transition.get("verify_camera"):
             position = self.camera.observe(part_name)
             if position is not None:
-                entry["state"] = "verified"
+                entry["state"] = "assembled"
                 entry["position"] = position
             else:
                 entry["state"] = "untracked"

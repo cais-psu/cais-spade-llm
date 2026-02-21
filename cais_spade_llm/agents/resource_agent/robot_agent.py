@@ -33,7 +33,6 @@ class RobotAgent(ResourceAgent):
                 "move_to_pick_location",
                 "move_loaded_to_destination",
                 "move_home",
-                "place_part",
                 "assemble_part",
             ],
         )
@@ -90,27 +89,6 @@ class RobotAgent(ResourceAgent):
 
         self._sg_slippage_triggered = True
         return True
-
-    def _build_generic_failure_context(
-        self,
-        *,
-        failure_mode: str,
-        affected_entities: Optional[list[dict[str, Any]]] = None,
-        observations: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Build a generic failure context payload usable across modes
-        (e.g. slippage, breakdown, timeout).
-        """
-        context: Dict[str, Any] = {
-            "failure_class": "execution_failure",
-            "failure_mode": str(failure_mode),
-        }
-        if affected_entities:
-            context["affected_entities"] = affected_entities
-        if observations:
-            context["observations"] = observations
-        return context
 
     async def move_to_pick_location(
         self,
@@ -184,7 +162,7 @@ class RobotAgent(ResourceAgent):
 
         in_state: at_pick
         out_state: picked
-        part_in_state: printed
+        part_in_state: ready
 
         required_context_keys: [origin]
 
@@ -192,10 +170,6 @@ class RobotAgent(ResourceAgent):
           completed:
             state: in_gripper
             location_template: "{robot_jid}_gripper"
-          failed:
-            state: lost
-            observation_required: true
-            last_known_template: "{robot_jid}_workspace"
 
         params:
           part_name:
@@ -213,12 +187,12 @@ class RobotAgent(ResourceAgent):
           task_id:
             type: string
 
-        description: Pick a printed part from an origin location.
+        description: Pick a ready part from an origin location.
         ---
         """
 
         if self._held_part:
-            msg = f"Already holding {self._held_part}; place it before picking a new part."
+            msg = f"Already holding {self._held_part}; assemble it before picking a new part."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
@@ -255,10 +229,6 @@ class RobotAgent(ResourceAgent):
           completed:
             state: in_transit
             location_template: "{robot_jid}_gripper"
-          failed:
-            state: lost
-            observation_required: true
-            last_known_template: "{robot_jid}_workspace"
 
         params:
           destination_location:
@@ -304,116 +274,6 @@ class RobotAgent(ResourceAgent):
             "content": f"Reached {destination_location} with {self._held_part}.",
         }
 
-    async def place_part(
-        self,
-        destination_location: str,
-        part_name: str,
-        *,
-        orientation: Optional[str] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: positioned
-        out_state: idle
-        part_in_state: in_transit
-
-        required_context_keys: [destination]
-
-        part_transition:
-          completed:
-            state: printed
-            location_param: destination_location
-          "failed:misplaced":
-            state: untracked
-            camera_locate: true
-            last_known_param: destination_location
-
-        params:
-          destination_location:
-            type: string
-            description: Target placement location.
-          part_name:
-            type: string
-            description: Name of the part being placed.
-          orientation:
-            type: string
-            description: Optional placement orientation.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Place the currently held part at a destination.
-        ---
-        """
-
-        if not self._held_part:
-            msg = "No part currently held; run pick_part first."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        # Consistency check
-        if part_name and self._held_part != part_name:
-            self.logger.warning(
-                "[Robot] Requested to place '%s' but currently holding '%s'. Placing held part.",
-                part_name, self._held_part
-            )
-
-        # Simulate slippage for SG placement (configurable test injection).
-        placed_target = part_name or self._held_part
-        if self._should_inject_sg_slippage(placed_target):
-            msg = "Simulated slippage: SG failed to seat during placement."
-            self.logger.error("[Robot] %s", msg)
-
-            # Part is no longer held — actual location is unknown until observed.
-            self._held_part = None
-            self._current_state = "recovery_required"
-            self._gripper_state = "open"
-
-            affected = []
-            if placed_target:
-                affected.append(
-                    {
-                        "entity_type": "part",
-                        "entity_id": str(placed_target),
-                        "state": "untracked",
-                    }
-                )
-
-            return {
-                "status": "failed:misplaced",
-                "content": msg,
-                "failure_context": self._build_generic_failure_context(
-                    failure_mode="slippage",
-                    affected_entities=affected,
-                    observations={
-                        "part_state": "untracked",
-                        "last_known_position": dict(self._position),
-                        "observation_required": True,
-                    },
-                ),
-            }
-
-        await self._simulate_action(
-            f"Placing {self._held_part} at {destination_location} "
-            f"(orientation={orientation or 'default'})"
-        )
-        placed = self._held_part
-        self._held_part = None
-        self._current_state = "idle"
-        self._gripper_state = "open"
-        return {
-            "status": "completed",
-            "content": f"Placed {placed}.",
-            "placed_location": destination_location,  # For part tracking
-        }
-
     async def assemble_part(
         self,
         destination_location: str,
@@ -436,13 +296,9 @@ class RobotAgent(ResourceAgent):
 
         part_transition:
           completed:
-            state: verified
+            state: assembled
             verify_camera: true
             location_param: destination_location
-          "failed:misplaced":
-            state: untracked
-            camera_locate: true
-            last_known_param: destination_location
 
         params:
           destination_location:
@@ -460,7 +316,7 @@ class RobotAgent(ResourceAgent):
           task_id:
             type: string
 
-        description: Assemble the currently held part at its final destination (verified placement).
+        description: Assemble the currently held part at its final destination.
         ---
         """
 
@@ -471,30 +327,26 @@ class RobotAgent(ResourceAgent):
 
         placed_target = part_name or self._held_part
         if self._should_inject_sg_slippage(placed_target):
-            msg = "Simulated slippage: SG failed to seat during assembly."
-            self.logger.error("[Robot] %s", msg)
+            self.logger.error("[Robot] Assembly verification failed for %s.", placed_target)
+
             self._held_part = None
             self._current_state = "recovery_required"
             self._gripper_state = "open"
-            affected = []
-            if placed_target:
-                affected.append({
-                    "entity_type": "part",
-                    "entity_id": str(placed_target),
-                    "state": "untracked",
-                })
+
             return {
-                "status": "failed:misplaced",
-                "content": msg,
-                "failure_context": self._build_generic_failure_context(
-                    failure_mode="slippage",
-                    affected_entities=affected,
-                    observations={
-                        "part_state": "untracked",
-                        "last_known_position": dict(self._position),
-                        "observation_required": True,
+                "status": "failed",
+                "content": "Assembly verification failed.",
+                "observations": {
+                    "gripper_force": 0.0,
+                    "camera_detection": {
+                        "object_found": True,
+                        "zone": f"{self._robot_scope_name()}_workspace",
+                        "shape_match_confidence": 0.85,
+                        "orientation": "upright",
+                        "visible_damage": False,
                     },
-                ),
+                    "last_commanded_location": destination_location,
+                },
             }
 
         await self._simulate_action(
@@ -539,7 +391,7 @@ class RobotAgent(ResourceAgent):
         """
 
         if self._held_part:
-            msg = "Cannot move home while still holding a part; place it first."
+            msg = "Cannot move home while still holding a part; assemble it first."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 

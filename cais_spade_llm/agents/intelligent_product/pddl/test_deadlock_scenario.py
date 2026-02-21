@@ -2,22 +2,21 @@
 End-to-end test: SG/MCP deadlock recovery scenario.
 
 Scenario:
-  - xArm6 fails to place SG (slippage) → recovery_required, unavailable
+  - xArm6 fails to assemble SG (slippage) → recovery_required, unavailable
   - SG is misplaced at UR5e workspace region
   - UR5e is holding MCP, positioned at assembly board
-  - Safety: SG must be placed before MCP → deadlock
+  - Safety: SG must be assembled before MCP → deadlock
 
 Expected recovery (what PDDL should find):
-  1. UR5e moves MCP back to prusa-mk4-2
-  2. UR5e places MCP at prusa-mk4-2
-  3. UR5e moves to pick SG from failed location
-  4. UR5e picks SG
-  5. UR5e moves SG to assembly board
-  6. UR5e places SG on assembly board  ← ordering unlocked
-  7. UR5e moves to pick MCP from prusa-mk4-2
-  8. UR5e picks MCP
-  9. UR5e moves MCP to assembly board
-  10. UR5e places MCP on assembly board ← done
+  1. UR5e stages MCP back to prusa-mk4-2 (LLM-generated: stage-part)
+  2. UR5e moves to pick SG from failed location
+  3. UR5e picks SG
+  4. UR5e moves SG to assembly board
+  5. UR5e assembles SG on assembly board  ← ordering unlocked
+  6. UR5e moves to pick MCP from prusa-mk4-2
+  7. UR5e picks MCP
+  8. UR5e moves MCP to assembly board
+  9. UR5e assembles MCP on assembly board ← done
 
 Run with:
     python -m cais_spade_llm.agents.intelligent_product.pddl.test_deadlock_scenario
@@ -70,7 +69,7 @@ DEADLOCK_DOMAIN = """\
     :effect (and (resource-positioned ?r ?p) (not (carrying ?r ?p)))
   )
 
-  (:action place-part
+  (:action assemble-part
     :parameters (?r - resource ?p - part ?l - location)
     :precondition (and (resource-available ?r) (resource-positioned ?r ?p) (reachable ?r ?l) (placement-allowed ?p))
     :effect (and (part-placed ?p ?l) (placed-flag ?p) (idle ?r) (not (resource-positioned ?r ?p)))
@@ -157,7 +156,7 @@ TOOLS_CATALOG = [
         },
     },
     {
-        "function": "place_part",
+        "function": "assemble_part",
         "params": {
             "destination_location": {"type": "string"},
             "part_name": {"type": "string"},
@@ -194,7 +193,7 @@ FAILED_PLAN_NODES = [
     {"id": "REQ_1_T3", "status": "completed", "function_name": "move_loaded_to_destination",
      "params": {"part_name": "SG"}, "resource_jid": "xarm6@localhost",
      "predecessors": ["REQ_1_T2"], "successors": ["REQ_1_T4"]},
-    {"id": "REQ_1_T4", "status": "failed:misplaced", "function_name": "place_part",
+    {"id": "REQ_1_T4", "status": "failed", "function_name": "assemble_part",
      "params": {"part_name": "SG"}, "resource_jid": "xarm6@localhost",
      "predecessors": ["REQ_1_T3"], "successors": []},
     {"id": "REQ_2_T1", "status": "completed", "function_name": "move_to_pick_location",
@@ -206,7 +205,7 @@ FAILED_PLAN_NODES = [
     {"id": "REQ_2_T3", "status": "completed", "function_name": "move_loaded_to_destination",
      "params": {"part_name": "MCP"}, "resource_jid": "ur5e@localhost",
      "predecessors": ["REQ_2_T2"], "successors": ["REQ_2_T4"]},
-    {"id": "REQ_2_T4", "status": "blocked", "function_name": "place_part",
+    {"id": "REQ_2_T4", "status": "blocked", "function_name": "assemble_part",
      "params": {"part_name": "MCP"}, "resource_jid": "ur5e@localhost",
      "predecessors": ["REQ_2_T3", "REQ_1_T4"], "successors": []},
 ]
@@ -242,9 +241,9 @@ def test_solver_finds_recovery():
     sg_placed_idx = None
     mcp_placed_idx = None
     for i, (action, params) in enumerate(plan):
-        if action == "place-part" and "sg" in params:
+        if action == "assemble-part" and "sg" in params:
             sg_placed_idx = i
-        if action == "place-part" and "mcp" in params:
+        if action == "assemble-part" and "mcp" in params:
             mcp_placed_idx = i
 
     assert sg_placed_idx is not None, "SG should be placed"
@@ -254,7 +253,7 @@ def test_solver_finds_recovery():
     )
 
     # Final goals should be achieved: both parts placed at assembly board
-    # Check that place-part for SG targets assembly-board-v1
+    # Check that assemble-part for SG targets assembly-board-v1
     sg_place = plan[sg_placed_idx]
     assert "assembly-board-v1" in sg_place[1], f"SG should be placed at assembly board: {sg_place}"
 

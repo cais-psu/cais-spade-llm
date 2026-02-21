@@ -691,21 +691,21 @@ STRICT RULES FOR MODIFICATION:
       - Each function in tools_catalog has `in_state` and `out_state` fields
       - CHAIN functions by matching output state to input state
       - State transition examples:
-        * pick_part: in_state="printed" → out_state="picked"
+        * pick_part: in_state="ready" → out_state="picked"
         * move_loaded_to_destination: in_state="picked" → out_state="positioned"
-        * place_part: in_state="positioned" → out_state="placed"
+        * assemble_part: in_state="positioned" → out_state="idle"
       - Build multi-step sequences by connecting compatible states
-      - Example: To relocate a part: pick_part (→picked) → move_loaded (→positioned) → place_part (→placed)
+      - Example: To assemble a part: pick_part (→picked) → move_loaded (→positioned) → assemble_part (→idle)
 
    b) CHECK WORKSPACE BOUNDARIES:
       - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
       - Use these to determine which robot can reach the failed part location
       - SELECT the robot whose workspace_boundaries.x_range/y_range/z_range contains the part coordinates
 
-   c) USE STAGING AREAS:
+   c) USE STAGING AREAS FOR HANDOFF:
       - Each robot has `staging_areas` in static_capabilities with coordinates and `accessible_by` list
-      - INSTEAD of creating new functions, use existing `place_part` with staging locations
-      - Example recovery pattern:
+      - When a part must transfer between robots, generate a new staging action (NOT in catalog) targeting a shared staging area
+      - Example recovery pattern (staging action is LLM-generated, not a catalog function):
         ```json
         {{
           "id": "RECOVER_FAILED_PART",
@@ -716,17 +716,17 @@ STRICT RULES FOR MODIFICATION:
         }},
         {{
           "id": "STAGE_FOR_XARM",
-          "function_name": "place_part",
+          "function_name": "release_to_staging",
           "params": {{ "part_name": "SG", "location": "staging_zone_neutral" }},
           "resource_jid": "ur5e@localhost",
           "predecessors": ["RECOVER_FAILED_PART"],
-          "change_reason": "INSERTION: Stage part in neutral zone for xArm6 to access"
+          "change_reason": "INSERTION: Stage part in neutral zone for xArm6 to access (LLM-generated recovery action)"
         }}
         ```
 
    d) COMPOSITIONAL REASONING PRINCIPLES:
-      - PREFER using existing primitives in new sequences over inventing new functions
-      - A robot holding a part (out_state="picked") can `place_part` at a staging area, then `pick_part` elsewhere
+      - Use `assemble_part` only for final placement at the assembly destination
+      - For intermediate placement (staging, handoff), GENERATE a new recovery action not present in tools_catalog
       - Staging enables coordination between robots without collision
       - CONSULT function_owner_agent field to verify which robot has which capability
 
