@@ -5,7 +5,7 @@
       "type": "requirement",
       "raw_text": "Assemble part SG from picking location prusa-mk3 to the assembly_board-v1.",
       "phase": "ASSEMBLY",
-      "process_type": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
       "product": "SG",
       "context": {
         "origin": "prusa-mk3",
@@ -17,7 +17,7 @@
       "type": "requirement",
       "raw_text": "Assemble part MCP from picking location prusa-mk3 to the assembly_board-v1.",
       "phase": "ASSEMBLY",
-      "process_type": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
       "product": "MCP",
       "context": {
         "origin": "prusa-mk3",

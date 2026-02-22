@@ -59,9 +59,10 @@ def plan_on_environment_model(
     M_e: dict,
     x_c: dict,
     P_id: list[str],
+    goal_state: str,
 ) -> list[dict] | None:
     """
-    BFS on M_e from x_c to a goal state where all P_id parts are assembled.
+    BFS on M_e from x_c to a goal state where all P_id parts are at goal_state.
     Finds the path with fewest steps.
 
     Returns ordered list of event dicts (each includes ra_jid and params),
@@ -78,7 +79,7 @@ def plan_on_environment_model(
 
     def is_goal(state_key: str) -> bool:
         part_states = states[state_key].get("part_states", {})
-        return all(part_states.get(p) == "assembled" for p in P_id)
+        return all(part_states.get(p) == goal_state for p in P_id)
 
     # BFS: queue of (state_key, path_as_event_keys)
     queue: deque = deque([(start_key, [])])
@@ -104,9 +105,9 @@ def _find_start_state(states: dict, x_c: dict) -> str | None:
     if exact in states:
         return exact
 
-    # Partial: same robot_state and part_states
+    # Partial: same resource_state and part_states
     for key, state in states.items():
-        if (state.get("robot_state") == x_c.get("robot_state") and
+        if (state.get("resource_state") == x_c.get("resource_state") and
                 state.get("part_states") == x_c.get("part_states")):
             return key
 
@@ -118,6 +119,7 @@ async def ask_llm_for_bridge(
     P_id: list[str],
     ra_jid: str,
     ask_llm: Callable[..., Coroutine[Any, Any, str]],
+    goal_state: str,
     part_tracker: dict | None = None,
 ) -> list[dict]:
     """
@@ -129,14 +131,14 @@ async def ask_llm_for_bridge(
     prompt = (
         f"A robot ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
         f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"
-        f"Parts that still need to be assembled: {P_id}\n\n"
+        f"Parts that still need to reach {goal_state}: {P_id}\n\n"
         "The robot has no available tool to make progress. "
         "Generate 1-3 recovery tool steps as a JSON array:\n"
         "[\n"
         "  {\n"
         '    "function_name": "<tool name>",\n'
-        '    "in_state": "<robot state before>",\n'
-        '    "out_state": "<robot state after>",\n'
+        '    "in_state": "<resource state before>",\n'
+        '    "out_state": "<resource state after>",\n'
         '    "part_effect": {"<part_name>": {"state": "<new_state>", "location": "<new_location>"}},\n'
         '    "params": {"<param_name>": "<value>"},\n'
         '    "duration": <seconds as number>\n'

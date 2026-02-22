@@ -353,7 +353,7 @@ class ProcessPlanner:
         system_coordination_state: dict | None = None,
     ) -> None:
         """
-        DES replanning: PA computes bids per robot, compiles M_e, runs Dijkstra.
+        DES replanning: PA computes bids per robot, compiles M_e, runs BFS.
         LLM bridge if stuck. Falls back to LLM replan if no path found.
         """
         from cais_spade_llm.agents.intelligent_product.replanner.graph_planner import (
@@ -387,9 +387,10 @@ class ProcessPlanner:
             self.logger.info("[Planner] All parts at goal state (%s) — nothing to replan.", goal_state)
             return
 
-        # 2. Build x_c per robot from coordination state and part tracker
+        # 2. Build x_c per resource from coordination state and part tracker
         scs = system_coordination_state or {}
-        robot_states = scs.get("robot_states", {})
+        # Gracefully handle older formats returning robot_states
+        resource_states = scs.get("resource_states", scs.get("robot_states", {}))
         part_states = {name: info.get("state") for name, info in part_tracker.items()}
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
 
@@ -397,10 +398,10 @@ class ProcessPlanner:
         bids: list[Bid] = []
         for ra in self.resource_agents:
             ra_jid = str(ra.jid)
-            ra_robot_state = robot_states.get(ra_jid, {})
+            ra_resource_state = resource_states.get(ra_jid, {})
             x_c = {
-                "robot_state": ra_robot_state.get("current_state", "idle"),
-                "current_part": ra_robot_state.get("held_part"),
+                "resource_state": ra_resource_state.get("current_state", "idle"),
+                "current_part": ra_resource_state.get("held_part"),
                 "current_location": None,
                 "part_states": part_states,
                 "part_locations": part_locations,
@@ -410,14 +411,14 @@ class ProcessPlanner:
             bid = compute_bid(
                 x_c=x_c,
                 P_id=P_id,
-                t_bound=300.0,
+                goal_state=goal_state,
                 tools=tools_catalog,
                 reachability=reachability,
                 staging_areas=staging_areas,
-                robot_jid=ra_jid,
+                resource_jid=ra_jid,
             )
             if bid:
-                self.logger.info("[Planner] Bid from %s: complete=%s, time=%.1fs", ra_jid, bid.complete, bid.total_time)
+                self.logger.info("[Planner] Bid from %s: complete=%s", ra_jid, bid.complete)
                 bids.append(bid)
             else:
                 self.logger.info("[Planner] No bid from %s.", ra_jid)
@@ -430,13 +431,13 @@ class ProcessPlanner:
         # 4. Compile M_e from all bids
         M_e = compile_environment_model(bids)
 
-        # 5. Dijkstra — start from the first bid's initial state
+        # 5. BFS — start from the first bid's initial state
         x_c = bids[0].str_x[0]
-        path = plan_on_environment_model(M_e, x_c, P_id)
+        path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
 
         # 6. If stuck, try LLM bridge
         if path is None:
-            self.logger.info("[Planner] Dijkstra found no path — requesting LLM bridge.")
+            self.logger.info("[Planner] BFS found no path — requesting LLM bridge.")
             stuck_state = x_c
             ra_jids = list({b.ra_jid for b in bids})
             ra_jid = ra_jids[0] if ra_jids else "unknown"
@@ -445,6 +446,7 @@ class ProcessPlanner:
                 P_id=P_id,
                 ra_jid=ra_jid,
                 ask_llm=self.product_agent.ask_llm,
+                goal_state=goal_state,
                 part_tracker=part_tracker,
             )
             if bridge_tools:
@@ -455,7 +457,7 @@ class ProcessPlanner:
                     str_e=bridge_tools,
                     str_x=[stuck_state] + [
                         {
-                            "robot_state": t.get("out_state", stuck_state.get("robot_state")),
+                            "resource_state": t.get("out_state", stuck_state.get("resource_state")),
                             "part_states": {
                                 **stuck_state.get("part_states", {}),
                                 **{k: v.get("state") for k, v in t.get("part_effect", {}).items()},
@@ -468,11 +470,10 @@ class ProcessPlanner:
                         for t in bridge_tools
                     ],
                     prp_p_achieved=[],
-                    total_time=sum(t.get("duration", 60.0) for t in bridge_tools),
                     complete=False,
                 )
                 M_e = compile_environment_model(bids + [bridge_bid])
-                path = plan_on_environment_model(M_e, x_c, P_id)
+                path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
 
         # 7. If still no path, fall back to LLM replan
         if path is None:

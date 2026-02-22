@@ -11,11 +11,11 @@
   },
   "ur5e@localhost": {
     "held_part": "MCP",
-    "current_state": "positioned",
+    "current_state": "picked",
     "position": {
-      "x": 400.0,
-      "y": -200.0,
-      "z": 200.0
+      "x": 0.0,
+      "y": 0.0,
+      "z": 300.0
     },
     "gripper_state": "closed"
   }

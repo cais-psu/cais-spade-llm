@@ -140,9 +140,10 @@
       },
       "resource_jid": "ur5e@localhost",
       "sequence_index": 2,
-      "status": "completed",
+      "status": "accepted",
       "predecessors": [
-        "REQ_2_T2"
+        "REQ_2_T2",
+        "REQ_1_T4"
       ],
       "successors": [
         "REQ_2_T4"
@@ -162,10 +163,9 @@
       },
       "resource_jid": "ur5e@localhost",
       "sequence_index": 3,
-      "status": "accepted",
+      "status": "pending",
       "predecessors": [
-        "REQ_2_T3",
-        "REQ_1_T4"
+        "REQ_2_T3"
       ],
       "successors": []
     }

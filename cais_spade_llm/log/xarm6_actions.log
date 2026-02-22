@@ -1809,3 +1809,24 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-22 14:16:36,200 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
 2026-02-22 14:16:36,203 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T4
 2026-02-22 14:16:36,302 - agent:xarm6 - ERROR - [Robot] Assembly verification failed for SG.
+2026-02-22 15:08:44,338 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-22 15:08:45,087 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-22 15:09:06,502 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 15:09:06,511 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T1
+2026-02-22 15:09:06,607 - agent:xarm6 - INFO - [xarm6] Travel empty to pick location prusa-mk3 for SG (speed=default) (estimated 5.0 sec)
+2026-02-22 15:09:11,608 - agent:xarm6 - INFO - [xarm6] ... Travel empty to pick location prusa-mk3 for SG (speed=default) (5.0 / 5.0 sec)
+2026-02-22 15:09:11,608 - agent:xarm6 - INFO - [xarm6] Finished: Travel empty to pick location prusa-mk3 for SG (speed=default)
+2026-02-22 15:09:11,734 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 15:09:11,745 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T2
+2026-02-22 15:09:11,836 - agent:xarm6 - INFO - [xarm6] Picking SG from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-22 15:09:16,839 - agent:xarm6 - INFO - [xarm6] ... Picking SG from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-22 15:09:16,840 - agent:xarm6 - INFO - [xarm6] Finished: Picking SG from prusa-mk3 (gripper=default)
+2026-02-22 15:09:16,970 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 15:09:16,984 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T3
+2026-02-22 15:09:17,072 - agent:xarm6 - INFO - [xarm6] Move loaded part SG to assembly_board-v1 (speed=default) (estimated 5.0 sec)
+2026-02-22 15:09:22,075 - agent:xarm6 - INFO - [xarm6] ... Move loaded part SG to assembly_board-v1 (speed=default) (5.0 / 5.0 sec)
+2026-02-22 15:09:22,075 - agent:xarm6 - INFO - [xarm6] Finished: Move loaded part SG to assembly_board-v1 (speed=default)
+2026-02-22 15:09:22,171 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T4) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 15:09:22,181 - agent:xarm6 - INFO - [Resource] Stored safety_decision=allow for task=REQ_1_T4
+2026-02-22 15:09:22,273 - agent:xarm6 - ERROR - [Robot] Assembly verification failed for SG.
+2026-02-22 15:46:31,510 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'assemble_part'] sg_slippage_mode=always sg_slippage_scope=xarm6

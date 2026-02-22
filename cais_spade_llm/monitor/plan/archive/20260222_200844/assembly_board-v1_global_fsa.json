@@ -46,23 +46,7 @@
       "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
       "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
       "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=4,idle))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
-      "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
       "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=4,idle))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
-      "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
       "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=4,idle))",
       "(ur5e@localhost=(k=3,run=REQ_2_T4:assemble_part),xarm6@localhost=(k=4,idle))",
       "(ur5e@localhost=(k=4,idle),xarm6@localhost=(k=4,idle))"
@@ -268,15 +252,6 @@
       },
       {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
         "event": "REQ_1_T1.start",
         "readable_event": "move_to_pick_location(SG).start",
         "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
@@ -354,33 +329,6 @@
         "to": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
         "resource_jid": "xarm6@localhost",
         "task_id": "REQ_1_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,idle))",
-        "event": "REQ_1_T1.start",
-        "readable_event": "move_to_pick_location(SG).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T1",
-        "function_name": "move_to_pick_location"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
         "function_name": "move_loaded_to_destination"
       },
       {
@@ -465,42 +413,6 @@
         "function_name": "move_loaded_to_destination"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,idle))",
-        "event": "REQ_1_T1.start",
-        "readable_event": "move_to_pick_location(SG).start",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T1",
-        "function_name": "move_to_pick_location"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "event": "REQ_1_T1.done",
-        "readable_event": "move_to_pick_location(SG).done",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T1",
-        "function_name": "move_to_pick_location"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,idle))",
         "event": "REQ_1_T2.start",
         "readable_event": "pick_part(SG).start",
@@ -580,42 +492,6 @@
         "resource_jid": "xarm6@localhost",
         "task_id": "REQ_1_T4",
         "function_name": "assemble_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=0,run=REQ_1_T1:move_to_pick_location))",
-        "event": "REQ_1_T1.done",
-        "readable_event": "move_to_pick_location(SG).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T1",
-        "function_name": "move_to_pick_location"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,idle))",
-        "event": "REQ_1_T2.start",
-        "readable_event": "pick_part(SG).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T2",
-        "function_name": "pick_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
       },
       {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
@@ -699,42 +575,6 @@
         "function_name": "assemble_part"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,idle))",
-        "event": "REQ_1_T2.start",
-        "readable_event": "pick_part(SG).start",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T2",
-        "function_name": "pick_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "event": "REQ_1_T2.done",
-        "readable_event": "pick_part(SG).done",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T2",
-        "function_name": "pick_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,idle))",
         "event": "REQ_1_T3.start",
         "readable_event": "move_loaded_to_destination(SG).start",
@@ -807,42 +647,6 @@
         "function_name": "move_to_pick_location"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=1,run=REQ_1_T2:pick_part))",
-        "event": "REQ_1_T2.done",
-        "readable_event": "pick_part(SG).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T2",
-        "function_name": "pick_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,idle))",
-        "event": "REQ_1_T3.start",
-        "readable_event": "move_loaded_to_destination(SG).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
         "event": "REQ_1_T3.done",
         "readable_event": "move_loaded_to_destination(SG).done",
@@ -897,42 +701,6 @@
         "function_name": "move_to_pick_location"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,idle))",
-        "event": "REQ_1_T3.start",
-        "readable_event": "move_loaded_to_destination(SG).start",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "event": "REQ_1_T3.done",
-        "readable_event": "move_loaded_to_destination(SG).done",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))",
         "event": "REQ_1_T4.start",
         "readable_event": "assemble_part(SG).start",
@@ -969,42 +737,6 @@
         "function_name": "pick_part"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=2,run=REQ_1_T3:move_loaded_to_destination))",
-        "event": "REQ_1_T3.done",
-        "readable_event": "move_loaded_to_destination(SG).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,idle))",
-        "event": "REQ_1_T4.start",
-        "readable_event": "assemble_part(SG).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T4",
-        "function_name": "assemble_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "event": "REQ_2_T3.start",
-        "readable_event": "move_loaded_to_destination(MCP).start",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
         "event": "REQ_1_T4.done",
         "readable_event": "assemble_part(SG).done",
@@ -1023,33 +755,6 @@
         "function_name": "pick_part"
       },
       {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,idle))",
-        "event": "REQ_1_T4.start",
-        "readable_event": "assemble_part(SG).start",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T4",
-        "function_name": "assemble_part"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "event": "REQ_2_T3.done",
-        "readable_event": "move_loaded_to_destination(MCP).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "resource_jid": "ur5e@localhost",
-        "task_id": "REQ_2_T3",
-        "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "event": "REQ_1_T4.done",
-        "readable_event": "assemble_part(SG).done",
-        "to": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=4,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T4",
-        "function_name": "assemble_part"
-      },
-      {
         "from": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=4,idle))",
         "event": "REQ_2_T3.start",
         "readable_event": "move_loaded_to_destination(MCP).start",
@@ -1057,15 +762,6 @@
         "resource_jid": "ur5e@localhost",
         "task_id": "REQ_2_T3",
         "function_name": "move_loaded_to_destination"
-      },
-      {
-        "from": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))",
-        "event": "REQ_1_T4.done",
-        "readable_event": "assemble_part(SG).done",
-        "to": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=4,idle))",
-        "resource_jid": "xarm6@localhost",
-        "task_id": "REQ_1_T4",
-        "function_name": "assemble_part"
       },
       {
         "from": "(ur5e@localhost=(k=2,run=REQ_2_T3:move_loaded_to_destination),xarm6@localhost=(k=4,idle))",
@@ -1105,8 +801,8 @@
       "ur5e@localhost",
       "xarm6@localhost"
     ],
-    "num_reachable_states": 65,
-    "num_transitions": 112,
+    "num_reachable_states": 49,
+    "num_transitions": 80,
     "has_failure_states": false
   }
 }

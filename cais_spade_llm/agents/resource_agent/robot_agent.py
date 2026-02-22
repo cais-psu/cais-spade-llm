@@ -108,6 +108,9 @@ class RobotAgent(ResourceAgent):
         out_state: at_pick
 
         required_context_keys: [origin]
+        context_mapping:
+          location_param: origin_resource_location
+          location_type: part_location
 
         params:
           origin_resource_location:
@@ -165,6 +168,9 @@ class RobotAgent(ResourceAgent):
         part_in_state: ready
 
         required_context_keys: [origin]
+        context_mapping:
+          location_param: origin_resource_location
+          location_type: current_location
 
         part_transition:
           completed:
@@ -224,6 +230,9 @@ class RobotAgent(ResourceAgent):
         part_in_state: in_gripper
 
         required_context_keys: [destination]
+        context_mapping:
+          location_param: destination_location
+          location_type: reachable_location
 
         part_transition:
           completed:
@@ -293,6 +302,9 @@ class RobotAgent(ResourceAgent):
         part_in_state: in_transit
 
         required_context_keys: [destination]
+        context_mapping:
+          location_param: destination_location
+          location_type: current_location
 
         part_transition:
           completed:

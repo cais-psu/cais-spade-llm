@@ -6,144 +6,126 @@
       "last_successful_task": "REQ_1_T3"
     },
     "MCP": {
-      "state": "in_transit",
+      "state": "in_gripper",
       "location": "ur5e@localhost_gripper",
-      "last_successful_task": "REQ_2_T3"
+      "last_successful_task": "REQ_2_T2"
     }
   },
   "execution_timeline": [
     {
-      "timestamp": "2026-02-22T20:09:06.503256+00:00",
+      "timestamp": "2026-02-22T19:16:21.061442+00:00",
       "task_id": "REQ_1_T1",
       "status": "accepted",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:06.609362+00:00",
+      "timestamp": "2026-02-22T19:16:21.163835+00:00",
       "task_id": "REQ_1_T1",
       "status": "running",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:06.620248+00:00",
+      "timestamp": "2026-02-22T19:16:21.165788+00:00",
       "task_id": "REQ_2_T1",
       "status": "accepted",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:06.722817+00:00",
+      "timestamp": "2026-02-22T19:16:21.266088+00:00",
       "task_id": "REQ_2_T1",
       "status": "running",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.609969+00:00",
+      "timestamp": "2026-02-22T19:16:26.165338+00:00",
       "task_id": "REQ_1_T1",
       "status": "completed",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.726191+00:00",
+      "timestamp": "2026-02-22T19:16:26.267246+00:00",
       "task_id": "REQ_2_T1",
       "status": "completed",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.736104+00:00",
+      "timestamp": "2026-02-22T19:16:26.278751+00:00",
       "task_id": "REQ_1_T2",
       "status": "accepted",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.838707+00:00",
+      "timestamp": "2026-02-22T19:16:26.381240+00:00",
       "task_id": "REQ_1_T2",
       "status": "running",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.848467+00:00",
+      "timestamp": "2026-02-22T19:16:26.383634+00:00",
       "task_id": "REQ_2_T2",
       "status": "accepted",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:11.949272+00:00",
+      "timestamp": "2026-02-22T19:16:26.483765+00:00",
       "task_id": "REQ_2_T2",
       "status": "running",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:16.841744+00:00",
+      "timestamp": "2026-02-22T19:16:31.379896+00:00",
       "task_id": "REQ_1_T2",
       "status": "completed",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:16.952698+00:00",
+      "timestamp": "2026-02-22T19:16:31.485257+00:00",
       "task_id": "REQ_2_T2",
       "status": "completed",
       "resource_jid": "ur5e@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:16.971540+00:00",
+      "timestamp": "2026-02-22T19:16:31.495576+00:00",
       "task_id": "REQ_1_T3",
       "status": "accepted",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:17.056046+00:00",
-      "task_id": "REQ_2_T3",
-      "status": "accepted",
-      "resource_jid": "ur5e@localhost"
-    },
-    {
-      "timestamp": "2026-02-22T20:09:17.073048+00:00",
+      "timestamp": "2026-02-22T19:16:31.596808+00:00",
       "task_id": "REQ_1_T3",
       "status": "running",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:17.157166+00:00",
-      "task_id": "REQ_2_T3",
-      "status": "running",
-      "resource_jid": "ur5e@localhost"
-    },
-    {
-      "timestamp": "2026-02-22T20:09:22.077188+00:00",
+      "timestamp": "2026-02-22T19:16:36.195774+00:00",
       "task_id": "REQ_1_T3",
       "status": "completed",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:22.159238+00:00",
-      "task_id": "REQ_2_T3",
-      "status": "completed",
-      "resource_jid": "ur5e@localhost"
-    },
-    {
-      "timestamp": "2026-02-22T20:09:22.171957+00:00",
+      "timestamp": "2026-02-22T19:16:36.200872+00:00",
       "task_id": "REQ_1_T4",
       "status": "accepted",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:22.276273+00:00",
+      "timestamp": "2026-02-22T19:16:36.302487+00:00",
       "task_id": "REQ_1_T4",
       "status": "running",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:22.291170+00:00",
+      "timestamp": "2026-02-22T19:16:36.303753+00:00",
       "task_id": "REQ_1_T4",
       "status": "failed",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-02-22T20:09:22.778161+00:00",
-      "task_id": "REQ_2_T4",
+      "timestamp": "2026-02-22T19:16:36.801257+00:00",
+      "task_id": "REQ_2_T3",
       "status": "accepted",
       "resource_jid": "ur5e@localhost"
     }
   ],
-  "last_updated": "2026-02-22T20:09:22.785260+00:00"
+  "last_updated": "2026-02-22T19:16:36.801834+00:00"
 }

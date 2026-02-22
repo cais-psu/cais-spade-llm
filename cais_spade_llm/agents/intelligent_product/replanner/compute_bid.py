@@ -11,28 +11,29 @@ logger = logging.getLogger(__name__)
 def compute_bid(
     x_c: dict,
     P_id: list[str],
+    goal_state: str,
     tools: list[dict],
     reachability: list[str],
     staging_areas: dict,
-    robot_jid: str,
+    resource_jid: str,
 ) -> Bid | None:
     """
-    DES forward BFS to find a feasible event sequence for this robot.
+    DES forward BFS to find a feasible event sequence for this resource.
 
     x_c keys expected:
-        robot_state      : current FSM state ("idle", "picked", etc.)
+        resource_state   : current FSM state ("idle", "picked", etc.)
         current_part     : part currently being handled (None if idle)
-        current_location : location robot is at/heading to (None if idle)
+        current_location : location resource is at/heading to (None if idle)
         part_states      : {part_name: state}
         part_locations   : {part_name: location}
 
     Returns a complete Bid (all P_id assembled), a partial Bid
-    (robot reaches a staging area), or None if no path found.
+    (resource reaches a staging area), or None if no path found.
     """
-    robot_name = robot_jid.split("@")[0]
-    robot_tools = [t for t in tools if t.get("function_owner_agent") == robot_name]
+    resource_name = resource_jid.split("@")[0]
+    resource_tools = [t for t in tools if t.get("function_owner_agent") == resource_name]
 
-    if not robot_tools:
+    if not resource_tools:
         return None
 
     staging_names = set(staging_areas.keys())
@@ -41,7 +42,7 @@ def compute_bid(
         return (rs, cp, cl, frozenset(ps.items()), frozenset(pl.items()))
 
     init = dict(
-        rs=x_c.get("robot_state", "idle"),
+        rs=x_c.get("resource_state", "idle"),
         cp=x_c.get("current_part"),
         cl=x_c.get("current_location"),
         ps=dict(x_c.get("part_states", {})),
@@ -49,7 +50,7 @@ def compute_bid(
     )
 
     start_state = {
-        "robot_state": init["rs"],
+        "resource_state": init["rs"],
         "current_part": init["cp"],
         "current_location": init["cl"],
         "part_states": init["ps"],
@@ -72,30 +73,30 @@ def compute_bid(
         pl = dict(pl_f)
 
         # --- complete goal ---
-        if all(ps.get(p) == "assembled" for p in P_id):
+        if all(ps.get(p) == goal_state for p in P_id):
             return Bid(
                 request_id="",
-                ra_jid=robot_jid,
+                ra_jid=resource_jid,
                 str_e=events,
                 str_x=states,
-                prp_p_achieved=[p for p in P_id if ps.get(p) == "assembled"],
+                prp_p_achieved=[p for p in P_id if ps.get(p) == goal_state],
                 complete=True,
             )
 
-        # --- partial goal: robot is at a staging area ---
+        # --- partial goal: resource is at a staging area ---
         if cl in staging_names and events and best_partial is None:
             best_partial = (events[:], states[:])
 
         # --- expand ---
         for new_rs, new_cp, new_cl, new_ps, new_pl, event_dict in _expand(
-            robot_tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, robot_jid
+            resource_tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resource_jid, goal_state
         ):
             new_key = _key(new_rs, new_cp, new_cl, new_ps, new_pl)
             if new_key in visited:
                 continue
             visited.add(new_key)
             new_state = {
-                "robot_state": new_rs,
+                "resource_state": new_rs,
                 "current_part": new_cp,
                 "current_location": new_cl,
                 "part_states": new_ps,
@@ -113,20 +114,21 @@ def compute_bid(
         last_ps = st[-1].get("part_states", {})
         return Bid(
             request_id="",
-            ra_jid=robot_jid,
+            ra_jid=resource_jid,
             str_e=ev,
             str_x=st,
-            prp_p_achieved=[p for p in P_id if last_ps.get(p) == "assembled"],
+            prp_p_achieved=[p for p in P_id if last_ps.get(p) == goal_state],
             complete=False,
         )
 
     return None
 
 
-def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, robot_jid):
+def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resource_jid, goal_state):
     """
     Yield (new_rs, new_cp, new_cl, new_ps, new_pl, event_dict)
     for every valid tool application from the current state.
+    Generalized to read preconditions and effects dynamically from tools.json.
     """
     for tool in tools:
         if tool.get("in_state") != rs:
@@ -134,44 +136,83 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, robot_
 
         fn = tool.get("function")
         out = tool.get("out_state")
+        part_in = tool.get("part_in_state")
+        part_effect = tool.get("part_transition", {}).get("completed", {})
+        
+        # Generic location parameter mapping
+        ctx_map = tool.get("context_mapping", {})
+        loc_param = ctx_map.get("location_param")
+        loc_type = ctx_map.get("location_type")
+        loc_template = part_effect.get("location_template") if cp else None
 
-        if fn == "move_to_pick_location":
+        # Tools targeting a specific part location (e.g., move_to_pick)
+        if loc_type == "part_location" and not part_in:
             for part in P_id:
-                if ps.get(part) == "assembled":
+                if ps.get(part) == goal_state:
                     continue
                 loc = pl.get(part)
                 if loc and loc in reachability:
                     yield (
                         out, part, loc, dict(ps), dict(pl),
-                        {"function_name": fn, "params": {"origin_resource_location": loc, "part_name": part}},
+                        {"function_name": fn, "params": {loc_param: loc, "part_name": part}},
                     )
+            continue
+            
+        # Tools that require a specific part logic state
+        if cp:
+            if part_in and ps.get(cp) != part_in:
+                continue
 
-        elif fn == "pick_part":
-            part_in = tool.get("part_in_state")
-            if cp and cl and (part_in is None or ps.get(cp) == part_in):
-                new_ps = {**ps, cp: "in_gripper"}
-                new_pl = {**pl, cp: f"{robot_jid}_gripper"}
+            part_effect = tool.get("part_transition", {}).get("completed", {})
+            new_ps = {**ps}
+            new_pl = {**pl}
+            
+            if "state" in part_effect:
+                new_ps[cp] = part_effect["state"]
+
+            params = {"part_name": cp}
+
+            # Tools that execute at the current location and stay there (e.g. pick_part, assemble_part)
+            if loc_type == "current_location":
+                if loc_param:
+                    params[loc_param] = cl
+
+                # If the action places the part down (assembly), resource no longer holds it
+                next_cp = None if new_ps[cp] == goal_state else cp
+                next_cl = None if next_cp is None else cl 
+                
+                # If picking or transferring physically into the gripper template
+                if loc_template:
+                    formatted_loc = loc_template.replace("{robot_jid}", resource_jid).replace("{resource_jid}", resource_jid)
+                    new_pl[cp] = formatted_loc
+                elif not next_cp:
+                    # Dropped into the environment at cl
+                    new_pl[cp] = cl
+
                 yield (
-                    out, cp, cl, new_ps, new_pl,
-                    {"function_name": fn, "params": {"part_name": cp, "origin_resource_location": cl}},
+                    out, next_cp, next_cl, new_ps, new_pl,
+                    {"function_name": fn, "params": params},
                 )
-
-        elif fn == "move_loaded_to_destination":
-            part_in = tool.get("part_in_state")
-            if cp and (part_in is None or ps.get(cp) == part_in):
-                for dest in list(reachability) + list(staging_names):
-                    new_ps = {**ps, cp: "in_transit"}
+                
+            # Tools that traverse to an explicit new destination (e.g. move_loaded_to_destination)
+            elif loc_type == "reachable_location":
+                dest_options = [
+                    d for d in list(reachability) + (list(staging_names) if goal_state not in new_ps.get(cp, "") else [])
+                    if d != cl
+                ]
+                
+                for dest in dest_options:
+                    p_copy = dict(new_pl)
+                    
+                    if loc_template:
+                        p_copy[cp] = loc_template.replace("{robot_jid}", resource_jid).replace("{resource_jid}", resource_jid)
+                    
+                    event_params = dict(params)
+                    if loc_param:
+                        event_params[loc_param] = dest
+                        
                     yield (
-                        out, cp, dest, new_ps, dict(pl),
-                        {"function_name": fn, "params": {"destination_location": dest, "part_name": cp}},
+                        out, cp, dest, new_ps, p_copy,
+                        {"function_name": fn, "params": event_params},
                     )
 
-        elif fn == "assemble_part":
-            part_in = tool.get("part_in_state")
-            if cp and cl and (part_in is None or ps.get(cp) == part_in):
-                new_ps = {**ps, cp: "assembled"}
-                new_pl = {**pl, cp: cl}
-                yield (
-                    out, None, None, new_ps, new_pl,
-                    {"function_name": fn, "params": {"destination_location": cl, "part_name": cp}},
-                )

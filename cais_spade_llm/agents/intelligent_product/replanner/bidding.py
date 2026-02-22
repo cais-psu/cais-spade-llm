@@ -8,9 +8,8 @@ class BidRequest:
     """PA → RA: request a feasible action sequence for recovery."""
     request_id: str
     pa_jid: str
-    x_c: dict                  # current state: {robot_state, part_states, part_locations}
+    x_c: dict                  # current state: {resource_state, part_states, part_locations}
     P_id: list[str]            # parts that must reach "assembled"
-    t_bound: float = 300.0     # time budget in seconds
 
 
 @dataclass
@@ -21,5 +20,4 @@ class Bid:
     str_e: list[dict]          # sequence of events: [{function_name, params, duration}]
     str_x: list[dict]          # sequence of states after each event
     prp_p_achieved: list[str]  # which P_id parts this bid assembles
-    total_time: float
     complete: bool             # True = fully satisfies P_id; False = partial (reaches staging)
