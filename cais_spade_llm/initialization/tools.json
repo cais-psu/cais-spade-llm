@@ -1,79 +1,5 @@
 [
   {
-    "function": "move_to_pick_location",
-    "function_owner_agent": "xarm6",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "idle",
-    "out_state": "at_pick",
-    "required_context_keys": ["origin"],
-    "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Target origin location to approach for picking."
-      },
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part intended to be picked (for tracking)."
-      },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Move empty gripper to the part's origin location."
-  },
-  {
-    "function": "pick_part",
-    "function_owner_agent": "xarm6",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "at_pick",
-    "out_state": "picked",
-    "part_in_state": "ready",
-    "required_context_keys": ["origin"],
-    "part_transition": {
-      "completed": {
-        "state": "in_gripper",
-        "location_template": "{robot_jid}_gripper"
-      },
-      "failed": {
-        "state": "lost",
-        "observation_required": true,
-        "last_known_template": "{robot_jid}_workspace"
-      }
-    },
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper configuration."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Pick a part from an origin location."
-  },
-  {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "xarm6",
     "process": "assembly",
@@ -81,16 +7,13 @@
     "in_state": "picked",
     "out_state": "positioned",
     "part_in_state": "in_gripper",
-    "required_context_keys": ["destination"],
+    "required_context_keys": [
+      "destination"
+    ],
     "part_transition": {
       "completed": {
         "state": "in_transit",
         "location_template": "{robot_jid}_gripper"
-      },
-      "failed": {
-        "state": "lost",
-        "observation_required": true,
-        "last_known_template": "{robot_jid}_workspace"
       }
     },
     "params": {
@@ -124,17 +47,14 @@
     "in_state": "positioned",
     "out_state": "idle",
     "part_in_state": "in_transit",
-    "required_context_keys": ["destination"],
+    "required_context_keys": [
+      "destination"
+    ],
     "part_transition": {
       "completed": {
         "state": "assembled",
         "verify_camera": true,
         "location_param": "destination_location"
-      },
-      "failed:misplaced": {
-        "state": "untracked",
-        "camera_locate": true,
-        "last_known_param": "destination_location"
       }
     },
     "params": {
@@ -161,13 +81,55 @@
     "description": "Assemble the currently held part at its final destination."
   },
   {
+    "function": "pick_part",
+    "function_owner_agent": "xarm6",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "at_pick",
+    "out_state": "picked",
+    "part_in_state": "ready",
+    "required_context_keys": [
+      "origin"
+    ],
+    "part_transition": {
+      "completed": {
+        "state": "in_gripper",
+        "location_template": "{robot_jid}_gripper"
+      }
+    },
+    "params": {
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Pick a ready part from an origin location."
+  },
+  {
     "function": "move_to_pick_location",
-    "function_owner_agent": "ur5e",
+    "function_owner_agent": "xarm6",
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "idle",
     "out_state": "at_pick",
-    "required_context_keys": ["origin"],
+    "required_context_keys": [
+      "origin"
+    ],
     "params": {
       "origin_resource_location": {
         "type": "string",
@@ -192,49 +154,6 @@
     "description": "Move empty gripper to the part's origin location."
   },
   {
-    "function": "pick_part",
-    "function_owner_agent": "ur5e",
-    "process": "assembly",
-    "resource_type": "robot",
-    "in_state": "at_pick",
-    "out_state": "picked",
-    "part_in_state": "ready",
-    "required_context_keys": ["origin"],
-    "part_transition": {
-      "completed": {
-        "state": "in_gripper",
-        "location_template": "{robot_jid}_gripper"
-      },
-      "failed": {
-        "state": "lost",
-        "observation_required": true,
-        "last_known_template": "{robot_jid}_workspace"
-      }
-    },
-    "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
-      },
-      "gripper": {
-        "type": "string",
-        "description": "Optional gripper configuration."
-      },
-      "product_jid": {
-        "type": "string",
-        "description": "JID of the ProductAgent that owns this task."
-      },
-      "task_id": {
-        "type": "string"
-      }
-    },
-    "description": "Pick a part from an origin location."
-  },
-  {
     "function": "move_loaded_to_destination",
     "function_owner_agent": "ur5e",
     "process": "assembly",
@@ -242,16 +161,13 @@
     "in_state": "picked",
     "out_state": "positioned",
     "part_in_state": "in_gripper",
-    "required_context_keys": ["destination"],
+    "required_context_keys": [
+      "destination"
+    ],
     "part_transition": {
       "completed": {
         "state": "in_transit",
         "location_template": "{robot_jid}_gripper"
-      },
-      "failed": {
-        "state": "lost",
-        "observation_required": true,
-        "last_known_template": "{robot_jid}_workspace"
       }
     },
     "params": {
@@ -285,17 +201,14 @@
     "in_state": "positioned",
     "out_state": "idle",
     "part_in_state": "in_transit",
-    "required_context_keys": ["destination"],
+    "required_context_keys": [
+      "destination"
+    ],
     "part_transition": {
       "completed": {
         "state": "assembled",
         "verify_camera": true,
         "location_param": "destination_location"
-      },
-      "failed:misplaced": {
-        "state": "untracked",
-        "camera_locate": true,
-        "last_known_param": "destination_location"
       }
     },
     "params": {
@@ -320,5 +233,78 @@
       }
     },
     "description": "Assemble the currently held part at its final destination."
+  },
+  {
+    "function": "pick_part",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "at_pick",
+    "out_state": "picked",
+    "part_in_state": "ready",
+    "required_context_keys": [
+      "origin"
+    ],
+    "part_transition": {
+      "completed": {
+        "state": "in_gripper",
+        "location_template": "{robot_jid}_gripper"
+      }
+    },
+    "params": {
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part to pick."
+      },
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Pick a ready part from an origin location."
+  },
+  {
+    "function": "move_to_pick_location",
+    "function_owner_agent": "ur5e",
+    "process": "assembly",
+    "resource_type": "robot",
+    "in_state": "idle",
+    "out_state": "at_pick",
+    "required_context_keys": [
+      "origin"
+    ],
+    "params": {
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Target origin location to approach for picking."
+      },
+      "part_name": {
+        "type": "string",
+        "description": "Name of the part intended to be picked (for tracking)."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed."
+      },
+      "product_jid": {
+        "type": "string",
+        "description": "JID of the ProductAgent that owns this task."
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "description": "Move empty gripper to the part's origin location."
   }
 ]

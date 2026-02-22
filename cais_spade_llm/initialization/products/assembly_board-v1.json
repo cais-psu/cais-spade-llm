@@ -20,6 +20,6 @@
     ],
     "product_specification_file": "cais_spade_llm/specification/products/requirements/assembly_board-v1.txt",
     "safety_file": "cais_spade_llm/specification/safety/safety_requirements.txt",
-    "replan_mode": "pddl"
+    "replan_mode": "des"
   }
 }

@@ -1958,3 +1958,17 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-10 15:47:44,864 - agent:ur5e - INFO - [ur5e] Finished: Move loaded part MCP to assembly_board-v1 (speed=default)
 2026-02-10 15:47:45,471 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T4) from=assembly_board-v1@localhost proto=plan/1.0
 2026-02-10 15:47:45,476 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=REQ_2_T4
+2026-02-22 14:16:03,322 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-22 14:16:04,342 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-22 14:16:21,165 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 14:16:21,167 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T1
+2026-02-22 14:16:21,265 - agent:ur5e - INFO - [ur5e] Travel empty to pick location prusa-mk3 for MCP (speed=default) (estimated 5.0 sec)
+2026-02-22 14:16:26,266 - agent:ur5e - INFO - [ur5e] ... Travel empty to pick location prusa-mk3 for MCP (speed=default) (5.0 / 5.0 sec)
+2026-02-22 14:16:26,266 - agent:ur5e - INFO - [ur5e] Finished: Travel empty to pick location prusa-mk3 for MCP (speed=default)
+2026-02-22 14:16:26,383 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 14:16:26,384 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T2
+2026-02-22 14:16:26,483 - agent:ur5e - INFO - [ur5e] Picking MCP from prusa-mk3 (gripper=default) (estimated 5.0 sec)
+2026-02-22 14:16:31,484 - agent:ur5e - INFO - [ur5e] ... Picking MCP from prusa-mk3 (gripper=default) (5.0 / 5.0 sec)
+2026-02-22 14:16:31,484 - agent:ur5e - INFO - [ur5e] Finished: Picking MCP from prusa-mk3 (gripper=default)
+2026-02-22 14:16:36,801 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-02-22 14:16:36,803 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=REQ_2_T3

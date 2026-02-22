@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
-from prompts import build_task_expansion_prompt, build_requirement_parse_prompt, build_replan_prompt
+from cais_spade_llm.prompts import build_task_expansion_prompt, build_requirement_parse_prompt, build_replan_prompt
 from collections import defaultdict, deque
 
 class ProcessPlanner:
@@ -239,102 +239,10 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
-        await self._replan_with_feedback(violations, source="offline")
+        self.logger.info("[Planner] Triggering LLM Re-planning with offline feedback...")
 
-    async def replan_with_feedback_online(
-        self,
-        violations: list[dict],
-        system_coordination_state: dict | None = None
-    ) -> None:
-        """Online replan using runtime failure/block feedback (prompt-level LLM guidance)."""
-        await self._replan_with_feedback(
-            violations,
-            source="online",
-            system_coordination_state=system_coordination_state
-        )
-
-    async def replan_with_feedback_online_pddl(
-        self,
-        violations: list[dict],
-        system_coordination_state: dict | None = None
-    ) -> None:
-        """Online replan using PDDL solved by a classical planner."""
-        from cais_spade_llm.agents.intelligent_product.pddl import replan as pddl_replan
-
-        self.logger.info(
-            "[Planner] Triggering PDDL Re-planning with online feedback (%d violations)...",
-            len(violations),
-        )
-
-        # 1. Gather tasks and mark conflict set
         failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
-        conflict_task_ids = self._extract_conflict_task_ids(violations, source="online")
-
-        plan_payload = []
-        for node in failed_nodes:
-            node_copy = node.copy()
-            if conflict_task_ids and node_copy["id"] in conflict_task_ids:
-                node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
-            plan_payload.append(node_copy)
-
-        # 2. Build tools catalog and resource info
-        tools_catalog = self._deduplicate_tools_catalog(
-            getattr(self.product_agent, "tools_catalog", [])
-        )
-        resource_infos = [
-            {
-                "jid": str(getattr(ra, "jid", "")),
-                "static_capabilities": getattr(ra, "static_capabilities", {}),
-            }
-            for ra in self.resource_agents
-        ]
-
-        # 3. Build system state (coordination + product)
-        product_state = self.product_agent._build_product_state()
-        system_state = {
-            **(system_coordination_state or {}),
-            **product_state,
-        }
-
-        # 4. Call PDDL replanner
-        pddl_patch = await pddl_replan(
-            ask_llm=self.product_agent.ask_llm,
-            violations=violations,
-            system_state=system_state,
-            tools_catalog=tools_catalog,
-            resource_infos=resource_infos,
-            safety_text=self.product_agent.safety_text,
-            failed_plan_nodes=plan_payload,
-            product_jid=str(self.product_agent.jid),
-            existing_task_ids={n["id"] for n in self.nodes},
-        )
-
-        if pddl_patch is not None:
-            self.logger.info(
-                "[Planner] PDDL replanner succeeded (%d tasks); applying patch.",
-                len(pddl_patch.get("tasks", [])),
-            )
-            self._apply_replan_patch(pddl_patch["tasks"])
-        else:
-            self.logger.warning("[Planner] PDDL replanner returned no solution.")
-
-    async def _replan_with_feedback(
-        self,
-        violations: list[dict],
-        *,
-        source: str,
-        system_coordination_state: dict | None = None
-    ) -> None:
-        """Shared replanning routine used by both offline and online feedback flows."""
-        self.logger.info("[Planner] Triggering LLM Re-planning with %s feedback...", source)
-        
-        # 1. Gather all tasks
-        failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
-
-        # 2. Extract the "Conflict Set" - IDs of tasks involved in violations
-        conflict_task_ids = self._extract_conflict_task_ids(violations, source=source)
-
-        # 3. Mark the nodes in the payload so the LLM knows what to focus on
+        conflict_task_ids = self._extract_conflict_task_ids(violations, source="offline")
         plan_payload = []
         for node in failed_nodes:
             node_copy = node.copy()
@@ -343,73 +251,255 @@ class ProcessPlanner:
             plan_payload.append(node_copy)
 
         if not conflict_task_ids:
-            self.logger.warning(
-                "[Planner] No conflict task IDs found in feedback; sending full plan context."
-            )
+            self.logger.warning("[Planner] No conflict task IDs found; sending full plan context.")
 
-        # --- DEFINITIONS RESTORED HERE ---
-        tools_catalog = self._deduplicate_tools_catalog(
-            getattr(self.product_agent, "tools_catalog", [])
-        )
-
-        # Get resource agent info
+        tools_catalog = self._deduplicate_tools_catalog(getattr(self.product_agent, "tools_catalog", []))
         resource_infos = [
-            {
-                "jid": str(getattr(ra, "jid", "")),
-                "static_capabilities": getattr(ra, "static_capabilities", {}),
-            }
+            {"jid": str(getattr(ra, "jid", "")), "static_capabilities": getattr(ra, "static_capabilities", {})}
             for ra in self.resource_agents
         ]
-        # ---------------------------------
 
-        # 4. Build runtime system state for context (online only)
-        # Combine coordination state (from CCA) with product state (from ProductAgent)
-        system_state = None
-        if source == "online":
-            product_state = self.product_agent._build_product_state()
-            system_state = {
-                **(system_coordination_state or {}),  # Robot states, running tasks, FSA states
-                **product_state,  # Parts, timeline, requirements
-            }
-
-        # 5. Build Prompt (use specialized instructions for offline vs online)
         prompt = build_replan_prompt(
             failed_plan_nodes=plan_payload,
             violations=violations,
             tools_catalog=tools_catalog,
             resource_infos=resource_infos,
-            source=source,  # "offline" or "online"
-            safety_text=self.product_agent.safety_text,  # Include safety constraints
-            system_state=system_state,  # Include runtime state for online replanning
+            source="offline",
+            safety_text=self.product_agent.safety_text,
+            system_state=None,
         )
-
-        raw = await self.product_agent.ask_llm(
-            prompt=prompt,
-            with_functions=False,
-            temperature=0.0, # Keep temp low for deterministic fixes
-        )
-
-        self._dump_replan_debug(
-            source=source,
-            prompt=prompt,
-            violations=violations,
-            resource_infos=resource_infos,
-            system_state=system_state,
-            llm_response=raw,
-        )
-
+        raw = await self.product_agent.ask_llm(prompt=prompt, with_functions=False, temperature=0.0)
+        self._dump_replan_debug(source="offline", prompt=prompt, violations=violations,
+                                resource_infos=resource_infos, system_state=None, llm_response=raw)
         try:
-            parsed = json.loads(raw)
-            modified_tasks = parsed.get("tasks", [])
-
+            modified_tasks = json.loads(raw).get("tasks", [])
             if not modified_tasks:
-                self.logger.warning("[Planner] LLM returned no modified tasks. Plan remains unchanged.")
+                self.logger.warning("[Planner] LLM returned no modified tasks.")
                 return
-
             self._apply_replan_patch(modified_tasks)
-
         except json.JSONDecodeError as exc:
-            self.logger.error(f"[Planner] LLM Re-planning returned invalid JSON: {exc}")
+            self.logger.error("[Planner] LLM replanning returned invalid JSON: %s", exc)
+
+    async def replan_with_feedback_online(
+        self,
+        violations: list[dict],
+        system_coordination_state: dict | None = None
+    ) -> None:
+        """Online replan — routes to DES or LLM based on replan_mode."""
+        if getattr(self.product_agent, "replan_mode", "llm") == "des":
+            await self.replan_with_feedback_des(
+                violations,
+                system_coordination_state=system_coordination_state,
+            )
+        else:
+            await self.replan_with_feedback_llm(
+                violations,
+                system_coordination_state=system_coordination_state,
+            )
+
+    async def replan_with_feedback_llm(
+        self,
+        violations: list[dict],
+        system_coordination_state: dict | None = None,
+    ) -> None:
+        """LLM-guided online replanning."""
+        self.logger.info("[Planner] Triggering LLM Re-planning with online feedback...")
+
+        failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
+        conflict_task_ids = self._extract_conflict_task_ids(violations, source="online")
+        plan_payload = []
+        for node in failed_nodes:
+            node_copy = node.copy()
+            if conflict_task_ids and node_copy["id"] in conflict_task_ids:
+                node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
+            plan_payload.append(node_copy)
+
+        if not conflict_task_ids:
+            self.logger.warning("[Planner] No conflict task IDs found; sending full plan context.")
+
+        tools_catalog = self._deduplicate_tools_catalog(getattr(self.product_agent, "tools_catalog", []))
+        resource_infos = [
+            {"jid": str(getattr(ra, "jid", "")), "static_capabilities": getattr(ra, "static_capabilities", {})}
+            for ra in self.resource_agents
+        ]
+
+        product_state = self.product_agent._build_product_state()
+        system_state = {**(system_coordination_state or {}), **product_state}
+
+        prompt = build_replan_prompt(
+            failed_plan_nodes=plan_payload,
+            violations=violations,
+            tools_catalog=tools_catalog,
+            resource_infos=resource_infos,
+            source="online",
+            safety_text=self.product_agent.safety_text,
+            system_state=system_state,
+        )
+        raw = await self.product_agent.ask_llm(prompt=prompt, with_functions=False, temperature=0.0)
+        self._dump_replan_debug(source="online", prompt=prompt, violations=violations,
+                                resource_infos=resource_infos, system_state=system_state, llm_response=raw)
+        try:
+            modified_tasks = json.loads(raw).get("tasks", [])
+            if not modified_tasks:
+                self.logger.warning("[Planner] LLM returned no modified tasks.")
+                return
+            self._apply_replan_patch(modified_tasks)
+        except json.JSONDecodeError as exc:
+            self.logger.error("[Planner] LLM replanning returned invalid JSON: %s", exc)
+
+    async def replan_with_feedback_des(
+        self,
+        violations: list[dict],
+        system_coordination_state: dict | None = None,
+    ) -> None:
+        """
+        DES replanning: PA computes bids per robot, compiles M_e, runs Dijkstra.
+        LLM bridge if stuck. Falls back to LLM replan if no path found.
+        """
+        from cais_spade_llm.agents.intelligent_product.replanner.graph_planner import (
+            compile_environment_model,
+            plan_on_environment_model,
+            ask_llm_for_bridge,
+        )
+        from cais_spade_llm.agents.intelligent_product.replanner.bidding import Bid
+        from cais_spade_llm.agents.intelligent_product.replanner.compute_bid import compute_bid
+
+        self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
+
+        # 1. Build P_id: parts not yet at goal state
+        product_state = self.product_agent._build_product_state()
+        part_tracker = product_state.get("part_tracker", {})
+        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
+        goal_state = next(
+            (
+                t["part_transition"]["completed"]["state"]
+                for t in tools_catalog
+                if t.get("part_transition", {}).get("completed", {}).get("state")
+            ),
+            None,
+        )
+        P_id = [
+            name for name, info in part_tracker.items()
+            if info.get("state") != goal_state
+        ]
+
+        if not P_id:
+            self.logger.info("[Planner] All parts at goal state (%s) — nothing to replan.", goal_state)
+            return
+
+        # 2. Build x_c per robot from coordination state and part tracker
+        scs = system_coordination_state or {}
+        robot_states = scs.get("robot_states", {})
+        part_states = {name: info.get("state") for name, info in part_tracker.items()}
+        part_locations = {name: info.get("location") for name, info in part_tracker.items()}
+
+        # 3. Compute a bid for each resource agent
+        bids: list[Bid] = []
+        for ra in self.resource_agents:
+            ra_jid = str(ra.jid)
+            ra_robot_state = robot_states.get(ra_jid, {})
+            x_c = {
+                "robot_state": ra_robot_state.get("current_state", "idle"),
+                "current_part": ra_robot_state.get("held_part"),
+                "current_location": None,
+                "part_states": part_states,
+                "part_locations": part_locations,
+            }
+            reachability = getattr(ra, "static_capabilities", {}).get("reachability", [])
+            staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {})
+            bid = compute_bid(
+                x_c=x_c,
+                P_id=P_id,
+                t_bound=300.0,
+                tools=tools_catalog,
+                reachability=reachability,
+                staging_areas=staging_areas,
+                robot_jid=ra_jid,
+            )
+            if bid:
+                self.logger.info("[Planner] Bid from %s: complete=%s, time=%.1fs", ra_jid, bid.complete, bid.total_time)
+                bids.append(bid)
+            else:
+                self.logger.info("[Planner] No bid from %s.", ra_jid)
+
+        if not bids:
+            self.logger.warning("[Planner] No bids from any robot — falling back to LLM replan.")
+            await self.replan_with_feedback_online(violations, system_coordination_state=system_coordination_state)
+            return
+
+        # 4. Compile M_e from all bids
+        M_e = compile_environment_model(bids)
+
+        # 5. Dijkstra — start from the first bid's initial state
+        x_c = bids[0].str_x[0]
+        path = plan_on_environment_model(M_e, x_c, P_id)
+
+        # 6. If stuck, try LLM bridge
+        if path is None:
+            self.logger.info("[Planner] Dijkstra found no path — requesting LLM bridge.")
+            stuck_state = x_c
+            ra_jids = list({b.ra_jid for b in bids})
+            ra_jid = ra_jids[0] if ra_jids else "unknown"
+            bridge_tools = await ask_llm_for_bridge(
+                stuck_state=stuck_state,
+                P_id=P_id,
+                ra_jid=ra_jid,
+                ask_llm=self.product_agent.ask_llm,
+                part_tracker=part_tracker,
+            )
+            if bridge_tools:
+                # Inject bridge as synthetic single-RA bid and retry
+                bridge_bid = Bid(
+                    request_id="bridge",
+                    ra_jid=ra_jid,
+                    str_e=bridge_tools,
+                    str_x=[stuck_state] + [
+                        {
+                            "robot_state": t.get("out_state", stuck_state.get("robot_state")),
+                            "part_states": {
+                                **stuck_state.get("part_states", {}),
+                                **{k: v.get("state") for k, v in t.get("part_effect", {}).items()},
+                            },
+                            "part_locations": {
+                                **stuck_state.get("part_locations", {}),
+                                **{k: v.get("location") for k, v in t.get("part_effect", {}).items()},
+                            },
+                        }
+                        for t in bridge_tools
+                    ],
+                    prp_p_achieved=[],
+                    total_time=sum(t.get("duration", 60.0) for t in bridge_tools),
+                    complete=False,
+                )
+                M_e = compile_environment_model(bids + [bridge_bid])
+                path = plan_on_environment_model(M_e, x_c, P_id)
+
+        # 7. If still no path, fall back to LLM replan
+        if path is None:
+            self.logger.warning("[Planner] DES + bridge found no path — falling back to LLM replan.")
+            await self.replan_with_feedback_online(violations, system_coordination_state=system_coordination_state)
+            return
+
+        # 8. Translate path to task patch
+        from uuid import uuid4
+        tasks = []
+        prev_id = None
+        for event in path:
+            task_id = f"RECOVERY_DES_{uuid4().hex[:6].upper()}"
+            params = {**event.get("params", {}), "product_jid": str(self.product_agent.jid), "task_id": task_id}
+            tasks.append({
+                "id": task_id,
+                "function_name": event["function_name"],
+                "params": params,
+                "resource_jid": event["ra_jid"],
+                "predecessors": [prev_id] if prev_id else [],
+                "successors": [],
+                "change_reason": f"INSERTION: DES recovery — {event['function_name']} on {event['ra_jid']}",
+            })
+            prev_id = task_id
+
+        self.logger.info("[Planner] DES recovery path: %d tasks.", len(tasks))
+        self._apply_replan_patch(tasks)
 
     def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:
         """
