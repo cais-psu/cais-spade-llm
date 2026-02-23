@@ -18,7 +18,7 @@ pkill -f ros2
 
 ### Terminal 1 — Gazebo (simulation)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 launch xarm_gazebo xarm6_beside_table_gazebo.launch.py add_gripper:=true
 ```
 - Opens **Gazebo** (physics simulation) and loads the robot controllers
@@ -28,7 +28,7 @@ ros2 launch xarm_gazebo xarm6_beside_table_gazebo.launch.py add_gripper:=true
 
 ### Terminal 2 — MoveIt2 (optional, for drag-to-plan)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 launch xarm_moveit_config xarm6_moveit_gazebo.launch.py add_gripper:=true
 ```
 - Adds motion planning to RViz (drag end-effector → Plan → Execute)
@@ -41,7 +41,7 @@ ros2 launch xarm_moveit_config xarm6_moveit_gazebo.launch.py add_gripper:=true
 
 ### Joint angles (6 values in radians)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 topic echo /joint_states --once
 ```
 Output:
@@ -82,7 +82,7 @@ ctrl.shutdown()
 
 Run with:
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 cd ~/projects/cais-spade-llm
 python3 your_script.py
 ```
@@ -170,7 +170,7 @@ POSES = {
 ## 7. Real Hardware Setup
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 ```
 - Same topics as simulation — your Python code and SPADE agents work unchanged
@@ -201,4 +201,4 @@ ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 | Robot doesn't move | Ensure Gazebo launched first, check `/xarm6_traj_controller/` appears in `ros2 topic list` |
 | RViz and Gazebo out of sync | Kill everything, restart Gazebo first, then MoveIt2 with `use_sim_time:=true` |
 | xArm SDK connection refused | Check robot IP, ensure robot is powered on and in remote mode |
-| `source` keeps being needed | Add `source /opt/ros/jazzy/setup.bash` to your `~/.bashrc` |
+| `source` keeps being needed | Add `source /opt/ros/humble/setup.bash` to your `~/.bashrc` |

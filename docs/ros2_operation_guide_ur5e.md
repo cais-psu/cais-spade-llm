@@ -14,7 +14,7 @@ pkill -f ros2
 
 ### Terminal 1 — Gazebo (simulation)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur5e launch_rviz:=false
 ```
 - Opens **Gazebo** (physics simulation) and loads the robot controllers
@@ -24,7 +24,7 @@ ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur5e launch_rviz:
 
 ### Terminal 2 — MoveIt2 (optional, for drag-to-plan)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e launch_rviz:=true use_sim_time:=true
 ```
 - Adds motion planning to RViz (drag end-effector → Plan → Execute)
@@ -37,7 +37,7 @@ ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e launch_rviz:=true
 
 ### Joint angles (6 values in radians)
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 ros2 topic echo /joint_states --once
 ```
 Output:
@@ -77,7 +77,7 @@ ctrl.shutdown()
 
 Run with:
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 cd ~/projects/cais-spade-llm
 python3 your_script.py
 ```
@@ -153,4 +153,5 @@ POSES = {
 | RViz window too big | `export QT_SCALE_FACTOR=0.7` before launching |
 | Robot doesn't move | Ensure Gazebo launched first, controllers loaded (`ros2 topic list` shows `/scaled_joint_trajectory_controller/`) |
 | RViz and Gazebo out of sync | Kill everything, restart Gazebo first, then MoveIt2 with `use_sim_time:=true` |
-| `source` keeps being needed | Add `source /opt/ros/jazzy/setup.bash` to your `~/.bashrc` |
+| `source` keeps being needed | Add `source /opt/ros/humble/setup.bash` to your `~/.bashrc` |
+| Gazebo crashes with `Ogre::UnimplementedException` | WSL OpenGL issue — run `export LIBGL_ALWAYS_SOFTWARE=1` before launching (add to `~/.bashrc` to make permanent) |

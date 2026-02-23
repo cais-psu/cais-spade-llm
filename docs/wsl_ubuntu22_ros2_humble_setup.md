@@ -190,5 +190,4 @@ wsl -d Ubuntu-24.04
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-export QT_SCALE_FACTOR=0.7   # optional: fix oversized windows
 ```
