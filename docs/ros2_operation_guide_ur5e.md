@@ -3,16 +3,23 @@
 How to run the UR5e simulation, read positions, plan motions, and control from Python.
 
 ---
+## 0. clean everything first
+pkill -f gazebo
+pkill -f gz
+pkill -f rviz2
+pkill -f ros2
 
 ## 1. Launch the Simulation
 
-### Terminal 1 — Gazebo + RViz
+
+### Terminal 1 — Gazebo (simulation)
 ```bash
 source /opt/ros/jazzy/setup.bash
-ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur5e
+ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur5e launch_rviz:=false
 ```
-- Opens **Gazebo** (physics simulation) and **RViz** (visualization)
-- Wait until both windows appear and the robot is visible
+- Opens **Gazebo** (physics simulation) and loads the robot controllers
+- Pass `launch_rviz:=false` since MoveIt2 (Terminal 2) provides its own RViz with motion planning
+- Wait until Gazebo appears and the robot is visible
 - The UR5e starts in its default pose
 
 ### Terminal 2 — MoveIt2 (optional, for drag-to-plan)
