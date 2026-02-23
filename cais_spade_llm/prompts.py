@@ -988,3 +988,45 @@ RESOURCE_AGENTS (workspace boundaries and staging areas):
 {safety_section}
 {state_section}
 """)
+
+# ----------------------------------------------------------------------
+# State exploration prompt
+# ----------------------------------------------------------------------
+def build_state_exploration_prompt(
+    stuck_state: dict,
+    part_tracker: dict | None,
+    P_id: list[str],
+    goal_state: str,
+    ra_jid: str,
+    tools_catalog: list[dict],
+    resource_infos: list[dict],
+) -> str:
+    """
+    Prompt to generate recovery steps when the DES BFS finds no path.
+    """
+    part_info = json.dumps(part_tracker, indent=2) if part_tracker else "unavailable"
+    tools_info = json.dumps(tools_catalog, indent=2)
+    resource_info = json.dumps(resource_infos, indent=2)
+
+    return (
+        f"A resource ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
+        f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"
+        f"Parts that still need to reach {goal_state}: {P_id}\n\n"
+        f"TOOLS CATALOG: (Reference this for available capabilities)\n{tools_info}\n\n"
+        f"RESOURCE CAPABILITIES: (Check reachability and staging areas before assigning coordinates)\n{resource_info}\n\n"
+        "The resource has no available tool sequence to make progress natively. "
+        "Generate 1-3 recovery tool steps as a JSON array to explore new physical states.\n"
+        "You do NOT need to strictly use exact function_names or parameters from the catalog; "
+        "you may invent parameter names (like XYZ coordinates) or function names that clearly "
+        "indicate the recovery action required to map the physical state to an un-stuck state.\n"
+        "[\n"
+        "  {\n"
+        '    "function_name": "<tool name>",\n'
+        '    "in_state": "<resource state before>",\n'
+        '    "out_state": "<resource state after>",\n'
+        '    "part_effect": {"<part_name>": {"state": "<new_state>", "location": "<new_location>"}},\n'
+        '    "params": {"<param_name>": "<value>"}\n'
+        "  }\n"
+        "]\n\n"
+        "Return ONLY the JSON array, no explanation."
+    )

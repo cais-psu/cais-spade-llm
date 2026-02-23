@@ -353,16 +353,16 @@ class ProcessPlanner:
         system_coordination_state: dict | None = None,
     ) -> None:
         """
-        DES replanning: PA computes bids per robot, compiles M_e, runs BFS.
-        LLM bridge if stuck. Falls back to LLM replan if no path found.
+        DES replanning: PA computes bids per resource, compiles M_e, runs BFS.
+        LLM bridge if stuck. Falls back to human intervention if no path found.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.graph_planner import (
+        from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
             compile_environment_model,
             plan_on_environment_model,
-            ask_llm_for_bridge,
+            llm_explore_states_and_events,
         )
-        from cais_spade_llm.agents.intelligent_product.replanner.bidding import Bid
-        from cais_spade_llm.agents.intelligent_product.replanner.compute_bid import compute_bid
+        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import Bid
+        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
 
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
 
@@ -394,13 +394,22 @@ class ProcessPlanner:
         part_states = {name: info.get("state") for name, info in part_tracker.items()}
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
 
+        # Derive the default resting state from the tools catalog
+        # (the in_state that is never any tool's out_state is the root state)
+        all_out_states = {t.get("out_state") for t in tools_catalog if t.get("out_state")}
+        root_states = [
+            t.get("in_state") for t in tools_catalog
+            if t.get("in_state") and t.get("in_state") not in all_out_states
+        ]
+        default_resource_state = root_states[0] if root_states else "idle"
+
         # 3. Compute a bid for each resource agent
         bids: list[Bid] = []
         for ra in self.resource_agents:
             ra_jid = str(ra.jid)
             ra_resource_state = resource_states.get(ra_jid, {})
             x_c = {
-                "resource_state": ra_resource_state.get("current_state", "idle"),
+                "resource_state": ra_resource_state.get("current_state", default_resource_state),
                 "current_part": ra_resource_state.get("held_part"),
                 "current_location": None,
                 "part_states": part_states,
@@ -423,37 +432,75 @@ class ProcessPlanner:
             else:
                 self.logger.info("[Planner] No bid from %s.", ra_jid)
 
-        if not bids:
-            self.logger.warning("[Planner] No bids from any robot — falling back to LLM replan.")
-            await self.replan_with_feedback_online(violations, system_coordination_state=system_coordination_state)
-            return
 
         # 4. Compile M_e from all bids
         M_e = compile_environment_model(bids)
 
-        # 5. BFS — start from the first bid's initial state
-        x_c = bids[0].str_x[0]
+        # 5. BFS — start from the first bid's initial state if available
+        # Find x_c representing the global start state for BFS fallback
+        x_c = None
+        if bids:
+            x_c = bids[0].str_x[0]
+        else:
+            # Reconstruct global state directly if no bids
+            x_c = {
+                "part_states": part_states,
+                "part_locations": part_locations,
+                "resource_state": default_resource_state,
+            }
+
         path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
 
         # 6. If stuck, try LLM bridge
         if path is None:
             self.logger.info("[Planner] BFS found no path — requesting LLM bridge.")
             stuck_state = x_c
-            ra_jids = list({b.ra_jid for b in bids})
-            ra_jid = ra_jids[0] if ra_jids else "unknown"
-            bridge_tools = await ask_llm_for_bridge(
+
+            # Identify the stuck resource from violations rather than
+            # blindly picking the first resource agent.
+            stuck_ra_jid = None
+            for v in violations:
+                candidate = v.get("resource_jid") or v.get("failed_resource_jid")
+                if candidate:
+                    stuck_ra_jid = candidate
+                    break
+            if not stuck_ra_jid:
+                # Fallback: pick the resource whose state is not idle
+                for ra in self.resource_agents:
+                    ra_jid_candidate = str(ra.jid)
+                    rs = resource_states.get(ra_jid_candidate, {})
+                    if rs.get("current_state", "idle") != "idle":
+                        stuck_ra_jid = ra_jid_candidate
+                        break
+            if not stuck_ra_jid:
+                stuck_ra_jid = str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
+
+            self.logger.info("[Planner] Identified stuck resource: %s", stuck_ra_jid)
+
+            # Build resource_infos for the prompt
+            resource_infos = [
+                {
+                    "jid": str(ra.jid),
+                    "static_capabilities": getattr(ra, "static_capabilities", {}),
+                }
+                for ra in self.resource_agents
+            ]
+
+            bridge_tools = await llm_explore_states_and_events(
                 stuck_state=stuck_state,
                 P_id=P_id,
-                ra_jid=ra_jid,
+                ra_jid=stuck_ra_jid,
                 ask_llm=self.product_agent.ask_llm,
                 goal_state=goal_state,
+                tools_catalog=tools_catalog,
+                resource_infos=resource_infos,
                 part_tracker=part_tracker,
             )
             if bridge_tools:
                 # Inject bridge as synthetic single-RA bid and retry
                 bridge_bid = Bid(
                     request_id="bridge",
-                    ra_jid=ra_jid,
+                    ra_jid=stuck_ra_jid,
                     str_e=bridge_tools,
                     str_x=[stuck_state] + [
                         {
@@ -475,11 +522,11 @@ class ProcessPlanner:
                 M_e = compile_environment_model(bids + [bridge_bid])
                 path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
 
-        # 7. If still no path, fall back to LLM replan
+        # 7. If still no path, throw error and exit
         if path is None:
-            self.logger.warning("[Planner] DES + bridge found no path — falling back to LLM replan.")
-            await self.replan_with_feedback_online(violations, system_coordination_state=system_coordination_state)
-            return
+            self.logger.error("[Planner] DES + bridge found no path. Human intervention required.")
+            import os
+            os._exit(1)
 
         # 8. Translate path to task patch
         from uuid import uuid4

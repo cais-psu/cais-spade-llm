@@ -5202,3 +5202,24 @@ Previous tokens: Token('SYMBOL_NAME', 'evt')
 2026-02-22 15:09:22,306 - agent:cca - INFO - [CCA] Task REQ_1_T4 failed. State updated.
 2026-02-22 15:09:22,796 - agent:cca - WARNING - [CCA] PLAN BLOCK: task=REQ_2_T4 not enabled in FSA (predecessor may have failed).
 2026-02-22 15:09:22,797 - agent:cca - INFO - [CCA] Replan request -> assembly_board-v1@localhost reason=plan_block task_id=REQ_1_T4 plan_ctx={"reachable_task_ids": [], "completed_task_ids": ["REQ_1_T1", "REQ_1_T2", "REQ_1_T3", "REQ_2_T1", "REQ_2_T2", "REQ_2_T3"], "failed_task_id": "REQ_1_T4", "failed_task_descendant_ids": ["REQ_1_T4", "REQ_2_T4"]} safety_ctx={"running_tasks": [], "blocked_task_id": "REQ_2_T4", "violated_rule_id": null, "running_aps": [], "candidate_aps": []} coord_state={"robots": {"xarm6@localhost": {"held_part": null, "current_state": "recovery_required", "position": {"x": 400.0, "y": -200.0, "z": 200.0}, "gripper_state": "open"}, "ur5e@localhost": {"held_part": "MCP", "current_state": "positioned", "position": {"x": 400.0, "y": -200.0, "z": 200.0}, "gripper_state": "closed"}}, "running_tasks": [], "plan_fsa_state": "(ur5e@localhost=(k=3,idle),xarm6@localhost=(k=3,run=REQ_1_T4:assemble_part))", "plan_fsa_completed_tasks": ["REQ_2_T3", "REQ_2_T1", "REQ_1_T3", "REQ_1_T1", "REQ_1_T2", "REQ_2_T2"], "safety_dfa_states": {"SAFE_1": "1"}}
+2026-02-22 18:16:02,333 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-22 18:16:04,399 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5, tools=[])
+2026-02-22 18:16:04,399 - agent:cca - INFO - [CCA] setup completed.
+2026-02-22 18:16:04,400 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-22 18:16:07,306 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
+2026-02-22 18:16:10,325 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 18
+2026-02-22 18:16:10,325 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-02-22 18:16:10,398 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-02-22 18:16:10,525 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-02-22 18:16:10,527 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-02-22 18:16:21,286 - agent:cca - INFO - [CCA] Offline FSA Validation: OK (Violated rules: 0, Witnesses: 0) product=assembly_board-v1@localhost
+2026-02-22 18:16:21,289 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T1 allowed.
+2026-02-22 18:16:26,391 - agent:cca - INFO - [CCA] Task REQ_1_T1 finished. State updated.
+2026-02-22 18:16:26,394 - agent:cca - INFO - [CCA] Safety OK: task=REQ_2_T1 allowed.
+2026-02-22 18:16:31,493 - agent:cca - INFO - [CCA] Task REQ_2_T1 finished. State updated.
+2026-02-22 18:16:31,495 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T2 allowed.
+2026-02-22 18:16:36,596 - agent:cca - INFO - [CCA] Task REQ_1_T2 finished. State updated.
+2026-02-22 18:16:36,598 - agent:cca - INFO - [CCA] Safety OK: task=REQ_2_T2 allowed.
+2026-02-22 18:16:36,701 - agent:cca - WARNING - [CCA] PLAN BLOCK: task=REQ_1_T3 not enabled in FSA (predecessor may have failed).
+2026-02-22 18:16:36,701 - agent:cca - INFO - [CCA] Replan request -> assembly_board-v1@localhost reason=plan_block task_id=REQ_1_T3 plan_ctx={"reachable_task_ids": ["REQ_1_T3", "REQ_2_T2"], "completed_task_ids": ["REQ_1_T1", "REQ_1_T2", "REQ_2_T1"], "failed_task_id": "REQ_1_T3", "failed_task_descendant_ids": ["REQ_1_T4", "REQ_2_T3", "REQ_2_T4"]} safety_ctx={"running_tasks": [], "blocked_task_id": "REQ_1_T3", "violated_rule_id": null, "running_aps": [], "candidate_aps": []} coord_state={"robots": {"ur5e@localhost": {"held_part": null, "current_state": "idle", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "gripper_state": "open"}, "xarm6@localhost": {"held_part": "SG", "current_state": "picked", "position": {"x": 0.0, "y": 0.0, "z": 300.0}, "gripper_state": "closed"}}, "running_tasks": [], "plan_fsa_state": "(xarm6@localhost=(k=3,run=REQ_2_T2:pick_part))", "plan_fsa_completed_tasks": ["REQ_1_T1", "REQ_2_T1", "REQ_1_T2"], "safety_dfa_states": {"SAFE_1": "1"}}
+2026-02-22 18:16:36,716 - agent:cca - INFO - [CCA] Offline FSA Validation: OK (Violated rules: 0, Witnesses: 0) product=assembly_board-v1@localhost

@@ -13,7 +13,7 @@ from agents.intelligent_product.product_agent import ProductAgent
 from agents.resource_agent.printing_agent import PrintingAgent
 from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
-from sensors.camera_module import CameraModule
+from resources.sensor.camera_module import CameraModule
 
 # Mock camera observations for simulation.
 # SG: slipped into ur5e-only territory (x=750 > xarm6 upper bound of 650).

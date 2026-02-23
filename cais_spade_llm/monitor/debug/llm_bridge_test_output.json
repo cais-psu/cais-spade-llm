@@ -1,0 +1,183 @@
+{
+  "01_Initial_Stuck_State": {
+    "resource_state": "holding",
+    "current_part": "MCP",
+    "current_location": "assembly_board-v1",
+    "part_states": {
+      "SG": "misplaced",
+      "MCP": "picked"
+    },
+    "part_locations": {
+      "SG": "ur5e_workspace",
+      "MCP": "ur5e_gripper"
+    }
+  },
+  "02_LLM_Bridge_Events_Generated": [
+    {
+      "function_name": "recover_assemble_current_hold",
+      "in_state": "holding",
+      "out_state": "idle",
+      "part_effect": {
+        "MCP": {
+          "state": "assembled",
+          "location": "assembly_board-v1"
+        }
+      },
+      "params": {
+        "part_name": "MCP",
+        "destination_location": "assembly_board-v1",
+        "placement_strategy": "fine_align_then_press",
+        "force_limit_n": 40,
+        "speed": 0.2
+      }
+    },
+    {
+      "function_name": "recover_pick_from_coordinates",
+      "in_state": "idle",
+      "out_state": "picked",
+      "part_effect": {
+        "SG": {
+          "state": "in_gripper",
+          "location": "ur5e_gripper"
+        }
+      },
+      "params": {
+        "part_name": "SG",
+        "x": 150.5,
+        "y": -20.0,
+        "z": 5.0,
+        "zone": "ur5e_workspace",
+        "approach_height": 30.0,
+        "grip_mode": "pinch_soft",
+        "speed": 0.2
+      }
+    }
+  ],
+  "03_Synthetic_Bid_States (str_x)": [
+    {
+      "resource_state": "holding",
+      "current_part": "MCP",
+      "current_location": "assembly_board-v1",
+      "part_states": {
+        "SG": "misplaced",
+        "MCP": "picked"
+      },
+      "part_locations": {
+        "SG": "ur5e_workspace",
+        "MCP": "ur5e_gripper"
+      }
+    },
+    {
+      "resource_state": "idle",
+      "part_states": {
+        "SG": "misplaced",
+        "MCP": "assembled"
+      },
+      "part_locations": {
+        "SG": "ur5e_workspace",
+        "MCP": "assembly_board-v1"
+      }
+    },
+    {
+      "resource_state": "picked",
+      "part_states": {
+        "SG": "in_gripper",
+        "MCP": "picked"
+      },
+      "part_locations": {
+        "SG": "ur5e_gripper",
+        "MCP": "ur5e_gripper"
+      }
+    }
+  ],
+  "04_Compiled_Environment_Model (M_e)": {
+    "states": {
+      "{\"current_location\": \"assembly_board-v1\", \"current_part\": \"MCP\", \"part_locations\": {\"MCP\": \"ur5e_gripper\", \"SG\": \"ur5e_workspace\"}, \"part_states\": {\"MCP\": \"picked\", \"SG\": \"misplaced\"}, \"resource_state\": \"holding\"}": {
+        "resource_state": "holding",
+        "current_part": "MCP",
+        "current_location": "assembly_board-v1",
+        "part_states": {
+          "SG": "misplaced",
+          "MCP": "picked"
+        },
+        "part_locations": {
+          "SG": "ur5e_workspace",
+          "MCP": "ur5e_gripper"
+        }
+      },
+      "{\"part_locations\": {\"MCP\": \"assembly_board-v1\", \"SG\": \"ur5e_workspace\"}, \"part_states\": {\"MCP\": \"assembled\", \"SG\": \"misplaced\"}, \"resource_state\": \"idle\"}": {
+        "resource_state": "idle",
+        "part_states": {
+          "SG": "misplaced",
+          "MCP": "assembled"
+        },
+        "part_locations": {
+          "SG": "ur5e_workspace",
+          "MCP": "assembly_board-v1"
+        }
+      },
+      "{\"part_locations\": {\"MCP\": \"ur5e_gripper\", \"SG\": \"ur5e_gripper\"}, \"part_states\": {\"MCP\": \"picked\", \"SG\": \"in_gripper\"}, \"resource_state\": \"picked\"}": {
+        "resource_state": "picked",
+        "part_states": {
+          "SG": "in_gripper",
+          "MCP": "picked"
+        },
+        "part_locations": {
+          "SG": "ur5e_gripper",
+          "MCP": "ur5e_gripper"
+        }
+      }
+    },
+    "transitions": {
+      "{\"current_location\": \"assembly_board-v1\", \"current_part\": \"MCP\", \"part_locations\": {\"MCP\": \"ur5e_gripper\", \"SG\": \"ur5e_workspace\"}, \"part_states\": {\"MCP\": \"picked\", \"SG\": \"misplaced\"}, \"resource_state\": \"holding\"}": {
+        "ur5e@localhost::recover_assemble_current_hold::0": "{\"part_locations\": {\"MCP\": \"assembly_board-v1\", \"SG\": \"ur5e_workspace\"}, \"part_states\": {\"MCP\": \"assembled\", \"SG\": \"misplaced\"}, \"resource_state\": \"idle\"}"
+      },
+      "{\"part_locations\": {\"MCP\": \"assembly_board-v1\", \"SG\": \"ur5e_workspace\"}, \"part_states\": {\"MCP\": \"assembled\", \"SG\": \"misplaced\"}, \"resource_state\": \"idle\"}": {
+        "ur5e@localhost::recover_pick_from_coordinates::1": "{\"part_locations\": {\"MCP\": \"ur5e_gripper\", \"SG\": \"ur5e_gripper\"}, \"part_states\": {\"MCP\": \"picked\", \"SG\": \"in_gripper\"}, \"resource_state\": \"picked\"}"
+      }
+    },
+    "events": {
+      "ur5e@localhost::recover_assemble_current_hold::0": {
+        "function_name": "recover_assemble_current_hold",
+        "in_state": "holding",
+        "out_state": "idle",
+        "part_effect": {
+          "MCP": {
+            "state": "assembled",
+            "location": "assembly_board-v1"
+          }
+        },
+        "params": {
+          "part_name": "MCP",
+          "destination_location": "assembly_board-v1",
+          "placement_strategy": "fine_align_then_press",
+          "force_limit_n": 40,
+          "speed": 0.2
+        },
+        "ra_jid": "ur5e@localhost"
+      },
+      "ur5e@localhost::recover_pick_from_coordinates::1": {
+        "function_name": "recover_pick_from_coordinates",
+        "in_state": "idle",
+        "out_state": "picked",
+        "part_effect": {
+          "SG": {
+            "state": "in_gripper",
+            "location": "ur5e_gripper"
+          }
+        },
+        "params": {
+          "part_name": "SG",
+          "x": 150.5,
+          "y": -20.0,
+          "z": 5.0,
+          "zone": "ur5e_workspace",
+          "approach_height": 30.0,
+          "grip_mode": "pinch_soft",
+          "speed": 0.2
+        },
+        "ra_jid": "ur5e@localhost"
+      }
+    }
+  }
+}

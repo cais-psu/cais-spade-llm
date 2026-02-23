@@ -14,7 +14,7 @@ from spade.template import Template
 
 from agents.shared_information.llm_agent import LlmAgent
 from agents.intelligent_product.process_planner import ProcessPlanner
-from sensors.camera_module import CameraModule
+from resources.sensor.camera_module import CameraModule
 
 
 class ProductAgent(LlmAgent):

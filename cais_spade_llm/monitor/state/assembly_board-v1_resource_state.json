@@ -1,21 +1,21 @@
 {
-  "xarm6@localhost": {
+  "ur5e@localhost": {
     "held_part": null,
-    "current_state": "recovery_required",
+    "current_state": "idle",
     "position": {
-      "x": 400.0,
-      "y": -200.0,
-      "z": 200.0
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0
     },
     "gripper_state": "open"
   },
-  "ur5e@localhost": {
-    "held_part": "MCP",
-    "current_state": "positioned",
+  "xarm6@localhost": {
+    "held_part": "SG",
+    "current_state": "picked",
     "position": {
-      "x": 400.0,
-      "y": -200.0,
-      "z": 200.0
+      "x": 0.0,
+      "y": 0.0,
+      "z": 300.0
     },
     "gripper_state": "closed"
   }

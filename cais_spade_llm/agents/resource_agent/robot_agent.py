@@ -175,7 +175,7 @@ class RobotAgent(ResourceAgent):
         part_transition:
           completed:
             state: in_gripper
-            location_template: "{robot_jid}_gripper"
+            location_template: "{resource_jid}_gripper"
 
         params:
           part_name:
@@ -237,7 +237,7 @@ class RobotAgent(ResourceAgent):
         part_transition:
           completed:
             state: in_transit
-            location_template: "{robot_jid}_gripper"
+            location_template: "{resource_jid}_gripper"
 
         params:
           destination_location:

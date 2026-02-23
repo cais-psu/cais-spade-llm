@@ -56,7 +56,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 2,
-      "status": "completed",
+      "status": "blocked",
       "predecessors": [
         "REQ_1_T2"
       ],
@@ -78,7 +78,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 3,
-      "status": "failed",
+      "status": "pending",
       "predecessors": [
         "REQ_1_T3"
       ],
@@ -96,7 +96,7 @@
         "product_jid": "assembly_board-v1@localhost",
         "task_id": "REQ_2_T1"
       },
-      "resource_jid": "ur5e@localhost",
+      "resource_jid": "xarm6@localhost",
       "sequence_index": 0,
       "status": "completed",
       "predecessors": [],
@@ -116,9 +116,9 @@
         "product_jid": "assembly_board-v1@localhost",
         "task_id": "REQ_2_T2"
       },
-      "resource_jid": "ur5e@localhost",
+      "resource_jid": "xarm6@localhost",
       "sequence_index": 1,
-      "status": "completed",
+      "status": "blocked",
       "predecessors": [
         "REQ_2_T1"
       ],
@@ -138,9 +138,9 @@
         "product_jid": "assembly_board-v1@localhost",
         "task_id": "REQ_2_T3"
       },
-      "resource_jid": "ur5e@localhost",
+      "resource_jid": "xarm6@localhost",
       "sequence_index": 2,
-      "status": "completed",
+      "status": "pending",
       "predecessors": [
         "REQ_2_T2"
       ],
@@ -160,9 +160,9 @@
         "product_jid": "assembly_board-v1@localhost",
         "task_id": "REQ_2_T4"
       },
-      "resource_jid": "ur5e@localhost",
+      "resource_jid": "xarm6@localhost",
       "sequence_index": 3,
-      "status": "accepted",
+      "status": "pending",
       "predecessors": [
         "REQ_2_T3",
         "REQ_1_T4"

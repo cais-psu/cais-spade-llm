@@ -1,6 +1,6 @@
 import json
 import asyncio
-from cais_spade_llm.agents.intelligent_product.replanner.compute_bid import compute_bid
+from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
 
 def run_test():
     with open("cais_spade_llm/initialization/tools.json") as f:
