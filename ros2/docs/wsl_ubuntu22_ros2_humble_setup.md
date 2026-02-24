@@ -2,6 +2,13 @@
 
 Install Ubuntu 22.04 alongside existing Ubuntu 24.04, then set up ROS2 Humble with UR5e and xArm6.
 
+After completing this OS/ROS bootstrap, continue with:
+`ros2/docs/ros2_setup_from_scratch.md`
+
+Then use:
+`ros2/docs/ros2_three_mode_control_guide.md`
+to run the three control modes.
+
 ---
 
 ## 0. Backup Current Work (Windows PowerShell)
