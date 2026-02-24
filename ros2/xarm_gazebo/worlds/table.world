@@ -1,0 +1,289 @@
+<?xml version="1.0" ?>
+<sdf version="1.4">
+  <world name="default">
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://table</uri>
+      <name>table_xarm6</name>
+      <pose>0.0 0.40 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://table</uri>
+      <name>table_ur5e</name>
+      <pose>0.0 -0.40 0 0 0 0</pose>
+    </include>
+
+    <model name="assembly_board_v1">
+      <static>true</static>
+      <!-- Center position on the combined table top (Z=1.015 top surface + half board thickness) -->
+      <pose>0 0 1.02 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.01</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual_base">
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/White</name>
+            </script>
+          </material>
+        </visual>
+        <!-- MARKERS FOR GEARS (Top Row, Y=0.1, Green Cylinders) -->
+        <visual name="mark_gear_1">
+          <pose>-0.1 0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.02</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+        <visual name="mark_gear_2">
+          <pose>0.0 0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.03</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+        <visual name="mark_gear_3">
+          <pose>0.1 0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+        <!-- MARKERS FOR RECT PINS (Middle Row, Y=0.0, Yellow Boxes) -->
+        <visual name="mark_rect_1">
+          <pose>-0.1 0.0 0.006 0 0 0</pose>
+          <geometry><box><size>0.02 0.02 0.001</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
+        </visual>
+        <visual name="mark_rect_2">
+          <pose>0.0 0.0 0.006 0 0 0</pose>
+          <geometry><box><size>0.025 0.025 0.001</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
+        </visual>
+        <visual name="mark_rect_3">
+          <pose>0.1 0.0 0.006 0 0 0</pose>
+          <geometry><box><size>0.03 0.03 0.001</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
+        </visual>
+        <!-- MARKERS FOR CIRC PINS (Bottom Row, Y=-0.1, Orange Cylinders) -->
+        <visual name="mark_circ_1">
+          <pose>-0.1 -0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.01</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material>
+        </visual>
+        <visual name="mark_circ_2">
+          <pose>0.0 -0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.013</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material>
+        </visual>
+        <visual name="mark_circ_3">
+          <pose>0.1 -0.1 0.006 0 0 0</pose>
+          <geometry><cylinder><radius>0.015</radius><length>0.001</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OVERHEAD CAMERA -->
+    <model name="overhead_camera">
+      <static>true</static>
+      <!-- Hovering at Z=2.0 right above assembly board, facing downward -->
+      <pose>0 0 2.0 0 1.571 1.571</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Black</name></script></material>
+        </visual>
+        <sensor type="camera" name="camera1">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>1.2</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.1</near>
+              <far>10</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>overhead_camera</namespace>
+            </ros>
+            <camera_name>overhead_camera</camera_name>
+            <frame_name>camera_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Prusa MK3 (Flat Mockup) on Left Side (-0.6, 0) -->
+    <model name="prusa_mk3">
+      <static>true</static>
+      <pose>-0.6 0 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/DarkGrey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Prusa MK4-1 (Flat Mockup) on Right Side (0.6, 0.4) -->
+    <model name="prusa_mk4_1">
+      <static>true</static>
+      <pose>0.6 0.4 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Prusa MK4-2 (Flat Mockup) on Right Side (0.6, -0.4) -->
+    <model name="prusa_mk4_2">
+      <static>true</static>
+      <pose>0.6 -0.4 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==============================================
+         PARTS: SMALL SET on MK3 (-0.6, 0.0) 
+         All components spawned at Z=1.15 to prevent clipping
+         ============================================== -->
+    <model name="gear_small">
+      <pose>-0.6 0.1 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
+      </link>
+    </model>
+    <model name="rect_pin_small">
+      <pose>-0.6 0.0 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><box><size>0.02 0.02 0.06</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.02 0.02 0.06</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
+      </link>
+    </model>
+    <model name="circ_pin_small">
+      <pose>-0.6 -0.1 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.01</radius><length>0.06</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.01</radius><length>0.06</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- ==============================================
+         PARTS: MEDIUM SET on MK4-1 (0.6, 0.4) 
+         All components spawned at Z=1.15
+         ============================================== -->
+    <model name="gear_medium">
+      <pose>0.6 0.5 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.10</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.03</radius><length>0.015</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.03</radius><length>0.015</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
+      </link>
+    </model>
+    <model name="rect_pin_medium">
+      <pose>0.6 0.4 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><box><size>0.025 0.025 0.08</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.025 0.025 0.08</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
+      </link>
+    </model>
+    <model name="circ_pin_medium">
+      <pose>0.6 0.3 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.013</radius><length>0.08</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.013</radius><length>0.08</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- ==============================================
+         PARTS: LARGE SET on MK4-2 (0.6, -0.4) 
+         All components spawned at Z=1.15
+         ============================================== -->
+    <model name="gear_large">
+      <pose>0.6 -0.3 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.15</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.04</radius><length>0.02</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.04</radius><length>0.02</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
+      </link>
+    </model>
+    <model name="rect_pin_large">
+      <pose>0.6 -0.4 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><box><size>0.03 0.03 0.1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.03 0.03 0.1</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
+      </link>
+    </model>
+    <model name="circ_pin_large">
+      <pose>0.6 -0.5 1.15 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><geometry><cylinder><radius>0.015</radius><length>0.10</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.015</radius><length>0.10</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
+      </link>
+    </model>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <!-- (2022-12-20) humble: change gravity from [0 0 -9.81] to [0 0 0] -->
+      <!-- Re-enabling gravity to 9.81 so the objects can sit on the tables instead of flying -->
+      <gravity>0 0 -9.81</gravity>
+    </physics>
+
+  </world>
+</sdf>

@@ -1852,3 +1852,13 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-22 18:16:36,693 - agent:xarm6 - WARNING - [Robot] Already holding SG; assemble it before picking a new part.
 2026-02-22 18:16:36,699 - agent:xarm6 - INFO - [Resource] ← Task (REQ_1_T3) from=assembly_board-v1@localhost proto=plan/1.0
 2026-02-22 18:16:36,702 - agent:xarm6 - INFO - [Resource] Stored safety_decision=block for task=REQ_1_T3
+2026-02-23 14:51:37,195 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-23 14:51:38,097 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 14:56:46,483 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-23 14:56:47,409 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 15:11:06,602 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-23 15:11:07,537 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 15:11:47,188 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-23 15:11:48,203 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 19:30:10,941 - agent:xarm6 - INFO - RobotAgent 'xarm6' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=once sg_slippage_scope=xarm6
+2026-02-23 19:30:11,984 - agent:xarm6 - INFO - [ready] xarm6@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])

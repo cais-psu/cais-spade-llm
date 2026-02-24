@@ -1994,3 +1994,13 @@ expected alphabetic or numeric character, but found '\n'
 2026-02-22 15:46:31,517 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'move_home', 'assemble_part'] sg_slippage_mode=always sg_slippage_scope=xarm6
 2026-02-22 18:16:02,320 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
 2026-02-22 18:16:03,096 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 14:51:37,190 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-23 14:51:37,682 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 14:56:46,478 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-23 14:56:46,972 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 15:11:06,596 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-23 15:11:07,087 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 15:11:47,157 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-23 15:11:47,777 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])
+2026-02-23 19:30:10,909 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-02-23 19:30:11,562 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_part', 'move_to_pick_location', 'move_loaded_to_destination', 'assemble_part'])

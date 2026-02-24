@@ -2,33 +2,56 @@
 
 How to run the xArm6 simulation, read positions, plan motions, and control from Python.
 
+> **Simulator:** xArm6 uses **Gazebo Classic** (the `gazebo` command) via `xarm_gazebo`.
+> This is different from UR5e, which uses Gazebo Ignition.
+> Do not mix the two; each robot has its own simulation environment.
+
 ---
 
 ## 0. Clean Everything First
+
+If Gazebo exited improperly, the ports might still be blocked. Clean the processes first:
+
 ```bash
-pkill -f gazebo
-pkill -f gz
-pkill -f rviz2
-pkill -f ros2
+killall -9 gzserver gzclient robot_state_publisher spawner spawn_entity.py ros2
+pkill -9 -f gazebo
+```
+
+---
+
+## CRITICAL: Two-Terminal Rule
+
+> **Never run ROS2/Gazebo commands with the Poetry venv activated.**
+
+If your Poetry venv is active (`which python3` points to `.venv/bin/python3`),
+ROS2 tools like `spawn_entity.py` will fail with `No module named 'lxml'`.
+
+**Before running any ROS2 command, deactivate the venv:**
+```bash
+deactivate   # if venv is currently active
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ```
 
 ---
 
 ## 1. Launch the Simulation
 
-### Terminal 1 — Gazebo (simulation)
+### Terminal 1 — Gazebo Classic (simulation)
 ```bash
 source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch xarm_gazebo xarm6_beside_table_gazebo.launch.py add_gripper:=true
 ```
-- Opens **Gazebo** (physics simulation) and loads the robot controllers
+- Opens **Gazebo Classic** and loads the robot controllers
 - `add_gripper:=true` attaches the xArm gripper; omit if using a custom end-effector
-- Wait until Gazebo appears and the robot is visible
+- Wait until Gazebo appears and the robot is visible (can take 30–60 seconds in WSL)
 - The xArm6 starts in its default pose
 
 ### Terminal 2 — MoveIt2 (optional, for drag-to-plan)
 ```bash
 source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch xarm_moveit_config xarm6_moveit_gazebo.launch.py add_gripper:=true
 ```
 - Adds motion planning to RViz (drag end-effector → Plan → Execute)
@@ -80,9 +103,13 @@ time.sleep(4)
 ctrl.shutdown()
 ```
 
-Run with:
+> Note: `XArm6Controller` is currently a **placeholder** (mock). It does not yet
+> communicate with Gazebo or real hardware. See `cais_spade_llm/resources/robot/xarm6_controller.py`.
+
+Run with (do NOT have Poetry venv active):
 ```bash
 source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 cd ~/projects/cais-spade-llm
 python3 your_script.py
 ```
@@ -131,6 +158,11 @@ arm.disconnect()
 | `/xarm6_traj_controller/joint_trajectory` | `trajectory_msgs/JointTrajectory` | Send joint commands (write) |
 | `/tf` | `tf2_msgs/TFMessage` | All frame transforms including TCP |
 | `/xarm6_traj_controller/state` | `control_msgs/JointTrajectoryControllerState` | Controller state |
+| `/controller_manager/*` | — | Controller lifecycle (at root `/`, not `/xarm6/`) |
+
+> **Note on controller namespace:** `gazebo_ros2_control` starts the `controller_manager`
+> at `/controller_manager` (root namespace), not `/xarm6/controller_manager`.
+> When spawning controllers manually, always use `--controller-manager /controller_manager`.
 
 ---
 
@@ -171,6 +203,7 @@ POSES = {
 
 ```bash
 source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 ```
 - Same topics as simulation — your Python code and SPADE agents work unchanged
@@ -184,6 +217,8 @@ ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 
 | | UR5e | xArm6 |
 |---|---|---|
+| Simulator | Gazebo Ignition (`gz`) | Gazebo Classic (`gazebo`) |
+| Launch package | `ur_simulation_gz` | `xarm_gazebo` |
 | Controller topic | `/scaled_joint_trajectory_controller/joint_trajectory` | `/xarm6_traj_controller/joint_trajectory` |
 | TCP frame | `tool0` | `link_eef` |
 | Base frame | `base_link` | `link_base` |
@@ -196,9 +231,11 @@ ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 
 | Problem | Fix |
 |---|---|
+| `No module named 'lxml'` | Poetry venv is active. Run `deactivate` first, then re-run the ROS2 command. |
 | No Gazebo/RViz window | Check `echo $DISPLAY` — must show `:0` for WSLg |
-| RViz window too big | `export QT_SCALE_FACTOR=0.7` before launching |
+| Gazebo takes very long to start | Normal in WSL — wait 30–60 seconds before assuming failure |
 | Robot doesn't move | Ensure Gazebo launched first, check `/xarm6_traj_controller/` appears in `ros2 topic list` |
+| Controller spawner: `controller_manager service not available` | Use `--controller-manager /controller_manager` (root namespace) |
 | RViz and Gazebo out of sync | Kill everything, restart Gazebo first, then MoveIt2 with `use_sim_time:=true` |
 | xArm SDK connection refused | Check robot IP, ensure robot is powered on and in remote mode |
-| `source` keeps being needed | Add `source /opt/ros/humble/setup.bash` to your `~/.bashrc` |
+| `source` keeps being needed | Add `source /opt/ros/humble/setup.bash` and `source ~/ros2_ws/install/setup.bash` to `~/.bashrc` |

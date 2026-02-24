@@ -2,22 +2,46 @@
 
 How to run the UR5e simulation, read positions, plan motions, and control from Python.
 
+> **Simulator:** UR5e uses **Gazebo Ignition** (the `gz` command) via `ur_simulation_gz`.
+> This is different from xArm6, which uses Gazebo Classic.
+> Do not mix the two; each robot has its own simulation environment.
+
 ---
-## 0. clean everything first
-pkill -f gazebo
-pkill -f gz
-pkill -f rviz2
-pkill -f ros2
+
+## 0. Clean Everything First
+
+If Gazebo was aborted improperly it will frequently conflict with future startups. Always clean your workspace context first:
+
+```bash
+killall -9 gzserver gzclient robot_state_publisher spawner spawn_entity.py ros2
+pkill -9 -f gazebo
+```
+
+---
+
+## CRITICAL: Two-Terminal Rule
+
+> **Never run ROS2/Gazebo commands with the Poetry venv activated.**
+
+If your Poetry venv is active (`which python3` points to `.venv/bin/python3`),
+ROS2 tools like `spawn_entity.py` will fail with `No module named 'lxml'`.
+
+**Before running any ROS2 command, deactivate the venv:**
+```bash
+deactivate   # if venv is currently active
+source /opt/ros/humble/setup.bash
+```
+
+---
 
 ## 1. Launch the Simulation
 
-
-### Terminal 1 — Gazebo (simulation)
+### Terminal 1 — Gazebo Ignition (simulation)
 ```bash
 source /opt/ros/humble/setup.bash
 ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur5e launch_rviz:=false
 ```
-- Opens **Gazebo** (physics simulation) and loads the robot controllers
+- Opens **Gazebo Ignition** and loads the robot controllers
 - Pass `launch_rviz:=false` since MoveIt2 (Terminal 2) provides its own RViz with motion planning
 - Wait until Gazebo appears and the robot is visible
 - The UR5e starts in its default pose
@@ -75,7 +99,7 @@ time.sleep(4)
 ctrl.shutdown()
 ```
 
-Run with:
+Run with (do NOT have Poetry venv active):
 ```bash
 source /opt/ros/humble/setup.bash
 cd ~/projects/cais-spade-llm
@@ -149,9 +173,9 @@ POSES = {
 
 | Problem | Fix |
 |---|---|
+| `No module named 'lxml'` | Poetry venv is active. Run `deactivate` first, then re-run the ROS2 command. |
 | No Gazebo/RViz window | Check `echo $DISPLAY` — must show `:0` for WSLg |
-| RViz window too big | `export QT_SCALE_FACTOR=0.7` before launching |
 | Robot doesn't move | Ensure Gazebo launched first, controllers loaded (`ros2 topic list` shows `/scaled_joint_trajectory_controller/`) |
 | RViz and Gazebo out of sync | Kill everything, restart Gazebo first, then MoveIt2 with `use_sim_time:=true` |
 | `source` keeps being needed | Add `source /opt/ros/humble/setup.bash` to your `~/.bashrc` |
-| Gazebo crashes with `Ogre::UnimplementedException` | WSL OpenGL issue — run `export LIBGL_ALWAYS_SOFTWARE=1` before launching (add to `~/.bashrc` to make permanent) |
+| Gazebo crashes with `Ogre::UnimplementedException` | WSL OpenGL issue — run `export LIBGL_ALWAYS_SOFTWARE=1` before launching |

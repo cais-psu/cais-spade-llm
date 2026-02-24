@@ -147,33 +147,110 @@ cp -r /mnt/wsl/instances/Ubuntu-24.04/home/jongh/projects/cais-spade-llm ~/proje
 
 ---
 
-## 7. Set Up Python Environment in Ubuntu 22.04
+## 7. Set Up Python Environment (Poetry + Python 3.12)
+
+The project uses **Poetry** for dependency management and requires **Python 3.12**.
+Ubuntu 22.04 ships with Python 3.10 by default, so install 3.12 via the deadsnakes PPA.
+
+### 7a. Install Python 3.12
+
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa -y
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv python3.12-dev
+```
+
+### 7b. Install required system packages
+
+```bash
+# 'python' binary needed by Poetry
+sudo apt install -y python-is-python3
+
+# lxml needed by ROS2 tools (spawn_entity.py, etc.)
+sudo apt install -y python3-lxml
+```
+
+> **Why `python-is-python3`?** Poetry looks for a `python` binary (not `python3`).
+> Without this package, `poetry install` fails with "No such file or directory: 'python'".
+
+> **Why `python3-lxml`?** ROS2's `spawn_entity.py` and other tools use
+> `#!/usr/bin/env python3`. When a Poetry venv is active, `python3` resolves to
+> the venv's Python — which does not have `lxml`. This causes Gazebo spawning to fail.
+> Installing `python3-lxml` system-wide fixes this for all ROS2 tools.
+
+### 7c. Install Poetry
+
+```bash
+curl -sSL https://install.python-poetry.org | python3.12
+```
+
+Add to `~/.bashrc`:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### 7d. Configure Poetry and install dependencies
 
 ```bash
 cd ~/projects/cais-spade-llm
-sudo apt install -y python3-pip python3-venv
-python3 -m venv .venv
+
+# Store venv inside the project (creates .venv/)
+poetry config virtualenvs.in-project true
+
+# Use Python 3.12 for this project
+poetry env use /usr/bin/python3.12
+
+# Install all dependencies
+poetry install
+```
+
+### 7e. Verify
+
+```bash
+# Should print 3.12.x
+.venv/bin/python --version
+
+# Should run the main entry point
 source .venv/bin/activate
-pip install -e .
+python cais_spade_llm/spade_main.py
 ```
 
 ---
 
-## 8. WSLg Display (for Gazebo/RViz)
+## 8. CRITICAL: Two-Terminal Rule
+
+> **Never run ROS2/Gazebo commands with the Poetry venv activated.**
+
+The Poetry venv does not contain ROS2 tools or `lxml`. When the venv is active,
+`python3` resolves to the venv Python and ROS2 internal tools (e.g. `spawn_entity.py`) fail.
+
+| Terminal | Purpose | Environment |
+|---|---|---|
+| **Terminal A** (Python/SPADE) | Run `spade_main.py`, tests, Poetry commands | Poetry venv **activated** (`source .venv/bin/activate`) |
+| **Terminal B** (ROS2/Gazebo) | `ros2 launch`, `ros2 topic`, Gazebo | Poetry venv **NOT activated** — only `source /opt/ros/humble/setup.bash` |
+
+**How to check:** Run `which python3` — if it points to `.venv/bin/python3`, the venv is active.
+Deactivate with `deactivate` before running any ROS2 commands.
+
+---
+
+## 9. WSLg Display (for Gazebo/RViz)
 
 WSLg is included in WSL2 — no extra setup needed. Verify:
 ```bash
 echo $DISPLAY   # should show :0 or similar
 ```
 
-If Gazebo windows are too large:
-```bash
-export QT_SCALE_FACTOR=0.7
-```
+Gazebo can be slow to start in WSL (30–60 seconds is normal). Wait for the window to appear before trying to spawn robots.
+
+> **Gazebo Troubleshooting:** If Gazebo exits immediately with `[gzclient] process has died`,
+> this is usually because the window was closed manually. Use `gui_required:=false` in launch
+> args so closing the Gazebo GUI doesn't kill the entire simulation.
 
 ---
 
-## 9. Switching Between Distros
+## 10. Switching Between Distros
 
 ```powershell
 # Use Ubuntu 22 (ROS2 Humble — UR5e + xArm6)
@@ -185,9 +262,13 @@ wsl -d Ubuntu-24.04
 
 ---
 
-## 10. Full ~/.bashrc for Ubuntu 22.04
+## 11. Full ~/.bashrc for Ubuntu 22.04
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
+
+> Do **not** add `source .venv/bin/activate` to `.bashrc` — this would break ROS2 tools
+> in every new terminal. Activate the Poetry venv manually only when needed.

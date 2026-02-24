@@ -28,9 +28,11 @@ JOINT_STATES_TOPIC = "/joint_states"
 class UR5eController:
     """UR5e low-level controller via ROS2."""
 
-    def __init__(self):
+    def __init__(self, trajectory_topic: str = TRAJECTORY_TOPIC, joint_states_topic: str = JOINT_STATES_TOPIC):
         self._node = None
         self._traj_pub = None
+        self._trajectory_topic = trajectory_topic
+        self._joint_states_topic = joint_states_topic
         self._initialized = False
 
     def init(self) -> bool:
@@ -46,10 +48,10 @@ class UR5eController:
 
         self._node = rclpy.create_node("ur5e_controller")
         self._traj_pub = self._node.create_publisher(
-            JointTrajectory, TRAJECTORY_TOPIC, 10
+            JointTrajectory, self._trajectory_topic, 10
         )
         self._initialized = True
-        logger.info("[UR5e] Initialized on %s", TRAJECTORY_TOPIC)
+        logger.info("[UR5e] Initialized on %s", self._trajectory_topic)
         return True
 
     def move_joints(self, positions: list[float], duration_sec: int = 2) -> bool:

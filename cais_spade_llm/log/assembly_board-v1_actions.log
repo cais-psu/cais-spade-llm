@@ -6914,3 +6914,19 @@ RuntimeError: LLM call failed after retries: BadRequestError
 2026-02-22 18:16:36,801 - agent:assembly_board-v1 - INFO - [Product] Saved product state to /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/state/assembly_board-v1_product_state.json
 2026-02-22 18:16:36,802 - agent:assembly_board-v1 - INFO - [Product] Saved resource state to /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/state/assembly_board-v1_resource_state.json
 2026-02-22 18:16:36,802 - agent:assembly_board-v1 - INFO - [Product] ACK (REQ_1_T3) status='blocked' from=xarm6@localhost
+2026-02-23 14:51:37,195 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-02-23 14:51:38,942 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-5, tools=[])
+2026-02-23 14:51:38,942 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-02-23 14:51:38,942 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-23 14:51:43,249 - agent:assembly_board-v1 - INFO - [Planner] Parsed 2 requirement(s) via LLM.
+2026-02-23 14:51:43,249 - agent:assembly_board-v1 - INFO - [Planner] Saved plan to /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/plan/assembly_board-v1_requirements.json
+2026-02-23 14:56:46,484 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-02-23 14:56:47,125 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-5, tools=[])
+2026-02-23 14:56:47,128 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-02-23 14:56:47,128 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-23 15:11:06,603 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-02-23 15:11:08,404 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-5, tools=[])
+2026-02-23 15:11:08,406 - agent:assembly_board-v1 - INFO - [Product] Using requirement file: /home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt
+2026-02-23 15:11:08,406 - agent:assembly_board-v1 - INFO - [Product] Loaded safety constraints from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-02-23 15:11:47,190 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-02-23 19:30:10,943 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
