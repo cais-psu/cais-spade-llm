@@ -16,9 +16,9 @@ import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from ament_index_python import get_package_share_directory
+from ament_index_python import get_package_share_directory, get_package_prefix
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, RegisterEventHandler, OpaqueFunction, TimerAction
+from launch.actions import IncludeLaunchDescription, RegisterEventHandler, OpaqueFunction, TimerAction, SetEnvironmentVariable, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
@@ -35,7 +35,7 @@ def _strip_gazebo_ros2_control_plugin(root):
             root.remove(gazebo_elem)
 
 
-def _inject_mimic_plugins(root):
+def _inject_mimic_plugins(root, max_effort='5.0', sensitiveness='0.001'):
     """Auto-inject gazebo_mimic_joint_plugin tags for all mimic joints in the URDF tree."""
     for joint in list(root.findall('joint')):
         mimic = joint.find('mimic')
@@ -50,8 +50,167 @@ def _inject_mimic_plugins(root):
             ET.SubElement(plugin_elem, 'mimicJoint').text = joint.get('name')
             ET.SubElement(plugin_elem, 'multiplier').text = mimic.get('multiplier', '1.0')
             ET.SubElement(plugin_elem, 'offset').text = mimic.get('offset', '0.0')
-            ET.SubElement(plugin_elem, 'sensitiveness').text = '0.0'
-            ET.SubElement(plugin_elem, 'maxEffort').text = '100.0'
+            ET.SubElement(plugin_elem, 'sensitiveness').text = sensitiveness
+            ET.SubElement(plugin_elem, 'maxEffort').text = max_effort
+
+
+def _set_ros2_control_initial_positions(root, joint_positions):
+    """
+    Inject per-joint state_interface initial_value into ros2_control joints.
+    This sets startup posture without moving the robot base frame.
+    """
+    for ros2_control in root.findall('ros2_control'):
+        for joint in ros2_control.findall('joint'):
+            joint_name = joint.get('name', '')
+            if joint_name not in joint_positions:
+                continue
+            position_si = None
+            for si in joint.findall('state_interface'):
+                if si.get('name') == 'position':
+                    position_si = si
+                    break
+            if position_si is None:
+                position_si = ET.SubElement(joint, 'state_interface', {'name': 'position'})
+            initial_param = position_si.find("param[@name='initial_value']")
+            if initial_param is None:
+                initial_param = ET.SubElement(position_si, 'param', {'name': 'initial_value'})
+            initial_param.text = str(joint_positions[joint_name])
+
+
+def _set_or_update_text(parent, tag_name, value):
+    child = parent.find(tag_name)
+    if child is None:
+        child = ET.SubElement(parent, tag_name)
+    child.text = str(value)
+
+
+def _strip_grasp_fix_plugins(root):
+    """Remove libgazebo_grasp_fix plugins to avoid Gazebo crashes."""
+    for gazebo_elem in list(root.findall('gazebo')):
+        plugin = gazebo_elem.find('plugin')
+        if plugin is None:
+            continue
+        name = plugin.get('name', '')
+        filename = plugin.get('filename', '')
+        if 'grasp_fix' in name or 'libgazebo_grasp_fix' in filename:
+            root.remove(gazebo_elem)
+
+
+def _tune_rg2_joint_dynamics(root, prefix):
+    """
+    Keep RG2 drive-joint motion moderate; avoid over-constraining mimic joints.
+    """
+    for joint in root.findall('joint'):
+        name = joint.get('name', '')
+        if not name.startswith(prefix):
+            continue
+        limit = joint.find('limit')
+        if limit is None:
+            continue
+
+        if name == f'{prefix}finger_width':
+            limit.set('effort', '18')
+            limit.set('velocity', '0.15')
+
+
+def _tune_rg2_contact_properties(root, prefix):
+    """Soften/damp RG2 finger contact to reduce part ejection during closure."""
+    finger_refs = {
+        f'{prefix}left_inner_finger',
+        f'{prefix}right_inner_finger',
+        f'{prefix}left_inner_knuckle',
+        f'{prefix}right_inner_knuckle',
+    }
+    for gazebo_elem in root.findall('gazebo'):
+        ref = gazebo_elem.get('reference', '')
+        if ref not in finger_refs:
+            continue
+        _set_or_update_text(gazebo_elem, 'kp', '12000.0')
+        _set_or_update_text(gazebo_elem, 'kd', '30.0')
+        _set_or_update_text(gazebo_elem, 'mu1', '200.0')
+        _set_or_update_text(gazebo_elem, 'mu2', '200.0')
+        _set_or_update_text(gazebo_elem, 'minDepth', '0.002')
+
+
+def _tune_xarm_gripper_contact_properties(root, prefix):
+    """Reduce xArm gripper impulse and increase frictional hold on parts."""
+    refs = {
+        f'{prefix}left_finger',
+        f'{prefix}right_finger',
+        f'{prefix}left_inner_knuckle',
+        f'{prefix}right_inner_knuckle',
+    }
+    for gazebo_elem in root.findall('gazebo'):
+        ref = gazebo_elem.get('reference', '')
+        if ref not in refs:
+            continue
+        _set_or_update_text(gazebo_elem, 'mu1', '20.0')
+        _set_or_update_text(gazebo_elem, 'mu2', '20.0')
+        _set_or_update_text(gazebo_elem, 'kp', '8000.0')
+        _set_or_update_text(gazebo_elem, 'kd', '8.0')
+        _set_or_update_text(gazebo_elem, 'minDepth', '0.001')
+
+
+def _tune_xarm_gripper_joint_dynamics(root, prefix):
+    """Limit xArm gripper closing speed/effort to prevent ODE instability."""
+    drive_joint = f'{prefix}drive_joint'
+    for joint in root.findall('joint'):
+        if joint.get('name') != drive_joint:
+            continue
+        limit = joint.find('limit')
+        if limit is None:
+            continue
+        # Restore snappier motion; attach will be handled by IFRA LinkAttacher.
+        limit.set('effort', '12')
+        limit.set('velocity', '0.30')
+
+
+def _tune_xarm_grasp_fix_plugin(root):
+    """Avoid repulsive impulses after grasp attach on xArm gripper."""
+    for gazebo_elem in root.findall('gazebo'):
+        plugin = gazebo_elem.find("plugin[@name='xarm_gazebo_grasp_fix']")
+        if plugin is None:
+            continue
+        _set_or_update_text(plugin, 'update_rate', '30')
+        _set_or_update_text(plugin, 'grip_count_threshold', '1')
+        _set_or_update_text(plugin, 'max_grip_count', '6')
+        # Keep contact pairs active after attach for Gazebo stability.
+        _set_or_update_text(plugin, 'disable_collisions_on_attach', 'false')
+        _set_or_update_text(plugin, 'release_tolerance', '0.005')
+
+
+def _add_rg2_grasp_fix_plugin(root, prefix):
+    """
+    Ensure RG2 grasp-fix plugin exists and uses stable attach parameters.
+    """
+    plugin = None
+    for gazebo_elem in root.findall('gazebo'):
+        plugin = gazebo_elem.find("plugin[@name='onrobot_gazebo_grasp_fix']")
+        if plugin is not None:
+            break
+
+    if plugin is None:
+        gazebo_elem = ET.SubElement(root, 'gazebo')
+        plugin = ET.SubElement(
+            gazebo_elem,
+            'plugin',
+            {'name': 'onrobot_gazebo_grasp_fix', 'filename': 'libgazebo_grasp_fix.so'},
+        )
+        arm = ET.SubElement(plugin, 'arm')
+        ET.SubElement(arm, 'arm_name').text = 'onrobot_gripper'
+        ET.SubElement(arm, 'palm_link').text = f'{prefix}onrobot_base_link'
+        ET.SubElement(arm, 'gripper_link').text = f'{prefix}left_inner_finger'
+        ET.SubElement(arm, 'gripper_link').text = f'{prefix}right_inner_finger'
+        ET.SubElement(arm, 'gripper_link').text = f'{prefix}left_inner_knuckle'
+        ET.SubElement(arm, 'gripper_link').text = f'{prefix}right_inner_knuckle'
+
+    _set_or_update_text(plugin, 'forces_angle_tolerance', '120')
+    _set_or_update_text(plugin, 'update_rate', '30')
+    _set_or_update_text(plugin, 'grip_count_threshold', '1')
+    _set_or_update_text(plugin, 'max_grip_count', '8')
+    _set_or_update_text(plugin, 'release_tolerance', '0.01')
+    _set_or_update_text(plugin, 'disable_collisions_on_attach', 'true')
+    _set_or_update_text(plugin, 'contact_topic', '__default_topic__')
 
 
 
@@ -73,6 +232,24 @@ def _strip_world_links_and_joints(root, extra_link_names=None):
 
 
 def launch_setup(context, *args, **kwargs):
+    # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
+    set_gazebo_plugin_path = None
+    attacher_candidates = [os.path.expanduser('~/ros2_ws/install/ros2_linkattacher/lib')]
+    try:
+        attacher_candidates.insert(0, os.path.join(get_package_prefix('ros2_linkattacher'), 'lib'))
+    except Exception:
+        pass
+    attacher_lib_dir = next((p for p in attacher_candidates if os.path.isdir(p)), None)
+    if attacher_lib_dir:
+        current_plugin_path = os.environ.get('GAZEBO_PLUGIN_PATH', '')
+        merged_plugin_path = (
+            attacher_lib_dir if not current_plugin_path
+            else f'{attacher_lib_dir}:{current_plugin_path}'
+        )
+        set_gazebo_plugin_path = SetEnvironmentVariable(
+            name='GAZEBO_PLUGIN_PATH',
+            value=merged_plugin_path,
+        )
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
     gazebo_world = PathJoinSubstitution(
@@ -127,8 +304,26 @@ def launch_setup(context, *args, **kwargs):
     )
     xarm_root = ET.fromstring(xarm_description_str)
 
+    # Keep base pose fixed; start with the user-provided picking posture.
+    xarm_initial_positions = {
+        f'{xarm_prefix}joint1': -2.488633342961955,
+        f'{xarm_prefix}joint2': 0.08960294687924664,
+        f'{xarm_prefix}joint3': -1.26837471206392,
+        f'{xarm_prefix}joint4': 7.842588030815278e-05,
+        f'{xarm_prefix}joint5': 1.1787895575959242,
+        f'{xarm_prefix}joint6': -2.4885358377427576,
+        f'{xarm_prefix}drive_joint': 0.85,  # gripper fully open at startup
+    }
+    _set_ros2_control_initial_positions(xarm_root, xarm_initial_positions)
+    _tune_xarm_gripper_joint_dynamics(xarm_root, xarm_prefix)
+    _tune_xarm_gripper_contact_properties(xarm_root, xarm_prefix)
+    _strip_grasp_fix_plugins(xarm_root)
+
     # Strip world link, world_joint, and the gazebo_ros2_control plugin
     # (combined URDF provides its own world link and single plugin)
+
+
+
     _strip_world_links_and_joints(xarm_root)
     _strip_gazebo_ros2_control_plugin(xarm_root)
 
@@ -147,13 +342,26 @@ def launch_setup(context, *args, **kwargs):
         f'tf_prefix:={ur5e_prefix}',
         'sim_gazebo:=true',
         f'simulation_controllers:={combined_controllers_yaml}',
+        f'initial_positions_file:={os.path.join(get_package_share_directory("xarm_gazebo"), "config", "ur5e_initial_positions.yaml")}',
     ]).decode('utf-8')
     ur5e_root = ET.fromstring(ur5e_raw)
+
+    # Apply the user-provided UR5e startup pose directly into ros2_control.
+    ur5e_initial_positions = {
+        f'{ur5e_prefix}shoulder_pan_joint': 2.232023449619252,
+        f'{ur5e_prefix}shoulder_lift_joint': -1.5960064086763361,
+        f'{ur5e_prefix}elbow_joint': 1.615863605277993,
+        f'{ur5e_prefix}wrist_1_joint': -1.592172956911188,
+        f'{ur5e_prefix}wrist_2_joint': -1.5690505595531368,
+        f'{ur5e_prefix}wrist_3_joint': 2.232159020791153,
+    }
+    _set_ros2_control_initial_positions(ur5e_root, ur5e_initial_positions)
 
     # Strip world/ground_plane links and joints
     _strip_world_links_and_joints(ur5e_root)
     # Strip the gazebo_ros2_control plugin injected by sim_gazebo:=true
     _strip_gazebo_ros2_control_plugin(ur5e_root)
+    _strip_grasp_fix_plugins(ur5e_root)
     # Do NOT inject <static>true</static> — UR5e now has physics!
 
     # ── Inject OnRobot RG2 Gripper onto UR5e ──────────────────────────────────
@@ -168,6 +376,12 @@ def launch_setup(context, *args, **kwargs):
     ]).decode('utf-8')
     onrobot_root = ET.fromstring(onrobot_raw)
 
+    # Start RG2 opened so first grasp comes from an explicit close command.
+    _set_ros2_control_initial_positions(
+        onrobot_root,
+        {f'{onrobot_prefix}finger_width': 0.11},
+    )
+
     # Gazebo drops massless links, which breaks the finger_width mock joint and mimic plugin.
     # Inject a small mass into the mock link so Gazebo keeps it.
     for link in onrobot_root.findall('link'):
@@ -181,7 +395,10 @@ def launch_setup(context, *args, **kwargs):
     # Strip the duplicate gazebo_ros2_control plugin from RG2
     _strip_gazebo_ros2_control_plugin(onrobot_root)
     # Inject Gazebo mimic plugins for RG2 mimic joints
-    _inject_mimic_plugins(onrobot_root)
+    _inject_mimic_plugins(onrobot_root, max_effort='3.0', sensitiveness='0.003')
+    _tune_rg2_joint_dynamics(onrobot_root, onrobot_prefix)
+    _tune_rg2_contact_properties(onrobot_root, onrobot_prefix)
+    _strip_grasp_fix_plugins(onrobot_root)
 
     # Strip world from RG2
     for link in list(onrobot_root.findall('link')):
@@ -201,7 +418,7 @@ def launch_setup(context, *args, **kwargs):
     mounting_joint = ET.Element('joint', {'name': f'{ur5e_prefix}gripper_mount_joint', 'type': 'fixed'})
     ET.SubElement(mounting_joint, 'parent', {'link': f'{ur5e_prefix}tool0'})
     ET.SubElement(mounting_joint, 'child', {'link': f'{onrobot_prefix}onrobot_base_link'})
-    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 -1.57079632679'})
     ur5e_root.append(mounting_joint)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -277,6 +494,22 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
+    # Run through bash and source overlays so linkattacher Python modules are always visible.
+    auto_link_attacher = ExecuteProcess(
+        cmd=[
+            'bash',
+            '-lc',
+            [
+                'source /opt/ros/humble/setup.bash && '
+                'source ', os.path.expanduser('~/ros2_ws/install/setup.bash'),
+                ' && python3 ',
+                PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'launch', 'auto_link_attacher_node.py']),
+                ' --ros-args -p use_sim_time:=true',
+            ],
+        ],
+        output='screen',
+    )
+
     # All controllers under the single /controller_manager
     controller_nodes = [
         Node(
@@ -316,11 +549,13 @@ def launch_setup(context, *args, **kwargs):
         ),
     ]
 
-    return [
+    launch_actions = [
         gazebo_launch,
         combined_rsp,
         # Delay spawn 30s to give Gazebo (WSL) time to fully initialize
         TimerAction(period=30.0, actions=[combined_spawn]),
+        # Start auto attach/detach helper after spawn/controllers are up.
+        TimerAction(period=36.0, actions=[auto_link_attacher]),
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=combined_spawn,
@@ -328,6 +563,9 @@ def launch_setup(context, *args, **kwargs):
             )
         ),
     ]
+    if set_gazebo_plugin_path is not None:
+        launch_actions.insert(0, set_gazebo_plugin_path)
+    return launch_actions
 
 
 def generate_launch_description():

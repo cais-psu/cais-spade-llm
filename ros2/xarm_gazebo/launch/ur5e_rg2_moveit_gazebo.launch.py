@@ -23,8 +23,8 @@ SPEED_LIMIT_SCALE = 2.5
 ACC_LIMIT_SCALE = 2.0
 DEFAULT_VELOCITY_SCALING = 1.0
 DEFAULT_ACCELERATION_SCALING = 1.0
-RG2_MAX_VELOCITY = 1.5
-RG2_MAX_ACCELERATION = 8.0
+RG2_MAX_VELOCITY = 0.25
+RG2_MAX_ACCELERATION = 1.0
 
 
 def _scale_joint_limits(joint_limits):
@@ -83,7 +83,7 @@ def _build_urdf(prefix):
     mounting_joint = ET.Element('joint', {'name': f'{prefix}gripper_mount_joint', 'type': 'fixed'})
     ET.SubElement(mounting_joint, 'parent', {'link': f'{prefix}tool0'})
     ET.SubElement(mounting_joint, 'child', {'link': f'{onrobot_prefix}onrobot_base_link'})
-    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 -1.57079632679'})
     ur5e_root.append(mounting_joint)
 
     combined = ET.Element('robot', {'name': 'ur5e_rg2_moveit'})
@@ -117,7 +117,7 @@ def _build_srdf(prefix):
     ET.SubElement(open_state, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.11'})
 
     close_state = ET.SubElement(srdf_root, 'group_state', {'name': 'close', 'group': f'{prefix}rg2_gripper'})
-    ET.SubElement(close_state, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.0'})
+    ET.SubElement(close_state, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.020'})
 
     rg2_links = [
         f'{onrobot_prefix}onrobot_base_link',
@@ -168,6 +168,9 @@ def _build_moveit_params(prefix, urdf, srdf):
             prefixed_limits[f'{prefix}{joint_name}'] = limits
 
     prefixed_limits[f'{prefix}rg2_finger_width'] = {
+        'has_position_limits': True,
+        'min_position': 0.015,
+        'max_position': 0.110,
         'has_velocity_limits': True,
         'max_velocity': RG2_MAX_VELOCITY,
         'has_acceleration_limits': True,

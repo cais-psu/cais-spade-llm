@@ -9,6 +9,9 @@ This guide reproduces all three simulation/control modes on ROS2 Humble:
 For operation details after setup, see:
 `ros2/docs/ros2_three_mode_control_guide.md`
 
+For IFRA LinkAttacher world-plugin setup (including patched multi-attach source), see:
+`ros2/docs/ifra_linkattacher_setup_from_scratch.md`
+
 ## 0. Base Environment
 
 Use Ubuntu 22.04 + ROS2 Humble.

@@ -37,8 +37,8 @@ SPEED_LIMIT_SCALE = 2.5
 ACC_LIMIT_SCALE = 2.0
 DEFAULT_VELOCITY_SCALING = 1.0
 DEFAULT_ACCELERATION_SCALING = 1.0
-RG2_MAX_VELOCITY = 1.5
-RG2_MAX_ACCELERATION = 8.0
+RG2_MAX_VELOCITY = 1.20
+RG2_MAX_ACCELERATION = 3.00
 
 
 def _scale_joint_limits(joint_limits):
@@ -161,7 +161,7 @@ def _build_combined_urdf(context, xarm_prefix, ur5e_prefix):
         ET.SubElement(mj, 'parent', {'link': f'{ur5e_prefix}tool0'})
         ET.SubElement(mj, 'child',
                       {'link': f'{onrobot_prefix}onrobot_base_link'})
-        ET.SubElement(mj, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+        ET.SubElement(mj, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 -1.57079632679'})
         ur5e_root.append(mj)
     except Exception:
         pass
@@ -228,9 +228,9 @@ def _build_combined_srdf(xarm_prefix, ur5e_prefix):
     state_open = ET.SubElement(merged, 'group_state', {'name': 'open', 'group': f'{ur5e_prefix}rg2_gripper'})
     ET.SubElement(state_open, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.11'})
 
-    # Predefined "close" state
+    # Predefined "close" state. Keep a non-zero gap so RViz "close" doesn't overcrush parts.
     state_close = ET.SubElement(merged, 'group_state', {'name': 'close', 'group': f'{ur5e_prefix}rg2_gripper'})
-    ET.SubElement(state_close, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.0'})
+    ET.SubElement(state_close, 'joint', {'name': f'{onrobot_prefix}finger_width', 'value': '0.020'})
 
     # Disable collisions for all OnRobot RG2 gripper link pairs
     onrobot_prefix = f'{ur5e_prefix}rg2_'
@@ -297,6 +297,9 @@ def _build_moveit_params(xarm_prefix, ur5e_prefix, urdf, srdf):
         for j, v in _scale_joint_limits(ur5e_lim['joint_limits']).items():
             combined_limits[f'{ur5e_prefix}{j}'] = v
     combined_limits[f'{ur5e_prefix}rg2_finger_width'] = {
+        'has_position_limits': True,
+        'min_position': 0.015,
+        'max_position': 0.110,
         'has_velocity_limits': True,
         'max_velocity': RG2_MAX_VELOCITY,
         'has_acceleration_limits': True,

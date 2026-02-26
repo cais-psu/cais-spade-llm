@@ -1,0 +1,7 @@
+# User-captured startup joints for UR5e picking posture
+shoulder_pan_joint: 2.232023449619252
+shoulder_lift_joint: -1.5960064086763361
+elbow_joint: 1.615863605277993
+wrist_1_joint: -1.592172956911188
+wrist_2_joint: -1.5690505595531368
+wrist_3_joint: 2.232159020791153

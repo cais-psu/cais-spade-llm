@@ -126,7 +126,7 @@ def _build_ur5e_rg2_description(controllers_yaml):
     mounting_joint = ET.Element('joint', {'name': f'{ur5e_prefix}gripper_mount_joint', 'type': 'fixed'})
     ET.SubElement(mounting_joint, 'parent', {'link': f'{ur5e_prefix}tool0'})
     ET.SubElement(mounting_joint, 'child', {'link': f'{onrobot_prefix}onrobot_base_link'})
-    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+    ET.SubElement(mounting_joint, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 -1.57079632679'})
     ur5e_root.append(mounting_joint)
 
     combined_root = ET.Element('robot', {'name': 'ur5e_rg2'})

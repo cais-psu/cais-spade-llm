@@ -7,6 +7,8 @@
     <include>
       <uri>model://sun</uri>
     </include>
+    <!-- IFRA LinkAttacher world plugin (services: /ATTACHLINK, /DETACHLINK) -->
+    <plugin name="gazebo_link_attacher" filename="libgazebo_link_attacher.so"/>
     <include>
       <uri>model://table</uri>
       <name>table_xarm6</name>
@@ -132,7 +134,7 @@
     <!-- Prusa MK3 (Flat Mockup) on Left Side (-0.6, 0) -->
     <model name="prusa_mk3">
       <static>true</static>
-      <pose>-0.6 0 1.04 0 0 0</pose>
+      <pose>-0.4 0 1.04 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
@@ -152,7 +154,7 @@
     <!-- Prusa MK4-1 (Flat Mockup) on Right Side (0.6, 0.4) -->
     <model name="prusa_mk4_1">
       <static>true</static>
-      <pose>0.6 0.4 1.04 0 0 0</pose>
+      <pose>0.4 0.4 1.04 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
@@ -172,7 +174,7 @@
     <!-- Prusa MK4-2 (Flat Mockup) on Right Side (0.6, -0.4) -->
     <model name="prusa_mk4_2">
       <static>true</static>
-      <pose>0.6 -0.4 1.04 0 0 0</pose>
+      <pose>0.4 -0.4 1.04 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
@@ -194,26 +196,44 @@
          All components spawned at Z=1.15 to prevent clipping
          ============================================== -->
     <model name="gear_small">
-      <pose>-0.6 0.1 1.15 0 0 0</pose>
+      <pose>-0.4 0.1 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
       </link>
     </model>
     <model name="rect_pin_small">
-      <pose>-0.6 0.0 1.15 0 0 0</pose>
+      <pose>-0.4 0.0 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><box><size>0.02 0.02 0.06</size></box></geometry></collision>
+        <collision name="collision">
+          <geometry><box><size>0.02 0.02 0.06</size></box></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><box><size>0.02 0.02 0.06</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
       </link>
     </model>
     <model name="circ_pin_small">
-      <pose>-0.6 -0.1 1.15 0 0 0</pose>
+      <pose>-0.4 -0.1 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.01</radius><length>0.06</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.01</radius><length>0.06</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.01</radius><length>0.06</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
       </link>
     </model>
@@ -223,26 +243,44 @@
          All components spawned at Z=1.15
          ============================================== -->
     <model name="gear_medium">
-      <pose>0.6 0.5 1.15 0 0 0</pose>
+      <pose>0.4 0.5 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.10</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.03</radius><length>0.015</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.03</radius><length>0.015</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.03</radius><length>0.015</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
       </link>
     </model>
     <model name="rect_pin_medium">
-      <pose>0.6 0.4 1.15 0 0 0</pose>
+      <pose>0.4 0.4 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><box><size>0.025 0.025 0.08</size></box></geometry></collision>
+        <collision name="collision">
+          <geometry><box><size>0.025 0.025 0.08</size></box></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><box><size>0.025 0.025 0.08</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
       </link>
     </model>
     <model name="circ_pin_medium">
-      <pose>0.6 0.3 1.15 0 0 0</pose>
+      <pose>0.4 0.3 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.013</radius><length>0.08</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.013</radius><length>0.08</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.013</radius><length>0.08</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
       </link>
     </model>
@@ -252,26 +290,44 @@
          All components spawned at Z=1.15
          ============================================== -->
     <model name="gear_large">
-      <pose>0.6 -0.3 1.15 0 0 0</pose>
+      <pose>0.4 -0.3 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.15</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.04</radius><length>0.02</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.04</radius><length>0.02</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.04</radius><length>0.02</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material></visual>
       </link>
     </model>
     <model name="rect_pin_large">
-      <pose>0.6 -0.4 1.15 0 0 0</pose>
+      <pose>0.4 -0.4 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><box><size>0.03 0.03 0.1</size></box></geometry></collision>
+        <collision name="collision">
+          <geometry><box><size>0.03 0.03 0.1</size></box></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><box><size>0.03 0.03 0.1</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
       </link>
     </model>
     <model name="circ_pin_large">
-      <pose>0.6 -0.5 1.15 0 0 0</pose>
+      <pose>0.4 -0.5 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-        <collision name="collision"><geometry><cylinder><radius>0.015</radius><length>0.10</length></cylinder></geometry></collision>
+        <collision name="collision">
+          <geometry><cylinder><radius>0.015</radius><length>0.10</length></cylinder></geometry>
+          <surface>
+            <friction><ode><mu>20.0</mu><mu2>20.0</mu2></ode></friction>
+            <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+          </surface>
+        </collision>
         <visual name="visual"><geometry><cylinder><radius>0.015</radius><length>0.10</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Orange</name></script></material></visual>
       </link>
     </model>

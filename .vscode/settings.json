@@ -18,5 +18,7 @@
             "args": ["-c", "source ${workspaceFolder}/.venv/bin/activate && exec bash"],
             "icon": "snake"
         }
-    }
+    },
+    "python-envs.defaultEnvManager": "ms-python.python:poetry",
+    "python-envs.defaultPackageManager": "ms-python.python:poetry"
 }
