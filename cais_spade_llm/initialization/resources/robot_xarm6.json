@@ -1,98 +1,226 @@
 {
-    "xarm6": {
-      "type": "robot",
-      "jid": "xarm6@localhost",
-      "password": "none",
-      "domain": "localhost",      
-      "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
-      "functions": ["pick_part", "move_to_pick_location", "move_loaded_to_destination", "assemble_part"],
-      "sg_slippage_mode": "once",
-      "sg_slippage_scope": "xarm6",
-      "static_capabilities":{
-        "reachability": ["prusa-mk4-1", "prusa-mk3", "assembly_board-v1"],
-        "workspace_boundaries": {
-          "type": "rectangular",
-          "x_range": [-150, 650],
-          "y_range": [-550, 100],
-          "z_range": [0, 600],
-          "units": "mm",
-          "description": "Cartesian workspace boundaries in robot base frame"
-        },
-        "staging_areas": {
-          "staging_zone_1": {
-            "x": 200,
-            "y": -250,
-            "z": 172,
-            "description": "Primary staging area for xArm6, reachable by UR5e for recovery",
-            "accessible_by": ["xarm6", "ur5e"]
-          },
-          "staging_zone_neutral": {
-            "x": 300,
-            "y": -150,
-            "z": 172,
-            "description": "Shared neutral zone between both robots",
-            "accessible_by": ["xarm6", "ur5e"]
-          }
-        }
-      },                
-      "gripper_file": "cais_spade_llm/specification/resources/parameters/xArm-gripper.pdf",
-      "ip": "192.168.1.240",
-      "dashboard_port": 29999,
-      "speed" : 280,
-      "acc" : 10000,
-      "radius" : -1,
-      "params": {
-        "acc": 0.5,
-        "vel": 0.3,
-        "gripper_programs": {
-          "activate": "gripper_activate.urp",
-          "open": "gripper_open.urp",
-          "close": "gripper_close.urp",
-          "close_90": "gripper_close_90.urp"
-        }
-      },
-      "camera_types": [
-        "cameraA",
-        "cameraB"
+  "xarm6": {
+    "type": "robot",
+    "jid": "xarm6@localhost",
+    "password": "none",
+    "domain": "localhost",
+    "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
+    "functions": [
+      "pick_part",
+      "move_to_pick_location",
+      "move_loaded_to_destination",
+      "assemble_part"
+    ],
+    "sg_slippage_mode": "once",
+    "sg_slippage_scope": "xarm6",
+    "static_capabilities": {
+      "reachability": [
+        "prusa-mk4-1",
+        "prusa-mk3",
+        "assembly_board-v1"
       ],
-      "cameraA_offsets": [0, 0],
-      "cameraB_offsets": [-32, -311],
-      "location": {
-        "x": 0,
-        "y": 0
-      },
-      "z_pick": 172,
-      "z_above": 300,
-      "base_position": [0, 0],
-      "pickup_orientation": [127.23, -127.21, 0.025],
-      "place_orientations": {
-        "housing": [-89.95, 2.07, -2.03],
-        "wedge": [-67.11, 72.40, -73.48],
-        "spring": [-67.11, 72.40, -73.48],
-        "cap": [121.42, -132.48, 0.00]
-      },
-      "initial_position" : [250,-150,445,180.0,0.0,0.0],
-      "intermediate_joint_pose": [-125.00, -73.60, -132.07, -64.14, 90.00, -120.00],
-      "camera_calibration": {
-        "camera_points": [
-          [499, 258],
-          [238, 326],
-          [358, 303],
-          [403, 209]
+      "workspace_boundaries": {
+        "type": "rectangular",
+        "x_range": [
+          -150,
+          650
         ],
-        "robot_points": [
-          [373.24, -293.29],
-          [326.875, -102.682],
-          [340.53, -189.55],
-          [406.88, -225.08]
-        ]
+        "y_range": [
+          -550,
+          100
+        ],
+        "z_range": [
+          0,
+          600
+        ],
+        "units": "mm",
+        "description": "Cartesian workspace boundaries in robot base frame"
       },
-      "grasp_strategies": {
-        "housing": { "strategy": "top", "gripper_action": "close" },
-        "wedge":   { "strategy": "above-top", "gripper_action": "close" },
-        "spring":  { "strategy": "above-top", "gripper_action": "close_90" },
-        "cap":     { "strategy": "center", "gripper_action": "close" }
+      "staging_areas": {
+        "staging_zone_1": {
+          "x": 200,
+          "y": -250,
+          "z": 172,
+          "description": "Primary staging area for xArm6, reachable by UR5e for recovery",
+          "accessible_by": [
+            "xarm6",
+            "ur5e"
+          ]
+        },
+        "staging_zone_neutral": {
+          "x": 300,
+          "y": -150,
+          "z": 172,
+          "description": "Shared neutral zone between both robots",
+          "accessible_by": [
+            "xarm6",
+            "ur5e"
+          ]
+        }
+      }
+    },
+    "gripper_file": "cais_spade_llm/specification/resources/parameters/xArm-gripper.pdf",
+    "ip": "192.168.1.240",
+    "dashboard_port": 29999,
+    "speed": 280,
+    "acc": 10000,
+    "radius": -1,
+    "params": {
+      "acc": 0.5,
+      "vel": 0.3,
+      "gripper_programs": {
+        "activate": "gripper_activate.urp",
+        "open": "gripper_open.urp",
+        "close": "gripper_close.urp",
+        "close_90": "gripper_close_90.urp"
+      }
+    },
+    "camera_types": [
+      "cameraA",
+      "cameraB"
+    ],
+    "cameraA_offsets": [
+      0,
+      0
+    ],
+    "cameraB_offsets": [
+      -32,
+      -311
+    ],
+    "location": {
+      "x": 0,
+      "y": 0
+    },
+    "z_pick": 172,
+    "z_above": 300,
+    "base_position": [
+      0,
+      0
+    ],
+    "pickup_orientation": [
+      127.23,
+      -127.21,
+      0.025
+    ],
+    "place_orientations": {
+      "housing": [
+        -89.95,
+        2.07,
+        -2.03
+      ],
+      "wedge": [
+        -67.11,
+        72.4,
+        -73.48
+      ],
+      "spring": [
+        -67.11,
+        72.4,
+        -73.48
+      ],
+      "cap": [
+        121.42,
+        -132.48,
+        0.0
+      ]
+    },
+    "initial_position": [
+      250,
+      -150,
+      445,
+      180.0,
+      0.0,
+      0.0
+    ],
+    "intermediate_joint_pose": [
+      -125.0,
+      -73.6,
+      -132.07,
+      -64.14,
+      90.0,
+      -120.0
+    ],
+    "camera_calibration": {
+      "camera_points": [
+        [
+          499,
+          258
+        ],
+        [
+          238,
+          326
+        ],
+        [
+          358,
+          303
+        ],
+        [
+          403,
+          209
+        ]
+      ],
+      "robot_points": [
+        [
+          373.24,
+          -293.29
+        ],
+        [
+          326.875,
+          -102.682
+        ],
+        [
+          340.53,
+          -189.55
+        ],
+        [
+          406.88,
+          -225.08
+        ]
+      ]
+    },
+    "grasp_strategies": {
+      "housing": {
+        "strategy": "top",
+        "gripper_action": "close"
+      },
+      "wedge": {
+        "strategy": "above-top",
+        "gripper_action": "close"
+      },
+      "spring": {
+        "strategy": "above-top",
+        "gripper_action": "close_90"
+      },
+      "cap": {
+        "strategy": "center",
+        "gripper_action": "close"
       }
     }
+  },
+  "named_positions": {
+    "test": [
+      -2.488633,
+      0.089611,
+      -1.268358,
+      7.9e-05,
+      1.17879,
+      -2.488536
+    ],
+    "test2": [
+      -2.488626,
+      0.208845,
+      -1.090125,
+      9.6e-05,
+      0.881837,
+      -2.488561
+    ],
+    "home": [
+      -2.488633,
+      0.089611,
+      -1.268358,
+      7.9e-05,
+      1.17879,
+      -2.488536
+    ]
   }
-  
+}

@@ -18,9 +18,19 @@ from pathlib import Path
 
 from ament_index_python import get_package_share_directory, get_package_prefix
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, RegisterEventHandler, OpaqueFunction, TimerAction, SetEnvironmentVariable, ExecuteProcess
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
+    RegisterEventHandler,
+    SetEnvironmentVariable,
+    TimerAction,
+)
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch.event_handlers import OnProcessExit
@@ -232,6 +242,8 @@ def _strip_world_links_and_joints(root, extra_link_names=None):
 
 
 def launch_setup(context, *args, **kwargs):
+    run_perception = LaunchConfiguration('run_perception')
+
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
     set_gazebo_plugin_path = None
     attacher_candidates = [os.path.expanduser('~/ros2_ws/install/ros2_linkattacher/lib')]
@@ -505,10 +517,56 @@ def launch_setup(context, *args, **kwargs):
                 ' && python3 ',
                 PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'launch', 'auto_link_attacher_node.py']),
                 ' --ros-args -p use_sim_time:=true',
+                ' -p attach_distance_threshold:=0.06',
+                ' -p finger_distance_threshold:=0.04',
+                ' -p attach_distance_threshold_ur5e:=0.04',
+                ' -p finger_distance_threshold_ur5e:=0.03',
+                ' -p require_finger_consensus:=true',
+                ' -p allow_tcp_fallback:=false',
+                ' -p tcp_fallback_distance_threshold:=0.03',
             ],
         ],
         output='screen',
     )
+
+    # Start perception node so /detect_part and /detect_all are available to SPADE camera clients.
+    perception_candidates = [
+        Path(__file__).resolve().parents[1] / 'nodes' / 'perception_node.py',
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/xarm_gazebo/nodes/perception_node.py')),
+    ]
+    perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
+    perception_actions = []
+    if perception_script:
+        perception_actions.append(
+            TimerAction(
+                period=8.0,
+                actions=[
+                    ExecuteProcess(
+                        cmd=[
+                            'bash',
+                            '-lc',
+                            [
+                                'source /opt/ros/humble/setup.bash && '
+                                'source ',
+                                os.path.expanduser('~/ros2_ws/install/setup.bash'),
+                                ' && python3.10 ',
+                                perception_script,
+                                ' --ros-args -p use_sim_time:=true',
+                            ],
+                        ],
+                        output='screen',
+                        condition=IfCondition(run_perception),
+                    )
+                ],
+            )
+        )
+    else:
+        perception_actions.append(
+            LogInfo(
+                msg='[xarm_gazebo] perception_node.py not found. '
+                    'Skipping automatic perception startup.'
+            )
+        )
 
     # All controllers under the single /controller_manager
     controller_nodes = [
@@ -563,10 +621,18 @@ def launch_setup(context, *args, **kwargs):
             )
         ),
     ]
+    launch_actions.extend(perception_actions)
     if set_gazebo_plugin_path is not None:
         launch_actions.insert(0, set_gazebo_plugin_path)
     return launch_actions
 
 
 def generate_launch_description():
-    return LaunchDescription([OpaqueFunction(function=launch_setup)])
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'run_perception',
+            default_value='true',
+            description='Automatically start perception_node for /detect_part and /detect_all.',
+        ),
+        OpaqueFunction(function=launch_setup),
+    ])

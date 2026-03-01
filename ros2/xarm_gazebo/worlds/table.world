@@ -7,6 +7,13 @@
     <include>
       <uri>model://sun</uri>
     </include>
+    <!-- Gazebo ROS state plugin (provides /get_entity_state, /set_entity_state) -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+      <update_rate>50</update_rate>
+    </plugin>
     <!-- IFRA LinkAttacher world plugin (services: /ATTACHLINK, /DETACHLINK) -->
     <plugin name="gazebo_link_attacher" filename="libgazebo_link_attacher.so"/>
     <include>
@@ -96,36 +103,142 @@
       </link>
     </model>
 
-    <!-- OVERHEAD CAMERA -->
-    <model name="overhead_camera">
+    <!-- ========== PERCEPTION CAMERAS (4x depth, facing down) ========== -->
+    <!-- Camera height Z=1.40, table surface ~1.02 → ~0.38m distance
+         hfov=0.8 rad → covers ~0.33m horizontally across 640px → ~0.5mm/px
+         Pose: roll=0, pitch=π/2 (look down -Z), yaw=0 -->
+
+    <!-- Camera above Prusa MK3 (pick detection) -->
+    <model name="cam_mk3">
       <static>true</static>
-      <!-- Hovering at Z=2.0 right above assembly board, facing downward -->
-      <pose>0 0 2.0 0 1.571 1.571</pose>
+      <pose>-0.4 0 1.40 0 1.5708 0</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
-          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Black</name></script></material>
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
         </visual>
-        <sensor type="camera" name="camera1">
+        <sensor type="depth" name="depth_camera">
           <update_rate>15.0</update_rate>
           <camera>
-            <horizontal_fov>1.2</horizontal_fov>
+            <horizontal_fov>0.8</horizontal_fov>
             <image>
               <width>640</width>
               <height>480</height>
               <format>R8G8B8</format>
             </image>
             <clip>
-              <near>0.1</near>
-              <far>10</far>
+              <near>0.05</near>
+              <far>2.0</far>
             </clip>
           </camera>
           <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
             <ros>
-              <namespace>overhead_camera</namespace>
+              <namespace>cam_mk3</namespace>
             </ros>
-            <camera_name>overhead_camera</camera_name>
-            <frame_name>camera_link</frame_name>
+            <camera_name>cam_mk3</camera_name>
+            <frame_name>cam_mk3_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Prusa MK4-1 (pick detection) -->
+    <model name="cam_mk4_1">
+      <static>true</static>
+      <pose>0.4 0.4 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>2.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk4_1</namespace>
+            </ros>
+            <camera_name>cam_mk4_1</camera_name>
+            <frame_name>cam_mk4_1_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Prusa MK4-2 (pick detection) -->
+    <model name="cam_mk4_2">
+      <static>true</static>
+      <pose>0.4 -0.4 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>2.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk4_2</namespace>
+            </ros>
+            <camera_name>cam_mk4_2</camera_name>
+            <frame_name>cam_mk4_2_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Assembly Board (placement verification + drop detection) -->
+    <model name="cam_assembly">
+      <static>true</static>
+      <pose>0 0 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>2.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_assembly</namespace>
+            </ros>
+            <camera_name>cam_assembly</camera_name>
+            <frame_name>cam_assembly_link</frame_name>
           </plugin>
         </sensor>
       </link>

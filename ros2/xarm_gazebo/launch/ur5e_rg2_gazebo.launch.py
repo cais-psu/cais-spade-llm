@@ -13,10 +13,19 @@ from pathlib import Path
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
+    RegisterEventHandler,
+    TimerAction,
+)
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -165,6 +174,8 @@ def _build_ur5e_rg2_description(controllers_yaml):
 
 
 def launch_setup(context, *args, **kwargs):
+    run_perception = LaunchConfiguration('run_perception')
+
     controllers_yaml = os.path.join(
         get_package_share_directory('xarm_gazebo'),
         'config',
@@ -227,7 +238,45 @@ def launch_setup(context, *args, **kwargs):
         ),
     ]
 
-    return [
+    perception_candidates = [
+        Path(__file__).resolve().parents[1] / 'nodes' / 'perception_node.py',
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/xarm_gazebo/nodes/perception_node.py')),
+    ]
+    perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
+    perception_actions = []
+    if perception_script:
+        perception_actions.append(
+            TimerAction(
+                period=8.0,
+                actions=[
+                    ExecuteProcess(
+                        cmd=[
+                            'bash',
+                            '-lc',
+                            [
+                                'source /opt/ros/humble/setup.bash && '
+                                'source ',
+                                os.path.expanduser('~/ros2_ws/install/setup.bash'),
+                                ' && python3.10 ',
+                                perception_script,
+                                ' --ros-args -p use_sim_time:=true',
+                            ],
+                        ],
+                        output='screen',
+                        condition=IfCondition(run_perception),
+                    )
+                ],
+            )
+        )
+    else:
+        perception_actions.append(
+            LogInfo(
+                msg='[xarm_gazebo] perception_node.py not found. '
+                    'Skipping automatic perception startup.'
+            )
+        )
+
+    launch_actions = [
         gazebo,
         state_publisher,
         TimerAction(period=30.0, actions=[spawn]),
@@ -235,10 +284,19 @@ def launch_setup(context, *args, **kwargs):
             event_handler=OnProcessExit(
                 target_action=spawn,
                 on_exit=controllers,
-            )
+                )
         ),
     ]
+    launch_actions.extend(perception_actions)
+    return launch_actions
 
 
 def generate_launch_description():
-    return LaunchDescription([OpaqueFunction(function=launch_setup)])
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'run_perception',
+            default_value='true',
+            description='Automatically start perception_node for /detect_part and /detect_all.',
+        ),
+        OpaqueFunction(function=launch_setup),
+    ])

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Iterable, List, Optional
 
@@ -15,14 +16,19 @@ from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
 from resources.sensor.camera_module import CameraModule
 
-# Mock camera observations for simulation.
-# SG: slipped into ur5e-only territory (x=750 > xarm6 upper bound of 650).
-# MCP: correctly placed at assembly board position.
-# Workspace boundaries (mm): xarm6 x=[-150,650], ur5e x=[100,900].
-_MOCK_CAMERA = CameraModule(mock_observations={
-    "SG":  {"x": 750.0, "y": -200.0, "z": 50.0},
-    "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
-})
+# Camera mode: set USE_ROS2_CAMERA=1 when running with Gazebo + perception_node.
+# Default: mock observations for offline testing.
+if os.environ.get("USE_ROS2_CAMERA", "").strip() in ("1", "true", "yes"):
+    _CAMERA = CameraModule(use_ros2=True)
+else:
+    # Mock camera observations for simulation.
+    # SG: slipped into ur5e-only territory (x=750 > xarm6 upper bound of 650).
+    # MCP: correctly placed at assembly board position.
+    # Workspace boundaries (mm): xarm6 x=[-150,650], ur5e x=[100,900].
+    _CAMERA = CameraModule(mock_observations={
+        "SG":  {"x": 750.0, "y": -200.0, "z": 50.0},
+        "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
+    })
 
 # FunctionAnalyzer consults this registry to decide which methods each agent is allowed to expose.
 ALLOWED_FUNCS: dict[str, set[str]] = defaultdict(set)
@@ -152,7 +158,7 @@ def create_product_agents(
                 resource_jids=resource_jids,
                 resource_agents=resource_agents,
                 cca_jid=cca_jid,
-                camera=_MOCK_CAMERA,
+                camera=_CAMERA,
                 replan_mode=meta.get("replan_mode", "des"),
             )
 

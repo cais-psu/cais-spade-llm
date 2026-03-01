@@ -16,6 +16,11 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from tf2_ros import Buffer, TransformException, TransformListener
 
+try:
+    from gazebo_msgs.msg import ModelStates
+except Exception:  # pragma: no cover - optional dependency at runtime
+    ModelStates = None
+
 
 PART_NAMES = [
     'gear_small',
@@ -72,10 +77,13 @@ class AutoLinkAttacher(Node):
 
         self.declare_parameter('world_frame', 'world')
         self.declare_parameter('model_name', 'dual_robot')
-        self.declare_parameter('attach_distance_threshold', 0.22)
-        self.declare_parameter('finger_distance_threshold', 0.25)
+        self.declare_parameter('attach_distance_threshold', 0.06)
+        self.declare_parameter('finger_distance_threshold', 0.04)
+        self.declare_parameter('attach_distance_threshold_ur5e', 0.04)
+        self.declare_parameter('finger_distance_threshold_ur5e', 0.03)
         self.declare_parameter('require_finger_consensus', True)
-        self.declare_parameter('allow_tcp_fallback', True)
+        self.declare_parameter('allow_tcp_fallback', False)
+        self.declare_parameter('tcp_fallback_distance_threshold', 0.03)
         self.declare_parameter('xarm_close_threshold', 0.75)
         self.declare_parameter('xarm_open_threshold', 0.08)
         self.declare_parameter('ur5e_close_threshold', 0.070)
@@ -86,8 +94,14 @@ class AutoLinkAttacher(Node):
         self.robot_model_name = self.get_parameter('model_name').value
         self.attach_distance_threshold = float(self.get_parameter('attach_distance_threshold').value)
         self.finger_distance_threshold = float(self.get_parameter('finger_distance_threshold').value)
+        self.attach_distance_threshold_ur5e = float(
+            self.get_parameter('attach_distance_threshold_ur5e').value)
+        self.finger_distance_threshold_ur5e = float(
+            self.get_parameter('finger_distance_threshold_ur5e').value)
         self.require_finger_consensus = bool(self.get_parameter('require_finger_consensus').value)
         self.allow_tcp_fallback = bool(self.get_parameter('allow_tcp_fallback').value)
+        self.tcp_fallback_distance_threshold = float(
+            self.get_parameter('tcp_fallback_distance_threshold').value)
         self.xarm_close_threshold = float(self.get_parameter('xarm_close_threshold').value)
         self.xarm_open_threshold = float(self.get_parameter('xarm_open_threshold').value)
         self.ur5e_close_threshold = float(self.get_parameter('ur5e_close_threshold').value)
@@ -135,6 +149,16 @@ class AutoLinkAttacher(Node):
             self._joint_state_cb,
             qos_profile_sensor_data,
         )
+        self.model_states_available = False
+        if ModelStates is not None:
+            self.create_subscription(
+                ModelStates,
+                '/gazebo/model_states',
+                self._model_states_cb,
+                qos_profile_sensor_data,
+            )
+        else:
+            self.get_logger().warn('gazebo_msgs/ModelStates not available; using static/fallback part poses')
 
         self.joint_positions: Dict[str, float] = {}
         self.part_positions = self._load_part_positions()
@@ -189,6 +213,16 @@ class AutoLinkAttacher(Node):
         for name, pos in zip(msg.name, msg.position):
             self.joint_positions[name] = pos
 
+    def _model_states_cb(self, msg) -> None:
+        updated = 0
+        for idx, name in enumerate(msg.name):
+            if name in PART_NAMES and idx < len(msg.pose):
+                p = msg.pose[idx].position
+                self.part_positions[name] = (p.x, p.y, p.z)
+                updated += 1
+        if updated:
+            self.model_states_available = True
+
     def _lookup_robot_pose(self, robot_key: str) -> Optional[Tuple[float, float, float]]:
         link_name = self.pose_links[robot_key]
         return self._lookup_link_pose(link_name)
@@ -230,37 +264,40 @@ class AutoLinkAttacher(Node):
         return True
 
     def _resolve_attach_candidate(self, robot_key: str) -> Tuple[Optional[str], float, str]:
+        attach_threshold = (
+            self.attach_distance_threshold_ur5e if robot_key == 'ur5e' else self.attach_distance_threshold
+        )
+        finger_threshold = (
+            self.finger_distance_threshold_ur5e if robot_key == 'ur5e' else self.finger_distance_threshold
+        )
         tcp_pose = self._lookup_robot_pose(robot_key)
         if tcp_pose is None:
             return None, float('inf'), 'tcp transform unavailable'
         tcp_model, tcp_dist = self._find_nearest_part(tcp_pose)
-        if tcp_model is None or tcp_dist > self.attach_distance_threshold:
+        if tcp_model is None or tcp_dist > attach_threshold:
             return (
                 None,
                 float('inf'),
-                f'tcp too far from parts ({tcp_dist:.3f} m > {self.attach_distance_threshold:.3f} m)',
+                f'tcp too far from parts ({tcp_dist:.3f} m > {attach_threshold:.3f} m)',
             )
 
         left_link, right_link = self.finger_links[robot_key]
         left_pose = self._lookup_link_pose(left_link)
         right_pose = self._lookup_link_pose(right_link)
         if left_pose is None or right_pose is None:
-            if self.allow_tcp_fallback:
+            if self.allow_tcp_fallback and tcp_dist <= self.tcp_fallback_distance_threshold:
                 return tcp_model, tcp_dist, 'tcp fallback (finger transforms unavailable)'
             return None, float('inf'), 'finger transforms unavailable'
 
         left_model, left_dist = self._find_nearest_part(left_pose)
         right_model, right_dist = self._find_nearest_part(right_pose)
-        left_ok = left_model == tcp_model and left_dist <= self.finger_distance_threshold
-        right_ok = right_model == tcp_model and right_dist <= self.finger_distance_threshold
+        left_ok = left_model == tcp_model and left_dist <= finger_threshold
+        right_ok = right_model == tcp_model and right_dist <= finger_threshold
 
         if left_ok and right_ok:
             return tcp_model, max(tcp_dist, left_dist, right_dist), 'finger consensus'
 
         if self.require_finger_consensus:
-            if self.allow_tcp_fallback and (left_ok or right_ok or tcp_dist <= 0.08):
-                fallback_side = 'left' if left_ok else ('right' if right_ok else 'tcp-near')
-                return tcp_model, tcp_dist, f'tcp fallback ({fallback_side})'
             return None, float('inf'), (
                 f'finger mismatch for {tcp_model} '
                 f'(left: {left_model} {left_dist:.3f} m, right: {right_model} {right_dist:.3f} m)'
@@ -274,7 +311,7 @@ class AutoLinkAttacher(Node):
                 dists.append(right_dist)
             return tcp_model, max(dists), 'single-finger consensus'
 
-        if self.allow_tcp_fallback:
+        if self.allow_tcp_fallback and tcp_dist <= self.tcp_fallback_distance_threshold:
             return tcp_model, tcp_dist, 'tcp fallback (consensus disabled)'
 
         return None, float('inf'), 'no finger close to tcp target'
@@ -293,12 +330,15 @@ class AutoLinkAttacher(Node):
             self._handle_pending_result()
             return
 
-        for robot_key, model_name in self.attached_by_robot.items():
-            if model_name is None:
-                continue
-            ee_pose = self._lookup_robot_pose(robot_key)
-            if ee_pose is not None:
-                self.part_positions[model_name] = ee_pose
+        # If /gazebo/model_states is not available, keep attached part pose in sync
+        # with the robot TCP as a fallback estimate.
+        if not self.model_states_available:
+            for robot_key, model_name in self.attached_by_robot.items():
+                if model_name is None:
+                    continue
+                ee_pose = self._lookup_robot_pose(robot_key)
+                if ee_pose is not None:
+                    self.part_positions[model_name] = ee_pose
 
         self._update_xarm_state()
         self._update_ur5e_state()
