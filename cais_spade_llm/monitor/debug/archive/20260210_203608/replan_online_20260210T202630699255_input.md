@@ -339,11 +339,11 @@ STRICT RULES FOR MODIFICATION:
       - Each function in tools_catalog has `in_state` and `out_state` fields
       - CHAIN functions by matching output state to input state
       - State transition examples:
-        * pick_part: in_state="printed" → out_state="picked"
-        * move_loaded_to_destination: in_state="picked" → out_state="positioned"
+        * pick_grasp: in_state="printed" → out_state="picked"
+        * place_approach: in_state="picked" → out_state="positioned"
         * place_part: in_state="positioned" → out_state="placed"
       - Build multi-step sequences by connecting compatible states
-      - Example: To relocate a part: pick_part (→picked) → move_loaded (→positioned) → place_part (→placed)
+      - Example: To relocate a part: pick_grasp (→picked) → move_loaded (→positioned) → place_part (→placed)
 
    b) CHECK WORKSPACE BOUNDARIES:
       - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
@@ -357,7 +357,7 @@ STRICT RULES FOR MODIFICATION:
         ```json
         {
           "id": "RECOVER_FAILED_PART",
-          "function_name": "pick_part",
+          "function_name": "pick_grasp",
           "params": { "part_name": "SG", "location": "failed_position" },
           "resource_jid": "ur5e@localhost",  // ← Selected because part is in UR5e's workspace
           "change_reason": "INSERTION: UR5e picks failed part (in UR5e workspace, not xArm6)"
@@ -374,7 +374,7 @@ STRICT RULES FOR MODIFICATION:
 
    d) COMPOSITIONAL REASONING PRINCIPLES:
       - PREFER using existing primitives in new sequences over inventing new functions
-      - A robot holding a part (out_state="picked") can `place_part` at a staging area, then `pick_part` elsewhere
+      - A robot holding a part (out_state="picked") can `place_part` at a staging area, then `pick_grasp` elsewhere
       - Staging enables coordination between robots without collision
       - CONSULT function_owner_agent field to verify which robot has which capability
 
@@ -427,7 +427,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_1_T1",
     "type": "task",
     "requirement_id": "REQ_1",
-    "function_name": "move_to_pick_location",
+    "function_name": "pick_approach",
     "params": {
       "origin_resource_location": "prusa-mk3",
       "part_name": "SG",
@@ -447,7 +447,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_1_T2",
     "type": "task",
     "requirement_id": "REQ_1",
-    "function_name": "pick_part",
+    "function_name": "pick_grasp",
     "params": {
       "part_name": "SG",
       "origin_resource_location": "prusa-mk3",
@@ -469,7 +469,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_1_T3",
     "type": "task",
     "requirement_id": "REQ_1",
-    "function_name": "move_loaded_to_destination",
+    "function_name": "place_approach",
     "params": {
       "destination_location": "assembly_board-v1",
       "part_name": "SG",
@@ -511,7 +511,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_2_T1",
     "type": "task",
     "requirement_id": "REQ_2",
-    "function_name": "move_to_pick_location",
+    "function_name": "pick_approach",
     "params": {
       "origin_resource_location": "prusa-mk3",
       "part_name": "MCP",
@@ -531,7 +531,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_2_T2",
     "type": "task",
     "requirement_id": "REQ_2",
-    "function_name": "pick_part",
+    "function_name": "pick_grasp",
     "params": {
       "part_name": "MCP",
       "origin_resource_location": "prusa-mk3",
@@ -553,7 +553,7 @@ FINAL JSON STRUCTURE:
     "id": "REQ_2_T3",
     "type": "task",
     "requirement_id": "REQ_2",
-    "function_name": "move_loaded_to_destination",
+    "function_name": "place_approach",
     "params": {
       "destination_location": "assembly_board-v1",
       "part_name": "MCP",
@@ -614,7 +614,7 @@ FINAL JSON STRUCTURE:
 TOOLS_CATALOG:
 [
   {
-    "function": "move_loaded_to_destination",
+    "function": "place_approach",
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "picked",
@@ -709,7 +709,7 @@ TOOLS_CATALOG:
     ]
   },
   {
-    "function": "pick_part",
+    "function": "pick_grasp",
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "printed",
@@ -756,7 +756,7 @@ TOOLS_CATALOG:
     ]
   },
   {
-    "function": "move_to_pick_location",
+    "function": "pick_approach",
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "idle",

@@ -114,24 +114,8 @@ PART_HEIGHTS = {
     "MCP": 0.08,
     "LCP": 0.10,
 }
-PART_PLACE_GAP_EXTRA = {
-    # Extra insertion bias by part type (meters). Added to --place-gap/default gap.
-    "SRP": -0.0005,
-    "MRP": -0.0010,
-    "LRP": -0.0015,
-    "SCP": -0.0005,
-    "MCP": -0.0010,
-    "LCP": -0.0015,
-}
-PART_SEAT_PUSH_EXTRA = {
-    # Additional downward "seat push" before release (meters).
-    "SRP": 0.0010,
-    "MRP": 0.0015,
-    "LRP": 0.0020,
-    "SCP": 0.0010,
-    "MCP": 0.0015,
-    "LCP": 0.0020,
-}
+# Extra insertion depth below nominal place pose (meters), shared for all parts.
+INSERTION_DEPTH_M = 0.0025
 ATTACH_LINK_CANDIDATES = [
     # Prefer wrist/tool links for stable placement.
     "ur5e_wrist_3_link",
@@ -890,13 +874,14 @@ class UR5ePickPlace(Node):
 
         # Step 7: Descend to place height
         grasp_tcp_to_part_origin_z = pick_tcp_z - tz
-        place_gap = self._place_surface_gap + PART_PLACE_GAP_EXTRA.get(target_part_name, 0.0)
+        insertion_depth = INSERTION_DEPTH_M
+        place_gap = self._place_surface_gap - insertion_depth
         place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
         place_z = place_tcp_z - ee_tcp_offset_z
         self.get_logger().info(
             f"Place gap for {target_part_name}: base={self._place_surface_gap:.4f} "
-            f"extra={PART_PLACE_GAP_EXTRA.get(target_part_name, 0.0):.4f} "
+            f"insertion_depth={insertion_depth:.4f} "
             f"effective={place_gap:.4f}"
         )
         if not self._cartesian_move(
@@ -904,19 +889,6 @@ class UR5ePickPlace(Node):
             f"Descend to place (EE z={place_z:.3f}, TCP z={place_tcp_z:.3f}, board_top={board_top_z:.3f})"
         ):
             return
-
-        # Optional seat push for pins to encourage insertion before release.
-        seat_push = PART_SEAT_PUSH_EXTRA.get(target_part_name, 0.0)
-        if seat_push > 0.0:
-            seat_z = place_z - seat_push
-            self.get_logger().info(
-                f"Seat push for {target_part_name}: extra={seat_push:.4f}m (EE z={seat_z:.3f})"
-            )
-            if not self._cartesian_move(
-                self._make_pose(bx, by, seat_z, ori),
-                f"Seat push ({target_part_name})"
-            ):
-                self.get_logger().warn("Seat push failed; continuing with release at current pose")
 
         # Step 8: Release at place pose, then always retreat up safely.
         # Detach first so opening gripper does not sweep an attached part sideways.

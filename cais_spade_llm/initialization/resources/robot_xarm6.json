@@ -4,152 +4,93 @@
     "jid": "xarm6@localhost",
     "password": "none",
     "domain": "localhost",
+    "execution_mode": "ros2",
     "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
     "functions": [
-      "pick_part",
-      "move_to_pick_location",
-      "move_loaded_to_destination",
-      "assemble_part"
+      "pick_grasp",
+      "pick_approach",
+      "place_approach",
+      "place_insert"
     ],
     "sg_slippage_mode": "once",
     "sg_slippage_scope": "xarm6",
-    "config_environment": "gazebo",
-    "environment_notes": {
-      "static_capabilities": "These values are for Gazebo simulation.",
-      "controller": "These ROS topics/links/services are for Gazebo + MoveIt simulation."
-    },
-    "real_world_overrides": {
-      "enabled": false,
-      "static_capabilities": {},
-      "controller": {}
-    },
-    "static_capabilities": {
-      "reachability": [
-        "prusa-mk4-1",
-        "prusa-mk3",
-        "assembly_board-v1"
-      ],
-      "staging_areas": {}
-    },
-    "controller": {
-      "move_group": {
-        "group_name": "xarm6_xarm6",
-        "ee_link": "xarm6_link_eef",
-        "tcp_link": "xarm6_link_tcp",
-        "frame_id": "world"
-      },
-      "gripper": {
-        "joint": "xarm6_drive_joint",
-        "topic": "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
-        "open": 0.0,
-        "close": 0.85,
-        "move_time_sec": 0.4,
-        "settle_sec": 0.08,
-        "feedback_timeout_pad_sec": 1.5,
-        "position_tolerance": 0.01
-      },
-      "services": {
-        "detect_all": "/detect_all",
-        "cartesian_path": "/compute_cartesian_path",
-        "execute_trajectory": "/execute_trajectory",
-        "attach": "/ATTACHLINK",
-        "detach": "/DETACHLINK",
-        "set_entity_state": "/set_entity_state"
-      },
-      "attach": {
-        "robot_model_name": "dual_robot",
-        "attach_link_candidates": [
-          "xarm6_link6",
-          "xarm6_right_inner_knuckle",
-          "xarm6_left_inner_knuckle",
-          "xarm6_right_finger",
-          "xarm6_left_finger"
+    "gazebo": {
+      "static_capabilities": {
+        "reachability": [
+          "prusa-mk4-1",
+          "prusa-mk3",
+          "assembly_board-v1"
         ],
-        "primary_attach_link": "xarm6_link6",
-        "detach_timeout_sec": 2.0,
-        "detach_max_link_attempts": 3
+        "staging_areas": {}
       },
-      "motion": {
-        "approach_height_m": 0.2,
-        "pick_tcp_z_bias_max_m": 0.02,
-        "pick_tcp_z_bias_min_m": 0.003,
-        "min_pick_tcp_z_m": 1.07,
-        "place_surface_gap_m": -0.01,
-        "release_preopen_settle_sec": 0.15,
-        "release_postopen_settle_sec": 0.6,
-        "release_postdetach_settle_sec": 0.35,
-        "trajectory_time_scale": 1.0
-      },
-      "assembly_board": {
-        "center": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 1.02
+      "controller": {
+        "move_group": {
+          "group_name": "xarm6_xarm6",
+          "ee_link": "xarm6_link_eef",
+          "tcp_link": "xarm6_link_tcp",
+          "frame_id": "world"
         },
-        "thickness_m": 0.01,
-        "slot_floor_z_m": 1.025,
-        "slots": {
-          "SG": [-0.1, 0.08],
-          "MG": [0.0, 0.08],
-          "LG": [0.1, 0.08],
-          "SRP": [-0.1, 0.0],
-          "MRP": [0.0, 0.0],
-          "LRP": [0.1, 0.0],
-          "SCP": [-0.1, -0.08],
-          "MCP": [0.0, -0.08],
-          "LCP": [0.1, -0.08]
+        "gripper": {
+          "joint": "xarm6_drive_joint",
+          "topic": "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
+          "open": 0.0,
+          "close": 0.85,
+          "move_time_sec": 0.4,
+          "settle_sec": 0.08,
+          "feedback_timeout_pad_sec": 1.5,
+          "position_tolerance": 0.01
+        },
+        "services": {
+          "detect_all": "/detect_all",
+          "cartesian_path": "/compute_cartesian_path",
+          "execute_trajectory": "/execute_trajectory",
+          "attach": "/ATTACHLINK",
+          "detach": "/DETACHLINK",
+          "set_entity_state": "/set_entity_state"
+        },
+        "attach": {
+          "robot_model_name": "dual_robot",
+          "attach_link_candidates": [
+            "xarm6_link6",
+            "xarm6_right_inner_knuckle",
+            "xarm6_left_inner_knuckle",
+            "xarm6_right_finger",
+            "xarm6_left_finger"
+          ],
+          "primary_attach_link": "xarm6_link6",
+          "detach_timeout_sec": 2.0,
+          "detach_max_link_attempts": 3
+        },
+        "motion": {
+          "approach_height_m": 0.2,
+          "pick_tcp_z_bias_max_m": 0.02,
+          "pick_tcp_z_bias_min_m": 0.003,
+          "min_pick_tcp_z_m": 1.07,
+          "place_surface_gap_m": -0.01,
+          "release_preopen_settle_sec": 0.15,
+          "release_postopen_settle_sec": 0.6,
+          "release_postdetach_settle_sec": 0.35,
+          "trajectory_time_scale": 1.0
+        },
+        "parts_tuning": {
+          "insertion_depth_m": 0.0025
         }
       },
-      "parts": {
-        "model_map": {
-          "SG": "gear_small",
-          "MG": "gear_medium",
-          "LG": "gear_large",
-          "SRP": "rect_pin_small",
-          "MRP": "rect_pin_medium",
-          "LRP": "rect_pin_large",
-          "SCP": "circ_pin_small",
-          "MCP": "circ_pin_medium",
-          "LCP": "circ_pin_large"
-        },
-        "heights_m": {
-          "SG": 0.01,
-          "MG": 0.015,
-          "LG": 0.02,
-          "SRP": 0.06,
-          "MRP": 0.08,
-          "LRP": 0.1,
-          "SCP": 0.06,
-          "MCP": 0.08,
-          "LCP": 0.1
-        },
-        "place_gap_extra_m": {
-          "SRP": -0.0005,
-          "MRP": -0.001,
-          "LRP": -0.0015,
-          "SCP": -0.0005,
-          "MCP": -0.001,
-          "LCP": -0.0015
-        },
-        "seat_push_extra_m": {
-          "SRP": 0.001,
-          "MRP": 0.0015,
-          "LRP": 0.002,
-          "SCP": 0.001,
-          "MCP": 0.0015,
-          "LCP": 0.002
-        }
+      "named_positions": {
+        "home": [
+          -1.572631,
+          -1.054702,
+          -0.385494,
+          0.000322,
+          1.440603,
+          -1.572544
+        ]
       }
     },
-    "named_positions": {
-      "home": [
-        -1.572631,
-        -1.054702,
-        -0.385494,
-        0.000322,
-        1.440603,
-        -1.572544
-      ]
+    "real": {
+      "static_capabilities": {},
+      "controller": {},
+      "named_positions": {}
     }
   }
 }

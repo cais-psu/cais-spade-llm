@@ -101,8 +101,8 @@ def print_positions(robot_name, joint_names, positions):
         print(f'    {short:24s}  {math.degrees(pos):+8.2f} deg  ({pos:+.6f} rad)')
 
 
-def save_to_json(filepath, name, positions):
-    """Merge a named position into a JSON file."""
+def save_to_json(filepath, name, positions, robot_name=None):
+    """Merge a named position into a JSON file under the gazebo environment block."""
     filepath = Path(filepath)
     if filepath.exists():
         with open(filepath) as f:
@@ -110,9 +110,13 @@ def save_to_json(filepath, name, positions):
     else:
         data = {}
 
-    if 'named_positions' not in data:
-        data['named_positions'] = {}
-    data['named_positions'][name] = positions
+    # Write into the robot's gazebo environment block when possible.
+    if robot_name and robot_name in data:
+        gazebo_block = data[robot_name].setdefault('gazebo', {})
+        named = gazebo_block.setdefault('named_positions', {})
+    else:
+        named = data.setdefault('named_positions', {})
+    named[name] = positions
 
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=2)
@@ -155,7 +159,7 @@ def run_interactive(node, robot_name, save_path):
         saved[name] = positions
 
         if save_path:
-            save_to_json(save_path, name, positions)
+            save_to_json(save_path, name, positions, robot_name=robot_name)
         else:
             print(f'  (use --save or --output to persist)')
 
@@ -206,7 +210,7 @@ def main():
             print(f'  {json.dumps({args.name: positions}, indent=4)}')
 
             if save_path:
-                save_to_json(save_path, args.name, positions)
+                save_to_json(save_path, args.name, positions, robot_name=args.robot)
             else:
                 print('\n  (use --save or --output to persist to file)')
 

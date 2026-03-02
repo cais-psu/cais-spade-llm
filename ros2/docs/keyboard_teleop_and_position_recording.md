@@ -226,7 +226,7 @@ In interactive mode:
 
 | Problem | Fix |
 |---------|-----|
-| `ModuleNotFoundError: No module named 'rclpy'` | Use `python3.10` not `python3`. The venv uses Python 3.12 which can't load ROS2 Humble C extensions. |
+| `ModuleNotFoundError: No module named 'rclpy'` | Use `python3.10` (or a Python 3.10 venv) instead of a newer interpreter. ROS2 Humble C extensions are built for Python 3.10. |
 | `rclpy._rclpy_pybind11` error | Same issue — wrong Python version. Use `python3.10`. |
 | Arrow keys show `^[[A` garbage | Normal during execution — queued keypresses are flushed after each move completes. |
 | `ERROR: /move_action not available` | MoveIt hasn't started yet. Wait longer after launch (~40s). |

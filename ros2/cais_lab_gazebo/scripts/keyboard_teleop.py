@@ -324,9 +324,11 @@ class KeyboardTeleop(Node):
                 data = json.load(f)
         else:
             data = {}
-        if 'named_positions' not in data:
-            data['named_positions'] = {}
-        data['named_positions'][name] = positions
+        # Write into the robot's gazebo environment block.
+        robot_block = data.setdefault(robot, {})
+        gazebo_block = robot_block.setdefault('gazebo', {})
+        named = gazebo_block.setdefault('named_positions', {})
+        named[name] = positions
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
             f.write('\n')
@@ -347,8 +349,14 @@ class KeyboardTeleop(Node):
         if isinstance(data.get('named_positions'), dict):
             candidates.append(data['named_positions'])
         robot_block = data.get(robot)
-        if isinstance(robot_block, dict) and isinstance(robot_block.get('named_positions'), dict):
-            candidates.append(robot_block['named_positions'])
+        if isinstance(robot_block, dict):
+            if isinstance(robot_block.get('named_positions'), dict):
+                candidates.append(robot_block['named_positions'])
+            # Check environment sub-blocks (gazebo / real).
+            for env in ('gazebo', 'real'):
+                env_block = robot_block.get(env, {})
+                if isinstance(env_block.get('named_positions'), dict):
+                    candidates.append(env_block['named_positions'])
 
         for named in candidates:
             values = named.get(name)

@@ -3,11 +3,11 @@
     {
       "id": "SAFE_1",
       "raw_text": "SG must be place_part before MCP is place_part",
-      "constraint_type": "ordering_place_part_before",
-      "process": null,
+      "constraint_type": "ordering_place_before",
+      "process": "assembly",
       "product": [
-        "sg",
-        "mcp"
+        "SG",
+        "MCP"
       ],
       "resources": [
         "any"

@@ -10,7 +10,7 @@ simulation used by the CAIS-SPADE multi-agent system.
 | Document | What it covers |
 |---|---|
 | **This file** | Overview, folder structure, and full setup from scratch |
-| [`docs/wsl_ubuntu22_ros2_humble_setup.md`](docs/wsl_ubuntu22_ros2_humble_setup.md) | Installing Ubuntu 22.04 on WSL, ROS 2 Humble, Python 3.12, and Poetry |
+| [`docs/wsl_ubuntu22_ros2_humble_setup.md`](docs/wsl_ubuntu22_ros2_humble_setup.md) | Installing Ubuntu 22.04 on WSL, ROS 2 Humble, Python 3.10, and Poetry |
 | [`docs/ros2_operation_guide_dual_robots.md`](docs/ros2_operation_guide_dual_robots.md) | Running the dual-robot simulation (xArm6 + UR5e + RG2), verifying it, and controlling robots |
 | [`docs/ros2_operation_guide_xarm6.md`](docs/ros2_operation_guide_xarm6.md) | xArm6 standalone simulation, joint reference, MoveIt2, Python control |
 | [`docs/ros2_operation_guide_ur5e.md`](docs/ros2_operation_guide_ur5e.md) | UR5e standalone simulation (Gazebo Ignition), joint reference |

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -389,8 +390,22 @@ class ResourceAgent(LlmAgent):
             state_after = state_before
             result: Dict[str, Any] | None = None
             try:
+                # Filter fn_args to only params the function accepts.
+                # Functions that declare **kwargs receive everything;
+                # others get only the params in their signature.
+                sig = inspect.signature(func)
+                accepts_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+                if accepts_var_kw:
+                    filtered_args = fn_args
+                else:
+                    accepted = set(sig.parameters.keys())
+                    filtered_args = {k: v for k, v in fn_args.items() if k in accepted}
+
                 result = await asyncio.wait_for(
-                    func(**fn_args),
+                    func(**filtered_args),
                     timeout=agent.tool_timeout_s,
                 )
                 state_after = agent._snapshot_state()

@@ -4,7 +4,7 @@
       "id": "REQ_1_T1",
       "type": "task",
       "requirement_id": "REQ_1",
-      "function_name": "move_to_pick_location",
+      "function_name": "pick_approach",
       "params": {
         "origin_resource_location": "prusa-mk3",
         "part_name": "SG",
@@ -24,7 +24,7 @@
       "id": "REQ_1_T2",
       "type": "task",
       "requirement_id": "REQ_1",
-      "function_name": "pick_part",
+      "function_name": "pick_grasp",
       "params": {
         "part_name": "SG",
         "origin_resource_location": "prusa-mk3",
@@ -46,7 +46,7 @@
       "id": "REQ_1_T3",
       "type": "task",
       "requirement_id": "REQ_1",
-      "function_name": "move_loaded_to_destination",
+      "function_name": "place_approach",
       "params": {
         "destination_location": "assembly_board-v1",
         "part_name": "SG",
@@ -68,7 +68,7 @@
       "id": "REQ_1_T4",
       "type": "task",
       "requirement_id": "REQ_1",
-      "function_name": "assemble_part",
+      "function_name": "place_insert",
       "params": {
         "destination_location": "assembly_board-v1",
         "part_name": "SG",
@@ -88,7 +88,7 @@
       "id": "REQ_2_T1",
       "type": "task",
       "requirement_id": "REQ_2",
-      "function_name": "move_to_pick_location",
+      "function_name": "pick_approach",
       "params": {
         "origin_resource_location": "prusa-mk3",
         "part_name": "MCP",
@@ -108,7 +108,7 @@
       "id": "REQ_2_T2",
       "type": "task",
       "requirement_id": "REQ_2",
-      "function_name": "pick_part",
+      "function_name": "pick_grasp",
       "params": {
         "part_name": "MCP",
         "origin_resource_location": "prusa-mk3",
@@ -130,7 +130,7 @@
       "id": "REQ_2_T3",
       "type": "task",
       "requirement_id": "REQ_2",
-      "function_name": "move_loaded_to_destination",
+      "function_name": "place_approach",
       "params": {
         "destination_location": "assembly_board-v1",
         "part_name": "MCP",
@@ -153,7 +153,7 @@
       "id": "REQ_2_T4",
       "type": "task",
       "requirement_id": "REQ_2",
-      "function_name": "assemble_part",
+      "function_name": "place_insert",
       "params": {
         "destination_location": "assembly_board-v1",
         "part_name": "MCP",

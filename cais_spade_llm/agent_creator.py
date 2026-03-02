@@ -16,6 +16,10 @@ from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
 from resources.sensor.camera_module import CameraModule
 
+# Environment mode: "gazebo" (default) or "real".
+# Controls which sub-config block is read from robot JSON manifests.
+ROBOT_ENV = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
+
 # Camera mode: set USE_ROS2_CAMERA=1 when running with Gazebo + gazebo_camera_detector.
 # Default: mock observations for offline testing.
 if os.environ.get("USE_ROS2_CAMERA", "").strip() in ("1", "true", "yes"):
@@ -85,11 +89,14 @@ def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str
             fn_names = _fn_names(meta)
             ALLOWED_FUNCS[name].update(fn_names)
 
+            # Resolve environment-specific config (gazebo / real).
+            env_block = meta.get(ROBOT_ENV, {})
+
             common = dict(
                 name=name,
                 instructions=meta.get("instructions"),
                 function_names=fn_names,
-                static_capabilities=meta.get("static_capabilities"),
+                static_capabilities=env_block.get("static_capabilities", meta.get("static_capabilities")),
                 cca_jid=cca_jid,  # <-- pass CCA JID into every resource agent
             )
 
@@ -100,6 +107,11 @@ def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str
                     common["sg_slippage_mode"] = meta.get("sg_slippage_mode")
                 if "sg_slippage_scope" in meta:
                     common["sg_slippage_scope"] = meta.get("sg_slippage_scope")
+                common["execution_mode"] = str(
+                    env_block.get("execution_mode", meta.get("execution_mode", "simulate"))
+                ).strip().lower()
+                common["controller_config"] = env_block.get("controller", {})
+                common["named_positions"] = env_block.get("named_positions", {})
                 agent = RobotAgent(jid, pw, **common)
             else:
                 print(
@@ -153,6 +165,7 @@ def create_product_agents(
                 name=name,
                 instructions=meta.get("instructions"),
                 product_specification_file=meta.get("product_specification_file"),
+                product_geometry_file=meta.get("product_geometry_file"),
                 safety_file=meta.get("safety_file"),
                 function_names=fn_names,
                 resource_jids=resource_jids,

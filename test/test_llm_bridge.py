@@ -56,7 +56,7 @@ async def run_test():
     # The LLM must figure out how to use these (or invent new ones) to recover.
     tools_catalog = [
         {
-            "function_name": "move_to_pick_location",
+            "function_name": "pick_approach",
             "process": "assembly",
             "resource_type": "robot",
             "in_state": "idle",
@@ -69,7 +69,7 @@ async def run_test():
             "description": "Move empty gripper to the part's origin location."
         },
         {
-            "function_name": "pick_part",
+            "function_name": "pick_grasp",
             "process": "assembly",
             "resource_type": "robot",
             "in_state": "at_pick",
@@ -84,7 +84,7 @@ async def run_test():
             "description": "Pick a ready part from an origin location."
         },
         {
-            "function_name": "move_loaded_to_destination",
+            "function_name": "place_approach",
             "process": "assembly",
             "resource_type": "robot",
             "in_state": "picked",
@@ -99,7 +99,7 @@ async def run_test():
             "description": "Move the loaded part to its destination location."
         },
         {
-            "function_name": "assemble_part",
+            "function_name": "place_insert",
             "process": "assembly",
             "resource_type": "robot",
             "in_state": "positioned",

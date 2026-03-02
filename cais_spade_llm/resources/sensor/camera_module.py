@@ -11,7 +11,7 @@ class CameraModule:
     """
     Sensor module for observing part positions in the workspace.
 
-    ProductAgent uses this to verify placement after every assemble_part ACK.
+    ProductAgent uses this to verify placement after every place_insert ACK.
     The robot places the part and reports mechanical outcome; CameraModule
     provides the ground truth about where the part actually ended up.
 

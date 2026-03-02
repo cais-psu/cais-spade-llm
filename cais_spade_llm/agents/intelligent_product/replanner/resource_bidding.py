@@ -199,7 +199,7 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
 
             params = {"part_name": cp}
 
-            # Tools that execute at the current location and stay there (e.g. pick_part, assemble_part)
+            # Tools that execute at the current location and stay there (e.g. pick_grasp, place_insert)
             if loc_type == "current_location":
                 if loc_param:
                     params[loc_param] = cl
@@ -221,7 +221,7 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                     {"function_name": fn, "params": params},
                 )
                 
-            # Tools that traverse to an explicit new destination (e.g. move_loaded_to_destination)
+            # Tools that traverse to an explicit new destination (e.g. place_approach)
             elif loc_type == "reachable_location":
                 dest_options = [
                     d for d in list(reachability) + (list(staging_names) if goal_state not in new_ps.get(cp, "") else [])

@@ -6,7 +6,7 @@ authors = ["Jonghan Lim <jxl567@psu.edu>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.10,<3.11"
 spade = "^4.1.2"
 spade-llm = "^0.2.0"
 langchain = "^0.2.11"

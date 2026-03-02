@@ -58,10 +58,10 @@ Gazebo vs real hardware is **not** a Python code concern — it depends on which
 - [ ] **Modify `agents/resource_agent/robot_agent.py`** — Use backend instead of `_simulate_action`
   - Add `_backend: RobotBackend` attribute, created via factory in `__init__`
   - Action method dispatch:
-    - `move_to_pick_location` → `_backend.move_to_named_position()` or `move_to_joint_positions()`
-    - `pick_part` → `_backend.close_gripper()`
-    - `move_loaded_to_destination` → `_backend.move_to_joint_positions()`
-    - `assemble_part` → `_backend.open_gripper()`
+    - `pick_approach` → `_backend.move_to_named_position()` or `move_to_joint_positions()`
+    - `pick_grasp` → `_backend.close_gripper()`
+    - `place_approach` → `_backend.move_to_joint_positions()`
+    - `place_insert` → `_backend.open_gripper()`
     - `move_home` → `_backend.move_to_named_position("home")`
   - Update `_position` from `_backend.get_joint_positions()` after each move
 

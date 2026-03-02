@@ -691,11 +691,11 @@ STRICT RULES FOR MODIFICATION:
       - Each function in tools_catalog has `in_state` and `out_state` fields
       - CHAIN functions by matching output state to input state
       - State transition examples:
-        * pick_part: in_state="ready" → out_state="picked"
-        * move_loaded_to_destination: in_state="picked" → out_state="positioned"
-        * assemble_part: in_state="positioned" → out_state="idle"
+        * pick_grasp: in_state="ready" → out_state="picked"
+        * place_approach: in_state="picked" → out_state="positioned"
+        * place_insert: in_state="positioned" → out_state="idle"
       - Build multi-step sequences by connecting compatible states
-      - Example: To assemble a part: pick_part (→picked) → move_loaded (→positioned) → assemble_part (→idle)
+      - Example: To assemble a part: pick_grasp (→picked) → move_loaded (→positioned) → place_insert (→idle)
 
    b) CHECK WORKSPACE BOUNDARIES:
       - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
@@ -709,7 +709,7 @@ STRICT RULES FOR MODIFICATION:
         ```json
         {{
           "id": "RECOVER_FAILED_PART",
-          "function_name": "pick_part",
+          "function_name": "pick_grasp",
           "params": {{ "part_name": "SG", "location": "failed_position" }},
           "resource_jid": "ur5e@localhost",  // ← Selected because part is in UR5e's workspace
           "change_reason": "INSERTION: UR5e picks failed part (in UR5e workspace, not xArm6)"
@@ -725,7 +725,7 @@ STRICT RULES FOR MODIFICATION:
         ```
 
    d) COMPOSITIONAL REASONING PRINCIPLES:
-      - Use `assemble_part` only for final placement at the assembly destination
+      - Use `place_insert` only for final placement at the assembly destination
       - For intermediate placement (staging, handoff), GENERATE a new recovery action not present in tools_catalog
       - Staging enables coordination between robots without collision
       - CONSULT function_owner_agent field to verify which robot has which capability

@@ -6,10 +6,17 @@ import asyncio
 from typing import Any, Dict, Optional
 
 from agents.resource_agent.resource_agent import ResourceAgent
+from resources.robot import UR5eController, XArm6Controller
 
 
 class RobotAgent(ResourceAgent):
-    """Robot resource (UR5e, xArm, etc.) with granular motion tools."""
+    """Robot resource (UR5e, xArm, etc.) with granular motion tools.
+
+    Execution behavior is selected by `execution_mode`:
+    - `simulate`: keep pure asyncio simulation via `_simulate_action`
+    - `ros2`: call ROS2 controller phases
+    - `real`: call ROS2 controller phases against real hardware stack
+    """
 
     agent_role = "robot"
 
@@ -26,14 +33,25 @@ class RobotAgent(ResourceAgent):
         self.sg_slippage_scope = str(kw.pop("sg_slippage_scope", "xarm6")).lower()
         self._sg_slippage_triggered = False
 
+        # Controller config from the environment-specific robot JSON block.
+        controller_config = kw.pop("controller_config", {})
+        self.controller_config = controller_config
+        self.named_positions = kw.pop("named_positions", {}) or {}
+        self.motion_config = controller_config.get("motion", {})
+        self.parts_tuning = controller_config.get("parts_tuning", {})
+        execution_mode = str(kw.pop("execution_mode", "simulate")).strip().lower()
+        if execution_mode not in {"simulate", "ros2", "real"}:
+            execution_mode = "simulate"
+        self.execution_mode = execution_mode
+
         kw.setdefault(
             "function_names",
             [
-                "pick_part",
-                "move_to_pick_location",
-                "move_loaded_to_destination",
+                "pick_approach",
+                "pick_grasp",
+                "place_approach",
                 "move_home",
-                "assemble_part",
+                "place_insert",
             ],
         )
         super().__init__(jid, password, name=name, **kw)
@@ -45,10 +63,15 @@ class RobotAgent(ResourceAgent):
         self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed
         self._position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"  # open, closed
+        self._controller = self._build_controller()
 
         self.logger.info(
-            "RobotAgent '%s' initialized. tools=%s sg_slippage_mode=%s sg_slippage_scope=%s",
+            (
+                "RobotAgent '%s' initialized. mode=%s tools=%s "
+                "sg_slippage_mode=%s sg_slippage_scope=%s"
+            ),
             name,
+            self.execution_mode,
             list(self.executables.keys()),
             self.sg_slippage_mode,
             self.sg_slippage_scope,
@@ -90,7 +113,98 @@ class RobotAgent(ResourceAgent):
         self._sg_slippage_triggered = True
         return True
 
-    async def move_to_pick_location(
+    def _build_controller(self):
+        """
+        Build the low-level robot controller when execution_mode requires hardware/ROS2.
+
+        simulate mode intentionally keeps controller as None and uses _simulate_action.
+        """
+        if self.execution_mode == "simulate":
+            return None
+
+        robot_scope = self._robot_scope_name()
+        try:
+            if robot_scope.startswith("ur5e"):
+                return UR5eController(
+                    controller_config=self.controller_config,
+                    named_positions=self.named_positions,
+                    execution_mode=self.execution_mode,
+                )
+            if robot_scope.startswith("xarm6"):
+                return XArm6Controller(
+                    controller_config=self.controller_config,
+                    named_positions=self.named_positions,
+                    execution_mode=self.execution_mode,
+                )
+
+            self.logger.error(
+                "[Robot] Unknown robot '%s' for controller selection; "
+                "falling back to simulate mode.",
+                self.agent_name,
+            )
+            self.execution_mode = "simulate"
+            return None
+        except Exception as exc:
+            self.logger.exception("[Robot] Failed to build controller: %s", exc)
+            self.execution_mode = "simulate"
+            return None
+
+    async def _run_phase_or_simulate(
+        self,
+        *,
+        phase_name: str,
+        simulate_description: str,
+        simulate_duration: float = 5.0,
+        **phase_kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Run a controller phase in ros2/real mode, otherwise use simulation."""
+        if self.execution_mode == "simulate":
+            await self._simulate_action(simulate_description, duration=simulate_duration)
+            return {"success": True, "message": f"Simulated: {simulate_description}"}
+
+        if self._controller is None:
+            return {"success": False, "message": "controller is not initialized"}
+
+        method = getattr(self._controller, phase_name, None)
+        if not callable(method):
+            return {
+                "success": False,
+                "message": f"controller missing phase method '{phase_name}'",
+            }
+
+        try:
+            result = await asyncio.to_thread(method, **phase_kwargs)
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, bool):
+                return {
+                    "success": result,
+                    "message": f"{phase_name} {'ok' if result else 'failed'}",
+                }
+            return {"success": False, "message": f"{phase_name} returned invalid result"}
+        except Exception as exc:
+            self.logger.exception("[Robot] %s execution failed", phase_name)
+            return {"success": False, "message": f"{phase_name} exception: {type(exc).__name__}"}
+
+    @staticmethod
+    def _normalize_phase_result(
+        phase_result: Dict[str, Any],
+        *,
+        on_success: str,
+        on_failure: str,
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Convert controller/sim result to ResourceAgent ACK payload shape."""
+        ok = bool((phase_result or {}).get("success"))
+        msg = str((phase_result or {}).get("message") or (on_success if ok else on_failure))
+        payload: Dict[str, Any] = {
+            "status": "completed" if ok else "failed",
+            "content": msg,
+        }
+        if isinstance((phase_result or {}).get("observations"), dict):
+            payload["observations"] = dict(phase_result["observations"])
+        return ok, payload
+
+    async def pick_approach(
         self,
         origin_resource_location: str,
         part_name: str,
@@ -98,6 +212,7 @@ class RobotAgent(ResourceAgent):
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
+        product_geometry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         ---
@@ -122,13 +237,16 @@ class RobotAgent(ResourceAgent):
           speed:
             type: number
             description: Optional motion speed.
+          product_geometry:
+            type: object
+            description: Product geometry payload containing part poses in world frame.
           product_jid:
             type: string
             description: JID of the ProductAgent that owns this task.
           task_id:
             type: string
 
-        description: Move empty gripper to the part's origin location.
+        description: Approach the part's origin location with empty gripper.
         ---
         """
 
@@ -137,19 +255,34 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
-        await self._simulate_action(
-            f"Travel empty to pick location {origin_resource_location} for {part_name} "
-            f"(speed={speed or 'default'})"
+        phase = await self._run_phase_or_simulate(
+            phase_name="pick_approach",
+            simulate_description=(
+                f"Travel empty to pick location {origin_resource_location} for {part_name} "
+                f"(speed={speed or 'default'})"
+            ),
+            origin_resource_location=origin_resource_location,
+            part_name=part_name,
+            product_geometry=product_geometry,
+            speed=speed,
         )
+        ok, payload = self._normalize_phase_result(
+            phase,
+            on_success=f"Arrived at {origin_resource_location} ready to pick {part_name}.",
+            on_failure=(
+                f"Failed to approach pick location {origin_resource_location} "
+                f"for {part_name}."
+            ),
+        )
+        if not ok:
+            return payload
+
         self._current_state = "at_pick"
         # Simulated position update (in real system, would query robot controller)
         self._position = {"x": 0.0, "y": 0.0, "z": 300.0}
-        return {
-            "status": "completed",
-            "content": f"Arrived at {origin_resource_location} ready to pick {part_name}.",
-        }
+        return payload
 
-    async def pick_part(
+    async def pick_grasp(
         self,
         part_name: str,
         origin_resource_location: str,
@@ -157,6 +290,7 @@ class RobotAgent(ResourceAgent):
         gripper: Optional[str] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
+        product_geometry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         ---
@@ -187,6 +321,9 @@ class RobotAgent(ResourceAgent):
           gripper:
             type: string
             description: Optional gripper configuration.
+          product_geometry:
+            type: object
+            description: Product geometry payload containing part poses in world frame.
           product_jid:
             type: string
             description: JID of the ProductAgent that owns this task.
@@ -202,16 +339,31 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
-        await self._simulate_action(
-            f"Picking {part_name} from {origin_resource_location} "
-            f"(gripper={gripper or 'default'})"
+        phase = await self._run_phase_or_simulate(
+            phase_name="pick_grasp",
+            simulate_description=(
+                f"Picking {part_name} from {origin_resource_location} "
+                f"(gripper={gripper or 'default'})"
+            ),
+            part_name=part_name,
+            origin_resource_location=origin_resource_location,
+            product_geometry=product_geometry,
+            gripper=gripper,
         )
+        ok, payload = self._normalize_phase_result(
+            phase,
+            on_success=f"Picked {part_name}.",
+            on_failure=f"Failed to pick {part_name} from {origin_resource_location}.",
+        )
+        if not ok:
+            return payload
+
         self._held_part = part_name
         self._current_state = "picked"
         self._gripper_state = "closed"
-        return {"status": "completed", "content": f"Picked {part_name}."}
+        return payload
 
-    async def move_loaded_to_destination(
+    async def place_approach(
         self,
         destination_location: str,
         part_name: str,
@@ -219,6 +371,7 @@ class RobotAgent(ResourceAgent):
         speed: Optional[float] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
+        product_geometry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         ---
@@ -249,6 +402,9 @@ class RobotAgent(ResourceAgent):
           speed:
             type: number
             description: Optional motion speed while loaded.
+          product_geometry:
+            type: object
+            description: Product geometry payload containing target placement poses.
           product_jid:
             type: string
             description: JID of the ProductAgent that owns this task.
@@ -271,19 +427,31 @@ class RobotAgent(ResourceAgent):
                 part_name, self._held_part
             )
 
-        await self._simulate_action(
-            f"Move loaded part {self._held_part} to {destination_location} "
-            f"(speed={speed or 'default'})"
+        phase = await self._run_phase_or_simulate(
+            phase_name="place_approach",
+            simulate_description=(
+                f"Move loaded part {self._held_part} to {destination_location} "
+                f"(speed={speed or 'default'})"
+            ),
+            destination_location=destination_location,
+            part_name=part_name or self._held_part,
+            product_geometry=product_geometry,
+            speed=speed,
         )
+        ok, payload = self._normalize_phase_result(
+            phase,
+            on_success=f"Reached {destination_location} with {self._held_part}.",
+            on_failure=f"Failed to move loaded part to {destination_location}.",
+        )
+        if not ok:
+            return payload
+
         self._current_state = "positioned"
         # Simulated position update
         self._position = {"x": 400.0, "y": -200.0, "z": 200.0}
-        return {
-            "status": "completed",
-            "content": f"Reached {destination_location} with {self._held_part}.",
-        }
+        return payload
 
-    async def assemble_part(
+    async def place_insert(
         self,
         destination_location: str,
         part_name: str,
@@ -291,6 +459,7 @@ class RobotAgent(ResourceAgent):
         orientation: Optional[str] = None,
         product_jid: Optional[str] = None,
         task_id: Optional[str] = None,
+        product_geometry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         ---
@@ -322,6 +491,9 @@ class RobotAgent(ResourceAgent):
           orientation:
             type: string
             description: Optional placement orientation.
+          product_geometry:
+            type: object
+            description: Product geometry payload containing insertion target pose.
           product_jid:
             type: string
             description: JID of the ProductAgent that owns this task.
@@ -333,7 +505,7 @@ class RobotAgent(ResourceAgent):
         """
 
         if not self._held_part:
-            msg = "No part currently held; run pick_part first."
+            msg = "No part currently held; run pick_grasp first."
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
@@ -361,19 +533,34 @@ class RobotAgent(ResourceAgent):
                 },
             }
 
-        await self._simulate_action(
-            f"Assembling {self._held_part} at {destination_location} "
-            f"(orientation={orientation or 'default'})"
+        phase = await self._run_phase_or_simulate(
+            phase_name="place_insert",
+            simulate_description=(
+                f"Assembling {self._held_part} at {destination_location} "
+                f"(orientation={orientation or 'default'})"
+            ),
+            destination_location=destination_location,
+            part_name=part_name or self._held_part,
+            product_geometry=product_geometry,
+            orientation=orientation,
         )
+        ok, payload = self._normalize_phase_result(
+            phase,
+            on_success=f"Assembled {self._held_part} at {destination_location}.",
+            on_failure=f"Failed to assemble {self._held_part} at {destination_location}.",
+        )
+        if not ok:
+            self._current_state = "recovery_required"
+            return payload
+
         placed = self._held_part
         self._held_part = None
         self._current_state = "idle"
         self._gripper_state = "open"
-        return {
-            "status": "completed",
-            "content": f"Assembled {placed} at {destination_location}.",
-            "placed_location": destination_location,
-        }
+        payload["placed_location"] = destination_location
+        if not payload.get("content"):
+            payload["content"] = f"Assembled {placed} at {destination_location}."
+        return payload
 
     async def move_home(
         self,
@@ -407,10 +594,22 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
-        await self._simulate_action("Moving arm to home position")
+        phase = await self._run_phase_or_simulate(
+            phase_name="move_home",
+            simulate_description="Moving arm to home position",
+            simulate_duration=3.0,
+        )
+        ok, payload = self._normalize_phase_result(
+            phase,
+            on_success="At home position.",
+            on_failure="Failed to move to home position.",
+        )
+        if not ok:
+            return payload
+
         self._current_state = "idle"
         self._position = {"x": 0.0, "y": 0.0, "z": 445.0}  # Home position
-        return {"status": "completed", "content": "At home position."}
+        return payload
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -418,6 +617,8 @@ class RobotAgent(ResourceAgent):
     def _snapshot_state(self) -> Dict[str, Any]:
         """Robot-specific state snapshot (override)."""
         return {
+            "execution_mode": self.execution_mode,
+            "controller_ready": self._controller is not None if self.execution_mode != "simulate" else True,
             "held_part": self._held_part,
             "current_state": self._current_state,
             "position": self._position.copy(),
@@ -433,7 +634,7 @@ class RobotAgent(ResourceAgent):
 
         self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
 
-        interval = 5.0   # print every 5 seconds
+        interval = 2.0   # print every 5 seconds
         elapsed = 0.0
 
         while elapsed < duration:

@@ -154,17 +154,15 @@ cp -r /mnt/wsl/instances/Ubuntu-24.04/home/jongh/projects/cais-spade-llm ~/proje
 
 ---
 
-## 7. Set Up Python Environment (Poetry + Python 3.12)
+## 7. Set Up Python Environment (Poetry + Python 3.10)
 
-The project uses **Poetry** for dependency management and requires **Python 3.12**.
-Ubuntu 22.04 ships with Python 3.10 by default, so install 3.12 via the deadsnakes PPA.
+The project uses **Poetry** for dependency management and should run on **Python 3.10**
+to stay compatible with ROS2 Humble.
 
-### 7a. Install Python 3.12
+### 7a. Install Python 3.10
 
 ```bash
-sudo add-apt-repository ppa:deadsnakes/ppa -y
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3.12-dev
+sudo apt install -y python3.10 python3.10-venv python3.10-dev
 ```
 
 ### 7b. Install required system packages
@@ -188,7 +186,7 @@ sudo apt install -y python3-lxml
 ### 7c. Install Poetry
 
 ```bash
-curl -sSL https://install.python-poetry.org | python3.12
+curl -sSL https://install.python-poetry.org | python3.10
 ```
 
 Add to `~/.bashrc`:
@@ -205,8 +203,8 @@ cd ~/projects/cais-spade-llm
 # Store venv inside the project (creates .venv/)
 poetry config virtualenvs.in-project true
 
-# Use Python 3.12 for this project
-poetry env use /usr/bin/python3.12
+# Use Python 3.10 for this project
+poetry env use /usr/bin/python3.10
 
 # Install all dependencies
 poetry install
@@ -215,7 +213,7 @@ poetry install
 ### 7e. Verify
 
 ```bash
-# Should print 3.12.x
+# Should print 3.10.x
 .venv/bin/python --version
 
 # Should run the main entry point

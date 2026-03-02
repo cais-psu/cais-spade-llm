@@ -41,7 +41,7 @@ Augment the BFS state to include DFA states, and prune transitions that violate 
 
 ## Key Complexity
 
-Mutex constraints ("no simultaneous pick_part") require the BFS to reason about what **all** resources are doing at the same step simultaneously — the current sequential event BFS doesn't model this. This may require a parallel-step BFS model.
+Mutex constraints ("no simultaneous pick_grasp") require the BFS to reason about what **all** resources are doing at the same step simultaneously — the current sequential event BFS doesn't model this. This may require a parallel-step BFS model.
 
 ---
 

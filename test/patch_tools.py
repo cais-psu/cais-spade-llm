@@ -6,13 +6,13 @@ def patch():
         
     for t in tools:
         fn = t.get("function")
-        if fn == "pick_part":
+        if fn == "pick_grasp":
             t["context_mapping"] = {"location_param": "origin_resource_location", "location_type": "current_location"}
-        elif fn == "move_to_pick_location":
+        elif fn == "pick_approach":
             t["context_mapping"] = {"location_param": "origin_resource_location", "location_type": "part_location"}
-        elif fn == "move_loaded_to_destination":
+        elif fn == "place_approach":
             t["context_mapping"] = {"location_param": "destination_location", "location_type": "reachable_location"}
-        elif fn == "assemble_part":
+        elif fn == "place_insert":
             t["context_mapping"] = {"location_param": "destination_location", "location_type": "current_location"}
 
     with open("cais_spade_llm/initialization/tools.json", "w") as f:

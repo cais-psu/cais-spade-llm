@@ -901,7 +901,7 @@ class ProcessPlanner:
         def task_sig(tid: str) -> str:
             """
             Human-readable task signature.
-            Example: 'pick_part(SG)' or 'move_loaded_to_destination(MCP)'.
+            Example: 'pick_grasp(SG)' or 'place_approach(MCP)'.
             """
             t = by_id[tid]
             fn = t.get("function_name") or "unknown_fn"
@@ -915,7 +915,7 @@ class ProcessPlanner:
 
         def readable_event(tid: str, phase: str) -> str:
             """
-            Example: 'pick_part(SG).start' / 'pick_part(SG).done'
+            Example: 'pick_grasp(SG).start' / 'pick_grasp(SG).done'
             """
             return f"{task_sig(tid)}.{phase}"
 

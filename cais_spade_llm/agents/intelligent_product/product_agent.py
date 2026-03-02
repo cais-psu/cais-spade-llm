@@ -36,6 +36,7 @@ class ProductAgent(LlmAgent):
         resource_jids: Optional[Iterable[str]] = None,
         resource_agents: Optional[Iterable[Any]] = None,
         product_specification_file: Optional[str] = None,
+        product_geometry_file: Optional[str] = None,
         safety_file: Optional[str] = None,
         instruction_override: Optional[str] = None,
         cca_jid: Optional[str] = None,
@@ -57,6 +58,8 @@ class ProductAgent(LlmAgent):
         self.resource_jids = list(resource_jids or [])
         self._resource_agent_refs = list(resource_agents or [])
         self.product_specification_file = product_specification_file
+        self.product_geometry_file = product_geometry_file
+        self.product_geometry: Dict[str, Any] = self._load_product_geometry(product_geometry_file)
         self.safety_file = safety_file
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = instruction_override
@@ -369,6 +372,43 @@ class ProductAgent(LlmAgent):
                 self.logger.exception(f"[Product] Failed to read spec: {e}")
 
         return None
+
+    def _load_product_geometry(self, geometry_file: Optional[str]) -> Dict[str, Any]:
+        """Load product geometry JSON, selecting the environment block (gazebo/real)."""
+        if not geometry_file:
+            return {}
+        env = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
+        try:
+            p = Path(geometry_file)
+            if not p.exists():
+                self.logger.warning("[Product] Geometry file not found: %s", p)
+                return {}
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            geo = raw.get(env, {})
+            self.logger.info(
+                "[Product] Loaded geometry for env='%s' from %s", env, p,
+            )
+            return geo
+        except Exception:
+            self.logger.exception("[Product] Failed to load geometry from %s", geometry_file)
+            return {}
+
+    def _geometry_for_part(self, part_name: str) -> Dict[str, Any]:
+        """Extract placement geometry for a single part from loaded product geometry."""
+        if not self.product_geometry:
+            return {}
+        board = self.product_geometry.get("assembly_board", {})
+        parts = self.product_geometry.get("parts", {})
+        slot_xy = board.get("slots", {}).get(part_name)
+        if slot_xy is None:
+            return {}
+        return {
+            "slot_xy": slot_xy,
+            "part_height_m": parts.get("heights_m", {}).get(part_name),
+            "model_name": parts.get("model_map", {}).get(part_name),
+            "slot_floor_z_m": board.get("slot_floor_z_m"),
+            "board_center": board.get("center", {}),
+        }
 
     def _compose_task_msg(
         self,
@@ -867,10 +907,18 @@ class ProductAgent(LlmAgent):
                     to,
                 )
 
-            # Build the instruction for the RobotAgent from the DAG node
+            # Build the instruction for the RobotAgent from the DAG node.
+            # Enrich params with product geometry when a part_name is present.
+            params = dict(task_node.get("params", {}))
+            part_name = params.get("part_name")
+            if part_name:
+                geo = agent._geometry_for_part(part_name)
+                if geo:
+                    params["product_geometry"] = geo
+
             instruction = {
                 "function_name": task_node.get("function_name"),
-                "params": task_node.get("params", {}),
+                "params": params,
             }
 
             task_id = task_node["id"]
