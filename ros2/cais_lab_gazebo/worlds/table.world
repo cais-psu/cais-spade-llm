@@ -157,7 +157,7 @@
     <!-- Camera above Prusa MK4-1 (pick detection) -->
     <model name="cam_mk4_1">
       <static>true</static>
-      <pose>0.4 0.4 1.40 0 1.5708 0</pose>
+      <pose>0.4 0.3 1.40 0 1.5708 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
@@ -192,7 +192,7 @@
     <!-- Camera above Prusa MK4-2 (pick detection) -->
     <model name="cam_mk4_2">
       <static>true</static>
-      <pose>0.4 -0.4 1.40 0 1.5708 0</pose>
+      <pose>0.4 -0.3 1.40 0 1.5708 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
@@ -279,10 +279,10 @@
       </link>
     </model>
 
-    <!-- Prusa MK4-1 (Flat Mockup) on Right Side (0.6, 0.4) -->
+    <!-- Prusa MK4-1 (Flat Mockup) on Right Side (0.4, 0.3) -->
     <model name="prusa_mk4_1">
       <static>true</static>
-      <pose>0.4 0.4 1.04 0 0 0</pose>
+      <pose>0.4 0.3 1.04 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
@@ -299,10 +299,10 @@
       </link>
     </model>
 
-    <!-- Prusa MK4-2 (Flat Mockup) on Right Side (0.6, -0.4) -->
+    <!-- Prusa MK4-2 (Flat Mockup) on Right Side (0.4, -0.3) -->
     <model name="prusa_mk4_2">
       <static>true</static>
-      <pose>0.4 -0.4 1.04 0 0 0</pose>
+      <pose>0.4 -0.3 1.04 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
@@ -368,11 +368,11 @@
     </model>
 
     <!-- ==============================================
-         PARTS: MEDIUM SET on MK4-1 (0.6, 0.4)
+         PARTS: MEDIUM SET on MK4-1 (0.4, 0.3)
          All components spawned at Z=1.15
          ============================================== -->
     <model name="gear_medium">
-      <pose>0.4 0.5 1.15 0 0 0</pose>
+      <pose>0.4 0.4 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.10</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz></inertia></inertial>
         <collision name="collision">
@@ -386,7 +386,7 @@
       </link>
     </model>
     <model name="rect_pin_medium">
-      <pose>0.4 0.4 1.15 0 0 0</pose>
+      <pose>0.4 0.3 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision">
@@ -400,7 +400,7 @@
       </link>
     </model>
     <model name="circ_pin_medium">
-      <pose>0.4 0.3 1.15 0 0 0</pose>
+      <pose>0.4 0.2 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision">
@@ -415,11 +415,11 @@
     </model>
 
     <!-- ==============================================
-         PARTS: LARGE SET on MK4-2 (0.6, -0.4)
+         PARTS: LARGE SET on MK4-2 (0.4, -0.3)
          All components spawned at Z=1.15
          ============================================== -->
     <model name="gear_large">
-      <pose>0.4 -0.3 1.15 0 0 0</pose>
+      <pose>0.4 -0.2 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.15</mass><inertia><ixx>0.0003</ixx><iyy>0.0003</iyy><izz>0.0003</izz></inertia></inertial>
         <collision name="collision">
@@ -433,7 +433,7 @@
       </link>
     </model>
     <model name="rect_pin_large">
-      <pose>0.4 -0.4 1.15 0 0 0</pose>
+      <pose>0.4 -0.3 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision">
@@ -447,7 +447,7 @@
       </link>
     </model>
     <model name="circ_pin_large">
-      <pose>0.4 -0.5 1.15 0 0 0</pose>
+      <pose>0.4 -0.4 1.15 0 0 0</pose>
       <link name="link">
         <inertial><mass>0.09</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision">

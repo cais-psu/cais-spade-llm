@@ -392,9 +392,7 @@ class Ros2PickPlaceController:
 
         self._initialized = True
         self._log().info(
-            "[%s] Controller initialized (execution_mode=%s)",
-            self.robot_name,
-            self.execution_mode,
+            f"[{self.robot_name}] Controller initialized (execution_mode={self.execution_mode})"
         )
         self._last_failure_message = ""
         return True
@@ -458,7 +456,7 @@ class Ros2PickPlaceController:
                 pass
             time.sleep(0.1)
         else:
-            self._log().error("TF not ready for %s -> %s", self.frame_id, self.ee_link)
+            self._log().error(f"TF not ready for {self.frame_id} -> {self.ee_link}")
             self._last_failure_message = (
                 f"tf not ready for {self.frame_id} -> {self.ee_link}"
             )
@@ -487,9 +485,7 @@ class Ros2PickPlaceController:
             return False
         if len(positions) != len(self.arm_joint_names):
             self._log().error(
-                "move_joints expected %d joints, got %d",
-                len(self.arm_joint_names),
-                len(positions),
+                f"move_joints expected {len(self.arm_joint_names)} joints, got {len(positions)}"
             )
             return False
 
@@ -522,7 +518,7 @@ class Ros2PickPlaceController:
         result = self._wait_future(future, timeout_sec=10.0, label="detect_all")
         if not result or not result.success:
             msg = result.message if result else "timeout"
-            self._log().error("/detect_all failed: %s", msg)
+            self._log().error(f"/detect_all failed: {msg}")
             return []
         try:
             parsed = json.loads(result.message)
@@ -553,6 +549,21 @@ class Ros2PickPlaceController:
         target = None
         if part_name:
             target = next((p for p in parts if p.get("part_name") == part_name), None)
+            if target is None:
+                detected_names = sorted(
+                    {
+                        str(p.get("part_name"))
+                        for p in parts
+                        if str(p.get("part_name") or "").strip()
+                    }
+                )
+                return {
+                    "success": False,
+                    "message": (
+                        f"requested part '{part_name}' not detected; "
+                        f"detected={detected_names}"
+                    ),
+                }
         if target is None:
             target = parts[0]
 
@@ -595,8 +606,8 @@ class Ros2PickPlaceController:
         if not self._gripper_command(self.gripper_open, "OPEN"):
             return {"success": False, "message": "failed to open gripper"}
 
-        if not self._cartesian_move(
-            self._make_pose(tx, ty, travel_z, ori), "Move above part"
+        if not self._move_xy_direct(
+            tx, ty, travel_z, ori, "Move above part"
         ):
             return {"success": False, "message": "failed to move above part"}
 
@@ -651,9 +662,7 @@ class Ros2PickPlaceController:
             return {"success": False, "message": "pick_approach must run first"}
         if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
             self._log().warn(
-                "pick_grasp requested %s but active part is %s",
-                part_name,
-                ctx.get("part_name"),
+                f"pick_grasp requested {part_name} but active part is {ctx.get('part_name')}"
             )
 
         if not self._gripper_command(self.gripper_close, "CLOSE — grasping"):
@@ -685,9 +694,7 @@ class Ros2PickPlaceController:
             return {"success": False, "message": "pick_grasp must complete first"}
         if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
             self._log().warn(
-                "place_approach requested %s but active part is %s",
-                part_name,
-                ctx.get("part_name"),
+                f"place_approach requested {part_name} but active part is {ctx.get('part_name')}"
             )
 
         geo = product_geometry or {}
@@ -767,9 +774,7 @@ class Ros2PickPlaceController:
             return {"success": False, "message": "place_approach must complete first"}
         if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
             self._log().warn(
-                "place_insert requested %s but active part is %s",
-                part_name,
-                ctx.get("part_name"),
+                f"place_insert requested {part_name} but active part is {ctx.get('part_name')}"
             )
 
         model_name = str(ctx.get("target_model") or "")
@@ -863,7 +868,7 @@ class Ros2PickPlaceController:
         while time.monotonic() < deadline:
             if client and client.wait_for_service(timeout_sec=0.5):
                 return True
-        self._log().error("Timed out waiting for service: %s", name)
+        self._log().error(f"Timed out waiting for service: {name}")
         self._last_failure_message = f"timed out waiting for service: {name}"
         return False
 
@@ -871,7 +876,7 @@ class Ros2PickPlaceController:
         while time.monotonic() < deadline:
             if action_client and action_client.wait_for_server(timeout_sec=0.5):
                 return True
-        self._log().error("Timed out waiting for action server: %s", name)
+        self._log().error(f"Timed out waiting for action server: {name}")
         self._last_failure_message = f"timed out waiting for action server: {name}"
         return False
 
@@ -887,7 +892,7 @@ class Ros2PickPlaceController:
             pose.orientation = t.transform.rotation
             return pose
         except Exception as e:
-            self._log().error("TF lookup failed: %s", e)
+            self._log().error(f"TF lookup failed: {e}")
             return None
 
     def _get_ee_tcp_world_z_offset(self) -> float:
@@ -929,14 +934,11 @@ class Ros2PickPlaceController:
 
         if not saw_feedback:
             self._log().warn(
-                "No joint-state feedback for '%s' while waiting gripper move",
-                self.gripper_joint,
+                f"No joint-state feedback for '{self.gripper_joint}' while waiting gripper move"
             )
         else:
             self._log().warn(
-                "Gripper target not reached: target=%.3f current=%.3f",
-                target,
-                float(last_pos),
+                f"Gripper target not reached: target={target:.3f} current={float(last_pos):.3f}"
             )
         return False
 
@@ -954,7 +956,7 @@ class Ros2PickPlaceController:
         move_time_s = self.gripper_move_time_sec if move_time_s is None else float(move_time_s)
         wait_s = self.gripper_settle_sec if wait_s is None else float(wait_s)
 
-        self._log().info("Gripper: %s (position=%.3f)", label, position)
+        self._log().info(f"Gripper: {label} (position={position:.3f})")
         traj = self._JointTrajectory()
         traj.joint_names = [self.gripper_joint]
         point = self._JointTrajectoryPoint()
@@ -983,12 +985,16 @@ class Ros2PickPlaceController:
                 future.cancel()
             except Exception:
                 pass
-            self._log().error("[%s] timed out", label)
+            self._log().error(f"[{label}] timed out")
             return None
         return future.result()
 
     def _scale_trajectory_timing(self, solution, scale: float):
-        if scale <= 1.0 or solution is None:
+        if solution is None:
+            return
+        # `scale` multiplies trajectory duration:
+        #   >1.0 => slower, <1.0 => faster, ==1.0 => unchanged.
+        if scale <= 0.0 or abs(scale - 1.0) < 1e-6:
             return
         joint_traj = solution.joint_trajectory
         if not joint_traj.points:
@@ -1039,7 +1045,7 @@ class Ros2PickPlaceController:
                 self._detach_model_from_any_link(model_name)
                 continue
 
-        self._log().error("Failed to attach %s", model_name)
+        self._log().error(f"Failed to attach {model_name}")
         return False
 
     def _detach_model_from_any_link(self, target_model: str) -> bool:
@@ -1110,7 +1116,7 @@ class Ros2PickPlaceController:
                 self._attached_link = None
                 return True
 
-        self._log().error("Failed to detach %s", target_model)
+        self._log().error(f"Failed to detach {target_model}")
         return False
 
     def _snap_part_to_slot(
@@ -1158,10 +1164,17 @@ class Ros2PickPlaceController:
         future = self._cart_client.call_async(request)
         response = self._wait_future(future, timeout_sec=10.0, label=f"plan:{label}")
         if response is None:
+            self._log().error(f"[{label}] planning response timed out")
             return False
         if response.fraction < min_fraction:
+            self._log().error(
+                f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
+            )
             return False
         if response.fraction < 0.999 and not allow_partial:
+            self._log().error(
+                f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
+            )
             return False
 
         exec_goal = self._ExecuteTrajectory.Goal()
@@ -1171,11 +1184,14 @@ class Ros2PickPlaceController:
         send_future = self._exec_client.send_goal_async(exec_goal)
         goal_handle = self._wait_future(send_future, timeout_sec=10.0, label=f"send:{label}")
         if not goal_handle or not goal_handle.accepted:
+            self._log().error(f"[{label}] trajectory goal rejected by execute action")
             return False
 
         result_future = goal_handle.get_result_async()
         result = self._wait_future(result_future, timeout_sec=30.0, label=f"result:{label}")
         code = result.result.error_code.val if result else None
+        if code != 1:
+            self._log().error(f"[{label}] execute_trajectory failed with error_code={code}")
         return code == 1
 
     def _move_xy_direct(

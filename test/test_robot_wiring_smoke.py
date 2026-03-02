@@ -54,6 +54,11 @@ PART_MODEL_MAP = {
 }
 
 
+DEFAULT_GEOMETRY_FILE = (
+    PKG_ROOT / "specification" / "products" / "geometry" / "assembly_board-v1.json"
+)
+
+
 def _load_robot_manifest(robot_name: str, init_dir: Path) -> tuple[dict[str, Any], Path]:
     path = init_dir / f"robot_{robot_name}.json"
     if not path.exists():
@@ -185,22 +190,75 @@ async def _run_agent_move_home(agent) -> dict[str, Any]:
     return await agent.move_home()
 
 
+def _load_env_geometry(
+    *,
+    geometry_file: Path,
+    env_name: str,
+) -> dict[str, Any]:
+    if not geometry_file.exists():
+        raise FileNotFoundError(f"geometry file not found: {geometry_file}")
+    raw = json.loads(geometry_file.read_text(encoding="utf-8"))
+    block = raw.get(env_name)
+    if not isinstance(block, dict):
+        raise KeyError(
+            f"geometry file {geometry_file} does not contain env block '{env_name}'"
+        )
+    return block
+
+
 def _default_product_geometry(
     *,
     part_name: str,
-    slot_x: float,
-    slot_y: float,
-    board_center_z: float,
-    slot_floor_z: float,
-    part_height_m: float,
+    env_geometry: dict[str, Any],
+    slot_x: float | None,
+    slot_y: float | None,
+    board_center_z: float | None,
+    slot_floor_z: float | None,
+    part_height_m: float | None,
 ) -> dict[str, Any]:
     upper = str(part_name or "").upper()
+    board = env_geometry.get("assembly_board", {}) if isinstance(env_geometry, dict) else {}
+    parts = env_geometry.get("parts", {}) if isinstance(env_geometry, dict) else {}
+    slots = board.get("slots", {}) if isinstance(board, dict) else {}
+    heights = parts.get("heights_m", {}) if isinstance(parts, dict) else {}
+    model_map = parts.get("model_map", {}) if isinstance(parts, dict) else {}
+    board_center = board.get("center", {}) if isinstance(board, dict) else {}
+
+    designated_slot = slots.get(upper)
+    if (slot_x is None or slot_y is None) and not (
+        isinstance(designated_slot, (list, tuple)) and len(designated_slot) >= 2
+    ):
+        raise KeyError(
+            f"no designated slot for part '{upper}' in geometry file; "
+            "provide --slot-x and --slot-y to override"
+        )
+
+    resolved_slot_x = float(slot_x) if slot_x is not None else float(designated_slot[0])
+    resolved_slot_y = float(slot_y) if slot_y is not None else float(designated_slot[1])
+    resolved_slot_floor_z = (
+        float(slot_floor_z)
+        if slot_floor_z is not None
+        else float(board.get("slot_floor_z_m", 1.025))
+    )
+    resolved_board_center = {
+        "x": float(board_center.get("x", 0.0)),
+        "y": float(board_center.get("y", 0.0)),
+        "z": float(board_center_z)
+        if board_center_z is not None
+        else float(board_center.get("z", 1.02)),
+    }
+    resolved_part_height = (
+        float(part_height_m)
+        if part_height_m is not None
+        else float(heights.get(upper, 0.08))
+    )
+
     return {
-        "board_center": {"x": 0.0, "y": 0.0, "z": float(board_center_z)},
-        "slot_xy": [float(slot_x), float(slot_y)],
-        "slot_floor_z_m": float(slot_floor_z),
-        "part_height_m": float(part_height_m),
-        "model_name": PART_MODEL_MAP.get(upper, ""),
+        "board_center": resolved_board_center,
+        "slot_xy": [resolved_slot_x, resolved_slot_y],
+        "slot_floor_z_m": resolved_slot_floor_z,
+        "part_height_m": resolved_part_height,
+        "model_name": str(model_map.get(upper) or PART_MODEL_MAP.get(upper, "")),
         "part_name": upper,
     }
 
@@ -263,11 +321,12 @@ def run_one_robot(
     part_name: str,
     origin_location: str,
     destination_location: str,
-    slot_x: float,
-    slot_y: float,
-    board_center_z: float,
-    slot_floor_z: float,
-    part_height_m: float,
+    env_geometry: dict[str, Any],
+    slot_x: float | None,
+    slot_y: float | None,
+    board_center_z: float | None,
+    slot_floor_z: float | None,
+    part_height_m: float | None,
 ) -> bool:
     _print_section(f"{robot_name.upper()} | env={env_name}")
 
@@ -350,14 +409,19 @@ def run_one_robot(
     print(_format_dict(snapshot))
 
     if run_agent_sequence:
-        geometry = _default_product_geometry(
-            part_name=part_name,
-            slot_x=slot_x,
-            slot_y=slot_y,
-            board_center_z=board_center_z,
-            slot_floor_z=slot_floor_z,
-            part_height_m=part_height_m,
-        )
+        try:
+            geometry = _default_product_geometry(
+                part_name=part_name,
+                env_geometry=env_geometry,
+                slot_x=slot_x,
+                slot_y=slot_y,
+                board_center_z=board_center_z,
+                slot_floor_z=slot_floor_z,
+                part_height_m=part_height_m,
+            )
+        except Exception as exc:
+            print(f"[FAIL] Could not resolve designated product_geometry: {type(exc).__name__}: {exc}")
+            return False
         print("RobotAgent pick/place sequence payload:")
         print(_format_dict(geometry))
         print("RobotAgent sequence: pick_approach -> pick_grasp -> place_approach -> place_insert ...")
@@ -467,34 +531,57 @@ def main() -> int:
         help="Destination location string passed to place tools.",
     )
     parser.add_argument(
+        "--geometry-file",
+        default=str(DEFAULT_GEOMETRY_FILE),
+        help=(
+            "Assembly board geometry JSON used to resolve designated slot/model/height "
+            "for --part-name (env block selected by --env)."
+        ),
+    )
+    parser.add_argument(
         "--slot-x",
         type=float,
-        default=0.0,
-        help="Board-local slot x (meters) used in generated product_geometry.",
+        default=None,
+        help=(
+            "Optional override for board-local slot x (meters). "
+            "If omitted, designated slot from geometry file is used."
+        ),
     )
     parser.add_argument(
         "--slot-y",
         type=float,
-        default=0.0,
-        help="Board-local slot y (meters) used in generated product_geometry.",
+        default=None,
+        help=(
+            "Optional override for board-local slot y (meters). "
+            "If omitted, designated slot from geometry file is used."
+        ),
     )
     parser.add_argument(
         "--board-center-z",
         type=float,
-        default=1.02,
-        help="Board center z (meters) used in generated product_geometry.",
+        default=None,
+        help=(
+            "Optional override for board center z (meters). "
+            "If omitted, value from geometry file is used."
+        ),
     )
     parser.add_argument(
         "--slot-floor-z",
         type=float,
-        default=1.025,
-        help="Slot floor z (meters) used in generated product_geometry.",
+        default=None,
+        help=(
+            "Optional override for slot floor z (meters). "
+            "If omitted, value from geometry file is used."
+        ),
     )
     parser.add_argument(
         "--part-height-m",
         type=float,
-        default=0.08,
-        help="Part height (meters) used in generated product_geometry.",
+        default=None,
+        help=(
+            "Optional override for part height (meters). "
+            "If omitted, designated part height from geometry file is used."
+        ),
     )
     args = parser.parse_args()
 
@@ -512,6 +599,15 @@ def main() -> int:
         print(f"[FAIL] init-dir does not exist: {init_dir}")
         return 2
 
+    geometry_file = Path(args.geometry_file).resolve()
+    try:
+        env_geometry = _load_env_geometry(geometry_file=geometry_file, env_name=args.env)
+        print(f"[INFO] geometry file: {geometry_file}")
+        print(f"[INFO] geometry env block: {args.env}")
+    except Exception as exc:
+        print(f"[FAIL] Could not load geometry file: {type(exc).__name__}: {exc}")
+        return 2
+
     overall = True
     for robot_name in robots:
         one_ok = run_one_robot(
@@ -525,6 +621,7 @@ def main() -> int:
             part_name=args.part_name,
             origin_location=args.origin_location,
             destination_location=args.destination_location,
+            env_geometry=env_geometry,
             slot_x=args.slot_x,
             slot_y=args.slot_y,
             board_center_z=args.board_center_z,

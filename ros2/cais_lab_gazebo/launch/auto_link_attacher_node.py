@@ -38,12 +38,12 @@ DEFAULT_PART_POSES = {
     'gear_small': (-0.4, 0.1, 1.15),
     'rect_pin_small': (-0.4, 0.0, 1.15),
     'circ_pin_small': (-0.4, -0.1, 1.15),
-    'gear_medium': (0.4, 0.5, 1.15),
-    'rect_pin_medium': (0.4, 0.4, 1.15),
-    'circ_pin_medium': (0.4, 0.3, 1.15),
-    'gear_large': (0.4, -0.3, 1.15),
-    'rect_pin_large': (0.4, -0.4, 1.15),
-    'circ_pin_large': (0.4, -0.5, 1.15),
+    'gear_medium': (0.4, 0.4, 1.15),
+    'rect_pin_medium': (0.4, 0.3, 1.15),
+    'circ_pin_medium': (0.4, 0.2, 1.15),
+    'gear_large': (0.4, -0.2, 1.15),
+    'rect_pin_large': (0.4, -0.3, 1.15),
+    'circ_pin_large': (0.4, -0.4, 1.15),
 }
 
 

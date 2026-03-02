@@ -70,7 +70,7 @@
           "release_preopen_settle_sec": 0.15,
           "release_postopen_settle_sec": 0.6,
           "release_postdetach_settle_sec": 0.35,
-          "trajectory_time_scale": 1.0
+          "trajectory_time_scale": 0.9
         },
         "parts_tuning": {
           "insertion_depth_m": 0.0025

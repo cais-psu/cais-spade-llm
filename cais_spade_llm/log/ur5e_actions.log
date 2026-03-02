@@ -2028,3 +2028,64 @@ TypeError: RcutilsLogger.info() takes 2 positional arguments but 4 were given
 2026-03-02 14:13:49,268 - agent:ur5e - INFO - [Resource] Stored safety_decision=block for task=REQ_1_T2
 2026-03-02 14:15:10,596 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
 2026-03-02 14:15:11,139 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'])
+2026-03-02 14:21:32,362 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 14:21:34,552 - agent:ur5e - ERROR - [Robot] pick_approach execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/robot_agent.py", line 176, in _run_phase_or_simulate
+    result = await asyncio.to_thread(method, **phase_kwargs)
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 543, in pick_approach
+    if not self.wait_for_services():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 428, in wait_for_services
+    if not self.init():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 394, in init
+    self._log().info(
+TypeError: RcutilsLogger.info() takes 2 positional arguments but 4 were given
+2026-03-02 14:22:08,894 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 14:22:11,695 - agent:ur5e - ERROR - [Robot] pick_approach execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/robot_agent.py", line 176, in _run_phase_or_simulate
+    result = await asyncio.to_thread(method, **phase_kwargs)
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 543, in pick_approach
+    if not self.wait_for_services():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 428, in wait_for_services
+    if not self.init():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 394, in init
+    self._log().info(
+TypeError: RcutilsLogger.info() takes 2 positional arguments but 4 were given
+2026-03-02 14:25:22,396 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 14:30:01,686 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 14:43:40,835 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 14:48:23,063 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:05:41,777 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:14:28,271 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:18:43,179 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:18:43,589 - agent:ur5e - ERROR - [Robot] pick_approach execution failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/agents/resource_agent/robot_agent.py", line 176, in _run_phase_or_simulate
+    result = await asyncio.to_thread(method, **phase_kwargs)
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 539, in pick_approach
+    if not self.wait_for_services():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 426, in wait_for_services
+    if not self.init():
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/resources/robot/ros2_pick_place_controller.py", line 322, in init
+    rclpy.init()
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/__init__.py", line 88, in init
+    context.init(args, domain_id=domain_id)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/context.py", line 79, in init
+    _rclpy.rclpy_logging_configure(self.__context)
+RuntimeError: Failed opening file /home/jongh/.ros/log/python_31159_1772482723531.log for writing: Permission denied
+2026-03-02 15:24:30,638 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:56:38,678 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=ros2 tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-02 15:56:39,352 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'])
