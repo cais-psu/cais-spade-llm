@@ -226,13 +226,13 @@ corresponding ROS2 controller action server at the root namespace.
 
 ```
 # Gazebo base launch (combined URDF + controllers)
-~/projects/cais-spade-llm/ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
+~/projects/cais-spade-llm/ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py
 
 # Combined controller config
-~/projects/cais-spade-llm/ros2/xarm_gazebo/config/xarm6_ur5e_controllers.yaml
+~/projects/cais-spade-llm/ros2/cais_lab_gazebo/config/xarm6_ur5e_controllers.yaml
 
 # MoveIt launch (Gazebo + MoveIt for both robots)
-~/projects/cais-spade-llm/ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
+~/projects/cais-spade-llm/ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py
 
 # Runtime copy used by ros2 launch after build
 ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py

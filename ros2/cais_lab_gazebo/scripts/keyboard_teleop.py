@@ -107,6 +107,7 @@ DEFAULT_CONFIG_PATHS = {
     'ur5e': Path(__file__).resolve().parents[3]
             / 'cais_spade_llm' / 'initialization' / 'resources' / 'robot_ur5e.json',
 }
+HOME_PRELIFT_Z_M = 1.40
 
 
 class KeyboardTeleop(Node):
@@ -655,7 +656,7 @@ def main():
     log('  Arrow alone = jog last axis (Z:UP/DOWN, X/Y:LEFT/RIGHT)')
     log('  1-6 = select joint (joint mode), then arrows to jog')
     log('  G = gripper mode, then Arrow UP(open)/DOWN(close)')
-    log(f'  H = both arms home ({fmt_value(home_duration_sec)}s)')
+    log(f'  H = pre-lift to Z>={fmt_value(HOME_PRELIFT_Z_M)}m, then both arms home ({fmt_value(home_duration_sec)}s)')
     log('  +/-=step  TAB=robot  M=cartesian  P=precision  F=fast  S=save  Q=quit')
     log('')
     show_ee(node, robot)
@@ -683,6 +684,17 @@ def main():
     def do_home_both():
         failures = []
         for rob in ('xarm6', 'ur5e'):
+            ee = node.get_ee_pose(rob)
+            if ee is None:
+                failures.append(f'[{rob}] No TF for pre-lift')
+                continue
+            if ee.position.z < HOME_PRELIFT_Z_M - 1e-3:
+                dz_mm = (HOME_PRELIFT_Z_M - ee.position.z) * 1000.0
+                ok, msg = node.move_cartesian(rob, dz_mm=dz_mm)
+                if not ok:
+                    failures.append(f'[{rob}] pre-lift failed: {msg}')
+                    continue
+
             target, err = node.load_named_position(rob, 'home')
             if target is None:
                 failures.append(f'[{rob}] {err}')

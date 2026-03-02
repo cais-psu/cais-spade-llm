@@ -239,8 +239,8 @@ def launch_setup(context, *args, **kwargs):
     ]
 
     perception_candidates = [
-        Path(__file__).resolve().parents[1] / 'nodes' / 'perception_node.py',
-        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/xarm_gazebo/nodes/perception_node.py')),
+        Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
     perception_actions = []
@@ -271,7 +271,7 @@ def launch_setup(context, *args, **kwargs):
     else:
         perception_actions.append(
             LogInfo(
-                msg='[xarm_gazebo] perception_node.py not found. '
+                msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
                     'Skipping automatic perception startup.'
             )
         )
@@ -296,7 +296,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'run_perception',
             default_value='true',
-            description='Automatically start perception_node for /detect_part and /detect_all.',
+            description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

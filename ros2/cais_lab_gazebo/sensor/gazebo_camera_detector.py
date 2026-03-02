@@ -11,7 +11,7 @@ ROS2 Services:
   /detect_all    - List all currently detected parts with positions
 
 Usage:
-  python3.10 ros2/xarm_gazebo/nodes/perception_node.py
+  python3.10 ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py
 
   # Test:
   ros2 param set /perception_node target_part SG

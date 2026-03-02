@@ -57,36 +57,36 @@ From `~/projects/cais-spade-llm`:
 
 ```bash
 # Worlds
-cp ros2/xarm_gazebo/worlds/table.world \
+cp ros2/cais_lab_gazebo/worlds/table.world \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
-cp ros2/xarm_gazebo/worlds/single_table.world \
+cp ros2/cais_lab_gazebo/worlds/single_table.world \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/single_table.world
 
 # Gazebo launches
-cp ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
-cp ros2/xarm_gazebo/launch/ur5e_rg2_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/ur5e_rg2_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_gazebo.launch.py
-cp ros2/xarm_gazebo/launch/xarm6_single_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/xarm6_single_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_single_gazebo.launch.py
 
 # MoveIt + Gazebo launches
-cp ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
-cp ros2/xarm_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py
-cp ros2/xarm_gazebo/launch/xarm6_moveit_single_gazebo.launch.py \
+cp ros2/cais_lab_gazebo/launch/xarm6_moveit_single_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_moveit_single_gazebo.launch.py
 
 # ros2_control configs
-cp ros2/xarm_gazebo/config/xarm6_ur5e_controllers.yaml \
+cp ros2/cais_lab_gazebo/config/xarm6_ur5e_controllers.yaml \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/xarm6_ur5e_controllers.yaml
-cp ros2/xarm_gazebo/config/ur5e_rg2_controllers.yaml \
+cp ros2/cais_lab_gazebo/config/ur5e_rg2_controllers.yaml \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/ur5e_rg2_controllers.yaml
 
 # RViz profile for dual mode
 mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz
-cp ros2/xarm_gazebo/rviz/dual_moveit.rviz \
+cp ros2/cais_lab_gazebo/rviz/dual_moveit.rviz \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz/dual_moveit.rviz
 ```
 

@@ -20,7 +20,7 @@ RobotAgent (SPADE)
 | RobotAgent (pick/move/place/assemble) | ⚠️ All actions simulated with `asyncio.sleep` | `agents/resource_agent/robot_agent.py` |
 | MoveIt action client for UR5e arm | ✅ Tested | `test/test_ur5e_moveit_action.py` |
 | MoveIt action client for UR5e gripper | ✅ Tested | `test/test_ur5e_rg2_gripper_action.py` |
-| Dual-robot Gazebo + MoveIt launch | ✅ Working | `ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py` |
+| Dual-robot Gazebo + MoveIt launch | ✅ Working | `ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py` |
 | Robot JSON configs (workspace, home, gripper) | ✅ | `initialization/resources/robot_*.json` |
 
 ## Design Decision: Two Modes, Not Three
@@ -156,7 +156,7 @@ Gazebo vs real hardware is **not** a Python code concern — it depends on which
 |---|---|
 | MoveGroup action client | `test/test_ur5e_moveit_action.py` |
 | Gripper action client | `test/test_ur5e_rg2_gripper_action.py` |
-| Prefixed joint names | `ros2/xarm_gazebo/config/xarm6_ur5e_controllers.yaml` |
+| Prefixed joint names | `ros2/cais_lab_gazebo/config/xarm6_ur5e_controllers.yaml` |
 
 ---
 

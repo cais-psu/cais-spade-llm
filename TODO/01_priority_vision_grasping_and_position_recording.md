@@ -20,7 +20,7 @@ Enable efficient robot position teaching (replacing tedious RViz drag-and-plan) 
 - [ ] Record all key named positions for UR5e and xArm6
 - [ ] Store in `initialization/resources/robot_ur5e.json` and `robot_xarm6.json`
 
-Scripts location: `ros2/xarm_gazebo/scripts/`
+Scripts location: `ros2/cais_lab_gazebo/scripts/`
 
 ### Workflow (Step-by-Step)
 
@@ -37,7 +37,7 @@ Wait ~40s for Gazebo + MoveIt to fully load.
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
-cd ~/projects/cais-spade-llm/ros2/xarm_gazebo/scripts
+cd ~/projects/cais-spade-llm/ros2/cais_lab_gazebo/scripts
 python3 keyboard_teleop.py
 ```
 
@@ -160,7 +160,7 @@ Execute + Gripper  ──► Pick up the object
 
 ### Phase 2.1: Add Depth Camera to Gazebo World
 
-- [ ] Modify `ros2/xarm_gazebo/worlds/table.world` — add depth camera plugin to existing overhead camera
+- [ ] Modify `ros2/cais_lab_gazebo/worlds/table.world` — add depth camera plugin to existing overhead camera
   - Publishes `/overhead_camera/depth/image_raw` (for 3D projection)
   - Publishes `/overhead_camera/points` (point cloud, optional)
   - Keep existing RGB at `/overhead_camera/image_raw`
@@ -168,7 +168,7 @@ Execute + Gripper  ──► Pick up the object
 ### Phase 2.2: Create YOLO Perception ROS2 Node
 
 - [ ] Install: `pip install ultralytics`
-- [ ] Create `ros2/xarm_gazebo/nodes/perception_node.py`
+- [ ] Create `ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py`
   - Subscribes to `/overhead_camera/image_raw`
   - Runs YOLOv8 inference (pretrained or fine-tuned on Gazebo screenshots)
   - Publishes detections as `vision_msgs/Detection2DArray`
@@ -195,10 +195,10 @@ Execute + Gripper  ──► Pick up the object
 
 | File | Action |
 |------|--------|
-| `ros2/xarm_gazebo/worlds/table.world` | Add depth camera plugin |
-| `ros2/xarm_gazebo/nodes/perception_node.py` | New — YOLO detection node |
-| `ros2/xarm_gazebo/launch/servo_keyboard.launch.py` | New — MoveIt Servo keyboard launch |
-| `ros2/xarm_gazebo/scripts/record_pose.py` | New — joint state snapshot CLI |
+| `ros2/cais_lab_gazebo/worlds/table.world` | Add depth camera plugin |
+| `ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py` | New — YOLO detection node |
+| `ros2/cais_lab_gazebo/launch/servo_keyboard.launch.py` | New — MoveIt Servo keyboard launch |
+| `ros2/cais_lab_gazebo/scripts/record_pose.py` | New — joint state snapshot CLI |
 | `cais_spade_llm/resources/sensor/camera_module.py` | Replace mock with ROS2 service client |
 | `cais_spade_llm/initialization/resources/robot_ur5e.json` | Add `named_positions` |
 | `cais_spade_llm/initialization/resources/robot_xarm6.json` | Add `named_positions` |

@@ -28,6 +28,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+ROBOT_BASE_Y = 0.50
 from uf_ros_lib.uf_robot_utils import (
     get_xacro_content,
     generate_ros2_control_params_temp_file,
@@ -170,21 +172,21 @@ def _build_combined_urdf(context, xarm_prefix, ur5e_prefix):
     combined = ET.Element('robot', {'name': 'dual_robot_moveit'})
     ET.SubElement(combined, 'link', {'name': 'world'})
 
-    # xArm6 at (0, -0.7, 1.021) with 180° yaw
+    # xArm6 at (0, -0.62, 1.021) with 180° yaw
     xj = ET.SubElement(combined, 'joint', {
         'name': f'{xarm_prefix}world_joint', 'type': 'fixed'})
     ET.SubElement(xj, 'parent', {'link': 'world'})
     ET.SubElement(xj, 'child', {'link': f'{xarm_prefix}link_base'})
-    ET.SubElement(xj, 'origin', {'xyz': '0.0 -0.7 1.021', 'rpy': '0 0 3.142'})
+    ET.SubElement(xj, 'origin', {'xyz': f'0.0 {-ROBOT_BASE_Y} 1.021', 'rpy': '0 0 3.142'})
     for elem in list(xarm_root):
         combined.append(elem)
 
-    # UR5e at (0, 0.7, 1.021) with 180° yaw
+    # UR5e at (0, 0.62, 1.021) with 180° yaw
     uj = ET.SubElement(combined, 'joint', {
         'name': f'{ur5e_prefix}world_joint', 'type': 'fixed'})
     ET.SubElement(uj, 'parent', {'link': 'world'})
     ET.SubElement(uj, 'child', {'link': f'{ur5e_prefix}base_link'})
-    ET.SubElement(uj, 'origin', {'xyz': '0.0 0.7 1.021', 'rpy': '0 0 3.142'})
+    ET.SubElement(uj, 'origin', {'xyz': f'0.0 {ROBOT_BASE_Y} 1.021', 'rpy': '0 0 3.142'})
     for elem in list(ur5e_root):
         combined.append(elem)
 

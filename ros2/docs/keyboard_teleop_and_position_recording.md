@@ -34,7 +34,7 @@ The perception node provides ground truth part positions from Gazebo via `/detec
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
-python3.10 ~/projects/cais-spade-llm/ros2/xarm_gazebo/nodes/perception_node.py
+python3.10 ~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py
 ```
 
 You should see:
@@ -62,7 +62,7 @@ python3.10 ~/projects/cais-spade-llm/cais_spade_llm/resources/sensor/camera_modu
 **Terminal 3:**
 
 ```bash
-source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash && cd ~/projects/cais-spade-llm/ros2/xarm_gazebo/scripts && python3.10 keyboard_teleop.py
+source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash && cd ~/projects/cais-spade-llm/ros2/cais_lab_gazebo/scripts && python3.10 keyboard_teleop.py
 ```
 
 The script waits for `/joint_states`, `/move_action`, and `/compute_cartesian_path` to become available, then prints `=== Ready! ===`.
@@ -186,7 +186,7 @@ Record these named positions for **both** xArm6 and UR5e:
 If you prefer to jog the robot using RViz drag-and-drop or another method, use `record_pose.py` to snapshot the current joint positions separately.
 
 ```bash
-cd ~/projects/cais-spade-llm/ros2/xarm_gazebo/scripts
+cd ~/projects/cais-spade-llm/ros2/cais_lab_gazebo/scripts
 ```
 
 ### Print Current Positions
@@ -235,18 +235,18 @@ In interactive mode:
 | `Goal rejected` | MoveIt can't plan to the target. The robot may be at a joint limit. Try a different direction. |
 | Save doesn't work | Check that `cais_spade_llm/initialization/resources/robot_xarm6.json` exists and is writable. |
 | Perception node: `/get_entity_state not available` | The `libgazebo_ros_state.so` plugin must be in `table.world`. Restart the simulation after adding it. |
-| Perception node: `Failed to get state` | Deadlock issue — make sure `perception_node.py` uses `MultiThreadedExecutor` with separate callback groups. |
+| Perception node: `Failed to get state` | Deadlock issue — make sure `gazebo_camera_detector.py` uses `MultiThreadedExecutor` with separate callback groups. |
 
 ---
 
 ## Script & Node Locations
 
 ```
-ros2/xarm_gazebo/scripts/keyboard_teleop.py       — keyboard jogging via MoveIt
-ros2/xarm_gazebo/scripts/record_pose.py            — standalone position snapshot CLI
-ros2/xarm_gazebo/scripts/save_camera_frame.py      — diagnostic: save camera frames to /tmp
-ros2/xarm_gazebo/nodes/perception_node.py          — Gazebo ground truth perception (ROS2 node)
-ros2/xarm_gazebo/launch/perception.launch.py       — launch file for perception node
-ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py — main simulation launch
+ros2/cais_lab_gazebo/scripts/keyboard_teleop.py       — keyboard jogging via MoveIt
+ros2/cais_lab_gazebo/scripts/record_pose.py            — standalone position snapshot CLI
+ros2/cais_lab_gazebo/scripts/save_camera_frame.py      — diagnostic: save camera frames to /tmp
+ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py   — Gazebo ground truth perception (ROS2 node)
+ros2/cais_lab_gazebo/launch/perception.launch.py       — launch file for perception node
+ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py — main simulation launch
 cais_spade_llm/resources/sensor/camera_module.py   — SPADE-side camera client (mock or ROS2)
 ```

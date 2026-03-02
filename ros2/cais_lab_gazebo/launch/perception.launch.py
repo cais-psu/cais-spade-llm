@@ -2,7 +2,7 @@
 """
 Launch the perception node for vision-based part detection.
 
-Runs perception_node.py which subscribes to the 4 depth cameras
+Runs gazebo_camera_detector.py which subscribes to the 4 depth cameras
 (cam_mk3, cam_mk4_1, cam_mk4_2, cam_assembly) and provides
 /detect_part and /detect_all services.
 
@@ -28,8 +28,8 @@ from launch_ros.actions import Node
 def generate_launch_description():
     perception_script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "nodes",
-        "perception_node.py",
+        "sensor",
+        "gazebo_camera_detector.py",
     )
 
     return LaunchDescription([

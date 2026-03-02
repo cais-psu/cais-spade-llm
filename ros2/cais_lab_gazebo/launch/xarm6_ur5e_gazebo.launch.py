@@ -7,8 +7,8 @@ so both have full physics simulation in Gazebo. Robot positions are encoded as
 fixed joints in the combined URDF (not as spawn_entity arguments).
 
 TF prefixes:
-  xArm6 → prefix: xarm6_,  pos: (0.0, -0.7, 1.021) [180° yaw (3.142)]
-  UR5e  → prefix: ur5e_,   pos: (0.0, 0.7, 1.021)  [180° yaw (3.142)]
+  xArm6 → prefix: xarm6_,  pos: (0.0, -0.62, 1.021) [180° yaw (3.142)]
+  UR5e  → prefix: ur5e_,   pos: (0.0, 0.62, 1.021)  [180° yaw (3.142)]
 """
 
 import os
@@ -35,6 +35,8 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch.event_handlers import OnProcessExit
 from uf_ros_lib.uf_robot_utils import get_xacro_content, generate_ros2_control_params_temp_file
+
+ROBOT_BASE_Y = 0.50
 
 
 def _strip_gazebo_ros2_control_plugin(root):
@@ -316,14 +318,14 @@ def launch_setup(context, *args, **kwargs):
     )
     xarm_root = ET.fromstring(xarm_description_str)
 
-    # Keep base pose fixed; start with the user-provided picking posture.
+    # Home position from robot_xarm6.json named_positions.home
     xarm_initial_positions = {
-        f'{xarm_prefix}joint1': -2.488633342961955,
-        f'{xarm_prefix}joint2': 0.08960294687924664,
-        f'{xarm_prefix}joint3': -1.26837471206392,
-        f'{xarm_prefix}joint4': 7.842588030815278e-05,
-        f'{xarm_prefix}joint5': 1.1787895575959242,
-        f'{xarm_prefix}joint6': -2.4885358377427576,
+        f'{xarm_prefix}joint1': -1.572631,
+        f'{xarm_prefix}joint2': -1.054702,
+        f'{xarm_prefix}joint3': -0.385494,
+        f'{xarm_prefix}joint4': 0.000322,
+        f'{xarm_prefix}joint5': 1.440603,
+        f'{xarm_prefix}joint6': -1.572544,
         f'{xarm_prefix}drive_joint': 0.85,  # gripper fully open at startup
     }
     _set_ros2_control_initial_positions(xarm_root, xarm_initial_positions)
@@ -358,14 +360,14 @@ def launch_setup(context, *args, **kwargs):
     ]).decode('utf-8')
     ur5e_root = ET.fromstring(ur5e_raw)
 
-    # Apply the user-provided UR5e startup pose directly into ros2_control.
+    # Home position from robot_ur5e.json named_positions.home
     ur5e_initial_positions = {
-        f'{ur5e_prefix}shoulder_pan_joint': 2.232023449619252,
-        f'{ur5e_prefix}shoulder_lift_joint': -1.5960064086763361,
-        f'{ur5e_prefix}elbow_joint': 1.615863605277993,
-        f'{ur5e_prefix}wrist_1_joint': -1.592172956911188,
-        f'{ur5e_prefix}wrist_2_joint': -1.5690505595531368,
-        f'{ur5e_prefix}wrist_3_joint': 2.232159020791153,
+        f'{ur5e_prefix}shoulder_pan_joint': 1.637161,
+        f'{ur5e_prefix}shoulder_lift_joint': -2.150816,
+        f'{ur5e_prefix}elbow_joint': 2.028921,
+        f'{ur5e_prefix}wrist_1_joint': -1.452287,
+        f'{ur5e_prefix}wrist_2_joint': -1.561075,
+        f'{ur5e_prefix}wrist_3_joint': 1.637331,
     }
     _set_ros2_control_initial_positions(ur5e_root, ur5e_initial_positions)
 
@@ -446,7 +448,7 @@ def launch_setup(context, *args, **kwargs):
                                 {'name': f'{xarm_prefix}world_joint', 'type': 'fixed'})
     ET.SubElement(xarm_attach, 'parent', {'link': 'world'})
     ET.SubElement(xarm_attach, 'child', {'link': f'{xarm_prefix}link_base'})
-    ET.SubElement(xarm_attach, 'origin', {'xyz': '0.0 -0.7 1.021', 'rpy': '0 0 3.142'})
+    ET.SubElement(xarm_attach, 'origin', {'xyz': f'0.0 {-ROBOT_BASE_Y} 1.021', 'rpy': '0 0 3.142'})
 
     # Copy all xArm6 elements (links, joints, ros2_control, gazebo material tags)
     for elem in list(xarm_root):
@@ -457,7 +459,7 @@ def launch_setup(context, *args, **kwargs):
                                 {'name': f'{ur5e_prefix}world_joint', 'type': 'fixed'})
     ET.SubElement(ur5e_attach, 'parent', {'link': 'world'})
     ET.SubElement(ur5e_attach, 'child', {'link': f'{ur5e_prefix}base_link'})
-    ET.SubElement(ur5e_attach, 'origin', {'xyz': '0.0 0.7 1.021', 'rpy': '0 0 3.142'})
+    ET.SubElement(ur5e_attach, 'origin', {'xyz': f'0.0 {ROBOT_BASE_Y} 1.021', 'rpy': '0 0 3.142'})
 
     # Copy all UR5e elements (links, joints, ros2_control, gripper)
     for elem in list(ur5e_root):
@@ -531,8 +533,8 @@ def launch_setup(context, *args, **kwargs):
 
     # Start perception node so /detect_part and /detect_all are available to SPADE camera clients.
     perception_candidates = [
-        Path(__file__).resolve().parents[1] / 'nodes' / 'perception_node.py',
-        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/xarm_gazebo/nodes/perception_node.py')),
+        Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
     perception_actions = []
@@ -563,7 +565,7 @@ def launch_setup(context, *args, **kwargs):
     else:
         perception_actions.append(
             LogInfo(
-                msg='[xarm_gazebo] perception_node.py not found. '
+                msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
                     'Skipping automatic perception startup.'
             )
         )
@@ -632,7 +634,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'run_perception',
             default_value='true',
-            description='Automatically start perception_node for /detect_part and /detect_all.',
+            description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

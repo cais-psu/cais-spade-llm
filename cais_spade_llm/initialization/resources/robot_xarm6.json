@@ -13,214 +13,143 @@
     ],
     "sg_slippage_mode": "once",
     "sg_slippage_scope": "xarm6",
+    "config_environment": "gazebo",
+    "environment_notes": {
+      "static_capabilities": "These values are for Gazebo simulation.",
+      "controller": "These ROS topics/links/services are for Gazebo + MoveIt simulation."
+    },
+    "real_world_overrides": {
+      "enabled": false,
+      "static_capabilities": {},
+      "controller": {}
+    },
     "static_capabilities": {
       "reachability": [
         "prusa-mk4-1",
         "prusa-mk3",
         "assembly_board-v1"
       ],
-      "workspace_boundaries": {
-        "type": "rectangular",
-        "x_range": [
-          -150,
-          650
-        ],
-        "y_range": [
-          -550,
-          100
-        ],
-        "z_range": [
-          0,
-          600
-        ],
-        "units": "mm",
-        "description": "Cartesian workspace boundaries in robot base frame"
+      "staging_areas": {}
+    },
+    "controller": {
+      "move_group": {
+        "group_name": "xarm6_xarm6",
+        "ee_link": "xarm6_link_eef",
+        "tcp_link": "xarm6_link_tcp",
+        "frame_id": "world"
       },
-      "staging_areas": {
-        "staging_zone_1": {
-          "x": 200,
-          "y": -250,
-          "z": 172,
-          "description": "Primary staging area for xArm6, reachable by UR5e for recovery",
-          "accessible_by": [
-            "xarm6",
-            "ur5e"
-          ]
+      "gripper": {
+        "joint": "xarm6_drive_joint",
+        "topic": "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
+        "open": 0.0,
+        "close": 0.85,
+        "move_time_sec": 0.4,
+        "settle_sec": 0.08,
+        "feedback_timeout_pad_sec": 1.5,
+        "position_tolerance": 0.01
+      },
+      "services": {
+        "detect_all": "/detect_all",
+        "cartesian_path": "/compute_cartesian_path",
+        "execute_trajectory": "/execute_trajectory",
+        "attach": "/ATTACHLINK",
+        "detach": "/DETACHLINK",
+        "set_entity_state": "/set_entity_state"
+      },
+      "attach": {
+        "robot_model_name": "dual_robot",
+        "attach_link_candidates": [
+          "xarm6_link6",
+          "xarm6_right_inner_knuckle",
+          "xarm6_left_inner_knuckle",
+          "xarm6_right_finger",
+          "xarm6_left_finger"
+        ],
+        "primary_attach_link": "xarm6_link6",
+        "detach_timeout_sec": 2.0,
+        "detach_max_link_attempts": 3
+      },
+      "motion": {
+        "approach_height_m": 0.2,
+        "pick_tcp_z_bias_max_m": 0.02,
+        "pick_tcp_z_bias_min_m": 0.003,
+        "min_pick_tcp_z_m": 1.07,
+        "place_surface_gap_m": -0.01,
+        "release_preopen_settle_sec": 0.15,
+        "release_postopen_settle_sec": 0.6,
+        "release_postdetach_settle_sec": 0.35,
+        "trajectory_time_scale": 1.0
+      },
+      "assembly_board": {
+        "center": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.02
         },
-        "staging_zone_neutral": {
-          "x": 300,
-          "y": -150,
-          "z": 172,
-          "description": "Shared neutral zone between both robots",
-          "accessible_by": [
-            "xarm6",
-            "ur5e"
-          ]
+        "thickness_m": 0.01,
+        "slot_floor_z_m": 1.025,
+        "slots": {
+          "SG": [-0.1, 0.08],
+          "MG": [0.0, 0.08],
+          "LG": [0.1, 0.08],
+          "SRP": [-0.1, 0.0],
+          "MRP": [0.0, 0.0],
+          "LRP": [0.1, 0.0],
+          "SCP": [-0.1, -0.08],
+          "MCP": [0.0, -0.08],
+          "LCP": [0.1, -0.08]
+        }
+      },
+      "parts": {
+        "model_map": {
+          "SG": "gear_small",
+          "MG": "gear_medium",
+          "LG": "gear_large",
+          "SRP": "rect_pin_small",
+          "MRP": "rect_pin_medium",
+          "LRP": "rect_pin_large",
+          "SCP": "circ_pin_small",
+          "MCP": "circ_pin_medium",
+          "LCP": "circ_pin_large"
+        },
+        "heights_m": {
+          "SG": 0.01,
+          "MG": 0.015,
+          "LG": 0.02,
+          "SRP": 0.06,
+          "MRP": 0.08,
+          "LRP": 0.1,
+          "SCP": 0.06,
+          "MCP": 0.08,
+          "LCP": 0.1
+        },
+        "place_gap_extra_m": {
+          "SRP": -0.0005,
+          "MRP": -0.001,
+          "LRP": -0.0015,
+          "SCP": -0.0005,
+          "MCP": -0.001,
+          "LCP": -0.0015
+        },
+        "seat_push_extra_m": {
+          "SRP": 0.001,
+          "MRP": 0.0015,
+          "LRP": 0.002,
+          "SCP": 0.001,
+          "MCP": 0.0015,
+          "LCP": 0.002
         }
       }
     },
-    "gripper_file": "cais_spade_llm/specification/resources/parameters/xArm-gripper.pdf",
-    "ip": "192.168.1.240",
-    "dashboard_port": 29999,
-    "speed": 280,
-    "acc": 10000,
-    "radius": -1,
-    "params": {
-      "acc": 0.5,
-      "vel": 0.3,
-      "gripper_programs": {
-        "activate": "gripper_activate.urp",
-        "open": "gripper_open.urp",
-        "close": "gripper_close.urp",
-        "close_90": "gripper_close_90.urp"
-      }
-    },
-    "camera_types": [
-      "cameraA",
-      "cameraB"
-    ],
-    "cameraA_offsets": [
-      0,
-      0
-    ],
-    "cameraB_offsets": [
-      -32,
-      -311
-    ],
-    "location": {
-      "x": 0,
-      "y": 0
-    },
-    "z_pick": 172,
-    "z_above": 300,
-    "base_position": [
-      0,
-      0
-    ],
-    "pickup_orientation": [
-      127.23,
-      -127.21,
-      0.025
-    ],
-    "place_orientations": {
-      "housing": [
-        -89.95,
-        2.07,
-        -2.03
-      ],
-      "wedge": [
-        -67.11,
-        72.4,
-        -73.48
-      ],
-      "spring": [
-        -67.11,
-        72.4,
-        -73.48
-      ],
-      "cap": [
-        121.42,
-        -132.48,
-        0.0
+    "named_positions": {
+      "home": [
+        -1.572631,
+        -1.054702,
+        -0.385494,
+        0.000322,
+        1.440603,
+        -1.572544
       ]
-    },
-    "initial_position": [
-      250,
-      -150,
-      445,
-      180.0,
-      0.0,
-      0.0
-    ],
-    "intermediate_joint_pose": [
-      -125.0,
-      -73.6,
-      -132.07,
-      -64.14,
-      90.0,
-      -120.0
-    ],
-    "camera_calibration": {
-      "camera_points": [
-        [
-          499,
-          258
-        ],
-        [
-          238,
-          326
-        ],
-        [
-          358,
-          303
-        ],
-        [
-          403,
-          209
-        ]
-      ],
-      "robot_points": [
-        [
-          373.24,
-          -293.29
-        ],
-        [
-          326.875,
-          -102.682
-        ],
-        [
-          340.53,
-          -189.55
-        ],
-        [
-          406.88,
-          -225.08
-        ]
-      ]
-    },
-    "grasp_strategies": {
-      "housing": {
-        "strategy": "top",
-        "gripper_action": "close"
-      },
-      "wedge": {
-        "strategy": "above-top",
-        "gripper_action": "close"
-      },
-      "spring": {
-        "strategy": "above-top",
-        "gripper_action": "close_90"
-      },
-      "cap": {
-        "strategy": "center",
-        "gripper_action": "close"
-      }
     }
-  },
-  "named_positions": {
-    "test": [
-      -2.488633,
-      0.089611,
-      -1.268358,
-      7.9e-05,
-      1.17879,
-      -2.488536
-    ],
-    "test2": [
-      -2.488626,
-      0.208845,
-      -1.090125,
-      9.6e-05,
-      0.881837,
-      -2.488561
-    ],
-    "home": [
-      -2.488633,
-      0.089611,
-      -1.268358,
-      7.9e-05,
-      1.17879,
-      -2.488536
-    ]
   }
 }

@@ -16,7 +16,7 @@ from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
 from resources.sensor.camera_module import CameraModule
 
-# Camera mode: set USE_ROS2_CAMERA=1 when running with Gazebo + perception_node.
+# Camera mode: set USE_ROS2_CAMERA=1 when running with Gazebo + gazebo_camera_detector.
 # Default: mock observations for offline testing.
 if os.environ.get("USE_ROS2_CAMERA", "").strip() in ("1", "true", "yes"):
     _CAMERA = CameraModule(use_ros2=True)

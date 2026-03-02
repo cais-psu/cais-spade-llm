@@ -21,7 +21,7 @@ class CameraModule:
 
     Modes:
       - mock: Pass mock_observations at construction time (default, for tests).
-      - ros2: Connect to the perception_node's /detect_part service.
+      - ros2: Connect to the gazebo_camera_detector's /detect_part service.
               Set use_ros2=True. Falls back to mock if ROS2 unavailable.
 
     Example (mock mode):
@@ -57,7 +57,7 @@ class CameraModule:
             self._init_ros2()
 
     def _init_ros2(self) -> None:
-        """Initialize ROS2 service clients for perception_node."""
+        """Initialize ROS2 service clients for gazebo_camera_detector."""
         try:
             import rclpy
             from std_srvs.srv import Trigger
@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
     cam = CameraModule(use_ros2=True)
     if not cam._use_ros2:
-        print("ERROR: ROS2 mode not available. Is perception_node running?")
+        print("ERROR: ROS2 mode not available. Is gazebo_camera_detector running?")
         sys.exit(1)
 
     print("\n--- observe('SG') ---")
