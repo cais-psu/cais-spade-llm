@@ -5278,3 +5278,25 @@ Previous tokens: Token('SYMBOL_NAME', 'evt')
 2026-03-02 15:56:43,383 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
 2026-03-02 15:56:45,930 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 18
 2026-03-02 15:56:45,933 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-03-02 23:22:33,999 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-03-02 23:22:36,706 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5, tools=[])
+2026-03-02 23:22:36,707 - agent:cca - INFO - [CCA] setup completed.
+2026-03-02 23:22:36,709 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-03-02 23:22:42,219 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
+2026-03-02 23:22:44,843 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 18
+2026-03-02 23:22:44,847 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-03-02 23:22:45,327 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-03-02 23:22:45,446 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-03-02 23:22:45,450 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-03-02 23:34:40,473 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_requirements.txt
+2026-03-02 23:34:43,184 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5, tools=[])
+2026-03-02 23:34:43,185 - agent:cca - INFO - [CCA] setup completed.
+2026-03-02 23:34:43,187 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_requirements.txt
+2026-03-02 23:34:47,220 - agent:cca - INFO - [SafetyLogic] Parsed 1 structured safety rule(s) via LLM.
+2026-03-02 23:34:49,633 - agent:cca - INFO - [SafetyLogic] Attached APs + LTLf to 1 rule(s). Global safety formula length: 18
+2026-03-02 23:34:49,637 - agent:cca - INFO - [SafetyLogic] Saved structured safety rules to /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-03-02 23:34:49,983 - agent:cca - INFO - [SafetyLogic] DFA (DOT) for SAFE_1 built and saved to cais_spade_llm/safety/SAFE_1_dfa.dot
+2026-03-02 23:34:50,038 - agent:cca - INFO - [SafetyLogic] DFA graph for SAFE_1 rendered to cais_spade_llm/safety/SAFE_1_dfa.png
+2026-03-02 23:34:50,041 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-03-02 23:35:03,263 - agent:cca - INFO - [CCA] Offline FSA Validation: OK (Violated rules: 0, Witnesses: 0) product=assembly_board-v1@localhost
+2026-03-02 23:35:03,323 - agent:cca - INFO - [CCA] Safety OK: task=REQ_1_T1 allowed.

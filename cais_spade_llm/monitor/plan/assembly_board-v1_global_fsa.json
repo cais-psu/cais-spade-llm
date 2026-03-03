@@ -1,0 +1,111 @@
+{
+  "A": {
+    "X": [
+      "(xarm6@localhost=(k=0,idle))",
+      "(xarm6@localhost=(k=0,run=REQ_1_T1:pick_approach))",
+      "(xarm6@localhost=(k=1,idle))",
+      "(xarm6@localhost=(k=1,run=REQ_1_T2:pick_grasp))",
+      "(xarm6@localhost=(k=2,idle))",
+      "(xarm6@localhost=(k=2,run=REQ_1_T3:place_approach))",
+      "(xarm6@localhost=(k=3,idle))",
+      "(xarm6@localhost=(k=3,run=REQ_1_T4:place_insert))",
+      "(xarm6@localhost=(k=4,idle))"
+    ],
+    "E": [
+      "REQ_1_T1.done",
+      "REQ_1_T1.start",
+      "REQ_1_T2.done",
+      "REQ_1_T2.start",
+      "REQ_1_T3.done",
+      "REQ_1_T3.start",
+      "REQ_1_T4.done",
+      "REQ_1_T4.start"
+    ],
+    "Tr": [
+      {
+        "from": "(xarm6@localhost=(k=0,idle))",
+        "event": "REQ_1_T1.start",
+        "readable_event": "pick_approach(LCP).start",
+        "to": "(xarm6@localhost=(k=0,run=REQ_1_T1:pick_approach))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T1",
+        "function_name": "pick_approach"
+      },
+      {
+        "from": "(xarm6@localhost=(k=0,run=REQ_1_T1:pick_approach))",
+        "event": "REQ_1_T1.done",
+        "readable_event": "pick_approach(LCP).done",
+        "to": "(xarm6@localhost=(k=1,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T1",
+        "function_name": "pick_approach"
+      },
+      {
+        "from": "(xarm6@localhost=(k=1,idle))",
+        "event": "REQ_1_T2.start",
+        "readable_event": "pick_grasp(LCP).start",
+        "to": "(xarm6@localhost=(k=1,run=REQ_1_T2:pick_grasp))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T2",
+        "function_name": "pick_grasp"
+      },
+      {
+        "from": "(xarm6@localhost=(k=1,run=REQ_1_T2:pick_grasp))",
+        "event": "REQ_1_T2.done",
+        "readable_event": "pick_grasp(LCP).done",
+        "to": "(xarm6@localhost=(k=2,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T2",
+        "function_name": "pick_grasp"
+      },
+      {
+        "from": "(xarm6@localhost=(k=2,idle))",
+        "event": "REQ_1_T3.start",
+        "readable_event": "place_approach(LCP).start",
+        "to": "(xarm6@localhost=(k=2,run=REQ_1_T3:place_approach))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T3",
+        "function_name": "place_approach"
+      },
+      {
+        "from": "(xarm6@localhost=(k=2,run=REQ_1_T3:place_approach))",
+        "event": "REQ_1_T3.done",
+        "readable_event": "place_approach(LCP).done",
+        "to": "(xarm6@localhost=(k=3,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T3",
+        "function_name": "place_approach"
+      },
+      {
+        "from": "(xarm6@localhost=(k=3,idle))",
+        "event": "REQ_1_T4.start",
+        "readable_event": "place_insert(LCP).start",
+        "to": "(xarm6@localhost=(k=3,run=REQ_1_T4:place_insert))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T4",
+        "function_name": "place_insert"
+      },
+      {
+        "from": "(xarm6@localhost=(k=3,run=REQ_1_T4:place_insert))",
+        "event": "REQ_1_T4.done",
+        "readable_event": "place_insert(LCP).done",
+        "to": "(xarm6@localhost=(k=4,idle))",
+        "resource_jid": "xarm6@localhost",
+        "task_id": "REQ_1_T4",
+        "function_name": "place_insert"
+      }
+    ],
+    "x0": "(xarm6@localhost=(k=0,idle))",
+    "Xm": [
+      "(xarm6@localhost=(k=4,idle))"
+    ]
+  },
+  "meta": {
+    "resources": [
+      "xarm6@localhost"
+    ],
+    "num_reachable_states": 9,
+    "num_transitions": 8,
+    "has_failure_states": false
+  }
+}

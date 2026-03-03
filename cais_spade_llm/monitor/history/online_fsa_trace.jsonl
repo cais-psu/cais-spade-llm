@@ -1,0 +1,1 @@
+{"ts": "2026-03-03T04:35:03.452500+00:00", "event_type": "start", "event": "REQ_1_T1.start", "readable_event": "pick_approach(LCP).start", "task_id": "REQ_1_T1", "function_name": "pick_approach", "resource_jid": "xarm6@localhost", "status": "running", "from": "(xarm6@localhost=(k=0,idle))", "to": "(xarm6@localhost=(k=0,run=REQ_1_T1:pick_approach))"}

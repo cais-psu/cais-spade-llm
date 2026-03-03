@@ -1,0 +1,18 @@
+{
+  "part_tracker": {},
+  "execution_timeline": [
+    {
+      "timestamp": "2026-03-03T04:35:03.303979+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-03T04:35:03.408464+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    }
+  ],
+  "last_updated": "2026-03-03T04:35:03.432366+00:00"
+}

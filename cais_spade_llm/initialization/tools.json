@@ -1,37 +1,30 @@
 [
   {
-    "function": "pick_grasp",
+    "function": "pick_approach",
     "function_owner_agent": "ur5e",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "at_pick",
-    "out_state": "picked",
-    "part_in_state": "ready",
+    "in_state": "idle",
+    "out_state": "at_pick",
     "required_context_keys": [
       "origin"
     ],
     "context_mapping": {
       "location_param": "origin_resource_location",
-      "location_type": "current_location"
-    },
-    "part_transition": {
-      "completed": {
-        "state": "in_gripper",
-        "location_template": "{resource_jid}_gripper"
-      }
+      "location_type": "part_location"
     },
     "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
       "origin_resource_location": {
         "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
+        "description": "Target origin location to approach for picking."
       },
-      "gripper": {
+      "part_name": {
         "type": "string",
-        "description": "Optional gripper configuration."
+        "description": "Name of the part intended to be picked (for tracking)."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed."
       },
       "product_jid": {
         "type": "string",
@@ -45,7 +38,7 @@
         "description": "Product geometry payload containing part poses in world frame."
       }
     },
-    "description": "Pick a ready part from an origin location."
+    "description": "Approach the part's origin location with empty gripper."
   },
   {
     "function": "place_insert",
@@ -97,31 +90,38 @@
     "description": "Assemble the currently held part at its final destination."
   },
   {
-    "function": "pick_approach",
+    "function": "pick_grasp",
     "function_owner_agent": "ur5e",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "idle",
-    "out_state": "at_pick",
+    "in_state": "at_pick",
+    "out_state": "picked",
+    "part_in_state": "ready",
     "required_context_keys": [
       "origin"
     ],
     "context_mapping": {
       "location_param": "origin_resource_location",
-      "location_type": "part_location"
+      "location_type": "current_location"
+    },
+    "part_transition": {
+      "completed": {
+        "state": "in_gripper",
+        "location_template": "{resource_jid}_gripper"
+      }
     },
     "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Target origin location to approach for picking."
-      },
       "part_name": {
         "type": "string",
-        "description": "Name of the part intended to be picked (for tracking)."
+        "description": "Name of the part to pick."
       },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed."
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
       },
       "product_jid": {
         "type": "string",
@@ -135,7 +135,7 @@
         "description": "Product geometry payload containing part poses in world frame."
       }
     },
-    "description": "Approach the part's origin location with empty gripper."
+    "description": "Pick a ready part from an origin location."
   },
   {
     "function": "place_approach",
@@ -186,38 +186,31 @@
     "description": "Move the loaded part to its destination location."
   },
   {
-    "function": "pick_grasp",
+    "function": "pick_approach",
     "function_owner_agent": "xarm6",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "at_pick",
-    "out_state": "picked",
-    "part_in_state": "ready",
+    "in_state": "idle",
+    "out_state": "at_pick",
     "required_context_keys": [
       "origin"
     ],
     "context_mapping": {
       "location_param": "origin_resource_location",
-      "location_type": "current_location"
-    },
-    "part_transition": {
-      "completed": {
-        "state": "in_gripper",
-        "location_template": "{resource_jid}_gripper"
-      }
+      "location_type": "part_location"
     },
     "params": {
-      "part_name": {
-        "type": "string",
-        "description": "Name of the part to pick."
-      },
       "origin_resource_location": {
         "type": "string",
-        "description": "Origin location of the part (printer or fixture)."
+        "description": "Target origin location to approach for picking."
       },
-      "gripper": {
+      "part_name": {
         "type": "string",
-        "description": "Optional gripper configuration."
+        "description": "Name of the part intended to be picked (for tracking)."
+      },
+      "speed": {
+        "type": "number",
+        "description": "Optional motion speed."
       },
       "product_jid": {
         "type": "string",
@@ -231,7 +224,7 @@
         "description": "Product geometry payload containing part poses in world frame."
       }
     },
-    "description": "Pick a ready part from an origin location."
+    "description": "Approach the part's origin location with empty gripper."
   },
   {
     "function": "place_insert",
@@ -283,31 +276,38 @@
     "description": "Assemble the currently held part at its final destination."
   },
   {
-    "function": "pick_approach",
+    "function": "pick_grasp",
     "function_owner_agent": "xarm6",
     "process": "assembly",
     "resource_type": "robot",
-    "in_state": "idle",
-    "out_state": "at_pick",
+    "in_state": "at_pick",
+    "out_state": "picked",
+    "part_in_state": "ready",
     "required_context_keys": [
       "origin"
     ],
     "context_mapping": {
       "location_param": "origin_resource_location",
-      "location_type": "part_location"
+      "location_type": "current_location"
+    },
+    "part_transition": {
+      "completed": {
+        "state": "in_gripper",
+        "location_template": "{resource_jid}_gripper"
+      }
     },
     "params": {
-      "origin_resource_location": {
-        "type": "string",
-        "description": "Target origin location to approach for picking."
-      },
       "part_name": {
         "type": "string",
-        "description": "Name of the part intended to be picked (for tracking)."
+        "description": "Name of the part to pick."
       },
-      "speed": {
-        "type": "number",
-        "description": "Optional motion speed."
+      "origin_resource_location": {
+        "type": "string",
+        "description": "Origin location of the part (printer or fixture)."
+      },
+      "gripper": {
+        "type": "string",
+        "description": "Optional gripper configuration."
       },
       "product_jid": {
         "type": "string",
@@ -321,7 +321,7 @@
         "description": "Product geometry payload containing part poses in world frame."
       }
     },
-    "description": "Approach the part's origin location with empty gripper."
+    "description": "Pick a ready part from an origin location."
   },
   {
     "function": "place_approach",

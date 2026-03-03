@@ -37,7 +37,7 @@
           "close": 0.02,
           "move_time_sec": 0.4,
           "settle_sec": 0.08,
-          "feedback_timeout_pad_sec": 1.5,
+          "feedback_timeout_pad_sec": 0.5,
           "position_tolerance": 0.01
         },
         "services": {

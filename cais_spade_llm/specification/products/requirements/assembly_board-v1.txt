@@ -1,3 +1,1 @@
-[Assembly Requirements]
-- Assemble part SG from picking location prusa-mk3 to the assembly_board-v1.
-- Assemble part MCP from picking location prusa-mk3 to the assembly_board-v1.
+- Assemble part LCP from picking location prusa-mk4-1 to the assembly_board-v1.

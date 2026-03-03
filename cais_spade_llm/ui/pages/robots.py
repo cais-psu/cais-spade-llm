@@ -1,4 +1,4 @@
-"""Robot status page: phase pipeline, state cards, config editor."""
+"""Resources page: simulation controls, robot phase pipeline, state cards, config editor."""
 
 from __future__ import annotations
 
@@ -12,11 +12,23 @@ from cais_spade_llm.ui.components.status_badge import status_badge
 
 _PHASES = ["idle", "at_pick", "picked", "positioned", "placed"]
 
+# Friendly labels for ROS2 processes.
+_ROS2_LABELS = {
+    "gazebo_moveit": ("Gazebo + MoveIt", "Launches dual-robot Gazebo simulation with MoveIt motion planning and RViz"),
+    "perception": ("Perception", "Part detection via Gazebo ground-truth camera"),
+    "teleop_xarm6": ("Teleop xArm6", "Keyboard teleoperation for xArm6"),
+    "teleop_ur5e": ("Teleop UR5e", "Keyboard teleoperation for UR5e"),
+}
+
 
 def render(bridge: SystemBridge) -> None:
     with ui.column().classes("w-full max-w-7xl mx-auto p-6 gap-6"):
-        ui.label("Robot Status").classes("text-2xl font-bold")
+        ui.label("Resources").classes("text-2xl font-bold")
 
+        # ── Simulation Controls ──────────────────────────────────────
+        _simulation_controls(bridge)
+
+        # ── Robot Status Cards ───────────────────────────────────────
         robot_container = ui.column().classes("w-full gap-6")
 
         def _refresh():
@@ -25,7 +37,7 @@ def render(bridge: SystemBridge) -> None:
 
             if not states:
                 with robot_container:
-                    ui.label("No robots available").classes("text-slate-400 italic")
+                    ui.label("No robots available — start the system first").classes("text-slate-400 italic")
                 return
 
             with robot_container:
@@ -33,6 +45,72 @@ def render(bridge: SystemBridge) -> None:
                     _robot_card(bridge, name, state)
 
         ui.timer(2.0, _refresh)
+
+
+def _simulation_controls(bridge: SystemBridge) -> None:
+    """ROS2/Gazebo process launch controls."""
+    with ui.card().classes("w-full"):
+        ui.label("Simulation Controls").classes("text-lg font-semibold mb-1")
+        ui.label(
+            "Launch and manage ROS2 processes. Gazebo + MoveIt must be running before starting the system in Simulation mode."
+        ).classes("text-xs text-slate-500 mb-3")
+
+        proc_container = ui.column().classes("w-full gap-3")
+
+        def _refresh_procs():
+            proc_container.clear()
+            statuses = bridge.ros2_all_statuses()
+
+            with proc_container:
+                for name, status in statuses.items():
+                    label, description = _ROS2_LABELS.get(name, (name, ""))
+                    with ui.row().classes("items-center gap-4 w-full"):
+                        # Status dot.
+                        color = "green" if status == "running" else "grey"
+                        ui.icon("circle", color=color).classes("text-xs")
+
+                        # Label + description.
+                        with ui.column().classes("gap-0 flex-1"):
+                            ui.label(label).classes("font-semibold text-sm")
+                            if description:
+                                ui.label(description).classes("text-xs text-slate-400")
+
+                        # Start / Stop buttons.
+                        is_running = status == "running"
+
+                        def _start(n=name):
+                            err = bridge.ros2_start(n)
+                            if err:
+                                ui.notify(err, type="warning")
+                            else:
+                                ui.notify(f"Started {n}", type="positive")
+
+                        def _stop(n=name):
+                            bridge.ros2_stop(n)
+                            ui.notify(f"Stopped {n}", type="info")
+
+                        ui.button("Start", on_click=_start, icon="play_arrow").props(
+                            "flat dense" + (" disable" if is_running else "")
+                        ).classes("text-green-600")
+                        ui.button("Stop", on_click=_stop, icon="stop").props(
+                            "flat dense" + (" disable" if not is_running else "")
+                        ).classes("text-red-600")
+
+                # Utility buttons.
+                ui.separator()
+                with ui.row().classes("gap-4"):
+                    def _stop_all():
+                        bridge.ros2_stop_all()
+                        ui.notify("All ROS2 processes stopped", type="info")
+
+                    def _kill_gazebo():
+                        bridge.ros2_kill_gazebo()
+                        ui.notify("Killed orphan Gazebo processes", type="info")
+
+                    ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props("flat dense").classes("text-red-600")
+                    ui.button("Kill Orphan Gazebo", on_click=_kill_gazebo, icon="delete_sweep").props("flat dense").classes("text-orange-600")
+
+        ui.timer(3.0, _refresh_procs)
 
 
 def _robot_card(bridge: SystemBridge, name: str, state: dict) -> None:

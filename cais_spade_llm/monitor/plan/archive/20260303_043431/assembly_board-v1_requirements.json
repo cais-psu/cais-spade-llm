@@ -9,8 +9,7 @@
       "product": "LCP",
       "context": {
         "origin": "prusa-mk4-1",
-        "destination": "assembly_board-v1",
-        "part_name": "LCP"
+        "destination": "assembly_board-v1"
       }
     }
   ]
