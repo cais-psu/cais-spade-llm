@@ -7,6 +7,13 @@ from typing import Any, Dict, Optional
 
 from agents.resource_agent.resource_agent import ResourceAgent
 from xarmlib.wrapper import XArmAPI
+import urx
+from robot_UR_patch import apply_urx_patches
+apply_urx_patches()
+import math
+import socket
+import time
+
 
 
 class RobotAgent(ResourceAgent):
@@ -14,7 +21,7 @@ class RobotAgent(ResourceAgent):
 
     agent_role = "robot"
 
-    def __init__(self, jid: str, password: str, *, name: str, robotIP: str, **kw: Any) -> None:
+    def __init__(self, jid: str, password: str, *, name: str, robotIP: str, robotType: str, ur5e_Params: dict = None, **kw: Any) -> None:
         kw.setdefault(
             "function_names",
             [
@@ -28,17 +35,37 @@ class RobotAgent(ResourceAgent):
         super().__init__(jid, password, name=name, **kw)
 
         self.agent_name = name
+        self.robot_type = robotType
         self._held_part: Optional[str] = None
         self.arm = None
         self.params = {}
-        self.setup_arm(ip = robotIP)
+
+        if robotType == "xarm":
+            self.setup_arm_xarm(ip = robotIP)
+
+        if robotType == "ur5e":
+            self.setup_arm_ur5e(ip = robotIP, ur5e_Params = ur5e_Params)
+
         self.logger.info(
             "RobotAgent '%s' initialized. tools=%s",
             name,
             list(self.executables.keys()),
         )
 
-    def setup_arm(self, ip: str):
+    def setup_arm_ur5e(self, ip: str, ur5e_Params: Optional[dict] = None):
+        """Initialize connection to the UR5e robot arm hardware."""
+        self.logger.info("[Robot] Setting up UR5e robot arm connection...")
+        print("Setting up UR5e robot arm connection...")
+        self.arm = urx.Robot(ip)
+        self.params = ur5e_Params 
+        time.sleep(1)
+        print("UR5e robot arm setup complete.")
+        print("Moving UR5e to home position...")
+        asyncio.run(self._perform_action("Moving UR5e to home position", 
+                             move={"x": -200, "y": -136, "z": -270, "roll": 0, "pitch": 0.0, "yaw": 0.0}, duration=10.0))
+        pass
+
+    def setup_arm_xarm(self, ip: str):
         """Initialize connection to the robot arm hardware."""
 
         self.logger.info("[Robot] Setting up robot arm connection...")
@@ -412,18 +439,33 @@ class RobotAgent(ResourceAgent):
         
         self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
 
-        useSpeed = self.params['speed']
-        if speed is not None:
-            useSpeed = speed
+        if self.robot_type == "xarm":
+            useSpeed = self.params['speed']
+            if speed is not None:
+                useSpeed = speed
 
-        ##start the actual robot action here using the move and other_params
-        self.arm.set_position(move['x'], move['y'], move['z'], move['roll'], move['pitch'], move['yaw'],
-                                speed= useSpeed, wait= False)
+            ##start the actual robot action here using the move and other_params
+            self.arm.set_position(move['x'], move['y'], move['z'], move['roll'], move['pitch'], move['yaw'],
+                                    speed= useSpeed, wait= False)
+        elif self.robot_type == "ur5e":
+            coords_mm_deg = list(move.values())
+            pos_m = [c / 1000.0 for c in coords_mm_deg[:3]]
+            orient_rad = [math.radians(a) for a in coords_mm_deg[3:]]
+            pose = pos_m + orient_rad
+            print("POSE TYPE:", type(pose))
+            print("POSE VALUE:", pose)
+            self.arm.movel(pose, wait=False)
 
         interval = 1.0  
         elapsed = 0.0
 
-        while self.arm.get_is_moving():
+        def check_is_moving():
+            if self.robot_type == "xarm":
+                return self.arm.get_is_moving()
+            elif self.robot_type == "ur5e":
+                return self.arm.is_program_running()  
+
+        while check_is_moving():
             await asyncio.sleep(interval)
             elapsed += interval
             print(f"[{robot}] ... {description} ({elapsed:.1f} sec elapsed)")
@@ -434,3 +476,12 @@ class RobotAgent(ResourceAgent):
         ##Track the overall time it takes to perform the action and print progress every 5 seconds
 
         self.logger.info("[%s] Finished: %s", robot, description)
+
+    def gripper_set(self, width, force):
+        tool_index = 0
+        body = f"""
+        local rg = rpc_factory("xmlrpc","http://localhost:41414")
+        local ret = rg.rg_grip({tool_index}, {float(width)}, {float(force)})
+        textmsg("rg_grip returned: ", ret)
+        """
+        self._rtde_c.sendCustomScriptFunction("rg2_cmd", body)
