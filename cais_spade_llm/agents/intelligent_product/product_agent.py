@@ -193,7 +193,7 @@ class ProductAgent(LlmAgent):
         function_name: str,
         status: str,
         params: Dict[str, Any],
-        robot_jid: str,
+        resource_jid: str,
         task_id: str,
     ) -> None:
         """Generic interpreter: applies the part_transition declared in each function's docstring."""
@@ -210,45 +210,68 @@ class ProductAgent(LlmAgent):
         entry: Dict[str, Any] = {"state": transition["state"]}
 
         if "location_template" in transition:
-            entry["location"] = transition["location_template"].format(robot_jid=robot_jid)
+            entry["location"] = transition["location_template"].format(
+                resource_jid=resource_jid,
+            )
 
         if "location_param" in transition:
             entry["location"] = params.get(transition["location_param"])
 
+        exec_mode = str(os.environ.get("EXECUTION_MODE", "dry_run")).strip().lower()
+        perception_backend = str(os.environ.get("PERCEPTION_BACKEND", "none")).strip().lower()
+
         if transition.get("verify_camera"):
-            position = self.camera.observe(part_name)
-            if position is not None:
+            if exec_mode == "dry_run" or perception_backend in {"", "none"}:
                 entry["state"] = "assembled"
-                entry["position"] = position
+                entry["camera_verification"] = "skipped_dry_run"
+            elif perception_backend == "yolo":
+                # Placeholder for future physical-camera verification.
+                entry["state"] = "assembled"
+                entry["camera_verification"] = "todo_yolo_placeholder"
             else:
-                entry["state"] = "untracked"
-                entry["observation_required"] = True
-                self.logger.error(
-                    "[Product] %s is untracked after placement — camera cannot locate it. Human intervention required.",
-                    part_name,
-                )
+                position = self.camera.observe(part_name)
+                if position is not None:
+                    entry["state"] = "assembled"
+                    entry["position"] = position
+                    entry["camera_verification"] = "detected"
+                else:
+                    entry["state"] = "untracked"
+                    entry["observation_required"] = True
+                    entry["camera_verification"] = "not_detected"
+                    self.logger.error(
+                        "[Product] %s is untracked after placement; camera backend '%s' could not locate it.",
+                        part_name,
+                        perception_backend or "unknown",
+                    )
 
         if transition.get("camera_locate"):
-            # Camera is the authority on where the part actually ended up.
-            # Found → misplaced with coordinates; not found → untracked, human required.
             last_known = (
                 params.get(transition["last_known_param"])
                 if "last_known_param" in transition else None
             )
-            position = self.camera.observe(part_name)
             entry["location"] = None
             if last_known:
                 entry["last_known_location"] = last_known
-            if position is not None:
-                entry["state"] = "misplaced"
-                entry["position"] = position
-            else:
+
+            if exec_mode == "dry_run" or perception_backend in {"", "none", "yolo"}:
                 entry["state"] = "untracked"
                 entry["observation_required"] = True
-                self.logger.error(
-                    "[Product] %s is untracked — camera cannot locate it. Human intervention required.",
-                    part_name,
-                )
+                entry["camera_verification"] = "unavailable"
+            else:
+                position = self.camera.observe(part_name)
+                if position is not None:
+                    entry["state"] = "misplaced"
+                    entry["position"] = position
+                    entry["camera_verification"] = "detected"
+                else:
+                    entry["state"] = "untracked"
+                    entry["observation_required"] = True
+                    entry["camera_verification"] = "not_detected"
+                    self.logger.error(
+                        "[Product] %s is untracked; camera backend '%s' could not locate it.",
+                        part_name,
+                        perception_backend or "unknown",
+                    )
 
         if transition.get("observation_required"):
             entry["observation_required"] = True
@@ -256,7 +279,7 @@ class ProductAgent(LlmAgent):
             if "last_known_param" in transition:
                 entry["last_known_location"] = params.get(transition["last_known_param"])
             elif "last_known_template" in transition:
-                entry["last_known_location"] = transition["last_known_template"].format(robot_jid=robot_jid)
+                entry["last_known_location"] = transition["last_known_template"].format(resource_jid=resource_jid)
 
         if status == "completed":
             entry["last_successful_task"] = task_id
@@ -311,8 +334,12 @@ class ProductAgent(LlmAgent):
     async def setup(self):
         await super().setup()
 
-        # Kickoff behaviour (runs once) to build the plan
-        self.add_behaviour(self._Kickoff())
+        # Kickoff behaviour (runs once) to build the plan.
+        # Template ensures _Kickoff only receives plan_safety_result messages
+        # and does not steal ACKs or other messages from the queue.
+        t_kickoff = Template()
+        t_kickoff.set_metadata("type", "plan_safety_result")
+        self.add_behaviour(self._Kickoff(), t_kickoff)
 
         # ACK inbox
         t_ack = Template()
@@ -385,10 +412,16 @@ class ProductAgent(LlmAgent):
                 return {}
             raw = json.loads(p.read_text(encoding="utf-8"))
             geo = raw.get(env, {})
-            self.logger.info(
-                "[Product] Loaded geometry for env='%s' from %s", env, p,
+            if geo:
+                self.logger.info(
+                    "[Product] Loaded geometry for env='%s' from %s", env, p,
+                )
+                return geo
+
+            self.logger.warning(
+                "[Product] Geometry file %s has no usable '%s' block.", p, env
             )
-            return geo
+            return {}
         except Exception:
             self.logger.exception("[Product] Failed to load geometry from %s", geometry_file)
             return {}
@@ -694,7 +727,7 @@ class ProductAgent(LlmAgent):
                         function_name=function_name,
                         status=status,
                         params=params,
-                        robot_jid=str(msg.sender),
+                        resource_jid=str(msg.sender),
                         task_id=task_id,
                     )
 
@@ -702,9 +735,9 @@ class ProductAgent(LlmAgent):
             # and provided in the replan_request message (system_coordination_state)
 
             if updated_node:
-                agent._persist_plan_snapshot()
-                agent._persist_product_state()
-                agent._persist_resource_state()
+                await asyncio.to_thread(agent._persist_plan_snapshot)
+                await asyncio.to_thread(agent._persist_product_state)
+                await asyncio.to_thread(agent._persist_resource_state)
 
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
@@ -803,9 +836,9 @@ class ProductAgent(LlmAgent):
                     "[Product] Failed to rebuild/re-register FSA after online replan."
                 )
 
-            agent._persist_plan_snapshot()
-            agent._persist_product_state()
-            agent._persist_resource_state()
+            await asyncio.to_thread(agent._persist_plan_snapshot)
+            await asyncio.to_thread(agent._persist_product_state)
+            await asyncio.to_thread(agent._persist_resource_state)
 
     class _PlanSafetyResultInbox(CyclicBehaviour):
         """Handle runtime plan_safety_result replies from CCA."""
@@ -867,9 +900,9 @@ class ProductAgent(LlmAgent):
                 check_msg.set_metadata("type", "plan_safety_check")
                 check_msg.body = json.dumps(check_payload)
                 await self.send(check_msg)
-                agent._persist_plan_snapshot()
-                agent._persist_product_state()
-                agent._persist_resource_state()
+                await asyncio.to_thread(agent._persist_plan_snapshot)
+                await asyncio.to_thread(agent._persist_product_state)
+                await asyncio.to_thread(agent._persist_resource_state)
             except Exception:
                 agent.logger.exception(
                     "[Product] Corrective runtime replan attempt failed."

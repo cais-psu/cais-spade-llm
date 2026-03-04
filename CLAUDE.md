@@ -34,11 +34,11 @@ monitor/                 # Runtime outputs (logs, state, plans)
 # Activate venv
 source .venv/bin/activate
 
-# Run in simulation mode (no ROS2 needed)
-python -m cais_spade_llm --mode simulate
+# Run in dry run mode (no ROS2 needed)
+python -m cais_spade_llm --mode dry_run
 
 # Run with ROS2 + Gazebo
-python -m cais_spade_llm --mode ros2
+python -m cais_spade_llm --mode simulation
 ```
 
 ## Running Tests
@@ -68,7 +68,7 @@ python3 test/test_xarm6_camera_move.py
 - Robot controllers are instantiated dynamically from JSON manifests (`initialization/resources/robot_*.json`)
 - SPADE agents communicate over XMPP; the `SystemBridge` syncs agent state to the NiceGUI UI
 - Safety validation runs both offline (pre-execution LTL→DFA) and online (runtime FSA monitoring)
-- Three execution modes: `simulate` (pure Python), `ros2` (Gazebo), `real` (hardware)
+- Three execution modes: `dry_run` (pure Python), `simulation` (Gazebo), `physical` (hardware)
 
 ## Things to Avoid
 

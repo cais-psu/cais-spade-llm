@@ -4,7 +4,7 @@
     "jid": "ur5e@localhost",
     "password": "none",
     "domain": "localhost",
-    "execution_mode": "ros2",
+    "execution_mode": "simulation",
     "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly board.",
     "functions": [
       "pick_grasp",
@@ -57,7 +57,8 @@
           ],
           "primary_attach_link": "ur5e_wrist_3_link",
           "detach_timeout_sec": 2.0,
-          "detach_max_link_attempts": 3
+          "detach_max_link_attempts": 3,
+          "release_detach_timeout_sec": 5.0
         },
         "motion": {
           "approach_height_m": 0.2,
@@ -68,6 +69,10 @@
           "release_preopen_settle_sec": 0.15,
           "release_postopen_settle_sec": 0.6,
           "release_postdetach_settle_sec": 0.35,
+          "release_descend_time_scale": 1.35,
+          "release_detach_retry_count": 2,
+          "release_detach_retry_delay_sec": 0.35,
+          "release_retry_lift_m": 0.005,
           "trajectory_time_scale": 1.0
         },
         "parts_tuning": {

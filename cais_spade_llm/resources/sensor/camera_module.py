@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -11,111 +12,141 @@ class CameraModule:
     """
     Sensor module for observing part positions in the workspace.
 
-    ProductAgent uses this to verify placement after every place_insert ACK.
-    The robot places the part and reports mechanical outcome; CameraModule
-    provides the ground truth about where the part actually ended up.
-
-    Observation outcomes:
-      - Returns {"x": float, "y": float, "z": float} if part is detected.
-      - Returns None if part cannot be located (untracked → human intervention).
-
-    Modes:
-      - mock: Pass mock_observations at construction time (default, for tests).
-      - ros2: Connect to the gazebo_camera_detector's /detect_part service.
-              Set use_ros2=True. Falls back to mock if ROS2 unavailable.
-
-    Example (mock mode):
-        CameraModule(mock_observations={
-            "SG":  {"x": 750, "y": -200, "z": 50},
-            "MCP": {"x": 400, "y": -100, "z": 50},
-        })
-
-    Example (ROS2 mode):
-        CameraModule(use_ros2=True)
-
-    Workspace boundaries (from robot configs, units: mm):
-        xarm6: x=[-150, 650], y=[-550, 100], z=[0, 600]
-        ur5e:  x=[100,  900], y=[-450, 200], z=[0, 600]
+    Backends:
+      - none: no observation (dry-run placeholder path).
+      - mock: deterministic map from mock_observations.
+      - gazebo_gt: ROS2 /detect_part and /detect_all from Gazebo perception node.
+      - yolo: direct physical perception module (no ROS2 dependency).
     """
 
     def __init__(
         self,
         mock_observations: Optional[Dict[str, Dict[str, float]]] = None,
         use_ros2: bool = False,
+        backend: Optional[str] = None,
         ros2_timeout_sec: float = 5.0,
         ros2_call_retries: int = 2,
     ) -> None:
+        self._backend = self._resolve_backend(
+            backend=backend,
+            use_ros2=use_ros2,
+            mock_observations=mock_observations,
+        )
         self._mock_observations: Dict[str, Optional[Dict[str, float]]] = mock_observations or {}
-        self._use_ros2 = use_ros2
+        self._use_ros2 = self._backend == "gazebo_gt"
         self._ros2_timeout = ros2_timeout_sec
         self._ros2_call_retries = max(1, int(ros2_call_retries))
-        self._ros2_node = None
-        self._detect_client = None
-        self._detect_all_client = None
+        self._perception_node_name = (
+            str(os.environ.get("PERCEPTION_NODE_NAME", "/perception_node")).strip()
+            or "/perception_node"
+        )
 
-        if self._use_ros2:
-            self._init_ros2()
+        self._ros2_node = None
+        self._Trigger = None
+
+        self._legacy_detect_part_client = None
+        self._legacy_detect_all_client = None
+        self._ros2_init_attempted = False
+
+        logger.info("CameraModule initialized backend=%s", self._backend)
+
+    @staticmethod
+    def _resolve_backend(
+        *,
+        backend: Optional[str],
+        use_ros2: bool,
+        mock_observations: Optional[Dict[str, Dict[str, float]]],
+    ) -> str:
+        aliases = {
+            "ros2": "gazebo_gt",
+            "gazebo": "gazebo_gt",
+            "gazebo_gt": "gazebo_gt",
+            "none": "none",
+            "mock": "mock",
+            "yolo": "yolo",
+        }
+        explicit = aliases.get(str(backend or "").strip().lower())
+        if explicit:
+            return explicit
+
+        env_value = aliases.get(str(os.environ.get("PERCEPTION_BACKEND", "")).strip().lower())
+        if env_value:
+            return env_value
+
+        if use_ros2:
+            return "gazebo_gt"
+        if mock_observations:
+            return "mock"
+        return "none"
 
     def _init_ros2(self) -> None:
-        """Initialize ROS2 service clients for gazebo_camera_detector."""
+        """Initialize ROS2 clients for Trigger-based legacy API."""
+        if self._ros2_init_attempted:
+            return
+        self._ros2_init_attempted = True
         try:
             import rclpy
             from std_srvs.srv import Trigger
+
+            self._Trigger = Trigger
 
             if not rclpy.ok():
                 rclpy.init()
 
             self._ros2_node = rclpy.create_node("camera_module_client")
-            self._detect_client = self._ros2_node.create_client(
+
+            # Keep legacy clients for compatibility with older perception nodes.
+            self._legacy_detect_part_client = self._ros2_node.create_client(
                 Trigger, "/detect_part"
             )
-            self._detect_all_client = self._ros2_node.create_client(
+            self._legacy_detect_all_client = self._ros2_node.create_client(
                 Trigger, "/detect_all"
             )
-            logger.info("CameraModule: ROS2 service clients created")
+
+            logger.info(
+                "CameraModule ROS2 clients ready backend=%s node=%s",
+                self._backend,
+                self._perception_node_name,
+            )
         except ImportError:
-            logger.warning(
-                "CameraModule: rclpy not available, falling back to mock mode"
-            )
+            logger.warning("CameraModule: rclpy unavailable; disabling ROS2 camera path")
             self._use_ros2 = False
-        except Exception as e:
-            logger.warning(
-                f"CameraModule: ROS2 init failed ({e}), falling back to mock mode"
-            )
+        except Exception as exc:
+            logger.warning("CameraModule: ROS2 init failed (%s); disabling ROS2 camera path", exc)
             self._use_ros2 = False
+
+    def _ensure_ros2(self) -> bool:
+        """Lazy-initialize ROS2 clients only when observation is actually requested."""
+        if not self._use_ros2:
+            return False
+        if self._ros2_node is None:
+            self._init_ros2()
+        return bool(self._ros2_node and self._legacy_detect_part_client and self._legacy_detect_all_client)
 
     def observe(self, part_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Query camera for the current position of a part.
-
-        Args:
-            part_name: Name of the part to locate.
-
-        Returns:
-            Position dict {"x": float, "y": float, "z": float} if detected,
-            None if the part cannot be found.
-        """
-        if self._mock_observations:
+        if self._backend == "mock":
             return self._mock_observations.get(part_name)
-
-        if self._use_ros2 and self._ros2_node and self._detect_client:
-            return self._observe_ros2(part_name)
-
+        if self._backend == "none":
+            return None
+        if self._backend == "yolo":
+            return self._observe_physical(part_name)
+        if self._ensure_ros2():
+            return self._observe_ros2_trigger(part_name)
         return None
 
-    def _observe_ros2(self, part_name: str) -> Optional[Dict[str, Any]]:
-        """Call /detect_part ROS2 service to get part position."""
+    def _observe_ros2_trigger(self, part_name: str) -> Optional[Dict[str, Any]]:
+        if not (self._legacy_detect_part_client and self._Trigger):
+            return None
+
         import rclpy
-        from std_srvs.srv import Trigger
 
         try:
-            # Set target_part on /perception_node via parameter service.
-            # Avoid setting it on this client node, which does not declare it.
+            from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterType, ParameterValue
             from rcl_interfaces.srv import SetParameters
-            from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
+            # Legacy protocol: set target_part parameter then call Trigger.
             param_client = self._ros2_node.create_client(
-                SetParameters, "/perception_node/set_parameters"
+                SetParameters, f"{self._perception_node_name}/set_parameters"
             )
             if param_client.wait_for_service(timeout_sec=self._ros2_timeout):
                 param_req = SetParameters.Request()
@@ -123,138 +154,136 @@ class CameraModule:
                 param_msg.name = "target_part"
                 param_msg.value = ParameterValue()
                 param_msg.value.type = ParameterType.PARAMETER_STRING
-                param_msg.value.string_value = part_name
+                param_msg.value.string_value = str(part_name or "").strip().upper()
                 param_req.parameters = [param_msg]
                 param_future = param_client.call_async(param_req)
                 rclpy.spin_until_future_complete(
                     self._ros2_node, param_future, timeout_sec=self._ros2_timeout
                 )
 
-            # Call /detect_part
-            if not self._detect_client.wait_for_service(timeout_sec=self._ros2_timeout):
-                logger.warning("CameraModule: /detect_part service not available")
+            if not self._legacy_detect_part_client.wait_for_service(timeout_sec=self._ros2_timeout):
                 return None
 
             result = None
-            for attempt in range(1, self._ros2_call_retries + 1):
-                request = Trigger.Request()
-                future = self._detect_client.call_async(request)
+            for _ in range(self._ros2_call_retries):
+                request = self._Trigger.Request()
+                future = self._legacy_detect_part_client.call_async(request)
                 rclpy.spin_until_future_complete(
                     self._ros2_node, future, timeout_sec=self._ros2_timeout
                 )
-
                 if future.done() and future.result() is not None:
                     result = future.result()
                     break
 
-                logger.warning(
-                    "CameraModule: /detect_part call timed out (attempt %d/%d)",
-                    attempt,
-                    self._ros2_call_retries,
-                )
-
             if result is None:
-                logger.warning("CameraModule: /detect_part call failed after retries")
                 return None
 
             data = json.loads(result.message)
-
             if data.get("detected"):
-                # Convert from metres to mm (matching existing interface)
                 return {
-                    "x": data["x"] * 1000,
-                    "y": data["y"] * 1000,
-                    "z": data["z"] * 1000,
+                    "x": float(data["x"]) * 1000.0,
+                    "y": float(data["y"]) * 1000.0,
+                    "z": float(data["z"]) * 1000.0,
                 }
             return None
-
-        except Exception as e:
-            logger.warning(f"CameraModule: ROS2 observe failed: {e}")
+        except Exception:
+            logger.exception("CameraModule: /detect_part Trigger call failed")
             return None
 
     def observe_all(self) -> Dict[str, Dict[str, float]]:
-        """
-        Query camera for all currently detected parts.
-
-        Returns:
-            Dict mapping part_name → {"x", "y", "z"} for all detected parts.
-        """
-        if self._mock_observations:
+        if self._backend == "mock":
             return {k: v for k, v in self._mock_observations.items() if v is not None}
-
-        if self._use_ros2 and self._ros2_node and self._detect_all_client:
-            return self._observe_all_ros2()
-
+        if self._backend == "none":
+            return {}
+        if self._backend == "yolo":
+            return self._observe_all_physical()
+        if self._ensure_ros2():
+            return self._observe_all_ros2_trigger()
         return {}
 
-    def _observe_all_ros2(self) -> Dict[str, Dict[str, float]]:
-        """Call /detect_all ROS2 service."""
+    def _observe_physical(self, part_name: str) -> Optional[Dict[str, Any]]:
+        """Call direct physical perception module (non-ROS path)."""
+        try:
+            from resources.sensor.physical.detect_part_service import detect_part
+
+            return detect_part(str(part_name or "").strip().upper())
+        except Exception:
+            logger.exception("CameraModule: physical detect_part call failed")
+            return None
+
+    def _observe_all_physical(self) -> Dict[str, Dict[str, float]]:
+        """Call direct physical perception module (non-ROS path)."""
+        try:
+            from resources.sensor.physical.detect_all_service import detect_all
+
+            result = detect_all()
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            logger.exception("CameraModule: physical detect_all call failed")
+            return {}
+
+    def _observe_all_ros2_trigger(self) -> Dict[str, Dict[str, float]]:
+        if not (self._legacy_detect_all_client and self._Trigger):
+            return {}
+
         import rclpy
-        from std_srvs.srv import Trigger
 
         try:
-            if not self._detect_all_client.wait_for_service(timeout_sec=self._ros2_timeout):
+            if not self._legacy_detect_all_client.wait_for_service(timeout_sec=self._ros2_timeout):
                 return {}
 
-            request = Trigger.Request()
-            future = self._detect_all_client.call_async(request)
+            request = self._Trigger.Request()
+            future = self._legacy_detect_all_client.call_async(request)
             rclpy.spin_until_future_complete(
                 self._ros2_node, future, timeout_sec=self._ros2_timeout
             )
-
-            if future.result() is None:
+            result = future.result()
+            if result is None:
                 return {}
 
-            detections = json.loads(future.result().message)
-            result = {}
+            detections = json.loads(result.message)
+            parsed: Dict[str, Dict[str, float]] = {}
             for d in detections:
-                result[d["part_name"]] = {
-                    "x": d["x"] * 1000,
-                    "y": d["y"] * 1000,
-                    "z": d["z"] * 1000,
+                parsed[str(d["part_name"])] = {
+                    "x": float(d["x"]) * 1000.0,
+                    "y": float(d["y"]) * 1000.0,
+                    "z": float(d["z"]) * 1000.0,
                 }
-            return result
-
-        except Exception as e:
-            logger.warning(f"CameraModule: ROS2 observe_all failed: {e}")
+            return parsed
+        except Exception:
+            logger.exception("CameraModule: /detect_all Trigger call failed")
             return {}
 
     def destroy(self) -> None:
-        """Clean up ROS2 resources."""
         if self._ros2_node:
             self._ros2_node.destroy_node()
             self._ros2_node = None
 
 
 if __name__ == "__main__":
-    import sys
     import subprocess
+    import sys
 
-    # ROS2 Humble requires Python 3.10 — re-exec if running under wrong version
     if sys.version_info[:2] != (3, 10):
-        print(f"Current Python is {sys.version_info.major}.{sys.version_info.minor}, "
-              f"re-launching with python3.10 (required for rclpy)...")
+        print(
+            f"Current Python is {sys.version_info.major}.{sys.version_info.minor}, "
+            "re-launching with python3.10 (required for rclpy)..."
+        )
         result = subprocess.run(["python3.10", __file__])
         sys.exit(result.returncode)
 
     logging.basicConfig(level=logging.INFO)
-
-    cam = CameraModule(use_ros2=True)
-    if not cam._use_ros2:
-        print("ERROR: ROS2 mode not available. Is gazebo_camera_detector running?")
+    selected_backend = str(os.environ.get("PERCEPTION_BACKEND", "gazebo_gt")).strip() or "gazebo_gt"
+    cam = CameraModule(backend=selected_backend)
+    if selected_backend == "gazebo_gt" and not cam._use_ros2:
+        print("ERROR: ROS2 mode not available. Is perception node running?")
         sys.exit(1)
 
     print("\n--- observe('SG') ---")
-    result = cam.observe("SG")
-    print(f"  SG: {result}")
-
-    print("\n--- observe('MCP') ---")
-    result = cam.observe("MCP")
-    print(f"  MCP: {result}")
+    print(f"  SG: {cam.observe('SG')}")
 
     print("\n--- observe_all() ---")
-    all_parts = cam.observe_all()
-    for name, pos in all_parts.items():
+    for name, pos in cam.observe_all().items():
         print(f"  {name}: x={pos['x']:.1f} y={pos['y']:.1f} z={pos['z']:.1f}")
 
     cam.destroy()

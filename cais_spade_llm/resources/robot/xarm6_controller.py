@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from .ros2_pick_place_controller import Ros2PickPlaceController
@@ -34,11 +35,11 @@ class XArm6Controller(Ros2PickPlaceController):
         joint_states_topic: str = JOINT_STATES_TOPIC,
         controller_config: dict[str, Any] | None = None,
         named_positions: dict[str, Any] | None = None,
-        execution_mode: str = "ros2",
+        execution_mode: str = "simulation",
     ) -> None:
         super().__init__(
             robot_name="xarm6",
-            node_name="xarm6_controller",
+            node_name=f"xarm6_controller_{os.getpid()}",
             controller_config=controller_config or {},
             named_positions=named_positions,
             execution_mode=execution_mode,

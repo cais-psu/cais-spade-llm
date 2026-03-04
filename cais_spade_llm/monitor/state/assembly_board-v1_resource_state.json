@@ -1,6 +1,6 @@
 {
   "ur5e@localhost": {
-    "execution_mode": "ros2",
+    "execution_mode": "simulation",
     "controller_ready": true,
     "held_part": null,
     "current_state": "idle",
@@ -12,14 +12,14 @@
     "gripper_state": "open"
   },
   "xarm6@localhost": {
-    "execution_mode": "ros2",
+    "execution_mode": "simulation",
     "controller_ready": true,
     "held_part": null,
     "current_state": "idle",
     "position": {
-      "x": 0.0,
-      "y": 0.0,
-      "z": 0.0
+      "x": 400.0,
+      "y": -200.0,
+      "z": 200.0
     },
     "gripper_state": "open"
   }

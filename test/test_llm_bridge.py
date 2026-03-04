@@ -75,7 +75,7 @@ async def run_test():
             "in_state": "at_pick",
             "out_state": "picked",
             "part_in_state": "ready",
-            "part_transition": {"completed": {"state": "in_gripper", "location_template": "{robot_jid}_gripper"}},
+            "part_transition": {"completed": {"state": "in_gripper", "location_template": "{resource_jid}_gripper"}},
             "params": {
                 "part_name": {"type": "string", "description": "Name of the part to pick."},
                 "origin_resource_location": {"type": "string", "description": "Origin location of the part (printer or fixture)."},
@@ -90,7 +90,7 @@ async def run_test():
             "in_state": "picked",
             "out_state": "positioned",
             "part_in_state": "in_gripper",
-            "part_transition": {"completed": {"state": "in_transit", "location_template": "{robot_jid}_gripper"}},
+            "part_transition": {"completed": {"state": "in_transit", "location_template": "{resource_jid}_gripper"}},
             "params": {
                 "destination_location": {"type": "string", "description": "Destination location to carry the loaded part."},
                 "part_name": {"type": "string", "description": "Name of the part being moved."},

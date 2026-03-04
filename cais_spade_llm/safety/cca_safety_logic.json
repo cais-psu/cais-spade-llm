@@ -3,7 +3,7 @@
     {
       "id": "SAFE_1",
       "raw_text": "SG must be place_part before MCP is place_part",
-      "constraint_type": "ordering_constraint",
+      "constraint_type": "ordering_place_part",
       "process": null,
       "product": [
         "sg",

@@ -503,10 +503,10 @@ class CentralControllerAgent(LlmAgent):
                 return
 
             await safety_logic.build_safety_rules_and_logic(safety_text)
-            safety_logic.save(agent.safety_logic_path)
+            await asyncio.to_thread(safety_logic.save, agent.safety_logic_path)
 
             agent.safety_rules = safety_logic.rules
-            dfa_map = safety_logic.build_dfas_per_rule()
+            dfa_map = await asyncio.to_thread(safety_logic.build_dfas_per_rule)
 
             # Initialize the NEW OnlineSafetyMonitor
             #

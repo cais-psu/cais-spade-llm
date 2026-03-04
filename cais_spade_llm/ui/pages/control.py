@@ -31,7 +31,7 @@ _HARDWARE_PROC_NAMES = (
 )
 
 _SUPPORT_PROCS = {
-    "perception": ("Perception", "Part detection via Gazebo ground-truth camera"),
+    "perception": ("Perception", "Simulation-only: part detection via Gazebo ground-truth camera"),
 }
 
 
@@ -225,12 +225,21 @@ def _launch_section(bridge: SystemBridge) -> None:
                         ui.notify("Stopped all tracked processes", type="info")
                         _refresh()
 
+                    async def _reset_gazebo_async() -> None:
+                        ok, msg = await asyncio.to_thread(bridge.ros2_reset_gazebo_environment)
+                        ui.notify(msg, type=("positive" if ok else "warning"), timeout=4500)
+                        _refresh()
+
+                    def _reset_gazebo():
+                        asyncio.create_task(_reset_gazebo_async())
+
                     def _cleanup():
                         bridge.ros2_cleanup_processes()
                         ui.notify("Cleanup complete: removed stale ROS2/MoveIt/driver processes", type="info")
                         _refresh()
 
                     ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props("flat dense").classes("text-red-600")
+                    ui.button("Reset Gazebo Scene", on_click=_reset_gazebo, icon="restart_alt").props("flat dense").classes("text-blue-700")
                     ui.button("Cleanup", on_click=_cleanup, icon="cleaning_services").props("flat dense").classes("text-amber-700")
 
         ui.timer(3.0, _refresh)
@@ -743,6 +752,59 @@ def _teleop_section(bridge: SystemBridge) -> None:
 
                 with ui.row().classes("gap-2"):
                     ui.button("Save", on_click=_save_current, icon="save").props("outline")
+
+            # ── Named Positions (Go To) ─────────────────────────────
+            with ui.card().classes("w-full mb-6 break-inside-avoid"):
+                ui.label("Named Positions").classes("font-semibold text-sm mb-2")
+                ui.label(
+                    "Select a stored position and press Go to move the robot there."
+                ).classes("text-xs text-slate-500 mb-2")
+                named_pos_env_label = ui.label("").classes("text-xs text-slate-500 mb-1")
+                named_pos_select = ui.select(
+                    [], label="Position", value=None,
+                ).props("dense").classes("w-48")
+                named_pos_busy = {"moving": False}
+
+                def _refresh_named_positions() -> None:
+                    robot = robot_select.value
+                    positions = bridge.list_named_positions(robot)
+                    env = bridge.teleop_target_environment()
+                    named_pos_env_label.set_text(f"Environment: {env}")
+                    options = list(positions.keys())
+                    named_pos_select.options = options
+                    if named_pos_select.value not in options:
+                        named_pos_select.value = options[0] if options else None
+                    named_pos_select.update()
+
+                async def _go_to_named() -> None:
+                    name = named_pos_select.value
+                    robot = robot_select.value
+                    if not name:
+                        ui.notify("Select a position first", type="warning", position="bottom-right", timeout=1800)
+                        return
+                    if named_pos_busy["moving"]:
+                        ui.notify("Already moving...", type="info", position="bottom-right", timeout=900)
+                        return
+                    named_pos_busy["moving"] = True
+                    go_btn.props("loading")
+                    try:
+                        ok, msg = await asyncio.to_thread(bridge.teleop_go_to_position, robot, name)
+                        if ok:
+                            ui.notify(f"{robot}: moved to '{name}'", type="positive", position="bottom-right", timeout=1800)
+                        else:
+                            ui.notify(f"{robot}: failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+                    except Exception as exc:
+                        ui.notify(f"{robot}: error ({exc})", type="negative", position="bottom-right", timeout=3500)
+                    finally:
+                        named_pos_busy["moving"] = False
+                        go_btn.props(remove="loading")
+
+                with ui.row().classes("gap-2 items-center mt-2"):
+                    go_btn = ui.button("Go", on_click=_go_to_named, icon="play_arrow").props("color=primary")
+                    ui.button("Refresh", on_click=_refresh_named_positions, icon="refresh").props("outline dense")
+
+                _refresh_named_positions()
+                robot_select.on_value_change(lambda _: _refresh_named_positions())
 
         _refresh_teleop_status()
         ui.timer(1.0, _refresh_teleop_status)

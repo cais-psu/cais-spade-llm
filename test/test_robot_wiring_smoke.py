@@ -71,9 +71,9 @@ def _load_robot_manifest(robot_name: str, init_dir: Path) -> tuple[dict[str, Any
 
 
 def _resolve_execution_mode(meta: dict[str, Any], env_block: dict[str, Any]) -> str:
-    mode = str(env_block.get("execution_mode", meta.get("execution_mode", "simulate"))).strip().lower()
-    if mode not in {"simulate", "ros2", "real"}:
-        return "simulate"
+    mode = str(env_block.get("execution_mode", meta.get("execution_mode", "dry_run"))).strip().lower()
+    if mode not in {"dry_run", "simulation", "physical"}:
+        return "dry_run"
     return mode
 
 
@@ -103,7 +103,7 @@ def _validate_manifest(
         issues.append(f"environment block '{env_name}' must be an object")
         return issues
 
-    if resolved_mode in {"ros2", "real"}:
+    if resolved_mode in {"simulation", "physical"}:
         controller_cfg = env_block.get("controller")
         if not isinstance(controller_cfg, dict) or not controller_cfg:
             issues.append(
@@ -354,7 +354,7 @@ def run_one_robot(
     controller = None
 
     # Build controller only when non-sim mode is requested.
-    if resolved_mode in {"ros2", "real"}:
+    if resolved_mode in {"simulation", "physical"}:
         try:
             controller = _build_controller(
                 robot_name=robot_name,

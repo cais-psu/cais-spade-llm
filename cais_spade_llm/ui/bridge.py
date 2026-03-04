@@ -11,7 +11,9 @@ import select
 import shlex
 import signal
 import shutil
+import socket
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -54,6 +56,9 @@ class SystemBridge:
         # UR5e still uses explicit driver + MoveIt bring-up.
         "ur5e": ("hardware_ur5e_driver", "hardware_ur5e_moveit"),
     }
+    _GAZEBO_PREWARM_TIMEOUT_S = 60.0
+    _GAZEBO_PREWARM_START_DELAY_S = 2.0
+    _GAZEBO_PREWARM_READY_WAIT_S = 60.0
 
     @classmethod
     def instance(cls) -> SystemBridge:
@@ -68,9 +73,10 @@ class SystemBridge:
         self.product_agents: list = []
         self.cca = None
 
-        # SPADE XMPP server task.
-        self._xmpp_server = None
-        self._xmpp_task: Optional[asyncio.Task] = None
+        # Embedded XMPP server process.
+        self._xmpp_proc: Optional[subprocess.Popen] = None
+        self._xmpp_host: str = "127.0.0.1"
+        self._xmpp_port: int = 5222
 
         # Lifecycle flags.
         self.system_running: bool = False
@@ -79,7 +85,7 @@ class SystemBridge:
         self.last_error: Optional[str] = None
 
         # Configuration (set from UI before start).
-        self.execution_mode: str = "ros2"
+        self.execution_mode: str = "simulation"
         self.robot_env: str = "gazebo"
         self.selected_product: str = ""
 
@@ -87,9 +93,78 @@ class SystemBridge:
         self._ros2_procs: dict[str, subprocess.Popen] = {}
         self._teleop_server_proc: Optional[subprocess.Popen] = None
         self._teleop_server_lock = threading.Lock()
+        self._gazebo_prewarm_lock = threading.Lock()
+        self._gazebo_prewarm_thread: Optional[threading.Thread] = None
+        self._gazebo_prewarm_pending: set[str] = set()
+        self._gazebo_prewarm_controllers: dict[str, Any] = {}
+        self._gazebo_prewarm_cancel = threading.Event()
+        self._gazebo_prewarm_done = threading.Event()  # Set when prewarm completes successfully.
+        self._sim_ready_cache_ts: float = 0.0
+        self._sim_ready_cache: tuple[bool, str] = (False, "Simulation startup check pending.")
+        self._sim_ready_probe_inflight: bool = False
         self.hardware_ips = self._load_hardware_ips()
         self._hw_ping_cache: dict[str, dict[str, Any]] = {}
         self._hw_ping_last_ts: float = 0.0
+        self._startup_seq: int = 0
+        self._startup_phase: str = "idle"
+        self._startup_phase_ts: float = time.monotonic()
+        self._agent_creator_cached: Any | None = None
+        self._agent_creator_prefetch_started: bool = False
+        self._agent_creator_prefetch_lock = threading.Lock()
+        self._agent_creator_prefetch_thread: Optional[threading.Thread] = None
+        self._maybe_start_agent_creator_prefetch()
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+    def _diag_emit(self, message: str) -> None:
+        """Emit high-signal startup diagnostics to stdout and logger."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+        line = f"{ts} - ui.bridge - INFO - [UI-DIAG] {message}"
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+        log.info("[UI-DIAG] %s", message)
+
+    def _set_startup_phase(self, phase: str) -> None:
+        self._startup_phase = str(phase)
+        self._startup_phase_ts = time.monotonic()
+        self._diag_emit(f"startup phase -> {self._startup_phase}")
+
+    def log_event_loop_lag(self, lag_sec: float) -> None:
+        """Called by UI watchdog to diagnose websocket disconnect/freeze windows."""
+        age = max(0.0, time.monotonic() - float(self._startup_phase_ts))
+        self._diag_emit(
+            "event-loop lag "
+            f"{lag_sec:.3f}s (starting={self._starting} running={self.system_running} "
+            f"phase={self._startup_phase} phase_age={age:.2f}s)"
+        )
+
+    def _maybe_start_agent_creator_prefetch(self) -> None:
+        with self._agent_creator_prefetch_lock:
+            if self._agent_creator_prefetch_started:
+                return
+            self._agent_creator_prefetch_started = True
+            self._agent_creator_prefetch_thread = threading.Thread(
+                target=self._prefetch_agent_creator_worker,
+                name="agent_creator_prefetch",
+                daemon=True,
+            )
+            self._agent_creator_prefetch_thread.start()
+
+    def _prefetch_agent_creator_worker(self) -> None:
+        t0 = time.monotonic()
+        try:
+            ac = self._import_agent_creator_module()
+            self._agent_creator_cached = ac
+            self._diag_emit(
+                "agent_creator pre-import ready in "
+                f"{time.monotonic() - t0:.2f}s"
+            )
+        except Exception as exc:
+            # Keep startup resilient: fallback import happens on demand in start_system.
+            self._diag_emit(f"agent_creator pre-import failed: {exc}")
 
     # ------------------------------------------------------------------
     # Product / resource discovery
@@ -115,29 +190,80 @@ class SystemBridge:
     # ------------------------------------------------------------------
     # XMPP server lifecycle
     # ------------------------------------------------------------------
-    async def _ensure_xmpp_server(self) -> None:
-        """Start the embedded XMPP server if it isn't already running."""
-        if self._xmpp_task is not None and not self._xmpp_task.done():
-            return
-        import loguru
-        from pyjabber.server import Server
-        from pyjabber.server_parameters import Parameters
+    @staticmethod
+    def _tcp_port_open(host: str, port: int, timeout_sec: float = 0.25) -> bool:
+        try:
+            with socket.create_connection((host, int(port)), timeout=max(0.05, float(timeout_sec))):
+                return True
+        except Exception:
+            return False
 
-        loguru.logger.remove()
-        self._xmpp_server = Server(Parameters(host="localhost", database_in_memory=True))
-        self._xmpp_task = asyncio.create_task(self._xmpp_server.start())
-        await self._xmpp_server.ready.wait()
-        log.info("Embedded XMPP server started on localhost:5222")
+    async def _wait_for_xmpp_ready(self, timeout_sec: float = 45.0) -> None:
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            proc = self._xmpp_proc
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(f"Embedded XMPP process exited early (rc={proc.returncode})")
+            ready = await asyncio.to_thread(
+                self._tcp_port_open,
+                self._xmpp_host,
+                self._xmpp_port,
+                0.25,
+            )
+            if ready:
+                return
+            await asyncio.sleep(0.2)
+        raise RuntimeError(
+            f"Embedded XMPP server startup timed out after {timeout_sec:.0f}s "
+            f"(host={self._xmpp_host} port={self._xmpp_port})"
+        )
+
+    async def _ensure_xmpp_server(self) -> None:
+        """Ensure an embedded XMPP server is reachable on localhost:5222."""
+        if self._xmpp_proc is not None and self._xmpp_proc.poll() is None:
+            return
+        # If an external XMPP is already up, reuse it.
+        already_up = await asyncio.to_thread(self._tcp_port_open, self._xmpp_host, self._xmpp_port, 0.25)
+        if already_up:
+            self._diag_emit("xmpp already listening on localhost:5222 (reusing existing server)")
+            return
+
+        cmd = [sys.executable, "-m", "cais_spade_llm.ui.xmpp_server_runner"]
+        self._xmpp_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+        self._diag_emit(f"spawned xmpp runner pid={self._xmpp_proc.pid}")
+        await self._wait_for_xmpp_ready(timeout_sec=45.0)
+        log.info("Embedded XMPP server started on localhost:5222 (pid=%s)", self._xmpp_proc.pid)
 
     async def _stop_xmpp_server(self) -> None:
-        if self._xmpp_task is not None:
-            self._xmpp_task.cancel()
+        proc = self._xmpp_proc
+        self._xmpp_proc = None
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except Exception:
             try:
-                await self._xmpp_task
-            except asyncio.CancelledError:
+                proc.terminate()
+            except Exception:
+                return
+        for _ in range(25):
+            if proc.poll() is not None:
+                return
+            await asyncio.sleep(0.1)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
                 pass
-            self._xmpp_task = None
-            self._xmpp_server = None
 
     # ------------------------------------------------------------------
     # System lifecycle
@@ -148,73 +274,189 @@ class SystemBridge:
             return
         self._starting = True
         self.last_error = None
+        self._startup_seq += 1
+        startup_id = self._startup_seq
+        startup_t0 = time.monotonic()
+        self._set_startup_phase("start_requested")
+        self._diag_emit(f"startup#{startup_id} begin mode={self.execution_mode} env={self.robot_env}")
 
         try:
             # Archive previous monitor outputs.
-            self._archive_monitors()
+            self._set_startup_phase("archive_monitors")
+            await asyncio.to_thread(self._archive_monitors)
+            self._diag_emit(
+                f"startup#{startup_id} archive_monitors done in {time.monotonic() - startup_t0:.2f}s"
+            )
 
             # Set environment variables that agent_creator reads.
+            self._set_startup_phase("prepare_environment")
             os.environ["ROBOT_ENV"] = self.robot_env
-            if self.robot_env == "gazebo":
-                os.environ["USE_ROS2_CAMERA"] = "0"
-            else:
-                os.environ.pop("USE_ROS2_CAMERA", None)
+            os.environ["EXECUTION_MODE"] = self.execution_mode
+            perception_backend = self._perception_backend_for_mode()
+            os.environ["PERCEPTION_BACKEND"] = perception_backend
+
+            mode = str(self.execution_mode or "").strip().lower()
+            prewarmed: dict[str, Any] = {}
+            if mode == "simulation":
+                self._set_startup_phase("simulation_readiness")
+                sim_ready, sim_reason = await asyncio.to_thread(
+                    self.simulation_start_ready,
+                    True,
+                )
+                if not sim_ready:
+                    raise RuntimeError(sim_reason)
+                # Hand off prewarmed controllers to SPADE agents instead of
+                # destroying them — avoids duplicate ROS2 init on first task.
+                with self._gazebo_prewarm_lock:
+                    prewarmed = dict(self._gazebo_prewarm_controllers)
+                    self._gazebo_prewarm_controllers.clear()
+                    self._gazebo_prewarm_pending.clear()
+                # Drop any stale prewarmed controller whose spin thread died.
+                invalid_keys: list[str] = []
+                for key, ctrl in list(prewarmed.items()):
+                    try:
+                        usable = bool(getattr(ctrl, "is_usable", lambda: True)())
+                    except Exception:
+                        usable = False
+                    if usable:
+                        continue
+                    invalid_keys.append(key)
+                    prewarmed.pop(key, None)
+                    try:
+                        ctrl.shutdown()
+                    except Exception:
+                        pass
+                if invalid_keys:
+                    self._diag_emit(
+                        "discarded stale prewarmed controllers: " + ",".join(sorted(invalid_keys))
+                    )
+                if prewarmed:
+                    log.info(
+                        "Handing off prewarmed controllers to agents: %s",
+                        ",".join(sorted(prewarmed.keys())),
+                    )
+                else:
+                    log.info("No prewarmed controllers available for handoff.")
+
+            self._set_startup_phase("physical_readiness")
+            ready, reason = self.physical_perception_ready()
+            if not ready:
+                raise RuntimeError(reason)
 
             # Ensure XMPP server is up.
+            self._set_startup_phase("xmpp_server")
             await self._ensure_xmpp_server()
 
-            # Ensure the SPADE Container uses the current running loop.
-            from spade.container import Container
-            container = Container()
-            container.loop = asyncio.get_running_loop()
-
-            # Import agent_creator from the project (uses sys.path set by ui_main).
-            import importlib
-            import agent_creator as ac
-            importlib.reload(ac)  # Re-read env vars.
+            # Import/configure agent_creator off the UI event loop.
+            self._set_startup_phase("import_agent_creator")
+            self._maybe_start_agent_creator_prefetch()
+            ac = self._agent_creator_cached
+            if ac is None:
+                ac = await asyncio.to_thread(self._import_agent_creator_module)
+                self._agent_creator_cached = ac
+            self._set_startup_phase("configure_agent_creator_runtime")
+            await asyncio.to_thread(
+                self._configure_agent_creator_runtime,
+                ac,
+                self.robot_env,
+                self.execution_mode,
+                perception_backend,
+            )
             from function_analyzer import FunctionAnalyzer
-            import utils
 
             # Collect init files.
-            prod_files = utils.get_init_files(str(_PRODUCT_DIR))
-            res_files = utils.get_init_files(str(_RESOURCE_DIR))
+            self._set_startup_phase("collect_init_files")
+            prod_files, res_files = await asyncio.to_thread(self._collect_init_files)
 
-            # Create agents.
-            self.user_agent = ac.create_user()
-            self.resource_agents = ac.create_resource_agents(res_files, str(_CCA_INIT))
-            self.product_agents = ac.create_product_agents(prod_files, self.resource_agents, str(_CCA_INIT))
-            self.cca = ac.create_central_controller(str(_CCA_INIT), self.resource_agents)
+            # Create agents, passing prewarmed controllers for reuse.
+            self._set_startup_phase("create_agents")
+            (
+                self.user_agent,
+                self.resource_agents,
+                self.product_agents,
+                self.cca,
+            ) = await asyncio.to_thread(
+                self._create_agents,
+                ac,
+                prod_files,
+                res_files,
+                str(_CCA_INIT),
+                prewarmed,
+            )
+            self._diag_emit(
+                f"startup#{startup_id} agents created resources={len(self.resource_agents)} "
+                f"products={len(self.product_agents)} in {time.monotonic() - startup_t0:.2f}s"
+            )
 
             # Build tools catalogue.
-            FunctionAnalyzer.build_tools_catalogue(
-                agents=self.product_agents + self.resource_agents,
-                allowed=ac.ALLOWED_FUNCS,
-                outfile=str(_TOOLS_OUT),
+            self._set_startup_phase("build_tools_catalogue")
+            await asyncio.to_thread(
+                FunctionAnalyzer.build_tools_catalogue,
+                self.product_agents + self.resource_agents,
+                ac.ALLOWED_FUNCS,
+                str(_TOOLS_OUT),
+            )
+            self._diag_emit(
+                f"startup#{startup_id} tools catalogue done in {time.monotonic() - startup_t0:.2f}s"
             )
 
             # Start agents in order: resources → CCA → user → products.
+            self._set_startup_phase("start_resource_agents")
             for ra in self.resource_agents:
+                name = getattr(ra, "agent_name", str(getattr(ra, "jid", "?")))
+                t_ra = time.monotonic()
+                self._diag_emit(f"startup#{startup_id} starting resource {name}")
                 await ra.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} resource {name} started in {time.monotonic() - t_ra:.2f}s"
+                )
 
+            self._set_startup_phase("start_cca")
             if self.cca:
+                t_cca = time.monotonic()
                 await self.cca.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s"
+                )
 
+            self._set_startup_phase("start_user")
             if self.user_agent:
+                t_user = time.monotonic()
                 await self.user_agent.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} user started in {time.monotonic() - t_user:.2f}s"
+                )
 
+            self._set_startup_phase("start_product_agents")
             for i, pa in enumerate(self.product_agents):
                 await asyncio.sleep(0.2 * i)
+                name = getattr(pa, "agent_name", str(getattr(pa, "jid", "?")))
+                t_pa = time.monotonic()
+                self._diag_emit(f"startup#{startup_id} starting product {name}")
                 await pa.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} product {name} started in {time.monotonic() - t_pa:.2f}s"
+                )
 
             self.system_running = True
+            self._set_startup_phase("startup_complete")
             log.info("All agents started successfully.")
+            self._diag_emit(
+                f"startup#{startup_id} complete in {time.monotonic() - startup_t0:.2f}s"
+            )
 
         except Exception as exc:
             self.last_error = str(exc)
+            self._set_startup_phase("startup_failed")
+            self._diag_emit(
+                f"startup#{startup_id} failed after {time.monotonic() - startup_t0:.2f}s: {exc}"
+            )
             log.exception("Failed to start system")
             await self._cleanup_agents()
         finally:
             self._starting = False
+            if not self.system_running:
+                self._set_startup_phase("idle")
 
     async def stop_system(self) -> None:
         """Stop all SPADE agents."""
@@ -245,6 +487,15 @@ class SystemBridge:
         self.cca = None
         self.user_agent = None
 
+        # Destroy the global CameraModule ROS2 node (if any).
+        try:
+            import agent_creator as ac
+            if hasattr(ac, "_CAMERA") and ac._CAMERA is not None:
+                ac._CAMERA.destroy()
+                log.info("CameraModule ROS2 node destroyed.")
+        except Exception:
+            log.debug("CameraModule cleanup skipped (not loaded or already destroyed).")
+
     @staticmethod
     def _archive_monitors() -> None:
         for sub, pattern in [
@@ -267,6 +518,59 @@ class SystemBridge:
                     shutil.move(str(p), str(archive / p.name))
                 except Exception:
                     pass
+
+    @staticmethod
+    def _import_agent_creator_module():
+        import agent_creator as ac
+        return ac
+
+    @staticmethod
+    def _configure_agent_creator_runtime(
+        agent_creator_module: Any,
+        robot_env: str,
+        execution_mode: str,
+        perception_backend: str,
+    ) -> None:
+        configure = getattr(agent_creator_module, "configure_runtime", None)
+        if callable(configure):
+            configure(
+                robot_env=robot_env,
+                execution_mode=execution_mode,
+                perception_backend=perception_backend,
+            )
+
+    @staticmethod
+    def _collect_init_files() -> tuple[list[str], list[str]]:
+        import utils
+
+        prod_files = utils.get_init_files(str(_PRODUCT_DIR))
+        res_files = utils.get_init_files(str(_RESOURCE_DIR))
+        return prod_files, res_files
+
+    @staticmethod
+    def _create_agents(
+        agent_creator_module: Any,
+        prod_files: list[str],
+        res_files: list[str],
+        cca_init_file: str,
+        prewarmed_controllers: dict[str, Any],
+    ) -> tuple[Any, list[Any], list[Any], Any]:
+        user_agent = agent_creator_module.create_user()
+        resource_agents = agent_creator_module.create_resource_agents(
+            res_files,
+            cca_init_file,
+            prewarmed_controllers=prewarmed_controllers,
+        )
+        product_agents = agent_creator_module.create_product_agents(
+            prod_files,
+            resource_agents,
+            cca_init_file,
+        )
+        cca = agent_creator_module.create_central_controller(
+            cca_init_file,
+            resource_agents,
+        )
+        return user_agent, resource_agents, product_agents, cca
 
     # ------------------------------------------------------------------
     # ROS2 process management
@@ -468,6 +772,111 @@ class SystemBridge:
             ur5e_ip=self.hardware_ips.get("ur5e", self._HW_IP_DEFAULTS["ur5e"]),
         )
 
+    def _perception_backend_for_mode(self) -> str:
+        mode = str(self.execution_mode or "").strip().lower()
+        if mode == "simulation":
+            return "gazebo_gt"
+        if mode == "physical":
+            return "yolo"
+        return "none"
+
+    def physical_perception_ready(self) -> tuple[bool, str]:
+        """Gate physical mode until real YOLO perception backend is integrated."""
+        if self._perception_backend_for_mode() != "yolo":
+            return True, ""
+
+        allow_placeholder = str(
+            os.environ.get("ALLOW_PLACEHOLDER_PHYSICAL_PERCEPTION", "")
+        ).strip().lower() in {"1", "true", "yes"}
+        if allow_placeholder:
+            return True, ""
+
+        return (
+            False,
+            "Physical mode is blocked: perception backend 'yolo' is still a placeholder. "
+            "Set ALLOW_PLACEHOLDER_PHYSICAL_PERCEPTION=1 to override intentionally.",
+        )
+
+    def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
+        """Return whether Gazebo+MoveIt simulation startup is fully ready for agent start."""
+        now = time.monotonic()
+        if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+            result = (False, "Gazebo stack is not running. Launch Gazebo + MoveIt first.")
+            self._sim_ready_cache_ts = now
+            self._sim_ready_cache = result
+            return result
+
+        # If prewarm completed successfully, services were confirmed ready.
+        if self._gazebo_prewarm_done.is_set():
+            result = (True, "")
+            self._sim_ready_cache = result
+            self._sim_ready_cache_ts = now
+            if force:
+                return result
+            return result
+
+        if force:
+            result = self._probe_sim_services(timeout_sec=6.0)
+            self._sim_ready_cache_ts = now
+            self._sim_ready_cache = result
+            return result
+
+        # Non-force path is called from a 1s UI timer. Keep it cheap and avoid
+        # repeatedly spawning `ros2 service list`, which can be expensive.
+        with self._gazebo_prewarm_lock:
+            prewarm_inflight = bool(
+                (self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive())
+                or self._gazebo_prewarm_pending
+            )
+
+        if prewarm_inflight:
+            result = (False, "Simulation startup is still initializing ROS services. Please wait...")
+            self._sim_ready_cache_ts = now
+            self._sim_ready_cache = result
+            return result
+
+        # If prewarm is not running (e.g., user launched Gazebo outside the UI),
+        # expose the last cached answer but do not shell out on every timer tick.
+        if self._sim_ready_cache[0]:
+            return self._sim_ready_cache
+        return (
+            False,
+            "Simulation startup check pending. Launch Gazebo from Control (to enable prewarm) or wait a moment.",
+        )
+
+    def _probe_sim_services(self, timeout_sec: float = 3.0) -> tuple[bool, str]:
+        ok, out = self._ros2_command_output("ros2 service list", timeout_sec=timeout_sec)
+        if not ok:
+            return (
+                False,
+                "Simulation startup is still initializing ROS services. "
+                "Please wait a few seconds and try Start again.",
+            )
+
+        services = [line.strip() for line in out.splitlines() if line.strip()]
+        required_services = ("/compute_cartesian_path", "/detect_all")
+        missing = [
+            svc
+            for svc in required_services
+            if not any(name == svc or name.endswith(svc) for name in services)
+        ]
+        if missing:
+            return (
+                False,
+                "Simulation startup is not done yet. Waiting for services: "
+                + ", ".join(missing),
+            )
+        return (True, "")
+
+    def _probe_sim_services_worker(self) -> None:
+        try:
+            result = self._probe_sim_services(timeout_sec=3.0)
+            self._sim_ready_cache = result
+            self._sim_ready_cache_ts = time.monotonic()
+        finally:
+            with self._gazebo_prewarm_lock:
+                self._sim_ready_probe_inflight = False
+
     def _any_running(self, names: set[str]) -> bool:
         return any(self.ros2_proc_status(name) == "running" for name in names)
 
@@ -481,8 +890,17 @@ class SystemBridge:
             return ("dashboard_client" in name) or ("ur_hardware_interface" in name)
         return False
 
-    def _ros2_command_output(self, command: str, timeout_sec: float = 8.0) -> tuple[bool, str]:
+    def _ros2_command_output(
+        self,
+        command: str,
+        timeout_sec: float = 8.0,
+        *,
+        emit_slow_diag: bool = True,
+        emit_failure_diag: bool = True,
+        emit_timeout_diag: bool = True,
+    ) -> tuple[bool, str]:
         full_cmd = self._ROS2_ENV + command
+        t0 = time.monotonic()
         try:
             cp = subprocess.run(
                 ["bash", "-c", full_cmd],
@@ -491,13 +909,22 @@ class SystemBridge:
                 timeout=max(1.0, float(timeout_sec)),
             )
         except subprocess.TimeoutExpired:
+            if emit_timeout_diag:
+                self._diag_emit(f"ros2 command timeout ({timeout_sec:.1f}s): {command}")
             return False, f"command timed out after {timeout_sec:.0f}s"
 
+        elapsed = time.monotonic() - t0
         if cp.returncode != 0:
             detail = self._tail_output(cp.stderr) or self._tail_output(cp.stdout)
+            if emit_failure_diag:
+                self._diag_emit(
+                    f"ros2 command failed rc={cp.returncode} elapsed={elapsed:.2f}s: {command}"
+                )
             if detail:
                 return False, detail
             return False, f"command failed (exit {cp.returncode})"
+        if emit_slow_diag and elapsed > 1.0:
+            self._diag_emit(f"ros2 command slow elapsed={elapsed:.2f}s: {command}")
         return True, cp.stdout or ""
 
     def _wait_for_ros_service(
@@ -505,6 +932,7 @@ class SystemBridge:
         service_name: str,
         timeout_sec: float = 20.0,
         process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str | None:
         target = str(service_name).strip()
         if not target:
@@ -512,15 +940,24 @@ class SystemBridge:
 
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return f"{target} wait cancelled"
+
             if process_name and self.ros2_proc_status(process_name) != "running":
                 return f"{process_name} exited before {target} became available"
 
-            ok, out = self._ros2_command_output("ros2 service list", timeout_sec=3.0)
+            ok, out = self._ros2_command_output(
+                "ros2 service list",
+                timeout_sec=3.0,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
             if ok:
                 services = [line.strip() for line in out.splitlines() if line.strip()]
                 if any(s == target or s.endswith(target) for s in services):
                     return None
-            time.sleep(0.7)
+            time.sleep(1.5)
 
         if process_name and self.ros2_proc_status(process_name) != "running":
             return f"{process_name} exited before {target} became available"
@@ -667,12 +1104,262 @@ class SystemBridge:
         self._stop_teleop_server()
         return None
 
+    def _load_gazebo_controller_settings(self, robot: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        robot_key = str(robot or "").strip().lower()
+        path_map = {
+            "xarm6": _XARM6_RESOURCE,
+            "ur5e": _UR5E_RESOURCE,
+        }
+        cfg_path = path_map.get(robot_key)
+        if not cfg_path or not cfg_path.exists():
+            log.warning("Gazebo prewarm skipped; config file missing for %s", robot_key)
+            return None
+
+        try:
+            raw = self.load_config(str(cfg_path))
+        except Exception:
+            log.exception("Gazebo prewarm failed reading config for %s", robot_key)
+            return None
+
+        block = raw.get(robot_key, {}) if isinstance(raw, dict) else {}
+        gazebo_block = block.get("gazebo", {}) if isinstance(block, dict) else {}
+        controller = gazebo_block.get("controller", {}) if isinstance(gazebo_block, dict) else {}
+        named_positions = gazebo_block.get("named_positions", {}) if isinstance(gazebo_block, dict) else {}
+        if not controller:
+            log.warning("Gazebo prewarm skipped; controller config empty for %s", robot_key)
+            return None
+        if not isinstance(named_positions, dict):
+            named_positions = {}
+        return controller, named_positions
+
+    def _prewarm_gazebo_controller(self, robot: str) -> None:
+        robot_key = str(robot or "").strip().lower()
+        settings = self._load_gazebo_controller_settings(robot_key)
+        if settings is None:
+            return
+        controller_cfg, named_positions = settings
+
+        with self._gazebo_prewarm_lock:
+            existing = self._gazebo_prewarm_controllers.get(robot_key)
+        if existing is not None:
+            try:
+                if existing.wait_for_services(timeout_sec=1.0):
+                    log.info("Gazebo prewarm already ready for %s", robot_key)
+                    return
+            except Exception:
+                pass
+            try:
+                existing.shutdown()
+            except Exception:
+                pass
+            with self._gazebo_prewarm_lock:
+                self._gazebo_prewarm_controllers.pop(robot_key, None)
+
+        try:
+            from cais_spade_llm.resources.robot.ros2_pick_place_controller import (
+                Ros2PickPlaceController,
+            )
+            from cais_spade_llm.resources.robot.ur5e_controller import (
+                JOINT_NAMES as UR5E_JOINT_NAMES,
+                JOINT_STATES_TOPIC as UR5E_JOINT_STATES_TOPIC,
+                TRAJECTORY_TOPIC as UR5E_TRAJECTORY_TOPIC,
+            )
+            from cais_spade_llm.resources.robot.xarm6_controller import (
+                JOINT_NAMES as XARM6_JOINT_NAMES,
+                JOINT_STATES_TOPIC as XARM6_JOINT_STATES_TOPIC,
+            )
+        except Exception:
+            log.exception("Gazebo prewarm failed importing controller modules for %s", robot_key)
+            return
+
+        controller = None
+        try:
+            if robot_key == "xarm6":
+                prewarm_node = f"xarm6_prewarm_controller_{os.getpid()}_{int(time.monotonic() * 1000) % 1000000}"
+                controller = Ros2PickPlaceController(
+                    robot_name="xarm6",
+                    node_name=prewarm_node,
+                    controller_config=controller_cfg,
+                    named_positions=named_positions,
+                    execution_mode="simulation",
+                    arm_joint_names=XARM6_JOINT_NAMES,
+                    arm_trajectory_topic=None,
+                    joint_states_topic=XARM6_JOINT_STATES_TOPIC,
+                )
+            elif robot_key == "ur5e":
+                prewarm_node = f"ur5e_prewarm_controller_{os.getpid()}_{int(time.monotonic() * 1000) % 1000000}"
+                controller = Ros2PickPlaceController(
+                    robot_name="ur5e",
+                    node_name=prewarm_node,
+                    controller_config=controller_cfg,
+                    named_positions=named_positions,
+                    execution_mode="simulation",
+                    arm_joint_names=UR5E_JOINT_NAMES,
+                    arm_trajectory_topic=UR5E_TRAJECTORY_TOPIC,
+                    joint_states_topic=UR5E_JOINT_STATES_TOPIC,
+                )
+            else:
+                return
+
+            start = time.monotonic()
+            ok = bool(controller.wait_for_services(timeout_sec=self._GAZEBO_PREWARM_TIMEOUT_S))
+            elapsed = time.monotonic() - start
+            if ok:
+                with self._gazebo_prewarm_lock:
+                    old = self._gazebo_prewarm_controllers.pop(robot_key, None)
+                    self._gazebo_prewarm_controllers[robot_key] = controller
+                if old is not None and old is not controller:
+                    try:
+                        old.shutdown()
+                    except Exception:
+                        pass
+                controller = None  # kept alive for reuse; cleaned up when Gazebo stops
+                log.info("Gazebo prewarm ready for %s in %.2fs", robot_key, elapsed)
+            else:
+                log.warning("Gazebo prewarm not ready for %s after %.2fs", robot_key, elapsed)
+        except Exception:
+            log.exception("Gazebo prewarm exception for %s", robot_key)
+        finally:
+            if controller is not None:
+                try:
+                    controller.shutdown()
+                except Exception:
+                    log.exception("Gazebo prewarm cleanup failed for %s", robot_key)
+
+    def _shutdown_gazebo_prewarm_controllers(self) -> None:
+        # Signal any in-progress prewarm wait to stop immediately.
+        self._gazebo_prewarm_cancel.set()
+        prewarm_thread = None
+        with self._gazebo_prewarm_lock:
+            controllers = dict(self._gazebo_prewarm_controllers)
+            self._gazebo_prewarm_controllers.clear()
+            self._gazebo_prewarm_pending.clear()
+            self._sim_ready_probe_inflight = False
+            prewarm_thread = self._gazebo_prewarm_thread
+        # Wait for the prewarm worker to exit (it checks cancel_event).
+        if prewarm_thread is not None:
+            prewarm_thread.join(timeout=5.0)
+        for robot_key, controller in controllers.items():
+            try:
+                controller.shutdown()
+            except Exception:
+                log.exception("Gazebo prewarm controller shutdown failed for %s", robot_key)
+
+    def _gazebo_prewarm_worker(self) -> None:
+        try:
+            # Use interruptible wait instead of blocking sleep.
+            if self._gazebo_prewarm_cancel.wait(timeout=self._GAZEBO_PREWARM_START_DELAY_S):
+                log.info("Gazebo prewarm cancelled during initial delay.")
+                return
+            while True:
+                if self._gazebo_prewarm_cancel.is_set():
+                    log.info("Gazebo prewarm cancelled.")
+                    return
+
+                with self._gazebo_prewarm_lock:
+                    targets = sorted(self._gazebo_prewarm_pending)
+                    self._gazebo_prewarm_pending.clear()
+
+                if not targets:
+                    return
+                if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+                    log.info("Gazebo prewarm skipped; no Gazebo stack running.")
+                    return
+
+                # Phase 1: Wait until MoveIt + perception services appear via
+                # lightweight shell probe (`ros2 service list`).  This avoids
+                # creating heavyweight ROS2 controllers before the simulation
+                # stack is actually ready.
+                for svc in ("/compute_cartesian_path", "/detect_all"):
+                    wait_err = self._wait_for_ros_service(
+                        svc,
+                        timeout_sec=self._GAZEBO_PREWARM_READY_WAIT_S,
+                        cancel_event=self._gazebo_prewarm_cancel,
+                    )
+                    if wait_err:
+                        log.info("Gazebo prewarm skipped (service not ready): %s", wait_err)
+                        return
+
+                log.info(
+                    "Gazebo prewarm: all required services detected for %s — "
+                    "creating controllers...",
+                    ", ".join(targets),
+                )
+
+                # Phase 2: Create controllers now that services are confirmed
+                # available.  This pre-initialises ROS2 nodes, spin threads,
+                # MoveIt / TF clients so that REQ_1_T1 doesn't pay the startup
+                # cost when "Start System" is pressed.
+                if self._gazebo_prewarm_cancel.is_set():
+                    return
+                for robot_key in targets:
+                    if self._gazebo_prewarm_cancel.is_set():
+                        return
+                    self._prewarm_gazebo_controller(robot_key)
+
+                # Signal that prewarm is done so simulation_start_ready() unblocks.
+                self._gazebo_prewarm_done.set()
+        except Exception:
+            log.exception("Gazebo prewarm worker crashed.")
+        finally:
+            with self._gazebo_prewarm_lock:
+                self._gazebo_prewarm_thread = None
+                if self._gazebo_prewarm_pending and not self._gazebo_prewarm_cancel.is_set():
+                    self._gazebo_prewarm_thread = threading.Thread(
+                        target=self._gazebo_prewarm_worker,
+                        daemon=True,
+                    )
+                    self._gazebo_prewarm_thread.start()
+
+    def _queue_gazebo_prewarm(self, launch_name: str) -> None:
+        launch_key = str(launch_name or "").strip().lower()
+        targets_by_launch = {
+            "gazebo_dual": {"xarm6", "ur5e"},
+            "gazebo_xarm6": {"xarm6"},
+            "gazebo_ur5e": {"ur5e"},
+        }
+        targets = targets_by_launch.get(launch_key)
+        if not targets:
+            return
+
+        with self._gazebo_prewarm_lock:
+            self._gazebo_prewarm_cancel.clear()
+            self._gazebo_prewarm_done.clear()
+            self._gazebo_prewarm_pending.update(targets)
+            if self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive():
+                return
+            self._gazebo_prewarm_thread = threading.Thread(
+                target=self._gazebo_prewarm_worker,
+                daemon=True,
+            )
+            self._gazebo_prewarm_thread.start()
+        log.info("Queued Gazebo controller prewarm for %s", ",".join(sorted(targets)))
+
+    @staticmethod
+    def _kill_stale_gazebo_helpers() -> None:
+        """Best-effort cleanup for helper nodes that can survive ros2 launch shutdown."""
+        for cmd in [
+            "pkill -9 -f auto_link_attacher_node.py 2>/dev/null",
+            "pkill -9 -f gazebo_camera_detector.py 2>/dev/null",
+        ]:
+            subprocess.run(["bash", "-c", cmd], capture_output=True)
+
     def ros2_start(self, name: str) -> str | None:
         """Start a ROS2 process by name. Returns error string or None on success."""
         if name not in self.ROS2_LAUNCH_CMDS:
             return f"Unknown process: {name}"
         if self.ros2_proc_status(name) == "running":
             return f"{name} is already running"
+        if name == "perception":
+            backend = str(
+                os.environ.get("PERCEPTION_BACKEND", self._perception_backend_for_mode())
+            ).strip().lower()
+            if backend != "gazebo_gt":
+                return (
+                    "Perception ROS2 process is simulation-only (gazebo_gt). "
+                    "Physical backend 'yolo' runs in-app under "
+                    "cais_spade_llm/resources/sensor/physical (no ROS2 node)."
+                )
 
         # Keep simulation and hardware stacks mutually exclusive.
         if name in self._HARDWARE_PROCESS_NAMES and self._any_running(self._GAZEBO_PROCESS_NAMES):
@@ -687,6 +1374,8 @@ class SystemBridge:
         elif name in self._GAZEBO_PROCESS_NAMES:
             self.robot_env = "gazebo"
             self._stop_teleop_server()
+            if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+                self._kill_stale_gazebo_helpers()
 
         cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
         try:
@@ -698,6 +1387,8 @@ class SystemBridge:
             )
             self._ros2_procs[name] = proc
             log.info("Started ROS2 process %s (pid=%d)", name, proc.pid)
+            if name in self._GAZEBO_PROCESS_NAMES:
+                self._queue_gazebo_prewarm(name)
             return None
         except Exception as exc:
             return str(exc)
@@ -707,6 +1398,9 @@ class SystemBridge:
         proc = self._ros2_procs.get(name)
         if proc is None or proc.poll() is not None:
             self._ros2_procs.pop(name, None)
+            if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
+                self._shutdown_gazebo_prewarm_controllers()
+                self._kill_stale_gazebo_helpers()
             return None
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGINT)
@@ -719,6 +1413,9 @@ class SystemBridge:
         except Exception as exc:
             log.warning("Error stopping %s: %s", name, exc)
         self._ros2_procs.pop(name, None)
+        if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
+            self._shutdown_gazebo_prewarm_controllers()
+            self._kill_stale_gazebo_helpers()
         return None
 
     def ros2_stop_all(self) -> None:
@@ -726,10 +1423,13 @@ class SystemBridge:
         self._stop_teleop_server()
         for name in list(self._ros2_procs):
             self.ros2_stop(name)
+        self._shutdown_gazebo_prewarm_controllers()
+        self._kill_stale_gazebo_helpers()
 
     def ros2_kill_gazebo(self) -> None:
         """Kill any orphan Gazebo / ROS2 processes (cleanup helper)."""
         self._stop_teleop_server()
+        self._shutdown_gazebo_prewarm_controllers()
         for cmd in [
             (
                 "killall -9 gzserver gzclient robot_state_publisher spawner spawn_entity.py "
@@ -739,10 +1439,12 @@ class SystemBridge:
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
+        self._kill_stale_gazebo_helpers()
 
     def ros2_cleanup_processes(self) -> None:
         """Aggressively clean stale ROS2/MoveIt/driver processes without killing the UI."""
         self._stop_teleop_server()
+        self._shutdown_gazebo_prewarm_controllers()
         for name in list(self._ros2_procs):
             self.ros2_stop(name)
 
@@ -760,6 +1462,7 @@ class SystemBridge:
             "pkill -9 -f gazebo 2>/dev/null",
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
+        self._kill_stale_gazebo_helpers()
 
         self._ros2_procs = {k: p for k, p in self._ros2_procs.items() if p.poll() is None}
 
@@ -790,6 +1493,61 @@ class SystemBridge:
             return False, f"command failed (exit {cp.returncode})"
 
         return True, self._tail_output(cp.stdout) or "OK"
+
+    def ros2_reset_gazebo_environment(self) -> tuple[bool, str]:
+        """
+        Reset Gazebo world/simulation to initial state without relaunching ROS2.
+
+        This is intended for simulation workflows where the operator wants a clean
+        scene between runs.
+        """
+        if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+            return False, "Gazebo is not running."
+        if self.system_running or self._starting:
+            return (
+                False,
+                "Stop the agent system before resetting Gazebo to avoid state mismatch.",
+            )
+
+        ok, out = self._ros2_command_output(
+            "ros2 service list",
+            timeout_sec=5.0,
+            emit_slow_diag=False,
+            emit_failure_diag=False,
+            emit_timeout_diag=False,
+        )
+        if not ok:
+            return False, f"Failed to query ROS services: {out}"
+
+        services = [line.strip() for line in out.splitlines() if line.strip()]
+        candidates = (
+            "/reset_world",
+            "/gazebo/reset_world",
+            "/reset_simulation",
+            "/gazebo/reset_simulation",
+        )
+        selected = next(
+            (
+                svc
+                for svc in candidates
+                if any(name == svc or name.endswith(svc) for name in services)
+            ),
+            None,
+        )
+        if not selected:
+            return (
+                False,
+                "No Gazebo reset service found (expected /reset_world or /reset_simulation).",
+            )
+
+        call_ok, call_msg = self.ros2_exec(
+            f'ros2 service call {selected} std_srvs/srv/Empty "{{}}"',
+            timeout_sec=10.0,
+        )
+        if not call_ok:
+            return False, f"Gazebo reset failed via {selected}: {call_msg}"
+
+        return True, f"Gazebo environment reset via {selected}."
 
     def _stop_teleop_server_locked(self) -> None:
         proc = self._teleop_server_proc
@@ -1008,6 +1766,41 @@ class SystemBridge:
             timeout_sec=25.0,
         )
 
+    def list_named_positions(self, robot: str) -> dict[str, list[float]]:
+        """Return named positions for *robot* in the current environment."""
+        robot = str(robot).strip().lower()
+        env = self.teleop_target_environment()
+        # Map "real" → JSON key "real", "gazebo" → "gazebo"
+        env_key = env if env in ("gazebo", "real") else "gazebo"
+        path = _RESOURCE_DIR / f"robot_{robot}.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            robot_block = data.get(robot, {})
+            return dict(robot_block.get(env_key, {}).get("named_positions", {}))
+        except Exception:
+            log.exception("Failed to read named positions for %s", robot)
+            return {}
+
+    def teleop_go_to_position(self, robot: str, name: str) -> tuple[bool, str]:
+        """Move *robot* to a stored named position by sending joint targets."""
+        robot = str(robot).strip().lower()
+        if robot not in {"xarm6", "ur5e"}:
+            return False, f"unknown robot: {robot}"
+        positions = self.list_named_positions(robot)
+        joints = positions.get(name)
+        if not joints or not isinstance(joints, list):
+            return False, f"named position '{name}' not found for {robot}"
+        return self._teleop_request(
+            payload={
+                "op": "move_joints",
+                "robot": robot,
+                "positions": [float(j) for j in joints],
+            },
+            timeout_sec=25.0,
+        )
+
     def teleop_joint(
         self,
         robot: str,
@@ -1121,6 +1914,53 @@ class SystemBridge:
             if pp and hasattr(pp, "nodes"):
                 nodes.extend(pp.nodes)
         return nodes
+
+    @staticmethod
+    def _read_json_dict(path: Path) -> dict[str, Any]:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def get_global_fsa(self) -> dict[str, Any]:
+        # Prefer in-memory FSA from currently running product agents.
+        for pa in self.product_agents:
+            pp = getattr(pa, "process_planner", None)
+            fsa = getattr(pp, "global_fsa", None) if pp else None
+            if isinstance(fsa, dict) and (fsa.get("A") or fsa.get("meta")):
+                return fsa
+
+            fsa_path = getattr(pa, "global_fsa_path", None)
+            if fsa_path:
+                data = self._read_json_dict(Path(fsa_path))
+                if data.get("A") or data.get("meta"):
+                    return data
+
+        # If a product was selected in UI, try its expected monitor path.
+        if self.selected_product:
+            selected_name = Path(self.selected_product).stem
+            selected_fsa_path = _MONITOR / "plan" / f"{selected_name}_global_fsa.json"
+            if selected_fsa_path.exists():
+                data = self._read_json_dict(selected_fsa_path)
+                if data.get("A") or data.get("meta"):
+                    return data
+
+        # Fallback: newest global FSA snapshot in monitor/plan.
+        plan_dir = _MONITOR / "plan"
+        if plan_dir.exists():
+            candidates = sorted(
+                plan_dir.glob("*_global_fsa.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for path in candidates:
+                data = self._read_json_dict(path)
+                if data.get("A") or data.get("meta"):
+                    return data
+
+        return {}
 
     def get_task_states(self) -> dict[str, str]:
         merged = {}

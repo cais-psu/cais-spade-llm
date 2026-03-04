@@ -26,10 +26,10 @@ def nodes_to_mermaid(nodes: list[dict[str, Any]], task_states: dict[str, str] | 
       - status: str  (optional, overridden by task_states if provided)
     """
     if not nodes:
-        return "graph TD\n    empty[No plan loaded]"
+        return "graph LR\n    empty[No plan loaded]"
 
     task_states = task_states or {}
-    lines = ["graph TD"]
+    lines = ["graph LR"]
 
     # Define style classes.
     lines.append("    classDef pending fill:#9e9e9e,color:#fff")
@@ -40,13 +40,14 @@ def nodes_to_mermaid(nodes: list[dict[str, Any]], task_states: dict[str, str] | 
     lines.append("    classDef blocked fill:#ff7043,color:#fff")
 
     for node in nodes:
-        tid = node.get("task_id", "?")
-        label = node.get("function_name") or node.get("instruction", tid)
-        if isinstance(label, dict):
-            label = label.get("function_name", str(label))
+        tid = node.get("id") or node.get("task_id", "?")
+        func = node.get("function_name") or node.get("instruction", "")
+        if isinstance(func, dict):
+            func = func.get("function_name", str(func))
+        label = f"{tid}<br/>{func}" if func else tid
         # Truncate long labels.
-        if len(str(label)) > 30:
-            label = str(label)[:27] + "..."
+        if len(str(label)) > 40:
+            label = str(label)[:37] + "..."
         # Sanitize for Mermaid.
         safe_label = str(label).replace('"', "'")
         safe_tid = tid.replace("-", "_").replace(".", "_")
@@ -64,7 +65,7 @@ def nodes_to_mermaid(nodes: list[dict[str, Any]], task_states: dict[str, str] | 
 
     # Edges from predecessors.
     for node in nodes:
-        tid = node.get("task_id", "?").replace("-", "_").replace(".", "_")
+        tid = (node.get("id") or node.get("task_id", "?")).replace("-", "_").replace(".", "_")
         for pred_id in node.get("predecessors", []):
             safe_pred = pred_id.replace("-", "_").replace(".", "_")
             lines.append(f"    {safe_pred} --> {tid}")

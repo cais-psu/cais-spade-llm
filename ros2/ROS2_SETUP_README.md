@@ -29,9 +29,9 @@ ros2/
 │   └── ros2_operation_guide_ur5e.md       ← Reference: UR5e standalone
 └── cais_lab_gazebo/
     ├── launch/
-    │   └── xarm6_ur5e_gazebo.launch.py    ← Custom launch file (copy into xarm_ros2)
+    │   └── xarm6_ur5e_gazebo.launch.py   ← Custom launch file (copy into xarm_ros2)
     └── worlds/
-        └── table.world                    ← Custom Gazebo world (copy into xarm_ros2)
+        └── table.world                   ← Custom Gazebo world (copy into xarm_ros2)
 ```
 
 ---
@@ -93,6 +93,7 @@ cp ros2/cais_lab_gazebo/worlds/table.world \
 # (xArm6 + UR5e with RG2 gripper, spawn timing, controllers)
 cp ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
    ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
+
 ```
 
 ### Step 4: Build Everything
@@ -208,8 +209,7 @@ Select `/overhead_camera/image_raw` from the dropdown.
 
 ## Custom Files Reference
 
-Only **two files** in `cais_lab_gazebo/` need to be copied to reproduce the simulation.
-Everything else comes from public upstream repositories:
+Core custom assets to copy for this setup:
 
 | File | Purpose |
 |---|---|

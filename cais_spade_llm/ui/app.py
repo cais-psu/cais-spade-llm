@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -84,7 +85,7 @@ def _header(bridge: SystemBridge) -> None:
         ui.timer(1.0, _update_status)
 
         # Execution mode badge.
-        _MODE_DISPLAY = {"simulate": "Dry Run", "ros2": "Simulation", "real": "Physical"}
+        _MODE_DISPLAY = {"dry_run": "Dry Run", "simulation": "Simulation", "physical": "Physical"}
         mode_badge = ui.badge(_MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)).props("color=blue outline")
 
         def _update_badge():
@@ -114,6 +115,7 @@ def create_app() -> None:
     """Register all NiceGUI pages and configure the app."""
     _patch_nicegui_lifecycle()
     bridge = SystemBridge.instance()
+    watchdog_task: asyncio.Task | None = None
 
     # Serve static assets and set Penn State favicon.
     app.add_static_files("/static", str(_STATIC_DIR))
@@ -150,6 +152,69 @@ def create_app() -> None:
     def products_page():
         _page_wrapper(bridge)
         products.render(bridge)
+
+    async def _ui_watchdog() -> None:
+        """Detect event-loop stalls that can trigger websocket reconnects."""
+        loop = asyncio.get_running_loop()
+        interval_s = 0.5
+        warn_threshold_s = 1.2
+        target = loop.time() + interval_s
+        while True:
+            await asyncio.sleep(interval_s)
+            now = loop.time()
+            lag = now - target
+            target = now + interval_s
+            if lag >= warn_threshold_s:
+                try:
+                    bridge.log_event_loop_lag(lag)
+                except Exception:
+                    pass
+
+    async def _on_startup() -> None:
+        nonlocal watchdog_task
+        watchdog_task = asyncio.create_task(_ui_watchdog())
+
+    async def _on_shutdown() -> None:
+        """Clean up all background resources when the app exits."""
+        import logging
+        log = logging.getLogger("ui.app")
+        log.info("App shutdown: cleaning up resources...")
+
+        # Stop watchdog first.
+        nonlocal watchdog_task
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.debug("App shutdown: watchdog cleanup skipped")
+            watchdog_task = None
+
+        # 1) Stop SPADE agents (which also shuts down robot controllers).
+        if bridge.system_running:
+            try:
+                await bridge.stop_system()
+            except Exception:
+                log.exception("App shutdown: stop_system failed")
+
+        # 2) Stop XMPP server.
+        try:
+            await bridge._stop_xmpp_server()
+        except Exception:
+            log.debug("App shutdown: XMPP cleanup skipped")
+
+        # 3) Shut down any remaining prewarm controllers.
+        try:
+            bridge._shutdown_gazebo_prewarm_controllers()
+        except Exception:
+            log.debug("App shutdown: prewarm cleanup skipped")
+
+        log.info("App shutdown: cleanup complete.")
+
+    app.on_startup(_on_startup)
+    app.on_shutdown(_on_shutdown)
 
     ui.run(
         title="Penn State CAIS Lab Multi-Agent Manufacturing System",

@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from .ros2_pick_place_controller import Ros2PickPlaceController
@@ -36,11 +37,11 @@ class UR5eController(Ros2PickPlaceController):
         *,
         controller_config: dict[str, Any] | None = None,
         named_positions: dict[str, Any] | None = None,
-        execution_mode: str = "ros2",
+        execution_mode: str = "simulation",
     ) -> None:
         super().__init__(
             robot_name="ur5e",
-            node_name="ur5e_controller",
+            node_name=f"ur5e_controller_{os.getpid()}",
             controller_config=controller_config or {},
             named_positions=named_positions,
             execution_mode=execution_mode,

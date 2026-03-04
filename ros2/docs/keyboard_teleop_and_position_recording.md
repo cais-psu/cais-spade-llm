@@ -28,7 +28,7 @@ Wait ~40 seconds for Gazebo + MoveIt + RViz to fully load. You should see both r
 
 ## Step 2: (Optional) Start Perception Node
 
-The perception node provides ground truth part positions from Gazebo via `/detect_part` and `/detect_all` services.
+The perception node provides ground truth part positions from Gazebo via `/detect_part` and `/detect_all` Trigger services.
 
 **Terminal 2:**
 
@@ -39,15 +39,15 @@ python3.10 ~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_d
 
 You should see:
 ```
-PerceptionNode started (Gazebo ground truth mode) — 9 parts registered
+PerceptionNode started (Gazebo ground truth mode, api=trigger_json)
 Connected to /get_entity_state service
 ```
 
 Test it:
 ```bash
 ros2 param set /perception_node target_part SG
-ros2 service call /detect_part std_srvs/srv/Trigger
-ros2 service call /detect_all std_srvs/srv/Trigger
+ros2 service call /detect_part std_srvs/srv/Trigger "{}"
+ros2 service call /detect_all std_srvs/srv/Trigger "{}"
 ```
 
 To test the CameraModule integration independently:

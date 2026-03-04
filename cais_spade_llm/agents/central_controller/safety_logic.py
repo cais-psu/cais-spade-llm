@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
@@ -44,6 +46,17 @@ class SafetyLogic:
 
         # store one DFA (DOT string) per rule
         self.rule_dfas: Dict[str, str] = {}
+
+    @staticmethod
+    def _to_dfa_quiet(ltlf_formula) -> str:
+        """
+        Convert LTLf to DFA while swallowing noisy parser prints from ltlf2dfa.
+        Some versions print regex parse warnings to stdout/stderr even on success.
+        """
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            return ltlf_formula.to_dfa()
 
 
     # ------------------------------------------------------------------ #
@@ -639,7 +652,7 @@ class SafetyLogic:
 
             try:
                 ltlf_formula = parser(phi)
-                dfa_dot = ltlf_formula.to_dfa()  # DOT string for this rule only
+                dfa_dot = self._to_dfa_quiet(ltlf_formula)  # DOT string for this rule only
             except Exception as exc:
                 if self.logger:
                     self.logger.exception(
@@ -697,7 +710,7 @@ class SafetyLogic:
         try:
             parser = LTLfParser()
             ltlf_formula = parser(formula_str)
-            dfa_dot = ltlf_formula.to_dfa()  # DOT string
+            dfa_dot = self._to_dfa_quiet(ltlf_formula)  # DOT string
         except Exception as exc:
             if self.logger:
                 self.logger.exception(

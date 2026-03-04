@@ -1286,6 +1286,23 @@ def run_server(args):
                 emit({'ok': bool(ok), 'msg': msg})
                 continue
 
+            if op == 'move_joints':
+                positions = cmd.get('positions')
+                if not isinstance(positions, list) or len(positions) != 6:
+                    emit({'ok': False, 'msg': 'positions must be a list of 6 floats'})
+                    continue
+                try:
+                    targets = [float(p) for p in positions]
+                except (TypeError, ValueError):
+                    emit({'ok': False, 'msg': 'positions must be numeric'})
+                    continue
+                if not wait_for_joint_positions(node, [robot], timeout_sec=service_timeout_sec):
+                    emit({'ok': False, 'msg': f'no joint state for {robot}'})
+                    continue
+                ok, msg = node.move_arm_to_joints(robot, targets, duration_sec=home_duration_sec)
+                emit({'ok': bool(ok), 'msg': msg})
+                continue
+
             if op == 'joint':
                 try:
                     joint = int(cmd.get('joint'))

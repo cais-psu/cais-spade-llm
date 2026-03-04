@@ -67,16 +67,16 @@ The web UI at `http://localhost:8080` provides a full operator console:
 ### Dashboard Controls
 
 - **Product Specification** — Select which product assembly to run (from `initialization/products/`)
-- **Execution Mode** — `simulate` (no ROS2), `ros2` (Gazebo simulation), or `real` (physical hardware)
+- **Execution Mode** — `dry_run` (no ROS2), `simulation` (Gazebo simulation), or `physical` (physical hardware)
 - **Robot Environment** — `gazebo` or `real` (selects which config block to read from robot manifests)
 
 ## Execution Modes
 
 | Mode | Description | ROS2 Required |
 |------|-------------|---------------|
-| `simulate` | Async simulation, no robot controllers | No |
-| `ros2` | Gazebo simulation with MoveIt motion planning | Yes |
-| `real` | Physical robot hardware | Yes |
+| `dry_run` | Async simulation, no robot controllers | No |
+| `simulation` | Gazebo simulation with MoveIt motion planning | Yes |
+| `physical` | Physical robot hardware | Yes |
 
 ## Project Structure
 
@@ -162,7 +162,7 @@ All ROS2 launch files, controller configs, world files, and sensor nodes live in
 
 Each robot manifest defines capabilities, controller config, and named positions per environment (gazebo/real). Key fields:
 
-- `execution_mode` — `simulate`, `ros2`, or `real`
+- `execution_mode` — `dry_run`, `simulation`, or `physical`
 - `functions` — Allowed pick/place phase functions
 - `controller` — Move group, gripper, service endpoints, motion parameters
 - `named_positions` — Home joint angles

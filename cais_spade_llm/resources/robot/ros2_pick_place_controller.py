@@ -75,14 +75,14 @@ class Ros2PickPlaceController:
         node_name: str,
         controller_config: dict[str, Any],
         named_positions: dict[str, Any] | None = None,
-        execution_mode: str = "ros2",
+        execution_mode: str = "simulation",
         arm_joint_names: list[str] | None = None,
         arm_trajectory_topic: str | None = None,
         joint_states_topic: str = "/joint_states",
     ) -> None:
         self.robot_name = robot_name
         self.node_name = node_name
-        self.execution_mode = str(execution_mode or "ros2").strip().lower()
+        self.execution_mode = str(execution_mode or "simulation").strip().lower()
         self.controller_config = controller_config or {}
         self.named_positions = named_positions or {}
         self.arm_joint_names = list(arm_joint_names or [])
@@ -126,6 +126,24 @@ class Ros2PickPlaceController:
             except Exception:
                 self._config_errors.append(path)
                 return 0
+
+        def opt_float(section: dict[str, Any], key: str, default: float) -> float:
+            raw = section.get(key)
+            if raw is None:
+                return float(default)
+            try:
+                return float(raw)
+            except Exception:
+                return float(default)
+
+        def opt_int(section: dict[str, Any], key: str, default: int) -> int:
+            raw = section.get(key)
+            if raw is None:
+                return int(default)
+            try:
+                return int(raw)
+            except Exception:
+                return int(default)
 
         self.group_name = need_str(move_group, "group_name", "controller.move_group.group_name")
         self.ee_link = need_str(move_group, "ee_link", "controller.move_group.ee_link")
@@ -190,6 +208,10 @@ class Ros2PickPlaceController:
             "detach_max_link_attempts",
             "controller.attach.detach_max_link_attempts",
         )
+        self.release_detach_timeout_sec = max(
+            self.detach_timeout_sec,
+            opt_float(attach_cfg, "release_detach_timeout_sec", 5.0),
+        )
 
         self.approach_height_m = need_float(
             motion, "approach_height_m", "controller.motion.approach_height_m"
@@ -221,6 +243,26 @@ class Ros2PickPlaceController:
             "release_postdetach_settle_sec",
             "controller.motion.release_postdetach_settle_sec",
         )
+        self.release_descend_time_scale = max(
+            1.0,
+            opt_float(
+                motion,
+                "release_descend_time_scale",
+                1.35,
+            ),
+        )
+        self.release_detach_retry_count = max(
+            0,
+            opt_int(motion, "release_detach_retry_count", 2),
+        )
+        self.release_detach_retry_delay_sec = max(
+            0.0,
+            opt_float(motion, "release_detach_retry_delay_sec", 0.35),
+        )
+        self.release_retry_lift_m = max(
+            0.0,
+            opt_float(motion, "release_retry_lift_m", 0.005),
+        )
         self.trajectory_time_scale = need_float(
             motion, "trajectory_time_scale", "controller.motion.trajectory_time_scale"
         )
@@ -248,6 +290,7 @@ class Ros2PickPlaceController:
         self._initialized = False
         self._services_ready = False
         self._spin_thread: threading.Thread | None = None
+        self._shutdown_requested = False
         self._executor = None
 
         self._rclpy = None
@@ -257,7 +300,7 @@ class Ros2PickPlaceController:
         self._tf_listener = None
         self._cart_client = None
         self._exec_client = None
-        self._detect_client = None
+        self._detect_all_client_legacy = None
         self._attach_client = None
         self._detach_client = None
         self._set_state_client = None
@@ -280,6 +323,26 @@ class Ros2PickPlaceController:
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
+    def _spin_executor(self) -> None:
+        """Run executor spin loop and suppress teardown-time RCLError noise."""
+        try:
+            if self._executor is not None:
+                self._executor.spin()
+        except Exception as exc:
+            msg = str(exc)
+            is_context_invalid = (
+                "context is not valid" in msg.lower()
+                or exc.__class__.__name__ == "RCLError"
+            )
+            if self._shutdown_requested and is_context_invalid:
+                self._log().debug("Executor stopped during shutdown: %s", msg)
+                return
+            self._log().warning(
+                "Executor spin terminated unexpectedly for %s: %s",
+                self.node_name,
+                msg,
+            )
+
     def init(self) -> bool:
         if self._initialized:
             return True
@@ -288,9 +351,9 @@ class Ros2PickPlaceController:
             logger.error("[%s] %s", self.robot_name, self._last_failure_message)
             return False
 
-        if self.execution_mode not in {"ros2", "real"}:
+        if self.execution_mode not in {"simulation", "physical"}:
             logger.warning(
-                "[%s] Unknown execution_mode '%s'; treating as 'ros2'",
+                "[%s] Unknown execution_mode '%s'; treating as 'simulation'",
                 self.robot_name,
                 self.execution_mode,
             )
@@ -351,9 +414,10 @@ class Ros2PickPlaceController:
             self.service_execute_traj,
             callback_group=self._cb_group,
         )
-        self._detect_client = self._node.create_client(
-            Trigger, self.service_detect_all, callback_group=self._cb_group
-        )
+        if self.execution_mode != "physical":
+            self._detect_all_client_legacy = self._node.create_client(
+                Trigger, self.service_detect_all, callback_group=self._cb_group
+            )
         self._set_state_client = self._node.create_client(
             SetEntityState, self.service_set_entity_state, callback_group=self._cb_group
         )
@@ -385,9 +449,10 @@ class Ros2PickPlaceController:
             self._link_attacher_enabled = False
             self._log().warn("linkattacher_msgs.srv not importable; attach/detach disabled")
 
-        self._executor = MultiThreadedExecutor()
+        self._executor = MultiThreadedExecutor(num_threads=1)
         self._executor.add_node(self._node)
-        self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
+        self._shutdown_requested = False
+        self._spin_thread = threading.Thread(target=self._spin_executor, daemon=True)
         self._spin_thread.start()
 
         self._initialized = True
@@ -401,12 +466,24 @@ class Ros2PickPlaceController:
         if not self._initialized:
             return
 
+        self._services_ready = False
+        self._shutdown_requested = True
+
         try:
             if self._executor and self._node:
-                self._executor.remove_node(self._node)
-                self._executor.shutdown()
+                try:
+                    self._executor.remove_node(self._node)
+                except Exception:
+                    pass
+                try:
+                    self._executor.shutdown(timeout_sec=1.0)
+                except TypeError:
+                    self._executor.shutdown()
         except Exception:
             pass
+
+        if self._spin_thread:
+            self._spin_thread.join(timeout=2.0)
 
         try:
             if self._node:
@@ -414,13 +491,15 @@ class Ros2PickPlaceController:
         except Exception:
             pass
 
-        if self._spin_thread:
-            self._spin_thread.join(timeout=2.0)
         self._spin_thread = None
         self._executor = None
         self._node = None
         self._initialized = False
-        self._services_ready = False
+
+    def is_usable(self) -> bool:
+        """Whether this controller instance is healthy enough for reuse."""
+        spin_alive = bool(self._spin_thread and self._spin_thread.is_alive())
+        return bool(self._initialized and self._services_ready and spin_alive)
 
     def wait_for_services(self, timeout_sec: float = 60.0) -> bool:
         if not self.init():
@@ -431,8 +510,11 @@ class Ros2PickPlaceController:
         self._log().info("Waiting for services/actions...")
         deadline = time.monotonic() + timeout_sec
 
-        if not self._wait_service(self._detect_client, self.service_detect_all, deadline):
-            return False
+        if self.execution_mode != "physical":
+            if not self._wait_service(
+                self._detect_all_client_legacy, self.service_detect_all, deadline
+            ):
+                return False
         if not self._wait_service(
             self._cart_client, self.service_cartesian_path, deadline
         ):
@@ -514,8 +596,15 @@ class Ros2PickPlaceController:
     def detect_parts(self) -> list[dict[str, Any]]:
         if not self.wait_for_services():
             return []
-        future = self._detect_client.call_async(self._Trigger.Request())
-        result = self._wait_future(future, timeout_sec=10.0, label="detect_all")
+        if self.execution_mode == "physical":
+            self._log().warning(
+                "Physical mode detect_parts is unavailable in ROS2 controller path; "
+                "use direct physical perception integration."
+            )
+            return []
+
+        future = self._detect_all_client_legacy.call_async(self._Trigger.Request())
+        result = self._wait_future(future, timeout_sec=10.0, label="detect_all_legacy")
         if not result or not result.success:
             msg = result.message if result else "timeout"
             self._log().error(f"/detect_all failed: {msg}")
@@ -741,6 +830,7 @@ class Ros2PickPlaceController:
         if not self._cartesian_move(
             self._make_pose(bx, by, place_z, ori),
             f"Descend to place (EE z={place_z:.3f}, TCP z={place_tcp_z:.3f})",
+            time_scale=self.release_descend_time_scale,
         ):
             return {"success": False, "message": "failed to descend to place"}
 
@@ -782,13 +872,11 @@ class Ros2PickPlaceController:
         slot_y = _as_float(ctx.get("slot_y"), 0.0)
         board_top_z = _as_float(ctx.get("board_top_z"), 1.025)
         target_height = _as_float(ctx.get("target_height"), 0.08)
+        place_z = _as_float(ctx.get("place_z"), board_top_z + target_height)
         travel_z = _as_float(ctx.get("travel_z"), 1.2)
         ori = ctx.get("orientation")
 
         time.sleep(self.release_preopen_settle_sec)
-        detached = self._detach_part(model_name)
-        if not detached:
-            self._log().warn("Detach failed before opening; opening and retrying detach")
 
         self._gripper_command(
             self.gripper_open,
@@ -798,11 +886,36 @@ class Ros2PickPlaceController:
         )
         time.sleep(self.release_postopen_settle_sec)
 
+        detached = False
+        attempts = max(1, 1 + self.release_detach_retry_count)
+        for attempt_idx in range(attempts):
+            if attempt_idx > 0:
+                if attempt_idx == 1 and self.release_retry_lift_m > 0.0:
+                    lift_z = place_z + self.release_retry_lift_m
+                    lift_ok = self._cartesian_move(
+                        self._make_pose(slot_x, slot_y, lift_z, ori),
+                        f"Release micro-lift +{self.release_retry_lift_m * 1000.0:.1f}mm",
+                        avoid_collisions=False,
+                        min_fraction=0.70,
+                        allow_partial=True,
+                        time_scale=self.release_descend_time_scale,
+                    )
+                    if not lift_ok:
+                        self._log().warn("Release micro-lift retry move failed")
+                time.sleep(self.release_detach_retry_delay_sec)
+
+            detached = self._detach_part(
+                model_name,
+                timeout_sec=self.release_detach_timeout_sec,
+                attached_link_only=(attempt_idx == 0),
+            )
+            if detached:
+                break
+            self._log().warn(
+                f"Detach attempt {attempt_idx + 1}/{attempts} failed for {model_name or 'held part'}"
+            )
         if not detached:
-            time.sleep(0.15)
-            detached = self._detach_part(model_name)
-            if not detached:
-                self._log().warn("Detach still failed after opening gripper")
+            self._log().warn("Detach still failed after retries")
         time.sleep(self.release_postdetach_settle_sec)
 
         if detached and model_name:
@@ -822,7 +935,7 @@ class Ros2PickPlaceController:
             )
 
         if not detached:
-            self._detach_part(model_name)
+            self._detach_part(model_name, timeout_sec=self.release_detach_timeout_sec)
 
         placed_part = str(ctx.get("part_name") or part_name or "")
         self._active_ctx = {}
@@ -1078,7 +1191,12 @@ class Ros2PickPlaceController:
             self._attached_link = None
         return detached_any
 
-    def _detach_part(self, model_name: str = "") -> bool:
+    def _detach_part(
+        self,
+        model_name: str = "",
+        timeout_sec: float | None = None,
+        attached_link_only: bool = False,
+    ) -> bool:
         if not self._link_attacher_enabled:
             return True
 
@@ -1087,15 +1205,19 @@ class Ros2PickPlaceController:
             return True
         if not self._detach_client.wait_for_service(timeout_sec=0.5):
             return False
+        detach_timeout = _as_float(timeout_sec, self.detach_timeout_sec)
+        if detach_timeout <= 0.0:
+            detach_timeout = self.detach_timeout_sec
 
         links_to_try: list[str] = []
         if self._attached_link:
             links_to_try.append(self._attached_link)
-        if self.primary_attach_link and self.primary_attach_link not in links_to_try:
-            links_to_try.append(self.primary_attach_link)
-        for link in self.attach_link_candidates:
-            if link not in links_to_try:
-                links_to_try.append(link)
+        if not (attached_link_only and links_to_try):
+            if self.primary_attach_link and self.primary_attach_link not in links_to_try:
+                links_to_try.append(self.primary_attach_link)
+            for link in self.attach_link_candidates:
+                if link not in links_to_try:
+                    links_to_try.append(link)
         links_to_try = links_to_try[: max(1, self.detach_max_link_attempts)]
 
         for link_name in links_to_try:
@@ -1108,7 +1230,7 @@ class Ros2PickPlaceController:
             future = self._detach_client.call_async(req)
             response = self._wait_future(
                 future,
-                timeout_sec=self.detach_timeout_sec,
+                timeout_sec=detach_timeout,
                 label=f"detach:{link_name}",
             )
             if response and response.success:
@@ -1149,6 +1271,7 @@ class Ros2PickPlaceController:
         avoid_collisions: bool = True,
         min_fraction: float = 0.9,
         allow_partial: bool = False,
+        time_scale: float | None = None,
     ) -> bool:
         request = self._GetCartesianPath.Request()
         request.header.frame_id = self.frame_id
@@ -1178,7 +1301,11 @@ class Ros2PickPlaceController:
             return False
 
         exec_goal = self._ExecuteTrajectory.Goal()
-        self._scale_trajectory_timing(response.solution, self.trajectory_time_scale)
+        if time_scale is None:
+            scale = self.trajectory_time_scale
+        else:
+            scale = _as_float(time_scale, self.trajectory_time_scale)
+        self._scale_trajectory_timing(response.solution, scale)
         exec_goal.trajectory = response.solution
 
         send_future = self._exec_client.send_goal_async(exec_goal)

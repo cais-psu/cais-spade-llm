@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from typing import Any, Dict, Optional
 
 from agents.resource_agent.resource_agent import ResourceAgent
@@ -13,12 +15,13 @@ class RobotAgent(ResourceAgent):
     """Robot resource (UR5e, xArm, etc.) with granular motion tools.
 
     Execution behavior is selected by `execution_mode`:
-    - `simulate`: keep pure asyncio simulation via `_simulate_action`
-    - `ros2`: call ROS2 controller phases
-    - `real`: call ROS2 controller phases against real hardware stack
+    - `dry_run`: keep pure asyncio simulation via `_simulate_action`
+    - `simulation`: call ROS2 controller phases (Gazebo)
+    - `physical`: call ROS2 controller phases against real hardware stack
     """
 
     agent_role = "robot"
+    _DEFAULT_PREWARM_TIMEOUT_S = 60.0
 
     def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
         # Failure-injection controls for SG placement tests.
@@ -39,10 +42,22 @@ class RobotAgent(ResourceAgent):
         self.named_positions = kw.pop("named_positions", {}) or {}
         self.motion_config = controller_config.get("motion", {})
         self.parts_tuning = controller_config.get("parts_tuning", {})
-        execution_mode = str(kw.pop("execution_mode", "simulate")).strip().lower()
-        if execution_mode not in {"simulate", "ros2", "real"}:
-            execution_mode = "simulate"
+        execution_mode = str(kw.pop("execution_mode", "dry_run")).strip().lower()
+        if execution_mode not in {"dry_run", "simulation", "physical"}:
+            execution_mode = "dry_run"
         self.execution_mode = execution_mode
+        self.controller_prewarm_timeout_s = float(
+            kw.pop("controller_prewarm_timeout_s", self._DEFAULT_PREWARM_TIMEOUT_S)
+        )
+        self.enable_controller_prewarm = str(
+            kw.pop(
+                "enable_controller_prewarm",
+                os.environ.get("ENABLE_ROBOT_AGENT_PREWARM", "0"),
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        # Pop before super().__init__ to avoid unexpected kwarg error.
+        self._injected_controller = kw.pop("prewarmed_controller", None)
 
         kw.setdefault(
             "function_names",
@@ -63,7 +78,19 @@ class RobotAgent(ResourceAgent):
         self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed
         self._position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"  # open, closed
-        self._controller = self._build_controller()
+        # Use pre-initialized controller (from Gazebo prewarm) if available,
+        # to avoid paying the ROS2 init cost again on first task.
+        if self._injected_controller is not None:
+            self._controller = self._injected_controller
+            self._controller_prewarm_done = True
+            self.logger.info("[Robot] Using prewarmed controller for %s", name)
+        else:
+            self._controller = self._build_controller()
+            self._controller_prewarm_done = self.execution_mode == "dry_run"
+        self._injected_controller = None  # release reference
+        self._controller_prewarm_attempted = False
+        self._controller_prewarm_lock = asyncio.Lock()
+        self._controller_prewarm_task: asyncio.Task | None = None
 
         self.logger.info(
             (
@@ -76,6 +103,45 @@ class RobotAgent(ResourceAgent):
             self.sg_slippage_mode,
             self.sg_slippage_scope,
         )
+
+    async def teardown(self) -> None:
+        """Clean up controller and prewarm task when the agent stops."""
+        # Cancel any in-progress prewarm task.
+        if self._controller_prewarm_task is not None and not self._controller_prewarm_task.done():
+            self._controller_prewarm_task.cancel()
+            try:
+                await self._controller_prewarm_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._controller_prewarm_task = None
+
+        # Shut down the ROS2 controller (kills spin thread, destroys node).
+        if self._controller is not None:
+            try:
+                self._controller.shutdown()
+                self.logger.info("[Robot] Controller shutdown complete for %s", self.agent_name)
+            except Exception:
+                self.logger.exception("[Robot] Controller shutdown failed for %s", self.agent_name)
+            self._controller = None
+
+    async def setup(self) -> None:
+        await super().setup()
+        # Run prewarm in background so startup/ready signal is not blocked.
+        if (
+            self.enable_controller_prewarm
+            and
+            self.execution_mode != "dry_run"
+            and self._controller is not None
+            and not self._controller_prewarm_done
+        ):
+            if self._controller_prewarm_task is None or self._controller_prewarm_task.done():
+                self.logger.info(
+                    "[Robot] Controller prewarm queued in background for %s",
+                    self.agent_name,
+                )
+                self._controller_prewarm_task = asyncio.create_task(
+                    self._ensure_controller_prewarmed()
+                )
 
     def _robot_scope_name(self) -> str:
         """Lower-cased stable robot identifier used for scoped fault injection."""
@@ -117,9 +183,9 @@ class RobotAgent(ResourceAgent):
         """
         Build the low-level robot controller when execution_mode requires hardware/ROS2.
 
-        simulate mode intentionally keeps controller as None and uses _simulate_action.
+        dry_run mode intentionally keeps controller as None and uses _simulate_action.
         """
-        if self.execution_mode == "simulate":
+        if self.execution_mode == "dry_run":
             return None
 
         robot_scope = self._robot_scope_name()
@@ -139,15 +205,56 @@ class RobotAgent(ResourceAgent):
 
             self.logger.error(
                 "[Robot] Unknown robot '%s' for controller selection; "
-                "falling back to simulate mode.",
+                "falling back to dry_run mode.",
                 self.agent_name,
             )
-            self.execution_mode = "simulate"
+            self.execution_mode = "dry_run"
             return None
         except Exception as exc:
             self.logger.exception("[Robot] Failed to build controller: %s", exc)
-            self.execution_mode = "simulate"
+            self.execution_mode = "dry_run"
             return None
+
+    async def _ensure_controller_prewarmed(self) -> None:
+        if not self.enable_controller_prewarm:
+            return
+        if self.execution_mode == "dry_run" or self._controller is None:
+            self._controller_prewarm_done = True
+            return
+        if self._controller_prewarm_done:
+            return
+
+        async with self._controller_prewarm_lock:
+            if self._controller_prewarm_done:
+                return
+            if self._controller_prewarm_attempted:
+                return
+            self._controller_prewarm_attempted = True
+            ok, elapsed = await self._wait_for_services(self._controller)
+            if ok:
+                self._controller_prewarm_done = True
+                self.logger.info(
+                    "[Robot] Controller prewarm ready for %s in %.2fs",
+                    self.agent_name,
+                    elapsed,
+                )
+            else:
+                self.logger.warning(
+                    "[Robot] Controller prewarm failed for %s; will defer to first task.",
+                    self.agent_name,
+                )
+
+    async def _wait_for_services(self, controller: Any) -> tuple[bool, float]:
+        start = time.monotonic()
+        try:
+            ok = await asyncio.to_thread(
+                controller.wait_for_services,
+                self.controller_prewarm_timeout_s,
+            )
+        except Exception as exc:
+            self.logger.exception("[Robot] Controller prewarm exception: %s", exc)
+            return False, time.monotonic() - start
+        return bool(ok), time.monotonic() - start
 
     async def _run_phase_or_simulate(
         self,
@@ -157,10 +264,12 @@ class RobotAgent(ResourceAgent):
         simulate_duration: float = 5.0,
         **phase_kwargs: Any,
     ) -> Dict[str, Any]:
-        """Run a controller phase in ros2/real mode, otherwise use simulation."""
-        if self.execution_mode == "simulate":
+        """Run a controller phase in simulation/physical mode, otherwise use dry_run."""
+        if self.execution_mode == "dry_run":
             await self._simulate_action(simulate_description, duration=simulate_duration)
             return {"success": True, "message": f"Simulated: {simulate_description}"}
+
+        await self._ensure_controller_prewarmed()
 
         if self._controller is None:
             return {"success": False, "message": "controller is not initialized"}
@@ -618,7 +727,7 @@ class RobotAgent(ResourceAgent):
         """Robot-specific state snapshot (override)."""
         return {
             "execution_mode": self.execution_mode,
-            "controller_ready": self._controller is not None if self.execution_mode != "simulate" else True,
+            "controller_ready": self._controller is not None if self.execution_mode != "dry_run" else True,
             "held_part": self._held_part,
             "current_state": self._current_state,
             "position": self._position.copy(),

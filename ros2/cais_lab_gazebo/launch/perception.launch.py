@@ -15,8 +15,8 @@ Usage:
 
     # Test detection:
     ros2 param set /perception_node target_part SG
-    ros2 service call /detect_part std_srvs/srv/Trigger
-    ros2 service call /detect_all std_srvs/srv/Trigger
+    ros2 service call /detect_part std_srvs/srv/Trigger "{}"
+    ros2 service call /detect_all std_srvs/srv/Trigger "{}"
 """
 
 import os

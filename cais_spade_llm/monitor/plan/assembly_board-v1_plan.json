@@ -15,7 +15,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 0,
-      "status": "running",
+      "status": "completed",
       "predecessors": [],
       "successors": [
         "REQ_1_T2"
@@ -36,7 +36,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 1,
-      "status": "pending",
+      "status": "completed",
       "predecessors": [
         "REQ_1_T1"
       ],
@@ -59,7 +59,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 2,
-      "status": "pending",
+      "status": "completed",
       "predecessors": [
         "REQ_1_T2"
       ],
@@ -82,7 +82,7 @@
       },
       "resource_jid": "xarm6@localhost",
       "sequence_index": 3,
-      "status": "pending",
+      "status": "completed",
       "predecessors": [
         "REQ_1_T3"
       ],

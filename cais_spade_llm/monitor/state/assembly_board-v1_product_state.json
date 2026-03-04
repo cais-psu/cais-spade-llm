@@ -1,18 +1,86 @@
 {
-  "part_tracker": {},
+  "part_tracker": {
+    "LCP": {
+      "state": "untracked",
+      "location": "assembly_board-v1",
+      "last_successful_task": "REQ_1_T4",
+      "observation_required": true,
+      "camera_verification": "not_detected"
+    }
+  },
   "execution_timeline": [
     {
-      "timestamp": "2026-03-03T04:35:03.303979+00:00",
+      "timestamp": "2026-03-04T01:22:42.943576+00:00",
       "task_id": "REQ_1_T1",
       "status": "accepted",
       "resource_jid": "xarm6@localhost"
     },
     {
-      "timestamp": "2026-03-03T04:35:03.408464+00:00",
+      "timestamp": "2026-03-04T01:22:43.996655+00:00",
       "task_id": "REQ_1_T1",
       "status": "running",
       "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:46.178572+00:00",
+      "task_id": "REQ_1_T1",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:46.535492+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:47.127265+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:47.949270+00:00",
+      "task_id": "REQ_1_T2",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:49.695323+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:51.256872+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:53.030075+00:00",
+      "task_id": "REQ_1_T3",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:54.407729+00:00",
+      "task_id": "REQ_1_T4",
+      "status": "accepted",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:55.455665+00:00",
+      "task_id": "REQ_1_T4",
+      "status": "running",
+      "resource_jid": "xarm6@localhost"
+    },
+    {
+      "timestamp": "2026-03-04T01:22:58.544913+00:00",
+      "task_id": "REQ_1_T4",
+      "status": "completed",
+      "resource_jid": "xarm6@localhost"
     }
   ],
-  "last_updated": "2026-03-03T04:35:03.432366+00:00"
+  "last_updated": "2026-03-04T01:22:58.689866+00:00"
 }

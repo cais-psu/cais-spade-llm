@@ -7,3 +7,14 @@ env/
 # (optional extras)
 __pycache__/
 *.pyc
+
+# Runtime / monitor artifacts
+cais_spade_llm/log/*.log
+cais_spade_llm/monitor/debug/*.md
+cais_spade_llm/monitor/history/*.jsonl
+cais_spade_llm/monitor/plan/*_plan.json
+cais_spade_llm/monitor/plan/*_global_fsa.json
+cais_spade_llm/monitor/plan/*_requirements.json
+cais_spade_llm/monitor/state/*_product_state.json
+cais_spade_llm/monitor/state/*_resource_state.json
+cais_spade_llm/monitor/**/archive/

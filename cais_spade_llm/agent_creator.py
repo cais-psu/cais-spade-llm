@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections import defaultdict
 from typing import Iterable, List, Optional
 
@@ -16,23 +17,75 @@ from agents.resource_agent.robot_agent import RobotAgent
 from agents.central_controller.central_controller_agent import CentralControllerAgent
 from resources.sensor.camera_module import CameraModule
 
+_CAMERA_LOCK = threading.Lock()
+
 # Environment mode: "gazebo" (default) or "real".
 # Controls which sub-config block is read from robot JSON manifests.
 ROBOT_ENV = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
 
-# Camera mode: set USE_ROS2_CAMERA=1 when running with Gazebo + gazebo_camera_detector.
-# Default: mock observations for offline testing.
-if os.environ.get("USE_ROS2_CAMERA", "").strip() in ("1", "true", "yes"):
-    _CAMERA = CameraModule(use_ros2=True)
-else:
-    # Mock camera observations for simulation.
-    # SG: slipped into ur5e-only territory (x=750 > xarm6 upper bound of 650).
-    # MCP: correctly placed at assembly board position.
-    # Workspace boundaries (mm): xarm6 x=[-150,650], ur5e x=[100,900].
-    _CAMERA = CameraModule(mock_observations={
-        "SG":  {"x": 750.0, "y": -200.0, "z": 50.0},
-        "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
-    })
+# Execution mode override: when set, takes precedence over per-robot JSON values.
+# Values: "dry_run", "simulation", "physical".
+_EXECUTION_MODE_OVERRIDE = os.environ.get("EXECUTION_MODE", "").strip().lower() or None
+
+def _normalize_camera_backend(raw: Optional[str]) -> str:
+    explicit = str(raw or "").strip().lower()
+    if explicit in {"none", "mock", "gazebo_gt", "yolo"}:
+        return explicit
+    return "none"
+
+
+def _resolve_camera_backend() -> str:
+    """Choose camera backend from PERCEPTION_BACKEND env only."""
+    return _normalize_camera_backend(os.environ.get("PERCEPTION_BACKEND", ""))
+
+
+def _build_camera(backend: str) -> CameraModule:
+    if backend == "mock":
+        # Optional deterministic mock map for offline tests.
+        return CameraModule(
+            backend="mock",
+            mock_observations={
+                "SG": {"x": 750.0, "y": -200.0, "z": 50.0},
+                "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
+            },
+        )
+    return CameraModule(backend=backend)
+
+
+_CAMERA_BACKEND = _resolve_camera_backend()
+_CAMERA = _build_camera(_CAMERA_BACKEND)
+
+
+def configure_runtime(
+    *,
+    robot_env: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    perception_backend: Optional[str] = None,
+) -> None:
+    """Refresh runtime globals without requiring module reload."""
+    global ROBOT_ENV, _EXECUTION_MODE_OVERRIDE, _CAMERA_BACKEND, _CAMERA
+
+    if robot_env is not None:
+        ROBOT_ENV = str(robot_env).strip().lower() or "gazebo"
+    if execution_mode is not None:
+        _EXECUTION_MODE_OVERRIDE = str(execution_mode).strip().lower() or None
+
+    backend = (
+        _normalize_camera_backend(perception_backend)
+        if perception_backend is not None
+        else _resolve_camera_backend()
+    )
+    with _CAMERA_LOCK:
+        if backend == _CAMERA_BACKEND:
+            return
+        old_camera = _CAMERA
+        _CAMERA = _build_camera(backend)
+        _CAMERA_BACKEND = backend
+    try:
+        if old_camera is not None:
+            old_camera.destroy()
+    except Exception:
+        pass
 
 # FunctionAnalyzer consults this registry to decide which methods each agent is allowed to expose.
 ALLOWED_FUNCS: dict[str, set[str]] = defaultdict(set)
@@ -72,8 +125,19 @@ def create_user():
     except Exception:
         return None
 
-def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str):
-    """Build resource-oriented agents (printing, robot, etc.) from their manifest files."""
+def create_resource_agents(
+    resource_init_list: Iterable[str],
+    cca_init_file: str,
+    prewarmed_controllers: dict | None = None,
+):
+    """Build resource-oriented agents (printing, robot, etc.) from their manifest files.
+
+    Args:
+        prewarmed_controllers: Optional dict mapping robot key (e.g. "ur5e", "xarm6")
+            to a pre-initialized Ros2PickPlaceController that the RobotAgent can
+            adopt instead of creating a new one.
+    """
+    prewarmed = prewarmed_controllers or {}
     cca_config = utils.load_json_data(cca_init_file) or {}
     cca_meta = cca_config.get("cca", cca_config)  # handle {"cca": {...}} or flat
     cca_jid = cca_meta.get("jid")
@@ -107,11 +171,16 @@ def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str
                     common["sg_slippage_mode"] = meta.get("sg_slippage_mode")
                 if "sg_slippage_scope" in meta:
                     common["sg_slippage_scope"] = meta.get("sg_slippage_scope")
-                common["execution_mode"] = str(
-                    env_block.get("execution_mode", meta.get("execution_mode", "simulate"))
+                common["execution_mode"] = _EXECUTION_MODE_OVERRIDE or str(
+                    env_block.get("execution_mode", meta.get("execution_mode", "dry_run"))
                 ).strip().lower()
                 common["controller_config"] = env_block.get("controller", {})
                 common["named_positions"] = env_block.get("named_positions", {})
+                # Inject prewarmed controller if available for this robot.
+                robot_key = str(name or "").split("@", 1)[0].lower()
+                pw_ctrl = prewarmed.pop(robot_key, None)
+                if pw_ctrl is not None:
+                    common["prewarmed_controller"] = pw_ctrl
                 agent = RobotAgent(jid, pw, **common)
             else:
                 print(
@@ -120,6 +189,13 @@ def create_resource_agents(resource_init_list: Iterable[str], cca_init_file: str
                 continue
 
             agents.append(agent)
+
+    # Shut down any prewarmed controllers that were not claimed by an agent.
+    for leftover_key, leftover_ctrl in prewarmed.items():
+        try:
+            leftover_ctrl.shutdown()
+        except Exception:
+            pass
     return agents
 
 def create_product_agents(
