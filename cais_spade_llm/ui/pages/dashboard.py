@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from nicegui import ui
 
@@ -24,31 +25,51 @@ _MODE_LABELS = list(_MODE_MAP.keys())
 def render(bridge: SystemBridge) -> None:
     ui.label("Dashboard").classes("text-2xl font-bold px-6 pt-6")
 
-    with ui.row().classes("w-full px-6 gap-6 items-start"):
+    with ui.row().classes("w-full px-6 gap-6 items-start no-wrap"):
       # ── Left column: existing dashboard content ───────────
-      with ui.column().classes("flex-grow gap-6 min-w-0"):
+      with ui.column().classes("flex-1 gap-6 min-w-0"):
 
         # ── System Control Card ──────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("System Control").classes("text-lg font-semibold mb-2")
 
-            with ui.row().classes("items-end gap-4 flex-wrap"):
-                # Product selector.
-                product_files = bridge.list_product_files()
-                product_options = {f: f.split("/")[-1] for f in product_files}
-                product_select = ui.select(
-                    product_options,
-                    value=product_files[0] if product_files else None,
-                    label="Product Specification",
-                ).classes("w-64")
+            with ui.row().classes("items-end gap-6 flex-wrap"):
+                startup_source_select = ui.radio(
+                    ["Generate Plan At Startup", "Use Verified Plan Set"],
+                    value="Generate Plan At Startup",
+                ).props("inline")
 
-                # Execution mode.
+            requirement_files = bridge.list_product_requirement_files()
+            safety_files = bridge.list_safety_requirement_files()
+            requirement_options = {f: Path(f).name for f in requirement_files}
+            safety_options = {"__NONE__": "None"}
+            for f in safety_files:
+                safety_options[f] = Path(f).name
+
+            with ui.row().classes("items-end gap-4 flex-wrap mt-2") as generate_source_row:
+                requirement_select = ui.select(
+                    requirement_options,
+                    value=requirement_files[0] if requirement_files else None,
+                    label="Product Requirement (.txt)",
+                ).classes("w-80")
+
+                safety_select = ui.select(
+                    safety_options,
+                    value=safety_files[0] if safety_files else "__NONE__",
+                    label="Safety Requirement (.txt)",
+                ).classes("w-80")
+
+            with ui.row().classes("items-end gap-4 flex-wrap mt-2") as verified_source_row:
+                plan_set_select = ui.select({}, label="Verified Plan Set").classes("w-96")
+
+            source_hint_label = ui.label("").classes("text-xs text-slate-600")
+            with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
                 mode_select = ui.radio(
                     _MODE_LABELS,
                     value="Simulation",
                 ).props("inline")
-                bridge.execution_mode = _MODE_MAP.get(mode_select.value, "simulation")
-                bridge.robot_env = "gazebo" if bridge.execution_mode in ("dry_run", "simulation") else "real"
+            bridge.execution_mode = _MODE_MAP.get(mode_select.value, "simulation")
+            bridge.robot_env = "gazebo" if bridge.execution_mode in ("dry_run", "simulation") else "real"
 
             # Prerequisite banner.
             prereq_banner = ui.column().classes("w-full mt-3")
@@ -57,6 +78,106 @@ def render(bridge: SystemBridge) -> None:
                 banner_hide_task: asyncio.Task | None = None
                 start_click_state = {"locked": False}
                 start_task: asyncio.Task | None = None
+                compatibility_cache: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
+
+                def _selected_files() -> tuple[str, str]:
+                    req_file = str(requirement_select.value or "").strip()
+                    safe_file = str(safety_select.value or "").strip()
+                    return req_file, safe_file
+
+                def _update_source_picker_visibility() -> None:
+                    use_verified = str(startup_source_select.value or "") == "Use Verified Plan Set"
+                    generate_source_row.style("display:none;" if use_verified else "display:flex;")
+                    verified_source_row.style("display:flex;" if use_verified else "display:none;")
+
+                def _refresh_plan_set_options() -> None:
+                    req_file, safe_file = _selected_files()
+                    internal = _MODE_MAP.get(mode_select.value, "dry_run")
+                    env = "gazebo" if internal in ("dry_run", "simulation") else "real"
+                    options: dict[str, str] = {}
+
+                    if req_file and safe_file and safe_file != "__NONE__":
+                        for row in bridge.list_bundles():
+                            bid = str(row.get("bundle_id", "")).strip()
+                            if not bid:
+                                continue
+                            status = str(row.get("status", "")).lower()
+                            if status != "verified":
+                                continue
+                            evaluation = bridge.evaluate_bundle_for_files(
+                                bid,
+                                req_file,
+                                safe_file,
+                                internal,
+                                env,
+                            )
+                            if not evaluation.get("ok", False):
+                                continue
+                            created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
+                            options[bid] = f"{created} | {bid}"
+
+                    current = str(plan_set_select.value or "").strip()
+                    plan_set_select.options = options
+                    plan_set_select.update()
+                    if current in options:
+                        plan_set_select.value = current
+                    else:
+                        plan_set_select.value = next(iter(options.keys()), None)
+
+                    if str(startup_source_select.value) == "Use Verified Plan Set":
+                        source_hint_label.text = (
+                            "Startup source: verified plan set (runtime plan/safety generation skipped)."
+                        )
+                    else:
+                        source_hint_label.text = (
+                            "Startup source: runtime generation from selected requirement/safety files."
+                        )
+
+                    plan_set_select.set_enabled(str(startup_source_select.value) == "Use Verified Plan Set")
+
+                def _bundle_gate(*, strict: bool) -> tuple[bool, str]:
+                    req_file, safe_file = _selected_files()
+                    internal = _MODE_MAP.get(mode_select.value, "dry_run")
+                    env = "gazebo" if internal in ("dry_run", "simulation") else "real"
+
+                    if not req_file:
+                        return False, "Select a product requirement file."
+
+                    source = str(startup_source_select.value or "")
+                    if source != "Use Verified Plan Set":
+                        return True, ""
+
+                    if safe_file == "__NONE__":
+                        return False, "Verified plan set mode requires a safety file (not None)."
+
+                    bid = str(plan_set_select.value or "").strip()
+                    if not bid:
+                        return False, "Select a verified plan set."
+
+                    if not strict:
+                        return True, ""
+
+                    cache_key = (bid, req_file, safe_file, f"{internal}/{env}")
+                    cached = compatibility_cache.get(cache_key)
+                    if cached is not None:
+                        return cached
+
+                    evaluation = bridge.evaluate_bundle_for_files(
+                        bid,
+                        req_file,
+                        safe_file,
+                        internal,
+                        env,
+                    )
+                    if evaluation.get("ok", False):
+                        out = (True, "")
+                        compatibility_cache[cache_key] = out
+                        return out
+                    reasons = evaluation.get("reasons", [])
+                    reason_text = ", ".join(str(r).replace("bundle", "plan_set") for r in reasons)
+                    out = (False, "Selected verified plan set incompatible: " + reason_text)
+                    compatibility_cache[cache_key] = out
+                    return out
 
                 def _set_action_banner(kind: str, message: str, *, auto_hide_s: float | None = None) -> None:
                     nonlocal banner_hide_task
@@ -107,7 +228,39 @@ def render(bridge: SystemBridge) -> None:
                     internal = _MODE_MAP[mode_select.value]
                     bridge.execution_mode = internal
                     bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
-                    bridge.selected_product = product_select.value or ""
+
+                    req_file, safe_file = _selected_files()
+                    if not req_file:
+                        _set_action_banner("warning", "Select a product requirement file.", auto_hide_s=6.0)
+                        return
+                    try:
+                        bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
+                    except Exception as exc:
+                        _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
+                        return
+
+                    bridge.selected_requirement_file = req_file
+                    bridge.selected_safety_file = safe_file or ""
+
+                    bundle_ok, bundle_msg = _bundle_gate(strict=True)
+                    if not bundle_ok:
+                        _set_action_banner("warning", bundle_msg, auto_hide_s=8.0)
+                        return
+
+                    source = str(startup_source_select.value or "")
+                    try:
+                        if source == "Use Verified Plan Set":
+                            selected_plan_set_id = str(plan_set_select.value or "").strip()
+                            if not selected_plan_set_id:
+                                _set_action_banner("warning", "Select a verified plan set.", auto_hide_s=6.0)
+                                return
+                            bridge.set_active_bundle(selected_plan_set_id)
+                        else:
+                            bridge.set_active_bundle(None)
+                    except Exception as exc:
+                        _set_action_banner("error", f"Failed to configure startup source: {exc}", auto_hide_s=8.0)
+                        return
+
                     if not _check_prerequisites(bridge, internal, prereq_banner):
                         detail = f" {bridge.last_error}" if bridge.last_error else ""
                         _set_action_banner(
@@ -217,6 +370,8 @@ def render(bridge: SystemBridge) -> None:
             def _update_controls():
                 try:
                     internal = _MODE_MAP.get(mode_select.value, "dry_run")
+                    bridge.execution_mode = internal
+                    bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
                     if internal == "physical" and hasattr(bridge, "hardware_connection_statuses"):
                         if not hw_probe["busy"]:
                             async def _probe_hw():
@@ -231,6 +386,15 @@ def render(bridge: SystemBridge) -> None:
                         prereqs_met = False
                     else:
                         prereqs_met = _check_prerequisites(bridge, internal, prereq_banner)
+
+                    bundle_ok, bundle_msg = _bundle_gate(strict=False)
+                    if not bundle_ok:
+                        prereqs_met = False
+                        if not bridge.system_running:
+                            with prereq_banner:
+                                with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
+                                    ui.icon("warning").classes("text-lg")
+                                    ui.label(bundle_msg).classes("text-sm font-semibold")
 
                     can_start = (
                         prereqs_met
@@ -259,6 +423,19 @@ def render(bridge: SystemBridge) -> None:
                     error_label.text = f"Dashboard control update failed: {exc}"
 
             ui.timer(1.0, _update_controls)
+
+            def _refresh_selection_and_controls() -> None:
+                compatibility_cache.clear()
+                _update_source_picker_visibility()
+                _refresh_plan_set_options()
+                _update_controls()
+
+            requirement_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            safety_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            startup_source_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            plan_set_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            mode_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            _refresh_selection_and_controls()
 
         # ── Agent Overview Grid ──────────────────────────────────────
         with ui.card().classes("w-full"):

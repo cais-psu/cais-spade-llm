@@ -621,7 +621,7 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # ltlf to dfa
     # ------------------------------------------------------------------ #
-    def build_dfas_per_rule(self):
+    def build_dfas_per_rule(self, out_dir: Path | str | None = None):
         """
         Build one DFA per safety rule (SAFE_1, SAFE_2, ...) using ltlf2dfa.
 
@@ -636,7 +636,7 @@ class SafetyLogic:
             return {}
 
         parser = LTLfParser()
-        out_dir = Path("cais_spade_llm/safety")
+        out_dir = Path(out_dir) if out_dir else Path("cais_spade_llm/safety")
         out_dir.mkdir(parents=True, exist_ok=True)
 
         self.rule_dfas = {}

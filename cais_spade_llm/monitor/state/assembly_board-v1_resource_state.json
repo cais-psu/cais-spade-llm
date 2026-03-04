@@ -2,25 +2,25 @@
   "ur5e@localhost": {
     "execution_mode": "simulation",
     "controller_ready": true,
-    "held_part": null,
-    "current_state": "idle",
-    "position": {
-      "x": 0.0,
-      "y": 0.0,
-      "z": 0.0
-    },
-    "gripper_state": "open"
-  },
-  "xarm6@localhost": {
-    "execution_mode": "simulation",
-    "controller_ready": true,
-    "held_part": null,
-    "current_state": "idle",
+    "held_part": "MRP",
+    "current_state": "positioned",
     "position": {
       "x": 400.0,
       "y": -200.0,
       "z": 200.0
     },
-    "gripper_state": "open"
+    "gripper_state": "closed"
+  },
+  "xarm6@localhost": {
+    "execution_mode": "simulation",
+    "controller_ready": true,
+    "held_part": "LCP",
+    "current_state": "positioned",
+    "position": {
+      "x": 400.0,
+      "y": -200.0,
+      "z": 200.0
+    },
+    "gripper_state": "closed"
   }
 }

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
+
 from nicegui import ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
@@ -13,6 +16,7 @@ def render_chat(
     agent_jid: str | None = None,
     agent_options: dict[str, str] | None = None,
     title: str = "Agent Chat",
+    on_send: Callable[[str], str | Awaitable[str]] | None = None,
 ) -> None:
     """Render a chat panel inside the current NiceGUI context.
 
@@ -102,12 +106,24 @@ def render_chat(
             else:
                 target_label = "system"
 
-            # Placeholder response (no backend wired yet).
-            messages.append({
-                "role": "agent",
-                "agent": target_label,
-                "text": f"[Chat backend not connected yet. Your message: \"{text}\"]",
-            })
+            if on_send is not None:
+                try:
+                    result = on_send(text)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    reply_text = str(result or "(no response)")
+                except Exception as exc:
+                    reply_text = f"[Chat request failed: {exc}]"
+            else:
+                reply_text = f"[Chat backend not connected yet. Your message: \"{text}\"]"
+
+            messages.append(
+                {
+                    "role": "agent",
+                    "agent": target_label,
+                    "text": reply_text,
+                }
+            )
             _render_messages()
 
         send_btn.on_click(_on_send)

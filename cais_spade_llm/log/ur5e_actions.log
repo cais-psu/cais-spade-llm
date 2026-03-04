@@ -2183,3 +2183,12 @@ RuntimeError: Failed opening file /home/jongh/.ros/log/python_31159_177248272353
 2026-03-03 20:19:22,372 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'])
 2026-03-03 20:21:53,320 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=simulation tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
 2026-03-03 20:21:56,876 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'])
+2026-03-03 22:29:20,229 - agent:ur5e - INFO - [Robot] Using prewarmed controller for ur5e
+2026-03-03 22:29:20,264 - agent:ur5e - INFO - RobotAgent 'ur5e' initialized. mode=simulation tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'] sg_slippage_mode=off sg_slippage_scope=ur5e
+2026-03-03 22:29:36,035 - agent:ur5e - INFO - [ready] ur5e@localhost (LLM=gpt-5, tools=['pick_grasp', 'pick_approach', 'place_approach', 'place_insert'])
+2026-03-03 22:29:43,626 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T1) from=assembly_board-v1@localhost proto=plan/1.0
+2026-03-03 22:29:43,881 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T1
+2026-03-03 22:29:48,167 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T2) from=assembly_board-v1@localhost proto=plan/1.0
+2026-03-03 22:29:48,461 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T2
+2026-03-03 22:29:51,982 - agent:ur5e - INFO - [Resource] ← Task (REQ_2_T3) from=assembly_board-v1@localhost proto=plan/1.0
+2026-03-03 22:29:52,121 - agent:ur5e - INFO - [Resource] Stored safety_decision=allow for task=REQ_2_T3

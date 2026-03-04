@@ -34,6 +34,7 @@ class CentralControllerAgent(LlmAgent):
         name: str,
         resource_agents: Optional[Iterable[Any]] = None,
         safety_file: str | None = None,
+        precomputed_bundle: Optional[dict[str, Any]] = None,
         **kw: Any,
     ) -> None:
         """Initialize controller state, safety logic, and monitoring scaffolding."""
@@ -42,6 +43,7 @@ class CentralControllerAgent(LlmAgent):
         self.agent_name = name
         self.safety_file = Path(safety_file) if safety_file else None
         self.resource_agents = list(resource_agents or [])
+        self.precomputed_bundle: dict[str, Any] = dict(precomputed_bundle or {})
         
         base_safety_dir = Path("cais_spade_llm/safety")
         self.safety_logic_path = base_safety_dir / f"{name}_safety_logic.json"
@@ -496,6 +498,53 @@ class CentralControllerAgent(LlmAgent):
             if not safety_logic:
                 agent.logger.warning("[CCA] No SafetyPlanner configured.")
                 return
+
+            # Bundle fast-path: load precomputed structured safety + DFA artifacts.
+            bundle = dict(agent.precomputed_bundle or {})
+            artifacts = bundle.get("artifacts", {}) if isinstance(bundle, dict) else {}
+            precomputed_logic = artifacts.get("safety_logic_json") if isinstance(artifacts, dict) else None
+            if precomputed_logic:
+                try:
+                    p_logic = Path(str(precomputed_logic))
+                    if p_logic.exists():
+                        await asyncio.to_thread(safety_logic.load, p_logic)
+                        agent.safety_rules = safety_logic.rules or []
+
+                        dfa_map: dict[str, str] = {}
+                        expected_rule_ids = [str(r.get("id")) for r in agent.safety_rules if r.get("id")]
+                        for rid in expected_rule_ids:
+                            dot_path = p_logic.parent / f"{rid}_dfa.dot"
+                            if dot_path.exists():
+                                dfa_map[rid] = dot_path.read_text(encoding="utf-8")
+
+                        if len(dfa_map) < len(expected_rule_ids):
+                            dfa_map = await asyncio.to_thread(
+                                safety_logic.build_dfas_per_rule,
+                                p_logic.parent,
+                            )
+
+                        safety_logic.rule_dfas = dfa_map
+                        agent.safety_monitor = OnlineSafetyMonitor(dfa_map, agent.safety_rules)
+                        agent.logger.info(
+                            "[Bundle] Using precomputed safety bundle_id=%s path=%s rules=%d",
+                            bundle.get("bundle_id", ""),
+                            p_logic,
+                            len(agent.safety_rules),
+                        )
+                        agent.logger.info(
+                            "[CCA] _InitCCA completed. Monitor online with %d rules.",
+                            len(agent.safety_rules),
+                        )
+                        return
+                    else:
+                        agent.logger.warning(
+                            "[Bundle] Precomputed safety logic missing at %s; falling back to runtime generation.",
+                            p_logic,
+                        )
+                except Exception:
+                    agent.logger.exception(
+                        "[Bundle] Failed loading precomputed safety. Falling back to runtime generation."
+                    )
 
             safety_text = safety_logic.load_nl_safety_text()
             if not safety_text:

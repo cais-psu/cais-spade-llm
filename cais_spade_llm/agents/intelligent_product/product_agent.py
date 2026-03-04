@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os, uuid
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -42,6 +43,7 @@ class ProductAgent(LlmAgent):
         cca_jid: Optional[str] = None,
         camera: Optional["CameraModule"] = None,
         replan_mode: str = "llm",
+        precomputed_bundle: Optional[Dict[str, Any]] = None,
         **kw,
     ) -> None:
         """
@@ -68,6 +70,7 @@ class ProductAgent(LlmAgent):
         self.safety_text: str = ""
 
         self.replan_mode = replan_mode
+        self.precomputed_bundle: dict[str, Any] = dict(precomputed_bundle or {})
 
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/monitor/plan")
@@ -614,6 +617,51 @@ class ProductAgent(LlmAgent):
         # 4) Return both artifacts
         return self.process_planner.nodes, self.process_planner.global_fsa
 
+    def _load_precomputed_plan_bundle(self) -> bool:
+        """Load precomputed plan/global FSA artifacts when provided by startup bundle context."""
+        bundle = dict(self.precomputed_bundle or {})
+        artifacts = bundle.get("artifacts", {}) if isinstance(bundle, dict) else {}
+        if not isinstance(artifacts, dict):
+            return False
+
+        plan_path = artifacts.get("plan_json")
+        fsa_path = artifacts.get("global_fsa_json")
+        req_path = artifacts.get("requirements_json")
+
+        if not plan_path or not fsa_path:
+            return False
+
+        p_plan = Path(str(plan_path))
+        p_fsa = Path(str(fsa_path))
+        if not p_plan.exists() or not p_fsa.exists():
+            self.logger.warning(
+                "[Bundle] Precomputed plan artifacts missing plan=%s fsa=%s",
+                p_plan,
+                p_fsa,
+            )
+            return False
+
+        self.process_planner.load(p_plan)
+        self.process_planner.load_global_fsa(p_fsa)
+
+        # Keep monitor snapshots aligned with runtime expectations.
+        self.process_planner.save(self.plan_path)
+        self.process_planner.save_global_fsa(self.global_fsa_path)
+
+        if req_path:
+            p_req = Path(str(req_path))
+            if p_req.exists():
+                self.structured_requirements_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(p_req, self.structured_requirements_path)
+
+        self.logger.info(
+            "[Bundle] Using precomputed plan bundle_id=%s plan=%s fsa=%s",
+            bundle.get("bundle_id", ""),
+            p_plan,
+            p_fsa,
+        )
+        return True
+
 
 
     # --------------------------------------------------------------------- #
@@ -628,10 +676,12 @@ class ProductAgent(LlmAgent):
             safety_text = agent._read_safety_text()
             agent.safety_text = safety_text  # Store for later use in replanning
 
-            dag_nodes = await agent._build_plan(instruction, safety_text)
-            
+            used_precomputed = agent._load_precomputed_plan_bundle()
+            if not used_precomputed:
+                await agent._build_plan(instruction, safety_text)
+
             # Retry Loop for Safety
-            max_retries = 3
+            max_retries = 1 if used_precomputed else 3
             attempt = 0
             
             while attempt < max_retries:
@@ -662,7 +712,14 @@ class ProductAgent(LlmAgent):
                     agent._ensure_plan_result_inbox()
                     agent.add_behaviour(agent._PlanExecutor())
                     return # Exit Kickoff successfully
-                
+
+                if used_precomputed:
+                    agent.logger.error(
+                        "[Bundle] Precomputed plan failed safety validation (%d violations). Aborting kickoff.",
+                        len(violations),
+                    )
+                    return
+
                 # 3. Handle Failure
                 agent.logger.warning(f"[Product] Plan FAILED safety check ({len(violations)} violations). Triggering Re-plan...")
                 

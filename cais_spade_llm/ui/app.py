@@ -20,10 +20,11 @@ _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
+    ("Plans", "/plans", "schema"),
     ("Control", "/control", "gamepad"),
-    ("Central Controller Agent", "/safety", "shield"),
-    ("Product Agent", "/products", "inventory_2"),
-    ("Resource Agent", "/resources", "precision_manufacturing"),
+    ("Safety", "/safety", "shield"),
+    ("Products", "/products", "inventory_2"),
+    ("Resources", "/resources", "precision_manufacturing"),
     ("Logs", "/logs", "terminal"),
 ]
 
@@ -121,7 +122,7 @@ def create_app() -> None:
     app.add_static_files("/static", str(_STATIC_DIR))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, control, logs, safety, resources, products
+    from cais_spade_llm.ui.pages import dashboard, plans, control, logs, safety, resources, products
 
     @ui.page("/")
     def index_page():
@@ -132,6 +133,11 @@ def create_app() -> None:
     def control_page():
         _page_wrapper(bridge)
         control.render(bridge)
+
+    @ui.page("/plans")
+    def plans_page():
+        _page_wrapper(bridge)
+        plans.render(bridge)
 
     @ui.page("/resources")
     def resources_page():
@@ -157,16 +163,23 @@ def create_app() -> None:
         """Detect event-loop stalls that can trigger websocket reconnects."""
         loop = asyncio.get_running_loop()
         interval_s = 0.5
-        warn_threshold_s = 1.2
         target = loop.time() + interval_s
+        last_emit_ts = 0.0
         while True:
             await asyncio.sleep(interval_s)
             now = loop.time()
             lag = now - target
             target = now + interval_s
-            if lag >= warn_threshold_s:
+
+            # Keep idle mode less noisy: focus diagnostics on active startup/running phases.
+            active = bridge._starting or bridge.system_running
+            warn_threshold_s = 1.2 if active else 3.5
+            min_emit_interval_s = 5.0 if active else 30.0
+
+            if lag >= warn_threshold_s and (now - last_emit_ts) >= min_emit_interval_s:
                 try:
                     bridge.log_event_loop_lag(lag)
+                    last_emit_ts = now
                 except Exception:
                     pass
 

@@ -17,7 +17,7 @@ _GEO_DIR = _SPEC_DIR / "geometry"
 
 
 def render(bridge: SystemBridge) -> None:
-    ui.label("Product Agent").classes("text-2xl font-bold px-6 pt-6")
+    ui.label("Products").classes("text-2xl font-bold px-6 pt-6")
 
     with ui.row().classes("w-full px-6 gap-6 items-start"):
       with ui.column().classes("flex-grow gap-6 min-w-0"):

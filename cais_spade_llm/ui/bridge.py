@@ -20,6 +20,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from cais_spade_llm.bundles import BundleCompiler, BundleStore
+from cais_spade_llm.bundles.models import (
+    BUNDLE_STATUS_DRAFT,
+    BUNDLE_STATUS_INVALID,
+    BUNDLE_STATUS_STALE,
+    BUNDLE_STATUS_VERIFIED,
+    sha256_file,
+    sha256_text,
+)
+
 log = logging.getLogger("ui.bridge")
 
 # Filesystem locations (mirror spade_main.py constants).
@@ -31,8 +41,11 @@ _TOOLS_OUT = _BASE / "initialization" / "tools.json"
 _CCA_INIT = _BASE / "initialization" / "cca.json"
 _MONITOR = _BASE / "monitor"
 _LOG_DIR = _BASE / "log"
+_PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements"
+_SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
+_USER_VERIFIED = _BASE / "user_verified"
 
 
 class SystemBridge:
@@ -88,6 +101,20 @@ class SystemBridge:
         self.execution_mode: str = "simulation"
         self.robot_env: str = "gazebo"
         self.selected_product: str = ""
+        self.selected_requirement_file: str = ""
+        # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
+        # any other value -> explicit safety text file path.
+        self.selected_safety_file: str = ""
+        self.bundle_store = BundleStore(_USER_VERIFIED)
+        self.bundle_compiler = BundleCompiler(
+            store=self.bundle_store,
+            project_root=_PROJECT_ROOT,
+            product_init_dir=_PRODUCT_DIR,
+            resource_init_dir=_RESOURCE_DIR,
+            cca_init_path=_CCA_INIT,
+            tools_path=_TOOLS_OUT,
+            prompts_path=_BASE / "prompts.py",
+        )
 
         # ROS2 subprocess tracking.
         self._ros2_procs: dict[str, subprocess.Popen] = {}
@@ -112,6 +139,12 @@ class SystemBridge:
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
         self._agent_creator_prefetch_thread: Optional[threading.Thread] = None
+        self._ui_diag_enabled: bool = str(os.getenv("CAIS_UI_DIAG", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         self._maybe_start_agent_creator_prefetch()
 
     # ------------------------------------------------------------------
@@ -119,6 +152,8 @@ class SystemBridge:
     # ------------------------------------------------------------------
     def _diag_emit(self, message: str) -> None:
         """Emit high-signal startup diagnostics to stdout and logger."""
+        if not self._ui_diag_enabled:
+            return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
         line = f"{ts} - ui.bridge - INFO - [UI-DIAG] {message}"
         try:
@@ -186,6 +221,765 @@ class SystemBridge:
     def save_config(self, path: str, data: dict) -> None:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+
+    # ------------------------------------------------------------------
+    # Verified bundle management
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _first_manifest_entry(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if "name" in raw:
+            name = str(raw.get("name", "product")).strip() or "product"
+            return name, raw
+        if not raw:
+            raise ValueError("empty manifest")
+        key = next(iter(raw.keys()))
+        value = raw[key]
+        if not isinstance(value, dict):
+            raise ValueError("invalid manifest format")
+        return str(key), value
+
+    @staticmethod
+    def _norm_path(path: str | Path) -> str:
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        return str(Path(raw).resolve())
+
+    @staticmethod
+    def _abs_project_path(path_value: str | Path) -> Path:
+        p = Path(str(path_value))
+        if p.is_absolute():
+            return p
+        return _PROJECT_ROOT / p
+
+    def _compute_source_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
+        if not requirement_file.exists():
+            raise FileNotFoundError(f"requirements file missing: {requirement_file}")
+        if not safety_file.exists():
+            raise FileNotFoundError(f"safety file missing: {safety_file}")
+
+        requirement_text = requirement_file.read_text(encoding="utf-8").strip()
+        safety_text = safety_file.read_text(encoding="utf-8").strip()
+        if not requirement_text:
+            raise ValueError(f"requirements file empty: {requirement_file}")
+        if not safety_text:
+            raise ValueError(f"safety file empty: {safety_file}")
+
+        if not _TOOLS_OUT.exists():
+            raise FileNotFoundError(f"tools catalogue missing: {_TOOLS_OUT}")
+        prompts_path = _BASE / "prompts.py"
+        if not prompts_path.exists():
+            raise FileNotFoundError(f"prompts file missing: {prompts_path}")
+
+        return {
+            "requirements_sha256": sha256_text(requirement_text),
+            "safety_sha256": sha256_text(safety_text),
+            "tools_sha256": sha256_file(_TOOLS_OUT),
+            "prompts_sha256": sha256_file(prompts_path),
+        }
+
+    def _resolve_requirement_input(
+        self,
+        product_spec_file_or_requirement_file: str,
+    ) -> tuple[Path, str | None]:
+        """
+        Resolve UI/runtime input into a requirements text file.
+
+        Returns:
+            (requirements_file_path, default_safety_file_path_if_known)
+        """
+        raw = str(product_spec_file_or_requirement_file or "").strip()
+        if not raw:
+            raise ValueError("product spec input is empty")
+
+        p = Path(raw)
+        if p.suffix.lower() == ".json":
+            ctx = self._resolve_product_context(raw, include_hashes=False)
+            return Path(str(ctx["product_spec_file"])), str(ctx.get("safety_file") or "")
+
+        req_file = self._abs_project_path(raw)
+        if not req_file.exists():
+            raise FileNotFoundError(f"requirements file missing: {req_file}")
+        return req_file.resolve(), None
+
+    def _resolve_product_init_for_requirement(self, requirement_file: str) -> dict[str, Any]:
+        req_norm = self._norm_path(self._abs_project_path(requirement_file))
+        for init_file in self.list_product_files():
+            try:
+                ctx = self._resolve_product_context(init_file, include_hashes=False)
+            except Exception:
+                continue
+            if self._norm_path(ctx.get("product_spec_file", "")) == req_norm:
+                out = dict(ctx)
+                out["product_init_file"] = str(Path(init_file).resolve())
+                return out
+        raise ValueError(
+            f"No product initialization manifest references requirements file: {requirement_file}"
+        )
+
+    def resolve_product_init_for_requirement(self, requirement_file: str) -> str:
+        """Return product init JSON path that maps to the given requirement file."""
+        ctx = self._resolve_product_init_for_requirement(requirement_file)
+        return str(ctx["product_init_file"])
+
+    def list_product_requirement_files(self) -> list[str]:
+        options: set[str] = set()
+        for init_file in self.list_product_files():
+            try:
+                ctx = self._resolve_product_context(init_file, include_hashes=False)
+                options.add(self._norm_path(ctx["product_spec_file"]))
+            except Exception:
+                continue
+        if not options and _PRODUCT_REQUIREMENTS_DIR.exists():
+            for p in sorted(_PRODUCT_REQUIREMENTS_DIR.glob("*.txt")):
+                options.add(self._norm_path(p))
+        return sorted(options)
+
+    def list_safety_requirement_files(self) -> list[str]:
+        files: list[str] = []
+        if _SAFETY_REQUIREMENTS_DIR.exists():
+            files.extend(self._norm_path(p) for p in sorted(_SAFETY_REQUIREMENTS_DIR.glob("*.txt")))
+        return files
+
+    def _resolve_product_context(
+        self,
+        product_spec_file: str,
+        *,
+        include_hashes: bool = True,
+    ) -> dict[str, Any]:
+        p = Path(str(product_spec_file))
+        if not p.exists():
+            raise FileNotFoundError(f"product init file missing: {p}")
+        raw = self.load_config(str(p))
+        product_name, product_meta = self._first_manifest_entry(raw)
+        product_spec_path_raw = str(product_meta.get("product_specification_file", "")).strip()
+        if not product_spec_path_raw:
+            raise ValueError(f"product init missing product_specification_file: {p}")
+
+        cca_raw = self.load_config(str(_CCA_INIT))
+        if "cca" in cca_raw and isinstance(cca_raw["cca"], dict):
+            cca_meta = cca_raw["cca"]
+        else:
+            _, cca_meta = self._first_manifest_entry(cca_raw)
+        safety_path = str(cca_meta.get("safety_file", "")).strip()
+        if not safety_path:
+            safety_path = str(product_meta.get("safety_file", "")).strip()
+        if not safety_path:
+            raise ValueError("safety_file is missing in cca/product manifest")
+        req_file = self._abs_project_path(product_spec_path_raw).resolve()
+        safe_file = self._abs_project_path(safety_path).resolve()
+        source_hashes = self._compute_source_hashes(req_file, safe_file) if include_hashes else {}
+        return {
+            "product_name": product_name,
+            "product_spec_file": str(req_file),
+            "safety_file": str(safe_file),
+            "product_init_file": str(p.resolve()),
+            "source_hashes": source_hashes,
+        }
+
+    def list_bundles(self) -> list[dict[str, Any]]:
+        active_id = self.bundle_store.get_active_bundle_id()
+        rows = []
+        for row in self.bundle_store.list_bundles():
+            out = dict(row)
+            out["active"] = bool(active_id and str(row.get("bundle_id")) == str(active_id))
+            rows.append(out)
+        return rows
+
+    def get_bundle_source_files(self, product_spec_file: str) -> dict[str, Any]:
+        """
+        Resolve which requirement/safety files will be used for offline bundle generation.
+        """
+        ctx = self._resolve_product_context(product_spec_file, include_hashes=False)
+        req_file = Path(str(ctx.get("product_spec_file", "")))
+        safety_file = Path(str(ctx.get("safety_file", "")))
+        if not req_file.is_absolute():
+            req_file = _PROJECT_ROOT / req_file
+        if not safety_file.is_absolute():
+            safety_file = _PROJECT_ROOT / safety_file
+        return {
+            "product_name": ctx.get("product_name", ""),
+            "product_requirement_file": str(req_file.resolve()),
+            "safety_requirement_file": str(safety_file.resolve()),
+        }
+
+    def get_active_bundle(self) -> dict[str, Any] | None:
+        active_id = self.bundle_store.get_active_bundle_id()
+        if not active_id:
+            return None
+        summary = self.bundle_store.get_bundle_summary(active_id)
+        manifest = self.bundle_store.load_manifest(active_id)
+        if not summary and not manifest:
+            return None
+        return {
+            "bundle_id": active_id,
+            "summary": summary,
+            "manifest": manifest,
+        }
+
+    def set_active_bundle(self, bundle_id: str | None) -> None:
+        if bundle_id is None:
+            self.bundle_store.set_active_bundle_id(None)
+            return
+        bid = str(bundle_id).strip()
+        if not bid:
+            self.bundle_store.set_active_bundle_id(None)
+            return
+        summary = self.bundle_store.get_bundle_summary(bid)
+        manifest = self.bundle_store.load_manifest(bid)
+        status = str((manifest or {}).get("status") or (summary or {}).get("status") or "")
+        if status != BUNDLE_STATUS_VERIFIED:
+            raise ValueError(f"plan set {bid} is not verified (status={status or 'unknown'})")
+        self.bundle_store.set_active_bundle_id(bid)
+
+    def check_bundle_compatibility(
+        self,
+        bundle_id: str,
+        product_spec_file: str,
+        execution_mode: str,
+        robot_env: str,
+        safety_requirement_file: str | None = None,
+    ) -> tuple[bool, list[str]]:
+        bid = str(bundle_id).strip()
+        if not bid:
+            return False, ["bundle_id_missing"]
+
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            return False, ["manifest_missing"]
+
+        reasons: list[str] = []
+        status = str(manifest.get("status", "")).strip()
+        if status != BUNDLE_STATUS_VERIFIED:
+            reasons.append("bundle_not_verified")
+
+        try:
+            req_file, default_safety = self._resolve_requirement_input(product_spec_file)
+        except Exception as exc:
+            return False, [f"context_error:{exc}"]
+
+        manifest_req_file = str(manifest.get("product_spec_file", "")).strip()
+        if self._norm_path(manifest_req_file) != self._norm_path(req_file):
+            reasons.append("product_spec_file")
+
+        if str(manifest.get("execution_mode", "")) != str(execution_mode):
+            reasons.append("execution_mode")
+        if str(manifest.get("robot_env", "")) != str(robot_env):
+            reasons.append("robot_env")
+
+        manifest_safety = str(manifest.get("safety_file", "")).strip()
+        selected_safety = str(safety_requirement_file or "").strip()
+        if selected_safety.upper() == "__NONE__":
+            reasons.append("safety_file_none")
+            ok = len(reasons) == 0
+            return ok, reasons
+        if selected_safety:
+            selected_safety_norm = self._norm_path(self._abs_project_path(selected_safety))
+            if manifest_safety and self._norm_path(manifest_safety) != selected_safety_norm:
+                reasons.append("safety_file")
+            safety_for_hash = Path(selected_safety_norm)
+        elif manifest_safety:
+            safety_for_hash = Path(self._norm_path(self._abs_project_path(manifest_safety)))
+        elif default_safety:
+            safety_for_hash = Path(self._norm_path(self._abs_project_path(default_safety)))
+        else:
+            return False, ["context_error:missing safety_file reference"]
+
+        try:
+            expected_hashes = self._compute_source_hashes(
+                Path(self._norm_path(req_file)),
+                safety_for_hash,
+            )
+        except Exception as exc:
+            return False, [f"context_error:{exc}"]
+
+        got_hashes = manifest.get("source_hashes", {}) if isinstance(manifest.get("source_hashes"), dict) else {}
+        for key, expected in expected_hashes.items():
+            if str(got_hashes.get(key, "")) != str(expected):
+                reasons.append(key)
+
+        ok = len(reasons) == 0
+        return ok, reasons
+
+    def list_compatible_bundles(
+        self,
+        product_spec_file: str,
+        execution_mode: str,
+        robot_env: str,
+        safety_requirement_file: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for row in self.list_bundles():
+            bid = str(row.get("bundle_id", "")).strip()
+            if not bid:
+                continue
+            ok, reasons = self.check_bundle_compatibility(
+                bid,
+                product_spec_file,
+                execution_mode,
+                robot_env,
+                safety_requirement_file,
+            )
+            if not ok:
+                continue
+            out = dict(row)
+            out["compatibility_ok"] = True
+            out["compatibility_reasons"] = []
+            rows.append(out)
+        return rows
+
+    def evaluate_bundle(
+        self,
+        bundle_id: str,
+        product_spec_file: str,
+        execution_mode: str,
+        robot_env: str,
+        safety_requirement_file: str | None = None,
+    ) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            return {"ok": False, "reasons": ["bundle_id_missing"], "status": BUNDLE_STATUS_INVALID}
+        summary = self.bundle_store.get_bundle_summary(bid) or {}
+        manifest = self.bundle_store.load_manifest(bid) or {}
+        ok, reasons = self.check_bundle_compatibility(
+            bid,
+            product_spec_file,
+            execution_mode,
+            robot_env,
+            safety_requirement_file,
+        )
+        status = str(manifest.get("status") or summary.get("status") or "")
+        if status == BUNDLE_STATUS_VERIFIED and not ok:
+            status = BUNDLE_STATUS_STALE
+        return {
+            "ok": ok,
+            "reasons": reasons,
+            "status": status or BUNDLE_STATUS_INVALID,
+            "summary": summary,
+            "manifest": manifest,
+        }
+
+    def evaluate_bundle_for_files(
+        self,
+        bundle_id: str,
+        product_requirement_file: str,
+        safety_requirement_file: str | None,
+        execution_mode: str,
+        robot_env: str,
+    ) -> dict[str, Any]:
+        return self.evaluate_bundle(
+            bundle_id=bundle_id,
+            product_spec_file=product_requirement_file,
+            execution_mode=execution_mode,
+            robot_env=robot_env,
+            safety_requirement_file=safety_requirement_file,
+        )
+
+    @staticmethod
+    def _ensure_called_from_worker_thread(method_name: str) -> None:
+        try:
+            asyncio.get_running_loop()
+            raise RuntimeError(
+                f"{method_name}() must be called from a worker thread "
+                "(use asyncio.to_thread in UI callbacks)."
+            )
+        except RuntimeError as exc:
+            if "no running event loop" not in str(exc).lower():
+                raise
+
+    def generate_verified_bundle(
+        self,
+        product_spec_file: str | None = None,
+        execution_mode: str | None = None,
+        robot_env: str | None = None,
+        *,
+        product_requirement_file: str | None = None,
+        safety_requirement_file: str | None = None,
+    ) -> dict[str, Any]:
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("cannot generate plan set while system lifecycle is active")
+
+        self._ensure_called_from_worker_thread("generate_verified_bundle")
+
+        resolved_execution_mode = str(execution_mode or self.execution_mode or "simulation").strip()
+        resolved_robot_env = str(robot_env or self.robot_env or "gazebo").strip()
+
+        req_file = str(product_requirement_file or "").strip()
+        input_spec = str(product_spec_file or "").strip()
+        if not req_file and input_spec and Path(input_spec).suffix.lower() != ".json":
+            req_file = input_spec
+
+        if req_file:
+            product_ctx = self._resolve_product_init_for_requirement(req_file)
+            product_init_file = str(product_ctx["product_init_file"])
+            req_file = self._norm_path(self._abs_project_path(req_file))
+        elif input_spec:
+            p_input = Path(input_spec)
+            if p_input.suffix.lower() == ".json":
+                product_init_file = self._norm_path(self._abs_project_path(p_input))
+                ctx = self._resolve_product_context(product_init_file, include_hashes=False)
+                req_file = str(ctx.get("product_spec_file", ""))
+            else:
+                product_ctx = self._resolve_product_init_for_requirement(input_spec)
+                product_init_file = str(product_ctx["product_init_file"])
+                req_file = self._norm_path(self._abs_project_path(input_spec))
+        else:
+            raise ValueError("product specification input is required")
+
+        safety_override = (
+            self._norm_path(self._abs_project_path(safety_requirement_file))
+            if str(safety_requirement_file or "").strip()
+            else None
+        )
+
+        return asyncio.run(
+            self.bundle_compiler.compile_bundle(
+                product_init_file=product_init_file,
+                execution_mode=resolved_execution_mode,
+                robot_env=resolved_robot_env,
+                product_requirement_file=req_file or None,
+                safety_requirement_file=safety_override,
+            )
+        )
+
+    def verify_bundle(self, bundle_id: str) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("plan_set_id is required")
+
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            raise ValueError(f"plan-set manifest not found: {bid}")
+
+        validation = manifest.get("validation_summary", {})
+        ok = bool(validation.get("ok", False))
+        if not ok:
+            raise ValueError("plan set cannot be verified because offline validation did not pass")
+
+        manifest["status"] = BUNDLE_STATUS_VERIFIED
+        manifest["verified"] = True
+        manifest["verified_at_utc"] = datetime.now(timezone.utc).isoformat()
+        self.bundle_store.overwrite_manifest(bid, manifest)
+
+        summary = self.bundle_store.update_bundle_summary(
+            bid,
+            {
+                "status": BUNDLE_STATUS_VERIFIED,
+                "verified": True,
+            },
+        )
+        return {"bundle_id": bid, "summary": summary, "manifest": manifest}
+
+    def unverify_bundle(self, bundle_id: str) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("plan_set_id is required")
+
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            raise ValueError(f"plan-set manifest not found: {bid}")
+
+        current_status = str(manifest.get("status", "")).strip().lower()
+        if current_status == BUNDLE_STATUS_INVALID:
+            raise ValueError("invalid plan set cannot be unverified")
+
+        manifest["status"] = BUNDLE_STATUS_DRAFT
+        manifest["verified"] = False
+        manifest["unverified_at_utc"] = datetime.now(timezone.utc).isoformat()
+        self.bundle_store.overwrite_manifest(bid, manifest)
+
+        summary = self.bundle_store.update_bundle_summary(
+            bid,
+            {
+                "status": BUNDLE_STATUS_DRAFT,
+                "verified": False,
+            },
+        )
+        if self.bundle_store.get_active_bundle_id() == bid:
+            self.bundle_store.set_active_bundle_id(None)
+        return {"bundle_id": bid, "summary": summary, "manifest": manifest}
+
+    def get_bundle_artifacts(self, bundle_id: str) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("plan_set_id is required")
+
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            raise ValueError(f"plan-set manifest not found: {bid}")
+        root = self.bundle_store.bundle_dir(bid)
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+
+        def _artifact_path(key: str) -> Path | None:
+            rel = artifacts.get(key)
+            if not rel:
+                return None
+            return (root / str(rel)).resolve()
+
+        plan_path = _artifact_path("plan_json")
+        fsa_path = _artifact_path("global_fsa_json")
+        validation_path = _artifact_path("offline_validation_json")
+
+        plan_payload = self._read_json_dict(plan_path) if plan_path else {}
+        fsa_payload = self._read_json_dict(fsa_path) if fsa_path else {}
+        validation_payload = self._read_json_dict(validation_path) if validation_path else {}
+
+        return {
+            "bundle_id": bid,
+            "manifest": manifest,
+            "summary": self.bundle_store.get_bundle_summary(bid) or {},
+            "plan_nodes": plan_payload.get("nodes", []) if isinstance(plan_payload.get("nodes", []), list) else [],
+            "global_fsa": fsa_payload,
+            "validation": validation_payload,
+            "paths": {
+                "root": str(root),
+                "plan_json": str(plan_path) if plan_path else "",
+                "global_fsa_json": str(fsa_path) if fsa_path else "",
+                "offline_validation_json": str(validation_path) if validation_path else "",
+            },
+        }
+
+    def apply_bundle_chat_edit(self, bundle_id: str, user_message: str) -> dict[str, Any]:
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("stop the system before editing plan sets")
+        self._ensure_called_from_worker_thread("apply_bundle_chat_edit")
+
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("plan_set_id is required")
+        message = str(user_message or "").strip()
+        if not message:
+            raise ValueError("message is empty")
+
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            raise ValueError(f"plan-set manifest not found: {bid}")
+        root = self.bundle_store.bundle_dir(bid)
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+
+        plan_rel = str(artifacts.get("plan_json", "")).strip()
+        fsa_rel = str(artifacts.get("global_fsa_json", "")).strip()
+        safety_logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
+        validation_rel = str(artifacts.get("offline_validation_json", "")).strip()
+        if not plan_rel or not fsa_rel or not safety_logic_rel or not validation_rel:
+            raise ValueError("plan set is missing required plan/safety artifacts")
+
+        plan_path = (root / plan_rel).resolve()
+        fsa_path = (root / fsa_rel).resolve()
+        safety_logic_path = (root / safety_logic_rel).resolve()
+        validation_path = (root / validation_rel).resolve()
+        if not plan_path.exists():
+            raise FileNotFoundError(f"plan artifact missing: {plan_path}")
+        if not safety_logic_path.exists():
+            raise FileNotFoundError(f"safety logic artifact missing: {safety_logic_path}")
+
+        safety_payload = self._read_json_dict(safety_logic_path)
+        rules = safety_payload.get("rules", []) if isinstance(safety_payload.get("rules", []), list) else []
+        if not rules:
+            raise ValueError("safety logic has no rules")
+
+        dfa_map: dict[str, str] = {}
+        dot_rels = artifacts.get("safety_dfa_dot_files", [])
+        if isinstance(dot_rels, list):
+            for rel in dot_rels:
+                dot_path = (root / str(rel)).resolve()
+                if not dot_path.exists():
+                    continue
+                rid = dot_path.stem
+                if rid.endswith("_dfa"):
+                    rid = rid[: -len("_dfa")]
+                try:
+                    dfa_map[rid] = dot_path.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+
+        if not dfa_map:
+            for rule in rules:
+                rid = str(rule.get("id", "")).strip()
+                if not rid:
+                    continue
+                dot_path = (root / "safety" / f"{rid}_dfa.dot").resolve()
+                if dot_path.exists():
+                    try:
+                        dfa_map[rid] = dot_path.read_text(encoding="utf-8")
+                    except Exception:
+                        continue
+        if not dfa_map:
+            raise ValueError("plan set has no DFA DOT artifacts for safety validation")
+
+        ProductAgent, _, OfflineSafetyValidator, CameraModule = (
+            self.bundle_compiler._import_runtime_classes()
+        )
+        resources = self.bundle_compiler._collect_resource_refs(
+            robot_env=str(manifest.get("robot_env", "gazebo") or "gazebo")
+        )
+        resource_jids = [str(r.jid) for r in resources]
+        product_name = str(manifest.get("product_name", "product")).strip() or "product"
+        product_spec_file = str(manifest.get("product_spec_file", "")).strip()
+        safety_file = str(manifest.get("safety_file", "")).strip()
+        product_jid = f"{product_name}@localhost"
+
+        safety_text = ""
+        if safety_file:
+            safety_path = self._abs_project_path(safety_file).resolve()
+            if safety_path.exists():
+                safety_text = safety_path.read_text(encoding="utf-8").strip()
+
+        product_agent = ProductAgent(
+            product_jid,
+            "none",
+            name=product_name,
+            resource_jids=resource_jids,
+            resource_agents=resources,
+            product_specification_file=product_spec_file,
+            safety_file=safety_file or None,
+            camera=CameraModule(backend="none"),
+        )
+        product_agent.process_planner.load(plan_path)
+        product_agent.safety_text = safety_text
+
+        try:
+            async def _run_replan() -> None:
+                task_nodes = [
+                    n for n in product_agent.process_planner.nodes
+                    if n.get("type") == "task"
+                ]
+                pred_map = {
+                    str(n.get("id")): list(n.get("predecessors", []))
+                    for n in task_nodes
+                    if n.get("id")
+                }
+                violations = [
+                    {
+                        "violated_rule_id": "USER_EDIT",
+                        "violation_text": f"Operator requested plan changes: {message}",
+                        "violation_logic": "manual_edit_request",
+                        "witness_trace": [],
+                        "relevant_tasks": task_nodes,
+                        "relevant_pred_map": pred_map,
+                    }
+                ]
+                await product_agent.process_planner.replan_with_feedback_offline(violations)
+
+            asyncio.run(_run_replan())
+            product_agent.process_planner.save(plan_path)
+            product_agent.process_planner.save_global_fsa(fsa_path)
+
+            validator = OfflineSafetyValidator(
+                rules=rules,
+                dfa_map=dfa_map,
+            )
+            ok, violations = validator.validate_fsa_offline(
+                fsa=product_agent.process_planner.global_fsa or {},
+                plan={"nodes": product_agent.process_planner.nodes},
+                product_jid=product_jid,
+            )
+            violated_rules = sorted(
+                {
+                    str(v.get("violated_rule_id"))
+                    for v in violations
+                    if v.get("violated_rule_id")
+                }
+            )
+            validation_payload = {
+                "ok": bool(ok),
+                "violations": violations,
+                "violated_rules": violated_rules,
+                "witness_count": len(violations),
+            }
+            validation_path.parent.mkdir(parents=True, exist_ok=True)
+            validation_path.write_text(
+                json.dumps(validation_payload, indent=2),
+                encoding="utf-8",
+            )
+
+            new_status = BUNDLE_STATUS_DRAFT if ok else BUNDLE_STATUS_INVALID
+            manifest["status"] = new_status
+            manifest["verified"] = False
+            manifest["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["validation_summary"] = {
+                "ok": bool(ok),
+                "violated_rules": violated_rules,
+                "witness_count": len(violations),
+            }
+            self.bundle_store.overwrite_manifest(bid, manifest)
+            summary = self.bundle_store.update_bundle_summary(
+                bid,
+                {
+                    "status": new_status,
+                    "verified": False,
+                },
+            )
+            if self.bundle_store.get_active_bundle_id() == bid:
+                self.bundle_store.set_active_bundle_id(None)
+
+            return {
+                "bundle_id": bid,
+                "status": new_status,
+                "validation_ok": bool(ok),
+                "witness_count": len(violations),
+                "summary": summary,
+                "manifest": manifest,
+                "task_count": len(
+                    [n for n in product_agent.process_planner.nodes if n.get("type") == "task"]
+                ),
+            }
+        finally:
+            try:
+                if hasattr(product_agent, "camera") and product_agent.camera:
+                    product_agent.camera.destroy()
+            except Exception:
+                pass
+
+    def _resolve_active_bundle_context(
+        self,
+        *,
+        product_spec_file: str,
+        execution_mode: str,
+        robot_env: str,
+        safety_requirement_file: str | None = None,
+    ) -> dict[str, Any] | None:
+        active_id = self.bundle_store.get_active_bundle_id()
+        if not active_id:
+            return None
+        ok, reasons = self.check_bundle_compatibility(
+            active_id,
+            product_spec_file,
+            execution_mode,
+            robot_env,
+            safety_requirement_file,
+        )
+        if not ok:
+            msg = ", ".join(reasons) if reasons else "unknown mismatch"
+            self._diag_emit(f"[Bundle] Compatibility check failed: {msg}")
+            raise RuntimeError(
+                f"Active plan set '{active_id}' is incompatible with current selection: {msg}"
+            )
+
+        manifest = self.bundle_store.load_manifest(active_id)
+        if not manifest:
+            raise RuntimeError(f"Active plan-set manifest missing: {active_id}")
+
+        root = self.bundle_store.bundle_dir(active_id)
+        raw_artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts_abs: dict[str, Any] = {}
+        for key, value in raw_artifacts.items():
+            if isinstance(value, list):
+                artifacts_abs[key] = [str((root / str(v)).resolve()) for v in value]
+            else:
+                artifacts_abs[key] = str((root / str(value)).resolve())
+
+        return {
+            "bundle_id": active_id,
+            "product_name": manifest.get("product_name"),
+            "product_spec_file": manifest.get("product_spec_file"),
+            "safety_file": manifest.get("safety_file"),
+            "execution_mode": manifest.get("execution_mode"),
+            "robot_env": manifest.get("robot_env"),
+            "status": manifest.get("status"),
+            "manifest_path": str(self.bundle_store.manifest_path(active_id)),
+            "artifacts": artifacts_abs,
+        }
 
     # ------------------------------------------------------------------
     # XMPP server lifecycle
@@ -367,6 +1161,67 @@ class SystemBridge:
             # Collect init files.
             self._set_startup_phase("collect_init_files")
             prod_files, res_files = await asyncio.to_thread(self._collect_init_files)
+            if not prod_files:
+                raise RuntimeError("No product initialization files found.")
+
+            selected_requirement_file = str(self.selected_requirement_file or "").strip()
+            if selected_requirement_file:
+                try:
+                    selected_product_file = await asyncio.to_thread(
+                        self.resolve_product_init_for_requirement,
+                        selected_requirement_file,
+                    )
+                    self.selected_product = selected_product_file
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to resolve product init for requirement file '{selected_requirement_file}': {exc}"
+                    ) from exc
+
+            selected_product_file = str(self.selected_product or "").strip()
+            if not selected_product_file:
+                selected_product_file = prod_files[0]
+                self.selected_product = selected_product_file
+            selected_norm = self._norm_path(selected_product_file)
+            matched_product_files = [p for p in prod_files if self._norm_path(p) == selected_norm]
+            if matched_product_files:
+                # Align runtime with UI selection and bundle scope.
+                prod_files = [matched_product_files[0]]
+                selected_product_file = matched_product_files[0]
+                self.selected_product = selected_product_file
+            else:
+                selected_product_file = prod_files[0]
+                self.selected_product = selected_product_file
+
+            selected_safety_raw = str(self.selected_safety_file or "").strip()
+            selected_safety_for_compat: str | None
+            if selected_safety_raw:
+                selected_safety_for_compat = selected_safety_raw
+            else:
+                selected_safety_for_compat = None
+
+            bundle_context = await asyncio.to_thread(
+                self._resolve_active_bundle_context,
+                product_spec_file=selected_product_file,
+                execution_mode=self.execution_mode,
+                robot_env=self.robot_env,
+                safety_requirement_file=selected_safety_for_compat,
+            )
+            if bundle_context:
+                self._diag_emit(
+                    f"[Bundle] startup using bundle_id={bundle_context.get('bundle_id', '')}"
+                )
+
+            runtime_overrides: dict[str, Any] = {}
+            if selected_requirement_file:
+                runtime_overrides["product_requirement_file"] = selected_requirement_file
+            if selected_safety_raw:
+                runtime_overrides["safety_file_override_set"] = True
+                if selected_safety_raw.upper() == "__NONE__":
+                    runtime_overrides["safety_file_override"] = None
+                else:
+                    runtime_overrides["safety_file_override"] = selected_safety_raw
+            else:
+                runtime_overrides["safety_file_override_set"] = False
 
             # Create agents, passing prewarmed controllers for reuse.
             self._set_startup_phase("create_agents")
@@ -382,6 +1237,8 @@ class SystemBridge:
                 res_files,
                 str(_CCA_INIT),
                 prewarmed,
+                bundle_context,
+                runtime_overrides,
             )
             self._diag_emit(
                 f"startup#{startup_id} agents created resources={len(self.resource_agents)} "
@@ -554,21 +1411,40 @@ class SystemBridge:
         res_files: list[str],
         cca_init_file: str,
         prewarmed_controllers: dict[str, Any],
+        bundle_context: dict[str, Any] | None = None,
+        runtime_overrides: dict[str, Any] | None = None,
     ) -> tuple[Any, list[Any], list[Any], Any]:
+        runtime_overrides = dict(runtime_overrides or {})
+        product_requirement_file = runtime_overrides.get("product_requirement_file")
+        safety_override_set = bool(runtime_overrides.get("safety_file_override_set", False))
+        safety_override = runtime_overrides.get("safety_file_override")
+
         user_agent = agent_creator_module.create_user()
         resource_agents = agent_creator_module.create_resource_agents(
             res_files,
             cca_init_file,
             prewarmed_controllers=prewarmed_controllers,
         )
+        product_kwargs: dict[str, Any] = {}
+        if product_requirement_file:
+            product_kwargs["product_requirement_file"] = product_requirement_file
+        if safety_override_set:
+            product_kwargs["safety_file_override"] = safety_override
         product_agents = agent_creator_module.create_product_agents(
             prod_files,
             resource_agents,
             cca_init_file,
+            bundle_context=bundle_context,
+            **product_kwargs,
         )
+        cca_kwargs: dict[str, Any] = {}
+        if safety_override_set:
+            cca_kwargs["safety_file_override"] = safety_override
         cca = agent_creator_module.create_central_controller(
             cca_init_file,
             resource_agents,
+            bundle_context=bundle_context,
+            **cca_kwargs,
         )
         return user_agent, resource_agents, product_agents, cca
 

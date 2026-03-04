@@ -1,0 +1,42 @@
+{
+  "bundle_id": "20260304T024658Z__assembly_board-v1__simulation__gazebo__08ef0931",
+  "display_name": "assembly_board-v1 | simulation/gazebo | draft | 20260304T024658Z",
+  "created_at_utc": "2026-03-04T02:47:18.432663+00:00",
+  "status": "verified",
+  "verified": true,
+  "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly_board-v1.txt",
+  "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_requirements-case1-ordering.txt",
+  "product_name": "assembly_board-v1",
+  "execution_mode": "simulation",
+  "robot_env": "gazebo",
+  "llm_models": {
+    "planner_model": "gpt-5",
+    "safety_model": "gpt-5"
+  },
+  "source_hashes": {
+    "requirements_sha256": "2af472d387af31fe75e49fc853b068b0f5de1845b4507e691b10b223973bd42f",
+    "safety_sha256": "5842d66ea835b1355244542f739319e19135b02c80486fbe70b4ca749fcc4589",
+    "tools_sha256": "96ec62f6f74586ca6d21422178c65fa01b7768327be5f946327e3f3096c1b65b",
+    "prompts_sha256": "126a85d7be43b7b2fd8bad4d1fc19489dc4f2ba1e2e0b4685daf5bea5817e42e"
+  },
+  "artifacts": {
+    "requirements_json": "plan/assembly_board-v1_requirements.json",
+    "plan_json": "plan/assembly_board-v1_plan.json",
+    "global_fsa_json": "plan/assembly_board-v1_global_fsa.json",
+    "safety_logic_json": "safety/cca_safety_logic.json",
+    "safety_dfa_dot_files": [
+      "safety/SAFE_1_dfa.dot"
+    ],
+    "safety_dfa_png_files": [
+      "safety/SAFE_1_dfa.png"
+    ],
+    "offline_validation_json": "validation/offline_validation.json"
+  },
+  "validation_summary": {
+    "ok": true,
+    "violated_rules": [],
+    "witness_count": 0
+  },
+  "verified_at_utc": "2026-03-04T03:05:46.199164+00:00",
+  "updated_at_utc": "2026-03-04T02:51:54.261542+00:00"
+}

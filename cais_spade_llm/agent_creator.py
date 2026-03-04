@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import threading
 from collections import defaultdict
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 import utils
@@ -18,6 +19,7 @@ from agents.central_controller.central_controller_agent import CentralController
 from resources.sensor.camera_module import CameraModule
 
 _CAMERA_LOCK = threading.Lock()
+_UNSET_OVERRIDE = object()
 
 # Environment mode: "gazebo" (default) or "real".
 # Controls which sub-config block is read from robot JSON manifests.
@@ -199,7 +201,12 @@ def create_resource_agents(
     return agents
 
 def create_product_agents(
-    product_init_list: Iterable[str], resource_agents: list, cca_init_file: str,
+    product_init_list: Iterable[str],
+    resource_agents: list,
+    cca_init_file: str,
+    bundle_context: dict | None = None,
+    product_requirement_file: str | None = None,
+    safety_file_override: object = _UNSET_OVERRIDE,
 ) -> List[ProductAgent]:
     """
     Build ProductAgent instances from JSON manifests.
@@ -235,20 +242,47 @@ def create_product_agents(
             else:
                 resource_jids = all_ra_jids[:]  # Use a copy so later mutation is safe.
 
+            product_bundle = None
+            if bundle_context:
+                b_product_name = str(bundle_context.get("product_name", "")).strip()
+                b_spec_file = str(bundle_context.get("product_spec_file", "")).strip()
+                resolved_spec_file = str(
+                    product_requirement_file or meta.get("product_specification_file", "")
+                ).strip()
+                m_spec_file = resolved_spec_file
+
+                name_match = not b_product_name or b_product_name == str(name)
+                spec_match = True
+                if b_spec_file and m_spec_file:
+                    spec_match = (
+                        Path(b_spec_file).resolve().as_posix()
+                        == Path(m_spec_file).resolve().as_posix()
+                    )
+
+                if name_match and spec_match:
+                    product_bundle = bundle_context
+
             agent = ProductAgent(
                 jid,
                 pw,
                 name=name,
                 instructions=meta.get("instructions"),
-                product_specification_file=meta.get("product_specification_file"),
+                product_specification_file=(
+                    product_requirement_file or meta.get("product_specification_file")
+                ),
                 product_geometry_file=meta.get("product_geometry_file"),
-                safety_file=meta.get("safety_file"),
+                safety_file=(
+                    meta.get("safety_file")
+                    if safety_file_override is _UNSET_OVERRIDE
+                    else safety_file_override
+                ),
                 function_names=fn_names,
                 resource_jids=resource_jids,
                 resource_agents=resource_agents,
                 cca_jid=cca_jid,
                 camera=_CAMERA,
                 replan_mode=meta.get("replan_mode", "des"),
+                precomputed_bundle=product_bundle,
             )
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.
@@ -270,6 +304,8 @@ def create_product_agents(
 def create_central_controller(
     cca_init_file: str,
     resource_agents: list | None = None,
+    bundle_context: dict | None = None,
+    safety_file_override: object = _UNSET_OVERRIDE,
 ) -> CentralControllerAgent:
     """
     Build exactly ONE CentralControllerAgent from a JSON manifest.
@@ -306,7 +342,11 @@ def create_central_controller(
     if not jid or not password:
         raise ValueError("CCA must have 'jid' and 'password' fields.")
 
-    safety_file = meta.get("safety_file")
+    safety_file = (
+        meta.get("safety_file")
+        if safety_file_override is _UNSET_OVERRIDE
+        else safety_file_override
+    )
 
     controller = CentralControllerAgent(
         jid,
@@ -315,6 +355,7 @@ def create_central_controller(
         instructions=meta.get("instructions", None),
         safety_file=safety_file,
         resource_agents=resource_agents,
+        precomputed_bundle=bundle_context,
     )
 
     return controller

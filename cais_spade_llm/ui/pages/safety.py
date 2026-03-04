@@ -1,4 +1,4 @@
-"""Central Controller page: safety requirements CRUD, rules table, DFA states, blocked tasks."""
+"""Safety page: safety requirements CRUD, rules table, runtime state, blocked tasks."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from nicegui import ui, events
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
-from cais_spade_llm.ui.components.fsa_graph import fsa_to_mermaid, fsa_state_index_text
 
 
 _SAFETY_DIR = Path("cais_spade_llm/specification/safety")
 
 
 def render(bridge: SystemBridge) -> None:
-    ui.label("Central Controller Agent").classes("text-2xl font-bold px-6 pt-6")
+    ui.label("Safety").classes("text-2xl font-bold px-6 pt-6")
 
     with ui.row().classes("w-full px-6 gap-6 items-start flex-nowrap"):
       with ui.column().classes("flex-grow gap-6 min-w-0"):
@@ -51,7 +50,7 @@ def render(bridge: SystemBridge) -> None:
 
             ui.timer(5.0, _refresh_rules)
 
-        # ── DFA / FSA State ──────────────────────────────────────────
+        # ── Runtime Safety State ─────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Runtime Safety State").classes("text-lg font-semibold mb-2")
             state_pre = ui.code("{}", language="json").classes("w-full")
@@ -61,81 +60,6 @@ def render(bridge: SystemBridge) -> None:
                 state_pre.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
 
             ui.timer(2.0, _refresh_state)
-
-        # ── Global Plan FSA (JSON + graph) ────────────────────────────
-        with ui.card().classes("w-full"):
-            ui.label("Global Plan FSA").classes("text-lg font-semibold mb-2")
-            fsa_meta = ui.label("No global FSA loaded").classes("text-sm text-slate-500 mb-2")
-
-            with ui.tabs().classes("w-full") as fsa_tabs:
-                graph_tab = ui.tab("Graph")
-                json_tab = ui.tab("JSON")
-
-            with ui.tab_panels(fsa_tabs, value=graph_tab).classes("w-full"):
-                with ui.tab_panel(graph_tab):
-                    with ui.card().classes("w-full bg-slate-50"):
-                        ui.label("State Graph").classes("text-sm text-slate-600 mb-2")
-                        with ui.element("div").classes("w-full overflow-auto").style("max-height: 70vh;"):
-                            with ui.element("div").classes("w-full flex justify-center"):
-                                fsa_graph = ui.mermaid(
-                                    "graph TB\n    empty[No global FSA loaded]",
-                                    config={
-                                        "flowchart": {
-                                            "useMaxWidth": False,
-                                            "nodeSpacing": 70,
-                                            "rankSpacing": 90,
-                                            "htmlLabels": False,
-                                        },
-                                        "themeVariables": {
-                                            "fontSize": "18px",
-                                        },
-                                    },
-                                ).style("display: inline-block;")
-                    with ui.expansion("State Index (S<n> -> full state)").classes("w-full"):
-                        fsa_index = ui.code("No global FSA loaded", language="text").classes("w-full")
-                with ui.tab_panel(json_tab):
-                    fsa_json = ui.code("{}", language="json").classes("w-full")
-
-            def _refresh_global_fsa():
-                fsa = bridge.get_global_fsa()
-                if not fsa:
-                    fsa_meta.text = "No global FSA loaded"
-                    fsa_json.content = "{}"
-                    fsa_graph.content = "graph TB\n    empty[No global FSA loaded]"
-                    fsa_index.content = "No global FSA loaded"
-                    return
-
-                safety_state = bridge.get_safety_state()
-                current_state = safety_state.get("fsa_state")
-                automaton = fsa.get("A", {})
-                meta = fsa.get("meta", {})
-                num_states = len(automaton.get("X", []) or [])
-                num_transitions = len(automaton.get("Tr", []) or [])
-                resources = meta.get("resources", [])
-                resource_text = ", ".join(resources) if resources else "unknown"
-                if current_state:
-                    fsa_meta.text = (
-                        f"Resources: {resource_text} | States: {num_states} | "
-                        f"Transitions: {num_transitions} | Current: {current_state}"
-                    )
-                else:
-                    fsa_meta.text = (
-                        f"Resources: {resource_text} | States: {num_states} | "
-                        f"Transitions: {num_transitions}"
-                    )
-
-                fsa_json.content = json.dumps(fsa, indent=2, default=str)
-                fsa_graph.content = fsa_to_mermaid(
-                    fsa,
-                    current_state=current_state,
-                    max_edges=220,
-                )
-                fsa_index.content = fsa_state_index_text(
-                    fsa,
-                    current_state=current_state,
-                )
-
-            ui.timer(2.0, _refresh_global_fsa)
 
         # ── Blocked Tasks ────────────────────────────────────────────
         with ui.card().classes("w-full"):

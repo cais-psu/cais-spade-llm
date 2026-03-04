@@ -15,14 +15,14 @@ _PHASES = ["idle", "at_pick", "picked", "positioned", "placed"]
 
 
 def render(bridge: SystemBridge) -> None:
-    ui.label("Resource Agent").classes("text-2xl font-bold px-6 pt-6")
+    ui.label("Resources").classes("text-2xl font-bold px-6 pt-6")
 
     with ui.row().classes("w-full px-6 gap-6 items-start"):
       with ui.column().classes("flex-grow gap-6 min-w-0"):
 
         # ── Resource Configuration Files ─────────────────────────────
         with ui.card().classes("w-full"):
-            ui.label("Resource Configurations").classes("text-lg font-semibold mb-2")
+            ui.label("Resources").classes("text-lg font-semibold mb-2")
             ui.label("JSON manifests that define robot capabilities, controllers, and motion parameters.").classes(
                 "text-xs text-slate-500 mb-3"
             )

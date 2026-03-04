@@ -1073,3 +1073,16 @@ class ProcessPlanner:
             json.dump(self.global_fsa, f, indent=2)
 
         self.logger.info(f"[Planner] Saved global FSA to {p.resolve()}")
+
+    def load_global_fsa(self, path: Path | str) -> None:
+        p = Path(path)
+        if not p.exists():
+            self.logger.warning(f"[Planner] Global FSA file missing: {p}")
+            return
+        with p.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            self.logger.warning(f"[Planner] Invalid global FSA payload in {p}")
+            return
+        self.global_fsa = payload
+        self.logger.info(f"[Planner] Loaded global FSA from {p.resolve()}")

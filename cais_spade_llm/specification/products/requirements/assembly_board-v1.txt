@@ -1,1 +1,2 @@
 - Assemble part LCP from picking location prusa-mk4-1 to the assembly_board-v1.
+- Assemble part MRP from picking location prusa-mk4-2 to the assembly_board-v1.
