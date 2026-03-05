@@ -16,7 +16,7 @@ from .models import INDEX_SCHEMA_VERSION, atomic_json_write
 class BundleStore:
     """Manage bundle index, manifests, active selection, and generation locks."""
 
-    def __init__(self, root_dir: Path | str = "cais_spade_llm/user_verified") -> None:
+    def __init__(self, root_dir: Path | str = "cais_spade_llm/user_verified_plan") -> None:
         self.root_dir = Path(root_dir)
         self.bundles_dir = self.root_dir / "bundles"
         self.index_path = self.root_dir / "index.json"
@@ -101,6 +101,21 @@ class BundleStore:
         merged.update(dict(patch or {}))
         self.upsert_bundle_summary(merged)
         return merged
+
+    def delete_bundle_summary(self, bundle_id: str) -> bool:
+        """Remove a bundle from the index. Returns True if an entry was removed."""
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("bundle_id is required")
+        data = self._load_index()
+        bundles = list(data.get("bundles", []))
+        kept = [row for row in bundles if str(row.get("bundle_id", "")).strip() != bid]
+        removed = len(kept) != len(bundles)
+        data["bundles"] = kept
+        if str(data.get("active_bundle_id", "")).strip() == bid:
+            data["active_bundle_id"] = None
+        self._save_index(data)
+        return removed
 
     def get_active_bundle_id(self) -> str | None:
         bid = self._load_index().get("active_bundle_id")

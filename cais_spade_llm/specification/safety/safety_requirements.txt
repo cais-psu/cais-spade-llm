@@ -1,1 +1,0 @@
-- SG must be place_part before MCP is place_part

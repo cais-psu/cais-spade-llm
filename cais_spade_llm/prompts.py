@@ -451,6 +451,14 @@ def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> s
     """
     rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
+    allowed_events = sorted(
+        {
+            str(t.get("function", "")).strip()
+            for t in (tools_catalog or [])
+            if str(t.get("function", "")).strip()
+        }
+    )
+    allowed_events_text = ", ".join(allowed_events) if allowed_events else "(none)"
 
     return dedent(f"""
 You are the SAFETY LOGIC GENERATOR.
@@ -468,6 +476,15 @@ Your task for each rule:
 
 Use the tool information in the TOOLS_CATALOGUE so that processes, events,
 resources, and context in the APs stay aligned with actual system behavior.
+
+MANDATORY EVENT GROUNDING:
+- In every AP string `ap/<process>/<product>/<resource>/<event>/<context>`,
+  the `<event>` segment MUST be one of these exact function names:
+  {allowed_events_text}
+- Do NOT invent free-text events (for example: "enter_zone", "move_to_area")
+  unless that exact function exists in the allowed list above.
+- If a rule cannot be grounded to an allowed event, prefer the parsed rule's
+  existing `event` field only when it is also in the allowed list.
 
 === TOOLS_CATALOGUE ===
 {tools_json}

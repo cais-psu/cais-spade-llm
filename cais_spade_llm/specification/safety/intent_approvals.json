@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "approvals": {
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_requirements-case1-ordering.txt": {
+      "approved": false,
+      "approved_at_utc": "2026-03-04T16:45:05.917433+00:00",
+      "safety_sha256": "5842d66ea835b1355244542f739319e19135b02c80486fbe70b4ca749fcc4589",
+      "note": "",
+      "revoked_at_utc": "2026-03-05T16:46:08.766550+00:00"
+    },
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case2.txt": {
+      "approved": false,
+      "approved_at_utc": "2026-03-05T15:44:59.106272+00:00",
+      "safety_sha256": "26cfcf30429ac0effe1264a80bf777a92daf16c9173ba717e657dbe79fcaf40b",
+      "note": "",
+      "preview_id": "20260305T154438Z__safety_case2__26cfcf30",
+      "preview_generated_at_utc": "2026-03-05T15:44:44.766984+00:00",
+      "revoked_at_utc": "2026-03-05T16:46:00.927012+00:00"
+    },
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case3.txt": {
+      "approved": true,
+      "approved_at_utc": "2026-03-05T18:37:26.103383+00:00",
+      "safety_sha256": "bed1f2e16d1a7d0f07b6b3ef1faab5cfaf9b40c382d6341b563539e55ccad4a2",
+      "note": "",
+      "preview_id": "20260305T183656Z__safety_case3__bed1f2e1",
+      "preview_generated_at_utc": "2026-03-05T18:37:08.209348+00:00"
+    }
+  }
+}

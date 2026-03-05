@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import select
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -26,6 +28,8 @@ from cais_spade_llm.bundles.models import (
     BUNDLE_STATUS_INVALID,
     BUNDLE_STATUS_STALE,
     BUNDLE_STATUS_VERIFIED,
+    atomic_json_write,
+    slug,
     sha256_file,
     sha256_text,
 )
@@ -43,9 +47,14 @@ _MONITOR = _BASE / "monitor"
 _LOG_DIR = _BASE / "log"
 _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements"
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
+_SAFETY_INTENT_APPROVALS = _SAFETY_REQUIREMENTS_DIR / "intent_approvals.json"
+_SAFETY_INTENT_PREVIEWS = _SAFETY_REQUIREMENTS_DIR / "intent_previews.json"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
-_USER_VERIFIED = _BASE / "user_verified"
+_USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
+_SAFETY_PREVIEW_DIR = _USER_VERIFIED_PLAN / "safety_previews"
+_GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "worlds" / "table.world"
+_RESETTABLE_GAZEBO_MODEL_PREFIXES = ("gear_", "rect_pin_", "circ_pin_")
 
 
 class SystemBridge:
@@ -90,6 +99,7 @@ class SystemBridge:
         self._xmpp_proc: Optional[subprocess.Popen] = None
         self._xmpp_host: str = "127.0.0.1"
         self._xmpp_port: int = 5222
+        self._gazebo_reset_pose_cache: dict[str, tuple[float, float, float, float, float, float]] | None = None
 
         # Lifecycle flags.
         self.system_running: bool = False
@@ -105,7 +115,7 @@ class SystemBridge:
         # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
         # any other value -> explicit safety text file path.
         self.selected_safety_file: str = ""
-        self.bundle_store = BundleStore(_USER_VERIFIED)
+        self.bundle_store = BundleStore(_USER_VERIFIED_PLAN)
         self.bundle_compiler = BundleCompiler(
             store=self.bundle_store,
             project_root=_PROJECT_ROOT,
@@ -304,15 +314,23 @@ class SystemBridge:
 
     def _resolve_product_init_for_requirement(self, requirement_file: str) -> dict[str, Any]:
         req_norm = self._norm_path(self._abs_project_path(requirement_file))
+        candidates: list[dict[str, Any]] = []
         for init_file in self.list_product_files():
             try:
                 ctx = self._resolve_product_context(init_file, include_hashes=False)
             except Exception:
                 continue
+            out = dict(ctx)
+            out["product_init_file"] = str(Path(init_file).resolve())
+            candidates.append(out)
             if self._norm_path(ctx.get("product_spec_file", "")) == req_norm:
-                out = dict(ctx)
-                out["product_init_file"] = str(Path(init_file).resolve())
                 return out
+
+        # If there is only one product initialization manifest in the system,
+        # use it as the product context and allow requirement-file override.
+        if len(candidates) == 1:
+            return candidates[0]
+
         raise ValueError(
             f"No product initialization manifest references requirements file: {requirement_file}"
         )
@@ -330,16 +348,529 @@ class SystemBridge:
                 options.add(self._norm_path(ctx["product_spec_file"]))
             except Exception:
                 continue
-        if not options and _PRODUCT_REQUIREMENTS_DIR.exists():
+        if _PRODUCT_REQUIREMENTS_DIR.exists():
             for p in sorted(_PRODUCT_REQUIREMENTS_DIR.glob("*.txt")):
                 options.add(self._norm_path(p))
         return sorted(options)
 
-    def list_safety_requirement_files(self) -> list[str]:
+    def _load_safety_intent_approvals(self) -> dict[str, Any]:
+        try:
+            with _SAFETY_INTENT_APPROVALS.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+        approvals = raw.get("approvals", {}) if isinstance(raw, dict) else {}
+        if not isinstance(approvals, dict):
+            approvals = {}
+        return {
+            "schema_version": 1,
+            "approvals": approvals,
+        }
+
+    def _save_safety_intent_approvals(self, payload: dict[str, Any]) -> None:
+        _SAFETY_REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(_SAFETY_INTENT_APPROVALS, payload)
+
+    def _load_safety_intent_previews(self) -> dict[str, Any]:
+        try:
+            with _SAFETY_INTENT_PREVIEWS.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+        previews = raw.get("previews", {}) if isinstance(raw, dict) else {}
+        if not isinstance(previews, dict):
+            previews = {}
+        return {
+            "schema_version": 1,
+            "previews": previews,
+        }
+
+    def _save_safety_intent_previews(self, payload: dict[str, Any]) -> None:
+        _SAFETY_REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(_SAFETY_INTENT_PREVIEWS, payload)
+
+    @staticmethod
+    def _flatten_dfa_transitions(parsed_dfa: dict[str, Any]) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        transitions = parsed_dfa.get("transitions", {}) if isinstance(parsed_dfa, dict) else {}
+        if not isinstance(transitions, dict):
+            return out
+        for src, arcs in transitions.items():
+            if not isinstance(arcs, list):
+                continue
+            for arc in arcs:
+                if not isinstance(arc, (list, tuple)) or len(arc) < 2:
+                    continue
+                label = str(arc[0])
+                dst = str(arc[1])
+                out.append(
+                    {
+                        "from": str(src),
+                        "condition": label,
+                        "to": dst,
+                    }
+                )
+        return out
+
+    @staticmethod
+    def _dfa_plain_meaning(rule: dict[str, Any], parsed_dfa: dict[str, Any]) -> str:
+        rid = str(rule.get("id", "")).strip() or "rule"
+        initial = str(parsed_dfa.get("initial", "")).strip() or "unknown"
+        violation = str(parsed_dfa.get("violation_state", "")).strip()
+        aps = rule.get("aps", []) if isinstance(rule.get("aps"), list) else []
+        ap_parts: list[str] = []
+        for ap in aps:
+            if not isinstance(ap, dict):
+                continue
+            label = str(ap.get("label", "")).strip()
+            full = str(ap.get("full", "")).strip()
+            if label and full:
+                ap_parts.append(f"{label}={full}")
+        ap_desc = ", ".join(ap_parts) if ap_parts else "no AP mapping"
+        if violation:
+            return (
+                f"{rid}: DFA starts at state {initial}. Transitions follow edge conditions over AP labels. "
+                f"If it reaches state {violation}, the rule is violated. AP map: {ap_desc}."
+            )
+        return (
+            f"{rid}: DFA starts at state {initial}. Follow transitions using AP labels and edge conditions. "
+            f"No explicit violation sink was detected. AP map: {ap_desc}."
+        )
+
+    @staticmethod
+    def _ltlf_plain_feedback(rule: dict[str, Any]) -> str:
+        """Provide operator-facing natural-language meaning of AP + LTLf."""
+        raw_text = str(rule.get("raw_text", "")).strip()
+        ltlf = str(rule.get("ltlf", "")).strip()
+        aps = rule.get("aps", []) if isinstance(rule.get("aps"), list) else []
+
+        ap_map: dict[str, str] = {}
+        ap_brief: list[str] = []
+        for ap in aps:
+            if not isinstance(ap, dict):
+                continue
+            label = str(ap.get("label", "")).strip()
+            full = str(ap.get("full", "")).strip()
+            if not label or not full:
+                continue
+            ap_map[label] = full
+            ap_brief.append(f"{label} = {full}")
+
+        formula_for_user = ltlf
+        for label, full in ap_map.items():
+            formula_for_user = formula_for_user.replace(label, f"[{label}:{full}]")
+
+        if raw_text:
+            summary = f"Intent statement: {raw_text}."
+        else:
+            summary = "Intent statement: (not provided)."
+
+        rule_expl = ""
+        # Common ordering pattern: ((!a) U b) => b must happen before a
+        normalized = ltlf.replace(" ", "")
+        m_order = (
+            re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
+            or re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
+        )
+        if m_order:
+            blocked = m_order.group(1)
+            required = m_order.group(2)
+            blocked_full = ap_map.get(blocked, blocked)
+            required_full = ap_map.get(required, required)
+            rule_expl = (
+                f"Ordering meaning: event {required_full} must happen before event {blocked_full} can occur."
+            )
+        elif " U " in ltlf:
+            rule_expl = (
+                "Temporal meaning: the condition after 'U' must eventually occur, "
+                "and the condition before 'U' must hold until then."
+            )
+        elif ltlf.startswith("G(") or ltlf.startswith("G "):
+            rule_expl = "Temporal meaning: this must hold globally (at all times)."
+        elif "->" in ltlf:
+            rule_expl = "Temporal meaning: whenever the left side happens, the right side must follow."
+        else:
+            rule_expl = "Temporal meaning: evaluate this formula over AP events across execution."
+
+        ap_expl = "AP mapping: " + (", ".join(ap_brief) if ap_brief else "no AP labels generated.")
+        return (
+            f"{summary} {rule_expl} "
+            f"Generated formula: {formula_for_user or '(empty)'}. {ap_expl}"
+        )
+
+    def _parse_rule_dfas(
+        self,
+        dfa_map: dict[str, str],
+        rules: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not dfa_map:
+            return {}
+        try:
+            from cais_spade_llm.agents.central_controller.base_safety_checker import (
+                BaseSafetyChecker,
+            )
+        except ImportError:
+            from agents.central_controller.base_safety_checker import BaseSafetyChecker
+        try:
+            checker = BaseSafetyChecker(dfa_map=dfa_map, safety_rules=rules)
+            parsed = getattr(checker, "dfas", {})
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def get_safety_rule_preview(self, safety_requirement_file: str) -> dict[str, Any]:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            return {
+                "available": False,
+                "reason": "safety_file_missing",
+                "safety_file": "",
+                "rules": [],
+            }
+
+        safety_path = self._abs_project_path(raw).resolve()
+        safety_key = self._norm_path(safety_path)
+        exists = safety_path.exists()
+        safety_text = safety_path.read_text(encoding="utf-8").strip() if exists else ""
+        current_hash = sha256_text(safety_text) if safety_text else ""
+
+        payload = self._load_safety_intent_previews()
+        previews = payload.get("previews", {})
+        entries = previews.get(safety_key, []) if isinstance(previews, dict) else []
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            entries = []
+        if not entries:
+            return {
+                "available": False,
+                "reason": "not_generated",
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+                "hash_matches_current": False,
+                "rules": [],
+            }
+
+        latest = entries[0] if isinstance(entries[0], dict) else {}
+        preview_dir = Path(str(latest.get("preview_dir", "")).strip())
+        logic_path_raw = str(latest.get("safety_logic_json", "")).strip()
+        logic_path = Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        if not logic_path.exists():
+            return {
+                "available": False,
+                "reason": "preview_artifacts_missing",
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+                "hash_matches_current": False,
+                "record": latest,
+                "rules": [],
+            }
+
+        logic_payload = self._read_json_dict(logic_path)
+        raw_rules = logic_payload.get("rules", [])
+        rules: list[dict[str, Any]] = raw_rules if isinstance(raw_rules, list) else []
+
+        dfa_map: dict[str, str] = {}
+        for rule in rules:
+            rid = str(rule.get("id", "")).strip()
+            if not rid:
+                continue
+            dot_path = preview_dir / f"{rid}_dfa.dot"
+            if not dot_path.exists():
+                continue
+            try:
+                dfa_map[rid] = dot_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+        parsed_dfas = self._parse_rule_dfas(dfa_map, rules)
+        preview_rules: list[dict[str, Any]] = []
+        for idx, rule in enumerate(rules, start=1):
+            rid = str(rule.get("id", "")).strip() or f"SAFE_{idx}"
+            parsed = parsed_dfas.get(rid, {})
+            dot_path = preview_dir / f"{rid}_dfa.dot"
+            png_path = preview_dir / f"{rid}_dfa.png"
+            preview_rules.append(
+                {
+                    "id": rid,
+                    "raw_text": str(rule.get("raw_text", "")),
+                    "constraint_type": str(rule.get("constraint_type", "")),
+                    "ltlf": str(rule.get("ltlf", "")),
+                    "aps": rule.get("aps", []) if isinstance(rule.get("aps"), list) else [],
+                    "ltlf_plain_feedback": self._ltlf_plain_feedback(rule),
+                    "dfa_dot": dfa_map.get(rid, ""),
+                    "dfa_dot_path": str(dot_path) if dot_path.exists() else "",
+                    "dfa_png_path": str(png_path) if png_path.exists() else "",
+                    "dfa_initial_state": str(parsed.get("initial", "")),
+                    "dfa_violation_state": str(parsed.get("violation_state", "")),
+                    "dfa_ap_symbols": parsed.get("ap_symbols", []) if isinstance(parsed.get("ap_symbols"), list) else [],
+                    "dfa_transitions": self._flatten_dfa_transitions(parsed),
+                    "dfa_meaning": self._dfa_plain_meaning(rule, parsed),
+                }
+            )
+
+        preview_hash = str(latest.get("safety_sha256", "")).strip()
+        hash_matches = bool(current_hash and preview_hash and current_hash == preview_hash)
+        return {
+            "available": True,
+            "reason": "ok",
+            "safety_file": safety_key,
+            "current_hash": current_hash,
+            "hash_matches_current": hash_matches,
+            "record": latest,
+            "rules": preview_rules,
+        }
+
+    def generate_safety_rule_preview(self, safety_requirement_file: str) -> dict[str, Any]:
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("cannot generate safety preview while system lifecycle is active")
+        self._ensure_called_from_worker_thread("generate_safety_rule_preview")
+
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            raise ValueError("safety requirement file is required")
+
+        safety_path = self._abs_project_path(raw).resolve()
+        if not safety_path.exists():
+            raise FileNotFoundError(f"safety requirement file missing: {safety_path}")
+        safety_text = safety_path.read_text(encoding="utf-8").strip()
+        if not safety_text:
+            raise ValueError(f"safety requirement file is empty: {safety_path}")
+
+        safety_hash = sha256_text(safety_text)
+        safety_key = self._norm_path(safety_path)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        preview_id = f"{stamp}__{slug(safety_path.stem)}__{safety_hash[:8]}"
+        preview_dir = _SAFETY_PREVIEW_DIR / preview_id
+        suffix = 1
+        while preview_dir.exists():
+            suffix += 1
+            preview_id = f"{stamp}__{slug(safety_path.stem)}__{safety_hash[:8]}_{suffix}"
+            preview_dir = _SAFETY_PREVIEW_DIR / preview_id
+        preview_dir.mkdir(parents=True, exist_ok=False)
+
+        _, CentralControllerAgent, _, _ = self.bundle_compiler._import_runtime_classes()
+        resources = self.bundle_compiler._collect_resource_refs(
+            robot_env=str(self.robot_env or "gazebo")
+        )
+        cca_agent = CentralControllerAgent(
+            "cca_preview@localhost",
+            "none",
+            name="cca_preview",
+            resource_agents=resources,
+            safety_file=str(safety_path),
+        )
+        safety_logic = getattr(cca_agent, "safety_logic", None)
+        if safety_logic is None:
+            raise RuntimeError("failed to initialize SafetyLogic for preview generation")
+
+        try:
+            async def _run_preview() -> dict[str, str]:
+                await safety_logic.build_safety_rules_and_logic(safety_text)
+                await asyncio.to_thread(safety_logic.save, preview_dir / "cca_safety_logic.json")
+                return await asyncio.to_thread(safety_logic.build_dfas_per_rule, preview_dir)
+
+            asyncio.run(_run_preview())
+        except Exception:
+            shutil.rmtree(preview_dir, ignore_errors=True)
+            raise
+
+        dot_files = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.dot"))
+        png_files = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.png"))
+        record = {
+            "preview_id": preview_id,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "safety_file": safety_key,
+            "safety_sha256": safety_hash,
+            "preview_dir": str(preview_dir.resolve()),
+            "safety_logic_json": str((preview_dir / "cca_safety_logic.json").resolve()),
+            "dfa_dot_files": dot_files,
+            "dfa_png_files": png_files,
+            "rules_count": len(getattr(safety_logic, "rules", []) or []),
+        }
+
+        payload = self._load_safety_intent_previews()
+        previews = payload.get("previews", {})
+        if not isinstance(previews, dict):
+            previews = {}
+        history = previews.get(safety_key, [])
+        if isinstance(history, dict):
+            history = [history]
+        if not isinstance(history, list):
+            history = []
+        history.insert(0, record)
+        previews[safety_key] = history[:20]
+        payload["previews"] = previews
+        self._save_safety_intent_previews(payload)
+
+        return self.get_safety_rule_preview(safety_key)
+
+    def evaluate_safety_intent_approval(self, safety_requirement_file: str) -> dict[str, Any]:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            return {"approved": False, "reason": "safety_file_missing", "record": {}, "safety_file": ""}
+
+        safety_path = self._abs_project_path(raw).resolve()
+        if not safety_path.exists():
+            return {
+                "approved": False,
+                "reason": "safety_file_missing",
+                "record": {},
+                "safety_file": str(safety_path),
+            }
+
+        safety_text = safety_path.read_text(encoding="utf-8").strip()
+        if not safety_text:
+            return {
+                "approved": False,
+                "reason": "safety_file_empty",
+                "record": {},
+                "safety_file": str(safety_path),
+            }
+        current_hash = sha256_text(safety_text)
+        safety_key = self._norm_path(safety_path)
+
+        payload = self._load_safety_intent_approvals()
+        approvals = payload.get("approvals", {})
+        record = approvals.get(safety_key, {}) if isinstance(approvals, dict) else {}
+        if not isinstance(record, dict):
+            record = {}
+
+        if not record:
+            return {
+                "approved": False,
+                "reason": "not_approved",
+                "record": {},
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+            }
+
+        if not bool(record.get("approved", False)):
+            return {
+                "approved": False,
+                "reason": "revoked",
+                "record": record,
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+            }
+
+        approved_hash = str(record.get("safety_sha256", "")).strip()
+        if approved_hash != current_hash:
+            return {
+                "approved": False,
+                "reason": "content_changed_since_approval",
+                "record": record,
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+            }
+
+        return {
+            "approved": True,
+            "reason": "approved",
+            "record": record,
+            "safety_file": safety_key,
+            "current_hash": current_hash,
+        }
+
+    def approve_safety_intent(self, safety_requirement_file: str, note: str = "") -> dict[str, Any]:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            raise ValueError("safety requirement file is required")
+
+        safety_path = self._abs_project_path(raw).resolve()
+        if not safety_path.exists():
+            raise FileNotFoundError(f"safety requirement file missing: {safety_path}")
+
+        safety_text = safety_path.read_text(encoding="utf-8").strip()
+        if not safety_text:
+            raise ValueError(f"safety requirement file is empty: {safety_path}")
+
+        preview = self.get_safety_rule_preview(str(safety_path))
+        if not bool(preview.get("available", False)):
+            raise ValueError(
+                "generate safety rule preview first before approving intent"
+            )
+        if not bool(preview.get("hash_matches_current", False)):
+            raise ValueError(
+                "safety file changed after preview generation; regenerate preview before approval"
+            )
+
+        safety_key = self._norm_path(safety_path)
+        now_utc = datetime.now(timezone.utc).isoformat()
+        record = {
+            "approved": True,
+            "approved_at_utc": now_utc,
+            "safety_sha256": sha256_text(safety_text),
+            "note": str(note or "").strip(),
+            "preview_id": str((preview.get("record") or {}).get("preview_id", "")).strip(),
+            "preview_generated_at_utc": str((preview.get("record") or {}).get("generated_at_utc", "")).strip(),
+        }
+
+        payload = self._load_safety_intent_approvals()
+        approvals = payload.get("approvals", {})
+        if not isinstance(approvals, dict):
+            approvals = {}
+        approvals[safety_key] = record
+        payload["approvals"] = approvals
+        self._save_safety_intent_approvals(payload)
+        return {
+            "approved": True,
+            "record": record,
+            "safety_file": safety_key,
+        }
+
+    def revoke_safety_intent_approval(self, safety_requirement_file: str, note: str = "") -> dict[str, Any]:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            raise ValueError("safety requirement file is required")
+
+        safety_path = self._abs_project_path(raw).resolve()
+        safety_key = self._norm_path(safety_path)
+        existing = self.evaluate_safety_intent_approval(safety_key)
+        prior_record = dict(existing.get("record") or {})
+
+        if safety_path.exists():
+            safety_text = safety_path.read_text(encoding="utf-8").strip()
+            safety_hash = sha256_text(safety_text) if safety_text else ""
+        else:
+            safety_hash = str(prior_record.get("safety_sha256", "")).strip()
+
+        record = {
+            **prior_record,
+            "approved": False,
+            "revoked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "safety_sha256": safety_hash,
+            "note": str(note or "").strip(),
+        }
+
+        payload = self._load_safety_intent_approvals()
+        approvals = payload.get("approvals", {})
+        if not isinstance(approvals, dict):
+            approvals = {}
+        approvals[safety_key] = record
+        payload["approvals"] = approvals
+        self._save_safety_intent_approvals(payload)
+        return {
+            "approved": False,
+            "record": record,
+            "safety_file": safety_key,
+        }
+
+    def list_safety_requirement_files(self, *, approved_only: bool = False) -> list[str]:
         files: list[str] = []
         if _SAFETY_REQUIREMENTS_DIR.exists():
             files.extend(self._norm_path(p) for p in sorted(_SAFETY_REQUIREMENTS_DIR.glob("*.txt")))
-        return files
+        if not approved_only:
+            return files
+        approved_files: list[str] = []
+        for path in files:
+            try:
+                eval_out = self.evaluate_safety_intent_approval(path)
+            except Exception:
+                continue
+            if bool(eval_out.get("approved", False)):
+                approved_files.append(path)
+        return approved_files
 
     def _resolve_product_context(
         self,
@@ -494,12 +1025,44 @@ class SystemBridge:
             return False, [f"context_error:{exc}"]
 
         got_hashes = manifest.get("source_hashes", {}) if isinstance(manifest.get("source_hashes"), dict) else {}
+        tools_snapshot_ok = self._bundle_tools_snapshot_matches_manifest(bid, manifest)
         for key, expected in expected_hashes.items():
+            if key == "tools_sha256":
+                if tools_snapshot_ok is False:
+                    reasons.append(key)
+                continue
             if str(got_hashes.get(key, "")) != str(expected):
                 reasons.append(key)
 
         ok = len(reasons) == 0
         return ok, reasons
+
+    def _bundle_tools_snapshot_matches_manifest(
+        self,
+        bundle_id: str,
+        manifest: dict[str, Any] | None = None,
+    ) -> bool | None:
+        """Return True when a bundled tools snapshot exists and matches the manifest hash."""
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            return None
+        data = manifest if isinstance(manifest, dict) else self.bundle_store.load_manifest(bid)
+        if not isinstance(data, dict):
+            return None
+        artifacts = data.get("artifacts", {}) if isinstance(data.get("artifacts"), dict) else {}
+        rel = str(artifacts.get("tools_json", "")).strip()
+        if not rel:
+            return None
+
+        snapshot_path = (self.bundle_store.bundle_dir(bid) / rel).resolve()
+        if not snapshot_path.exists():
+            return False
+
+        got_hashes = data.get("source_hashes", {}) if isinstance(data.get("source_hashes"), dict) else {}
+        expected = str(got_hashes.get("tools_sha256", "")).strip()
+        if not expected:
+            return False
+        return sha256_file(snapshot_path) == expected
 
     def list_compatible_bundles(
         self,
@@ -699,6 +1262,36 @@ class SystemBridge:
             self.bundle_store.set_active_bundle_id(None)
         return {"bundle_id": bid, "summary": summary, "manifest": manifest}
 
+    def delete_bundle(self, bundle_id: str) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("plan_set_id is required")
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("cannot delete plan set while system lifecycle is active")
+
+        summary = self.bundle_store.get_bundle_summary(bid) or {}
+        manifest = self.bundle_store.load_manifest(bid) or {}
+        if not summary and not manifest:
+            raise ValueError(f"plan-set not found: {bid}")
+
+        status = str(manifest.get("status") or summary.get("status") or "").strip().lower()
+        if status == BUNDLE_STATUS_VERIFIED:
+            raise ValueError("verified plan set cannot be deleted; unverify it first")
+
+        bundle_dir = self.bundle_store.bundle_dir(bid)
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir, ignore_errors=True)
+
+        removed = self.bundle_store.delete_bundle_summary(bid)
+        if self.bundle_store.get_active_bundle_id() == bid:
+            self.bundle_store.set_active_bundle_id(None)
+
+        return {
+            "bundle_id": bid,
+            "removed": bool(removed),
+            "status": status or "unknown",
+        }
+
     def get_bundle_artifacts(self, bundle_id: str) -> dict[str, Any]:
         bid = str(bundle_id or "").strip()
         if not bid:
@@ -739,6 +1332,23 @@ class SystemBridge:
             },
         }
 
+    def get_bundle_plan_nodes(self, bundle_id: str) -> list[dict[str, Any]]:
+        """Load DAG nodes from a stored plan set without starting the system."""
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            return []
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            return []
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        plan_rel = str(artifacts.get("plan_json", "")).strip()
+        if not plan_rel:
+            return []
+        plan_path = (self.bundle_store.bundle_dir(bid) / plan_rel).resolve()
+        plan_payload = self._read_json_dict(plan_path)
+        nodes = plan_payload.get("nodes", [])
+        return nodes if isinstance(nodes, list) else []
+
     def apply_bundle_chat_edit(self, bundle_id: str, user_message: str) -> dict[str, Any]:
         if self.system_running or self._starting or self._stopping:
             raise RuntimeError("stop the system before editing plan sets")
@@ -754,6 +1364,9 @@ class SystemBridge:
         manifest = self.bundle_store.load_manifest(bid)
         if not manifest:
             raise ValueError(f"plan-set manifest not found: {bid}")
+        current_status = str(manifest.get("status", "")).strip().lower()
+        if current_status == BUNDLE_STATUS_VERIFIED:
+            raise ValueError("verified plan set is locked; unverify it before editing")
         root = self.bundle_store.bundle_dir(bid)
         artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
 
@@ -1253,8 +1866,15 @@ class SystemBridge:
                 ac.ALLOWED_FUNCS,
                 str(_TOOLS_OUT),
             )
+            tools_catalogue_path = await asyncio.to_thread(
+                self._configure_llm_tools_catalogue,
+                bundle_context,
+            )
             self._diag_emit(
                 f"startup#{startup_id} tools catalogue done in {time.monotonic() - startup_t0:.2f}s"
+            )
+            self._diag_emit(
+                f"startup#{startup_id} llm tools catalogue source={tools_catalogue_path}"
             )
 
             # Start agents in order: resources → CCA → user → products.
@@ -1354,7 +1974,8 @@ class SystemBridge:
             log.debug("CameraModule cleanup skipped (not loaded or already destroyed).")
 
     @staticmethod
-    def _archive_monitors() -> None:
+    def _archive_monitors() -> dict[str, int]:
+        archived_counts: dict[str, int] = {}
         for sub, pattern in [
             ("history", "*.jsonl"),
             ("plan", "*.json"),
@@ -1363,18 +1984,24 @@ class SystemBridge:
         ]:
             d = _MONITOR / sub
             if not d.exists():
+                archived_counts[sub] = 0
                 continue
             files = [p for p in d.glob(pattern) if p.is_file()]
             if not files:
+                archived_counts[sub] = 0
                 continue
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             archive = d / "archive" / stamp
             archive.mkdir(parents=True, exist_ok=True)
+            moved = 0
             for p in files:
                 try:
                     shutil.move(str(p), str(archive / p.name))
+                    moved += 1
                 except Exception:
                     pass
+            archived_counts[sub] = moved
+        return archived_counts
 
     @staticmethod
     def _import_agent_creator_module():
@@ -1447,6 +2074,24 @@ class SystemBridge:
             **cca_kwargs,
         )
         return user_agent, resource_agents, product_agents, cca
+
+    @staticmethod
+    def _configure_llm_tools_catalogue(bundle_context: dict[str, Any] | None = None) -> str:
+        try:
+            from agents.shared_information.llm_agent import LlmAgent
+        except ImportError:
+            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+
+        tools_path: Path = _TOOLS_OUT
+        artifacts = bundle_context.get("artifacts", {}) if isinstance(bundle_context, dict) else {}
+        if isinstance(artifacts, dict):
+            bundled_tools = str(artifacts.get("tools_json", "")).strip()
+            if bundled_tools:
+                candidate = Path(bundled_tools)
+                if candidate.exists():
+                    tools_path = candidate
+
+        return LlmAgent.configure_shared_tools_catalogue(tools_path)
 
     # ------------------------------------------------------------------
     # ROS2 process management
@@ -2370,12 +3015,232 @@ class SystemBridge:
 
         return True, self._tail_output(cp.stdout) or "OK"
 
+    def reset_plan_runtime_state(self) -> tuple[bool, str]:
+        """
+        Reset runtime plan/product/resource snapshots kept under monitor/.
+
+        This archives current monitor files (plan/state/history/debug) so the
+        next run starts from a clean runtime state.
+        """
+        if self.system_running or self._starting:
+            return (
+                False,
+                "Stop the agent system before resetting plan/runtime state.",
+            )
+        if self._stopping:
+            return False, "System stop is in progress. Wait before reset."
+
+        counts = self._archive_monitors()
+        total = sum(int(v) for v in counts.values()) if isinstance(counts, dict) else 0
+        if total <= 0:
+            return True, "Plan/runtime state already clean."
+        return True, f"Plan/runtime state reset ({total} file(s) archived)."
+
+    def _load_gazebo_reset_model_poses(self) -> dict[str, tuple[float, float, float, float, float, float]]:
+        if self._gazebo_reset_pose_cache is not None:
+            return dict(self._gazebo_reset_pose_cache)
+        if not _GAZEBO_WORLD_FILE.exists():
+            return {}
+
+        poses: dict[str, tuple[float, float, float, float, float, float]] = {}
+        try:
+            root = ET.parse(_GAZEBO_WORLD_FILE).getroot()
+            for model in root.findall(".//world/model"):
+                name = str(model.get("name", "")).strip()
+                if not name or not any(name.startswith(prefix) for prefix in _RESETTABLE_GAZEBO_MODEL_PREFIXES):
+                    continue
+                pose_text = str(model.findtext("pose", default="")).strip()
+                if not pose_text:
+                    continue
+                parts = [float(v) for v in pose_text.split()]
+                if len(parts) != 6:
+                    continue
+                poses[name] = tuple(parts)  # type: ignore[assignment]
+        except Exception:
+            log.exception("Failed parsing Gazebo world reset poses from %s", _GAZEBO_WORLD_FILE)
+            poses = {}
+
+        self._gazebo_reset_pose_cache = dict(poses)
+        return poses
+
+    @staticmethod
+    def _quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        return (
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
+        )
+
+    def _acquire_gazebo_reset_controller(self, robot: str) -> tuple[Any | None, bool, str]:
+        robot_key = str(robot or "").strip().lower()
+        with self._gazebo_prewarm_lock:
+            existing = self._gazebo_prewarm_controllers.get(robot_key)
+        if existing is not None:
+            try:
+                if bool(getattr(existing, "is_usable", lambda: False)()):
+                    return existing, False, ""
+            except Exception:
+                pass
+            with self._gazebo_prewarm_lock:
+                self._gazebo_prewarm_controllers.pop(robot_key, None)
+            try:
+                existing.shutdown()
+            except Exception:
+                pass
+
+        settings = self._load_gazebo_controller_settings(robot_key)
+        if settings is None:
+            return None, False, f"{robot_key}: controller config unavailable"
+        controller_cfg, named_positions = settings
+
+        try:
+            from cais_spade_llm.resources.robot.ros2_pick_place_controller import (
+                Ros2PickPlaceController,
+            )
+            from cais_spade_llm.resources.robot.ur5e_controller import (
+                JOINT_NAMES as UR5E_JOINT_NAMES,
+                JOINT_STATES_TOPIC as UR5E_JOINT_STATES_TOPIC,
+                TRAJECTORY_TOPIC as UR5E_TRAJECTORY_TOPIC,
+            )
+            from cais_spade_llm.resources.robot.xarm6_controller import (
+                JOINT_NAMES as XARM6_JOINT_NAMES,
+                JOINT_STATES_TOPIC as XARM6_JOINT_STATES_TOPIC,
+            )
+        except Exception as exc:
+            return None, False, f"{robot_key}: controller import failed ({exc})"
+
+        try:
+            if robot_key == "xarm6":
+                controller = Ros2PickPlaceController(
+                    robot_name="xarm6",
+                    node_name=f"xarm6_reset_controller_{os.getpid()}_{int(time.monotonic() * 1000) % 1000000}",
+                    controller_config=controller_cfg,
+                    named_positions=named_positions,
+                    execution_mode="simulation",
+                    arm_joint_names=XARM6_JOINT_NAMES,
+                    arm_trajectory_topic=None,
+                    joint_states_topic=XARM6_JOINT_STATES_TOPIC,
+                )
+            elif robot_key == "ur5e":
+                controller = Ros2PickPlaceController(
+                    robot_name="ur5e",
+                    node_name=f"ur5e_reset_controller_{os.getpid()}_{int(time.monotonic() * 1000) % 1000000}",
+                    controller_config=controller_cfg,
+                    named_positions=named_positions,
+                    execution_mode="simulation",
+                    arm_joint_names=UR5E_JOINT_NAMES,
+                    arm_trajectory_topic=UR5E_TRAJECTORY_TOPIC,
+                    joint_states_topic=UR5E_JOINT_STATES_TOPIC,
+                )
+            else:
+                return None, False, f"unknown robot: {robot_key}"
+        except Exception as exc:
+            return None, False, f"{robot_key}: controller init failed ({exc})"
+
+        if not controller.wait_for_services(timeout_sec=15.0):
+            detail = getattr(controller, "_last_failure_message", "") or "services not ready"
+            try:
+                controller.shutdown()
+            except Exception:
+                pass
+            return None, False, f"{robot_key}: {detail}"
+        return controller, True, ""
+
+    def _restore_gazebo_scene_in_place(self) -> tuple[list[str], list[str]]:
+        success_messages: list[str] = []
+        warning_messages: list[str] = []
+        part_poses = self._load_gazebo_reset_model_poses()
+        part_names = sorted(part_poses.keys())
+
+        controllers: list[tuple[str, Any, bool]] = []
+        try:
+            for robot_key in ("xarm6", "ur5e"):
+                controller, owned, err = self._acquire_gazebo_reset_controller(robot_key)
+                if controller is None:
+                    warning_messages.append(err or f"{robot_key}: controller unavailable")
+                    continue
+                controllers.append((robot_key, controller, owned))
+
+            primary_controller = controllers[0][1] if controllers else None
+
+            for robot_key, controller, _owned in controllers:
+                try:
+                    try:
+                        controller.open_gripper()
+                    except Exception:
+                        pass
+
+                    detached_count = 0
+                    for model_name in part_names:
+                        try:
+                            out = controller.detach_model(model_name, quiet=True)
+                            if bool(out.get("success", False)):
+                                detached_count += 1
+                        except Exception:
+                            continue
+                    if detached_count > 0:
+                        success_messages.append(f"{robot_key}: detached {detached_count} part(s)")
+
+                    home_out = controller.move_home()
+                    if bool(home_out.get("success", False)):
+                        success_messages.append(f"{robot_key}: moved home")
+                    else:
+                        warning_messages.append(
+                            f"{robot_key}: {str(home_out.get('message', 'move_home failed')).strip()}"
+                        )
+                except Exception as exc:
+                    warning_messages.append(f"{robot_key}: reset failed ({exc})")
+
+            if primary_controller and part_poses:
+                restored = 0
+                for model_name, pose in sorted(part_poses.items()):
+                    x, y, z, roll, pitch, yaw = pose
+                    qx, qy, qz, qw = self._quaternion_from_rpy(roll, pitch, yaw)
+                    out = primary_controller.set_entity_pose(
+                        model_name,
+                        x=x,
+                        y=y,
+                        z=z,
+                        qx=qx,
+                        qy=qy,
+                        qz=qz,
+                        qw=qw,
+                    )
+                    if bool(out.get("success", False)):
+                        restored += 1
+                    else:
+                        warning_messages.append(
+                            f"{model_name}: {str(out.get('message', 'set_entity_pose failed')).strip()}"
+                        )
+                if restored > 0:
+                    success_messages.append(f"restored {restored} part pose(s)")
+            elif part_poses:
+                warning_messages.append("No Gazebo controller available to restore part poses.")
+        finally:
+            for _robot_key, controller, owned in controllers:
+                if not owned:
+                    continue
+                try:
+                    controller.shutdown()
+                except Exception:
+                    pass
+
+        return success_messages, warning_messages
+
     def ros2_reset_gazebo_environment(self) -> tuple[bool, str]:
         """
-        Reset Gazebo world/simulation to initial state without relaunching ROS2.
+        Reset Gazebo to a clean initial scene.
 
-        This is intended for simulation workflows where the operator wants a clean
-        scene between runs.
+        This keeps the Gazebo window/process alive and restores the authored
+        scene in place: reset the world, send both robots home, and put the
+        loose parts back at their initial poses.
         """
         if not self._any_running(self._GAZEBO_PROCESS_NAMES):
             return False, "Gazebo is not running."
@@ -2423,7 +3288,13 @@ class SystemBridge:
         if not call_ok:
             return False, f"Gazebo reset failed via {selected}: {call_msg}"
 
-        return True, f"Gazebo environment reset via {selected}."
+        success_messages, warning_messages = self._restore_gazebo_scene_in_place()
+        headline = f"Gazebo environment reset via {selected}."
+        if warning_messages:
+            detail = " ; ".join([headline] + success_messages + warning_messages)
+            return False, detail
+        detail = " ; ".join([headline] + success_messages) if success_messages else headline
+        return True, detail
 
     def _stop_teleop_server_locked(self) -> None:
         proc = self._teleop_server_proc

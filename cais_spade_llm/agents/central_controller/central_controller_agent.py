@@ -411,7 +411,8 @@ class CentralControllerAgent(LlmAgent):
                     cur_state = pm.current_state
                     if cur_state:
                         marked = set((pm.fsa or {}).get("A", {}).get("Xm") or [])
-                        any_running = bool(agent.safety_monitor.running_aps)
+                        plan_running_tasks = pm.running_task_ids_from_state(cur_state)
+                        any_running = bool(plan_running_tasks)
                         next_task_ids = pm._next_task_ids_from_state(cur_state)
 
                         replan_reason = agent._classify_replan_reason(
@@ -430,7 +431,7 @@ class CentralControllerAgent(LlmAgent):
                                     "current_state": cur_state,
                                     "marked_states": list(marked),
                                     "available_tasks": next_task_ids,
-                                    "running_tasks": sorted(agent.safety_monitor.running_aps),
+                                    "running_tasks": plan_running_tasks,
                                 },
                             )
                             await self.send(replan_msg)
@@ -592,8 +593,12 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.warning("[CCA] No FSA provided for offline validation.")
                 return
 
-            # Initialize plan FSA monitor for runtime tracing
-            agent.plan_fsa_monitor = OnlineFsaMonitor(fsa)
+            # Reuse the live runtime monitor when the validated FSA is unchanged.
+            if agent.plan_fsa_monitor and agent.plan_fsa_monitor.matches_fsa(fsa):
+                plan_fsa_monitor = agent.plan_fsa_monitor
+            else:
+                plan_fsa_monitor = OnlineFsaMonitor(fsa)
+            agent.plan_fsa_monitor = plan_fsa_monitor
 
             # Delegate to Offline FSA Validator
             if agent.safety_logic and agent.safety_logic.rule_dfas:

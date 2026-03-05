@@ -3,7 +3,7 @@
     "type": "product",
     "jid": "assembly_board-v1@localhost",
     "password": "none",
-    "domain": "localhost",      
+    "domain": "localhost",
     "functions": [],
     "instructions": "This product requires to be printed and assembled as specified.",
     "cad_path": "cais_spade_llm/specification/products/cad/assembly_board/",

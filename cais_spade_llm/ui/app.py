@@ -20,12 +20,11 @@ _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
-    ("Plans", "/plans", "schema"),
     ("Control", "/control", "gamepad"),
+    ("Plans", "/plans", "schema"),
     ("Safety", "/safety", "shield"),
     ("Products", "/products", "inventory_2"),
     ("Resources", "/resources", "precision_manufacturing"),
-    ("Logs", "/logs", "terminal"),
 ]
 
 
@@ -122,7 +121,7 @@ def create_app() -> None:
     app.add_static_files("/static", str(_STATIC_DIR))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, plans, control, logs, safety, resources, products
+    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products
 
     @ui.page("/")
     def index_page():
@@ -148,11 +147,6 @@ def create_app() -> None:
     def safety_page():
         _page_wrapper(bridge)
         safety.render(bridge)
-
-    @ui.page("/logs")
-    def logs_page():
-        _page_wrapper(bridge)
-        logs.render(bridge)
 
     @ui.page("/products")
     def products_page():

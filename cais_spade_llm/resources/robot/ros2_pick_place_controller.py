@@ -878,12 +878,27 @@ class Ros2PickPlaceController:
 
         time.sleep(self.release_preopen_settle_sec)
 
-        self._gripper_command(
+        open_ok = self._gripper_command(
             self.gripper_open,
             "OPEN — releasing",
             move_time_s=self.gripper_move_time_sec,
             wait_s=self.gripper_settle_sec,
+            require_target=True,
         )
+        if not open_ok:
+            self._log().warn("Release open target not reached; retrying gripper open once")
+            open_ok = self._gripper_command(
+                self.gripper_open,
+                "OPEN — releasing (retry)",
+                move_time_s=max(0.8, self.gripper_move_time_sec * 1.5),
+                wait_s=max(0.10, self.gripper_settle_sec),
+                require_target=True,
+            )
+        if not open_ok:
+            return {
+                "success": False,
+                "message": "failed to open gripper to release part",
+            }
         time.sleep(self.release_postopen_settle_sec)
 
         detached = False
@@ -965,6 +980,67 @@ class Ros2PickPlaceController:
                 return {"success": True, "message": "sent joint-space home command"}
 
         return {"success": False, "message": "no home pose available"}
+
+    def detach_model(self, model_name: str, *, quiet: bool = False) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._unavailable_message("services not ready"),
+            }
+        target_model = str(model_name or "").strip()
+        if not target_model:
+            return {"success": False, "message": "model name is required"}
+        ok = self._detach_model_from_any_link(target_model)
+        if not ok:
+            ok = self._detach_part(target_model, log_failure=not quiet)
+        return {
+            "success": bool(ok),
+            "message": "detached" if ok else f"failed to detach {target_model}",
+        }
+
+    def set_entity_pose(
+        self,
+        model_name: str,
+        *,
+        x: float,
+        y: float,
+        z: float,
+        qx: float = 0.0,
+        qy: float = 0.0,
+        qz: float = 0.0,
+        qw: float = 1.0,
+        reference_frame: str = "world",
+    ) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._unavailable_message("services not ready"),
+            }
+        if not self._set_state_client.wait_for_service(timeout_sec=2.0):
+            return {"success": False, "message": "set_entity_state service unavailable"}
+
+        from gazebo_msgs.msg import EntityState
+
+        state = EntityState()
+        state.name = str(model_name)
+        state.pose.position.x = float(x)
+        state.pose.position.y = float(y)
+        state.pose.position.z = float(z)
+        state.pose.orientation.x = float(qx)
+        state.pose.orientation.y = float(qy)
+        state.pose.orientation.z = float(qz)
+        state.pose.orientation.w = float(qw)
+        state.reference_frame = str(reference_frame or "world")
+
+        req = self._SetEntityState.Request()
+        req.state = state
+        future = self._set_state_client.call_async(req)
+        response = self._wait_future(future, timeout_sec=5.0, label=f"set_entity_pose:{model_name}")
+        if response and response.success:
+            return {"success": True, "message": f"entity pose reset for {model_name}"}
+        detail = getattr(response, "status_message", "") if response is not None else ""
+        detail = str(detail or "").strip() or f"failed to set pose for {model_name}"
+        return {"success": False, "message": detail}
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1061,6 +1137,7 @@ class Ros2PickPlaceController:
         label: str,
         move_time_s: float | None = None,
         wait_s: float | None = None,
+        require_target: bool = False,
     ) -> bool:
         if not self._gripper_pub:
             self._log().error("Gripper publisher is not configured")
@@ -1085,7 +1162,12 @@ class Ros2PickPlaceController:
         self._gripper_pub.publish(traj)
 
         feedback_timeout = max(move_time_s + self.gripper_feedback_timeout_pad_sec, 1.0)
-        self._wait_for_gripper_target(position, feedback_timeout)
+        reached = self._wait_for_gripper_target(position, feedback_timeout)
+        if require_target and not reached:
+            self._log().error(
+                f"Gripper command did not reach required target: target={position:.3f}"
+            )
+            return False
         time.sleep(max(0.0, wait_s))
         return True
 
@@ -1196,6 +1278,7 @@ class Ros2PickPlaceController:
         model_name: str = "",
         timeout_sec: float | None = None,
         attached_link_only: bool = False,
+        log_failure: bool = True,
     ) -> bool:
         if not self._link_attacher_enabled:
             return True
@@ -1238,7 +1321,8 @@ class Ros2PickPlaceController:
                 self._attached_link = None
                 return True
 
-        self._log().error(f"Failed to detach {target_model}")
+        if log_failure:
+            self._log().error(f"Failed to detach {target_model}")
         return False
 
     def _snap_part_to_slot(

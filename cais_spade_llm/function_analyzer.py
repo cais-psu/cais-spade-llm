@@ -201,7 +201,8 @@ class FunctionAnalyzer:
                 n for n in dir(agent) if not n.startswith("_") and callable(getattr(agent, n, None))
             }
 
-            for fn_name in fn_whitelist:
+            # Iterate in stable order so tools.json hash is reproducible across runs.
+            for fn_name in sorted(fn_whitelist):
                 fn = getattr(agent, fn_name, None)
                 if not callable(fn):
                     continue
@@ -234,6 +235,14 @@ class FunctionAnalyzer:
                     row["params"] = params_payload
 
                 rows.append(row)
+
+        # Keep output order deterministic regardless of agent creation order.
+        rows.sort(
+            key=lambda row: (
+                str(row.get("function_owner_agent", "")),
+                str(row.get("function", "")),
+            )
+        )
 
         out_path = Path(outfile)                     # ← coerce to Path
         out_path.parent.mkdir(parents=True, exist_ok=True)

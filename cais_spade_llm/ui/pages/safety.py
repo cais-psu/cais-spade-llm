@@ -1,8 +1,11 @@
-"""Safety page: safety requirements CRUD, rules table, runtime state, blocked tasks."""
+"""Safety page: safety requirement editing + preview generation + intent approval."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import re
 from pathlib import Path
 
 from nicegui import ui, events
@@ -15,72 +18,22 @@ _SAFETY_DIR = Path("cais_spade_llm/specification/safety")
 
 
 def render(bridge: SystemBridge) -> None:
+    ui.add_head_html(
+        """
+        <style>
+        .compact-upload { min-height: auto !important; }
+        .compact-upload .q-uploader__list { display: none !important; }
+        .compact-upload .q-uploader__header { min-height: auto !important; padding: 6px 8px !important; }
+        </style>
+        """
+    )
     ui.label("Safety").classes("text-2xl font-bold px-6 pt-6")
 
     with ui.row().classes("w-full px-6 gap-6 items-start flex-nowrap"):
       with ui.column().classes("flex-grow gap-6 min-w-0"):
 
-        # ── Safety Requirements (top; same pattern as Product Agent page) ──
+        # ── Safety Requirements + Preview/Approval ───────────────────
         _render_safety_requirements_card(bridge)
-
-        # ── Safety Rules ─────────────────────────────────────────────
-        with ui.card().classes("w-full"):
-            ui.label("Safety Rules").classes("text-lg font-semibold mb-2")
-            rules_table = ui.table(
-                columns=[
-                    {"name": "id", "label": "Rule ID", "field": "id", "sortable": True},
-                    {"name": "raw_text", "label": "Rule Text", "field": "raw_text"},
-                    {"name": "constraint_type", "label": "Type", "field": "constraint_type"},
-                    {"name": "ltlf", "label": "LTLf Formula", "field": "ltlf"},
-                ],
-                rows=[],
-            ).classes("w-full")
-
-            def _refresh_rules():
-                rules = bridge.get_safety_rules()
-                rows = []
-                for i, r in enumerate(rules):
-                    rows.append({
-                        "id": r.get("id", f"R{i}"),
-                        "raw_text": r.get("raw_text", r.get("text", str(r))),
-                        "constraint_type": r.get("constraint_type", ""),
-                        "ltlf": r.get("ltlf", r.get("formula", "")),
-                    })
-                rules_table.rows = rows
-
-            ui.timer(5.0, _refresh_rules)
-
-        # ── Runtime Safety State ─────────────────────────────────────
-        with ui.card().classes("w-full"):
-            ui.label("Runtime Safety State").classes("text-lg font-semibold mb-2")
-            state_pre = ui.code("{}", language="json").classes("w-full")
-
-            def _refresh_state():
-                ss = bridge.get_safety_state()
-                state_pre.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
-
-            ui.timer(2.0, _refresh_state)
-
-        # ── Blocked Tasks ────────────────────────────────────────────
-        with ui.card().classes("w-full"):
-            ui.label("Blocked Tasks").classes("text-lg font-semibold mb-2")
-            blocked_container = ui.column().classes("w-full gap-2")
-
-            def _refresh_blocked():
-                blocked_container.clear()
-                ss = bridge.get_safety_state()
-                blocked = ss.get("blocked_tasks", {})
-                if not blocked:
-                    with blocked_container:
-                        ui.label("No blocked tasks").classes("text-slate-400 italic")
-                    return
-                with blocked_container:
-                    for tid, info in blocked.items():
-                        with ui.card().classes("w-full bg-red-50"):
-                            ui.label(f"Task: {tid}").classes("font-semibold")
-                            ui.label(f"Violated rule: {info.get('violated_rule', 'unknown')}").classes("text-sm text-red-600")
-
-            ui.timer(3.0, _refresh_blocked)
 
       # ── Right column: chat panel ──────────────────────────
       with ui.column().classes("w-96 shrink-0 sticky top-20 self-start"):
@@ -96,15 +49,389 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
 
         _SAFETY_DIR.mkdir(parents=True, exist_ok=True)
         status_label = ui.label("").classes("text-sm")
+        preview_status_label = ui.label("Safety rule preview is not generated yet.").classes(
+            "text-xs text-slate-600 mt-1"
+        )
+        intent_status_label = ui.label("").classes("text-xs text-slate-600")
+        intent_buttons = {"approve": None, "revoke": None}
+        preview_state: dict[str, dict] = {"payload": {"available": False, "rules": []}}
+        preview_rules_cache: dict[str, dict] = {}
+        selected_preview_rule = {"id": ""}
+        preview_generation_state = {"busy": False}
+        verification_lock_state = {"locked": False}
 
-        req_select = ui.select(
-            {},
-            label="Requirement File",
-        ).classes("w-64")
+        with ui.row().classes("w-full gap-2 items-end flex-nowrap"):
+            req_select = ui.select(
+                {},
+                label="Requirement File",
+            ).classes("w-56 shrink-0")
+            name_input = ui.input(label="New file", placeholder="e.g. safety_case3").classes("w-56 shrink-0")
+            create_btn = ui.button("Create", icon="add").props("flat")
+
+        upload_widget = None
+        with ui.row().classes("w-full"):
+            upload_widget = ui.upload(
+                label="Upload .txt",
+                auto_upload=True,
+                on_upload=lambda e: _handle_upload(e),
+                max_file_size=1_000_000,
+            ).props("accept=.txt flat dense max-files=1 hide-upload-progress").classes("w-40 compact-upload")
+        upload_info_label = ui.label("").classes("text-xs text-slate-600")
 
         req_editor = ui.textarea(label="Edit requirements").classes(
             "w-full font-mono"
         ).props("outlined autogrow")
+
+        with ui.row().classes("w-full mt-2 items-start justify-between"):
+            with ui.row().classes("gap-2 items-center"):
+                generate_btn = ui.button(
+                    "Generate Safety Rule",
+                    icon="auto_fix_high",
+                ).props("flat color=primary")
+                generate_loading_row = ui.row().classes("items-center gap-2 text-primary")
+                with generate_loading_row:
+                    ui.spinner(size="sm")
+                    ui.label("Generating safety rule...")
+                generate_loading_row.style("display:none;")
+            with ui.column().classes("items-end gap-2"):
+                with ui.row().classes("gap-2 items-end"):
+                    save_btn = ui.button("Save", on_click=lambda: _save_req(), icon="save").props("color=primary")
+                    reload_btn = ui.button("Reload", on_click=lambda: _load_req(), icon="refresh").props("flat")
+                    delete_btn = ui.button("Delete", on_click=lambda: _delete_req(), icon="delete").props("flat color=red")
+                with ui.row().classes("gap-2 items-end"):
+                    intent_buttons["approve"] = ui.button(
+                        "Verify Safety",
+                        on_click=lambda: _approve_intent(),
+                        icon="task_alt",
+                    ).props("flat color=green")
+                    intent_buttons["revoke"] = ui.button(
+                        "Unverify Safety",
+                        on_click=lambda: _revoke_intent(),
+                        icon="remove_done",
+                    ).props("flat color=orange")
+
+        with ui.card().classes("w-full bg-slate-50 mt-3"):
+            ui.label("Generated Safety Rule Preview").classes("text-base font-semibold mb-2")
+            ui.label(
+                "Generate first, review LTLf and DFA, then verify safety."
+            ).classes("text-xs text-slate-600 mb-2")
+
+            preview_rules_table = ui.table(
+                columns=[
+                    {"name": "id", "label": "Rule ID", "field": "id", "sortable": True},
+                    {"name": "constraint_type", "label": "Type", "field": "constraint_type"},
+                    {"name": "raw_text", "label": "Rule Text", "field": "raw_text"},
+                    {"name": "ltlf", "label": "LTLf Formula", "field": "ltlf"},
+                ],
+                rows=[],
+                row_key="id",
+                selection="single",
+            ).classes("w-full")
+
+            ui.label("Generated LTLf").classes("text-sm font-semibold mt-2")
+            preview_ltlf = ui.code("No rule selected.", language="text").classes("w-full")
+            ui.label("Rule Interpretation").classes("text-sm font-semibold mt-2")
+            preview_ltlf_feedback = ui.code(
+                "Natural-language explanation will appear after selecting a rule.",
+                language="text",
+            ).classes("w-full")
+            ui.label("AP Mapping").classes("text-sm font-semibold mt-2")
+            preview_ap_map = ui.code("{}", language="json").classes("w-full")
+            ui.label("DFA Meaning").classes("text-sm font-semibold mt-2")
+            preview_dfa_meaning = ui.label("No DFA preview generated yet.").classes("text-sm text-slate-700")
+            ui.label("DFA Transitions").classes("text-sm font-semibold mt-2")
+            preview_dfa_transitions = ui.table(
+                columns=[
+                    {"name": "from", "label": "From", "field": "from"},
+                    {"name": "condition", "label": "Condition", "field": "condition"},
+                    {"name": "to", "label": "To", "field": "to"},
+                ],
+                rows=[],
+                row_key="condition",
+            ).classes("w-full")
+            ui.label("DFA DOT").classes("text-sm font-semibold mt-2")
+            preview_dfa_dot = ui.code("No DFA DOT generated yet.", language="text").classes("w-full")
+            ui.label("DFA Graph").classes("text-sm font-semibold mt-2")
+            preview_dfa_image = ui.html(
+                "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
+            ).classes("w-full")
+
+        def _intent_reason_text(reason: str) -> str:
+            mapping = {
+                "approved": "verified",
+                "not_approved": "not verified yet",
+                "revoked": "verification revoked",
+                "content_changed_since_approval": "content changed after verification",
+                "safety_file_empty": "file is empty",
+                "safety_file_missing": "file missing",
+            }
+            return mapping.get(str(reason or "").strip(), str(reason or "unknown"))
+
+        def _is_selected_verified() -> bool:
+            selected = str(req_select.value or "").strip()
+            if not selected:
+                return False
+            try:
+                return bool(bridge.evaluate_safety_intent_approval(selected).get("approved", False))
+            except Exception:
+                return False
+
+        def _set_preview_generation_busy(is_busy: bool) -> None:
+            preview_generation_state["busy"] = bool(is_busy)
+            generate_loading_row.style("display:flex;" if is_busy else "display:none;")
+            _refresh_intent_status()
+
+        def _preview_reason_text(reason: str) -> str:
+            mapping = {
+                "ok": "ready",
+                "not_generated": "not generated",
+                "preview_artifacts_missing": "preview artifacts missing",
+                "safety_file_missing": "safety file missing",
+            }
+            return mapping.get(str(reason or "").strip(), str(reason or "unknown"))
+
+        def _png_data_url(path_value: str) -> str:
+            raw = str(path_value or "").strip()
+            if not raw:
+                return ""
+            p = Path(raw)
+            if not p.exists():
+                return ""
+            try:
+                encoded = base64.b64encode(p.read_bytes()).decode("ascii")
+                return f"data:image/png;base64,{encoded}"
+            except Exception:
+                return ""
+
+        def _clear_preview_detail() -> None:
+            preview_ltlf.content = "No rule selected."
+            preview_ltlf_feedback.content = "Natural-language explanation will appear after selecting a rule."
+            preview_ap_map.content = "{}"
+            preview_dfa_meaning.text = "No DFA preview generated yet."
+            preview_dfa_transitions.rows = []
+            preview_dfa_dot.content = "No DFA DOT generated yet."
+            preview_dfa_image.content = (
+                "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
+            )
+
+        def _set_preview_rule_detail(rule_id: str) -> None:
+            rid = str(rule_id or "").strip()
+            rule = preview_rules_cache.get(rid)
+            if not rule:
+                _clear_preview_detail()
+                return
+            preview_ltlf.content = str(rule.get("ltlf", "") or "(empty)")
+            preview_ltlf_feedback.content = str(
+                rule.get(
+                    "ltlf_plain_feedback",
+                    "No natural-language explanation available for this rule.",
+                )
+            )
+            preview_ap_map.content = json.dumps(rule.get("aps", []), indent=2)
+            preview_dfa_meaning.text = str(
+                rule.get("dfa_meaning", "No DFA meaning available.")
+            )
+            transitions = rule.get("dfa_transitions", [])
+            preview_dfa_transitions.rows = transitions if isinstance(transitions, list) else []
+            preview_dfa_dot.content = str(rule.get("dfa_dot", "") or "No DFA DOT generated.")
+
+            data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
+            if data_url:
+                preview_dfa_image.content = (
+                    f"<img src='{data_url}' style='max-width:100%;height:auto;"
+                    "border:1px solid #e2e8f0;border-radius:8px;' />"
+                )
+            else:
+                preview_dfa_image.content = (
+                    "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
+                )
+
+        def _refresh_intent_status() -> None:
+            selected = str(req_select.value or "").strip()
+            approve_btn = intent_buttons.get("approve")
+            revoke_btn = intent_buttons.get("revoke")
+
+            if not selected:
+                intent_status_label.text = "Safety intent: no file selected."
+                intent_status_label.classes(replace="text-xs text-slate-600")
+                verification_lock_state["locked"] = False
+                save_btn.set_enabled(False)
+                reload_btn.set_enabled(False)
+                delete_btn.set_enabled(False)
+                generate_btn.set_enabled(False)
+                create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
+                if upload_widget is not None:
+                    upload_widget.set_enabled(False)
+                if approve_btn:
+                    approve_btn.set_enabled(False)
+                if revoke_btn:
+                    revoke_btn.set_enabled(False)
+                return
+
+            try:
+                evaluation = bridge.evaluate_safety_intent_approval(selected)
+            except Exception as exc:
+                intent_status_label.text = f"Safety intent status unavailable: {exc}"
+                intent_status_label.classes(replace="text-xs text-red-700")
+                verification_lock_state["locked"] = False
+                save_btn.set_enabled(False)
+                reload_btn.set_enabled(False)
+                delete_btn.set_enabled(False)
+                generate_btn.set_enabled(False)
+                create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
+                if upload_widget is not None:
+                    upload_widget.set_enabled(False)
+                if approve_btn:
+                    approve_btn.set_enabled(False)
+                if revoke_btn:
+                    revoke_btn.set_enabled(False)
+                return
+
+            preview_payload = preview_state.get("payload", {})
+            preview_ready = bool(preview_payload.get("available", False)) and bool(
+                preview_payload.get("hash_matches_current", False)
+            )
+            preview_record = preview_payload.get("record", {}) if isinstance(
+                preview_payload.get("record"), dict
+            ) else {}
+
+            approved = bool(evaluation.get("approved", False))
+            reason_text = _intent_reason_text(str(evaluation.get("reason", "")))
+            rec = evaluation.get("record", {}) if isinstance(evaluation.get("record"), dict) else {}
+
+            if approved:
+                approved_at = str(rec.get("approved_at_utc", "")).strip()
+                suffix = f" at {approved_at}" if approved_at else ""
+                intent_status_label.text = (
+                    f"Safety intent: VERIFIED{suffix}. "
+                    "File editing is locked; click Unverify Safety to modify."
+                )
+                intent_status_label.classes(replace="text-xs text-green-700")
+            else:
+                if not preview_ready:
+                    preview_reason = _preview_reason_text(str(preview_payload.get("reason", "")))
+                    generated_at = str(preview_record.get("generated_at_utc", "")).strip()
+                    if generated_at and not bool(preview_payload.get("hash_matches_current", False)):
+                        preview_reason = "preview is stale after file edits"
+                    intent_status_label.text = (
+                        f"Safety intent: NOT VERIFIED ({reason_text}). "
+                        f"Preview status: {preview_reason}. Generate current preview before verification."
+                    )
+                else:
+                    intent_status_label.text = f"Safety intent: NOT VERIFIED ({reason_text})."
+                intent_status_label.classes(replace="text-xs text-amber-700")
+
+            editable = not bridge.system_running
+            mutating_busy = preview_generation_state["busy"]
+            verification_lock_state["locked"] = bool(approved and selected)
+            can_mutate_file = editable and bool(selected) and not approved and not mutating_busy
+            can_create = editable and not mutating_busy
+
+            save_btn.set_enabled(can_mutate_file)
+            reload_btn.set_enabled(can_mutate_file)
+            delete_btn.set_enabled(can_mutate_file)
+            create_btn.set_enabled(can_create)
+            generate_btn.set_enabled(can_mutate_file)
+            if upload_widget is not None:
+                upload_widget.set_enabled(can_mutate_file)
+
+            if approve_btn:
+                approve_btn.set_enabled(can_mutate_file and preview_ready)
+            if revoke_btn:
+                revoke_btn.set_enabled(editable and bool(selected) and approved and not mutating_busy)
+
+        def _refresh_preview() -> None:
+            preview_rules_cache.clear()
+            selected_preview_rule["id"] = ""
+            selected = str(req_select.value or "").strip()
+
+            if not selected:
+                preview_status_label.text = "Safety rule preview is not generated yet."
+                preview_status_label.classes(replace="text-xs text-slate-600 mt-1")
+                preview_rules_table.rows = []
+                preview_state["payload"] = {"available": False, "reason": "safety_file_missing", "rules": []}
+                _clear_preview_detail()
+                _refresh_intent_status()
+                return
+
+            try:
+                payload = bridge.get_safety_rule_preview(selected)
+            except Exception as exc:
+                preview_status_label.text = f"Safety preview unavailable: {exc}"
+                preview_status_label.classes(replace="text-xs text-red-700 mt-1")
+                preview_rules_table.rows = []
+                preview_state["payload"] = {"available": False, "reason": "preview_error", "rules": []}
+                _clear_preview_detail()
+                _refresh_intent_status()
+                return
+
+            preview_state["payload"] = payload
+            available = bool(payload.get("available", False))
+            reason_text = _preview_reason_text(str(payload.get("reason", "")))
+            if not available:
+                preview_status_label.text = (
+                    "Safety rule preview not ready. "
+                    f"Status: {reason_text}. Click Generate Safety Rule."
+                )
+                preview_status_label.classes(replace="text-xs text-amber-700 mt-1")
+                preview_rules_table.rows = []
+                _clear_preview_detail()
+                _refresh_intent_status()
+                return
+
+            record = payload.get("record", {}) if isinstance(payload.get("record"), dict) else {}
+            generated_at = str(record.get("generated_at_utc", "")).strip()
+            hash_ok = bool(payload.get("hash_matches_current", False))
+            if hash_ok:
+                preview_status_label.text = (
+                    f"Safety rule preview generated at {generated_at or 'unknown time'} (current)."
+                )
+                preview_status_label.classes(replace="text-xs text-green-700 mt-1")
+            else:
+                preview_status_label.text = (
+                    f"Safety preview generated at {generated_at or 'unknown time'}, "
+                    "but file changed after generation. Regenerate preview."
+                )
+                preview_status_label.classes(replace="text-xs text-amber-700 mt-1")
+
+            rows: list[dict] = []
+            for idx, rule in enumerate(payload.get("rules", []), start=1):
+                if not isinstance(rule, dict):
+                    continue
+                rid = str(rule.get("id", "")).strip() or f"SAFE_{idx}"
+                preview_rules_cache[rid] = rule
+                rows.append(
+                    {
+                        "id": rid,
+                        "constraint_type": str(rule.get("constraint_type", "")),
+                        "raw_text": str(rule.get("raw_text", "")),
+                        "ltlf": str(rule.get("ltlf", "")),
+                    }
+                )
+            preview_rules_table.rows = rows
+
+            target_rid = selected_preview_rule["id"]
+            if target_rid not in preview_rules_cache and rows:
+                target_rid = str(rows[0].get("id", ""))
+            selected_preview_rule["id"] = target_rid
+            if target_rid:
+                _set_preview_rule_detail(target_rid)
+            else:
+                _clear_preview_detail()
+
+            _refresh_intent_status()
+
+        def _load_req():
+            if not req_select.value:
+                req_editor.value = ""
+                status_label.text = ""
+                _refresh_preview()
+                return
+            path = Path(req_select.value)
+            if path.exists():
+                req_editor.value = path.read_text()
+                status_label.text = ""
+            _refresh_preview()
 
         def _refresh_file_list(select_path: str | None = None):
             req_files = sorted(_SAFETY_DIR.glob("*.txt"))
@@ -120,19 +447,12 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 req_editor.value = ""
             _load_req()
 
-        def _load_req():
-            if not req_select.value:
-                req_editor.value = ""
-                status_label.text = ""
-                return
-            path = Path(req_select.value)
-            if path.exists():
-                req_editor.value = path.read_text()
-                status_label.text = ""
-
         def _save_req():
             if bridge.system_running:
                 ui.notify("Cannot edit while system is running", type="warning")
+                return
+            if _is_selected_verified():
+                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
                 return
             if not req_select.value:
                 status_label.text = "No file selected"
@@ -142,10 +462,14 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             path.write_text(req_editor.value)
             status_label.text = f"Saved {path.name}"
             status_label.classes(replace="text-sm text-green-600")
+            _refresh_preview()
 
         def _delete_req():
             if bridge.system_running:
                 ui.notify("Cannot edit while system is running", type="warning")
+                return
+            if _is_selected_verified():
+                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
                 return
             if not req_select.value:
                 return
@@ -157,17 +481,64 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             status_label.classes(replace="text-sm text-red-600")
             _refresh_file_list()
 
+        _REQ_FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\.txt$")
+
+        def _normalized_upload_name(raw_name: str) -> str:
+            base_name = Path(str(raw_name or "").strip()).name
+            if not base_name:
+                base_name = "uploaded"
+            stem = Path(base_name).stem if Path(base_name).suffix else base_name
+            stem = stem.lower()
+            stem = re.sub(r"\s+", "_", stem)
+            stem = re.sub(r"[^a-z0-9_-]", "_", stem)
+            stem = re.sub(r"_+", "_", stem).strip("_-")
+            if not stem:
+                stem = "uploaded"
+            normalized = f"{stem}.txt"
+            if not _REQ_FILENAME_RE.fullmatch(normalized):
+                normalized = "uploaded.txt"
+            return normalized
+
+        def _next_available_upload_path(filename: str) -> Path:
+            candidate = _SAFETY_DIR / filename
+            if not candidate.exists():
+                return candidate
+            stem = candidate.stem or "uploaded"
+            suffix = candidate.suffix or ".txt"
+            idx = 1
+            while True:
+                alt = _SAFETY_DIR / f"{stem}_{idx}{suffix}"
+                if not alt.exists():
+                    return alt
+                idx += 1
+
         async def _handle_upload(e: events.UploadEventArguments):
             if bridge.system_running:
                 ui.notify("Cannot edit while system is running", type="warning")
                 return
-            content = e.content.read()
-            name = e.name if e.name.endswith(".txt") else e.name + ".txt"
-            dest = _SAFETY_DIR / name
+            if _is_selected_verified():
+                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
+                return
+            content = await e.file.read()
+            original_name = str(getattr(e.file, "name", "") or "uploaded.txt")
+            uploaded_name = _normalized_upload_name(original_name)
+            dest = _next_available_upload_path(uploaded_name)
             dest.write_bytes(content)
-            status_label.text = f"Uploaded {name}"
+            status_label.text = f"Uploaded as new file: {dest.name}"
             status_label.classes(replace="text-sm text-green-600")
             _refresh_file_list(str(dest))
+            req_select.value = str(dest)
+            _load_req()
+            req_editor.update()
+            if dest.name != original_name:
+                upload_info_label.text = f"Uploaded: {original_name} -> {dest.name}"
+            else:
+                upload_info_label.text = f"Uploaded: {dest.name}"
+            if upload_widget is not None:
+                try:
+                    upload_widget.reset()
+                except Exception:
+                    pass
 
         async def _create_new():
             if bridge.system_running:
@@ -178,38 +549,101 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 status_label.text = "Enter a file name first"
                 status_label.classes(replace="text-sm text-amber-600")
                 return
-            name = name_input.value if name_input.value.endswith(".txt") else name_input.value + ".txt"
+            original_name = name_input.value
+            name = _normalized_upload_name(original_name)
             dest = _SAFETY_DIR / name
             if dest.exists():
                 status_label.text = f"{name} already exists — select it to edit"
                 status_label.classes(replace="text-sm text-amber-600")
                 return
             dest.write_text("[Safety Requirements]\n- ")
-            status_label.text = f"Created {name}"
+            if name != original_name and name != f"{original_name}.txt":
+                status_label.text = f"Created {name} (normalized from \"{original_name}\")"
+            else:
+                status_label.text = f"Created {name}"
             status_label.classes(replace="text-sm text-green-600")
             name_input.value = ""
             _refresh_file_list(str(dest))
 
+        async def _generate_preview() -> None:
+            if preview_generation_state["busy"]:
+                return
+            if bridge.system_running:
+                ui.notify("Cannot generate safety preview while system is running", type="warning")
+                return
+            if _is_selected_verified():
+                ui.notify("Selected safety file is verified. Unverify Safety before regenerating.", type="warning")
+                return
+            selected = str(req_select.value or "").strip()
+            if not selected:
+                ui.notify("Select a safety requirement file first.", type="warning")
+                return
+            _set_preview_generation_busy(True)
+            preview_status_label.text = "Generating safety rule preview..."
+            preview_status_label.classes(replace="text-xs text-blue-700 mt-1")
+            try:
+                ui.notify("Generating safety rule preview...", type="info")
+                await asyncio.to_thread(bridge.generate_safety_rule_preview, selected)
+                ui.notify("Safety rule preview generated.", type="positive")
+            except Exception as exc:
+                ui.notify(f"Safety preview generation failed: {exc}", type="negative")
+            finally:
+                _set_preview_generation_busy(False)
+                _refresh_preview()
+
+        def _approve_intent() -> None:
+            if bridge.system_running:
+                ui.notify("Cannot verify while system is running", type="warning")
+                return
+            selected = str(req_select.value or "").strip()
+            if not selected:
+                ui.notify("Select a safety requirement file first.", type="warning")
+                return
+            try:
+                out = bridge.approve_safety_intent(selected)
+                selected_path = Path(str(out.get("safety_file", selected)))
+                ui.notify(f"Safety intent verified: {selected_path.name}", type="positive")
+            except Exception as exc:
+                ui.notify(f"Safety intent verification failed: {exc}", type="negative")
+            finally:
+                _refresh_preview()
+
+        def _revoke_intent() -> None:
+            if bridge.system_running:
+                ui.notify("Cannot unverify while system is running", type="warning")
+                return
+            selected = str(req_select.value or "").strip()
+            if not selected:
+                ui.notify("Select a safety requirement file first.", type="warning")
+                return
+            try:
+                out = bridge.revoke_safety_intent_approval(selected)
+                selected_path = Path(str(out.get("safety_file", selected)))
+                ui.notify(f"Safety intent unverified: {selected_path.name}", type="positive")
+            except Exception as exc:
+                ui.notify(f"Failed to unverify safety intent: {exc}", type="negative")
+            finally:
+                _refresh_preview()
+
+        def _on_preview_rule_select(e):
+            selected_preview_rule["id"] = ""
+            for row in (e.selection or []):
+                rid = str(row.get("id", "")).strip()
+                if rid:
+                    selected_preview_rule["id"] = rid
+                    break
+            _set_preview_rule_detail(selected_preview_rule["id"])
+
         req_select.on_value_change(_load_req)
-
-        with ui.row().classes("gap-2 mt-1 items-end flex-wrap"):
-            ui.button("Save", on_click=_save_req, icon="save").props("color=primary")
-            ui.button("Reload", on_click=_load_req, icon="refresh").props("flat")
-            ui.button("Delete", on_click=_delete_req, icon="delete").props("flat color=red")
-
-        with ui.row().classes("gap-2 mt-3 items-end flex-wrap"):
-            name_input = ui.input(label="New file name", placeholder="e.g. safety_case3").classes("w-48")
-            ui.button("Create", on_click=_create_new, icon="add").props("flat")
-            ui.upload(
-                label="Upload .txt",
-                auto_upload=True,
-                on_upload=_handle_upload,
-                max_file_size=1_000_000,
-            ).props("accept=.txt flat dense").classes("w-40")
+        preview_rules_table.on_select(_on_preview_rule_select)
+        create_btn.on_click(_create_new)
+        generate_btn.on_click(_generate_preview)
 
         _refresh_file_list()
 
         def _update_readonly():
-            req_editor.props(f"readonly={str(bridge.system_running).lower()}")
+            readonly = bridge.system_running or preview_generation_state["busy"] or verification_lock_state["locked"]
+            req_editor.props(f"readonly={str(readonly).lower()}")
+            _refresh_intent_status()
 
         ui.timer(2.0, _update_readonly)

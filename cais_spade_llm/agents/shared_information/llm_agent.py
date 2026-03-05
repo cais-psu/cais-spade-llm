@@ -22,6 +22,7 @@ class LlmAgent(Agent):
     # Shared tool catalogue cache so every agent has access to the same tool metadata.
     _TOOLS_CATALOG: List[Dict[str, Any]] | None = None
     _TOOLS_BY_FUNC: Dict[str, Dict[str, Any]] | None = None
+    _TOOLS_CATALOG_PATH: Path = Path("cais_spade_llm/initialization/tools.json")
 
     def __init__(
         self,
@@ -99,17 +100,26 @@ class LlmAgent(Agent):
     # Tool catalogue helpers
     # ------------------------------------------------------------------ #
     @classmethod
+    def configure_shared_tools_catalogue(cls, path: str | Path | None = None) -> str:
+        """Point all agents at a specific tools catalogue and clear any cached snapshot."""
+        resolved = Path(path) if path is not None else Path("cais_spade_llm/initialization/tools.json")
+        LlmAgent._TOOLS_CATALOG_PATH = resolved.resolve()
+        LlmAgent._TOOLS_CATALOG = None
+        LlmAgent._TOOLS_BY_FUNC = None
+        return str(LlmAgent._TOOLS_CATALOG_PATH)
+
+    @classmethod
     def _load_shared_tools_catalogue(cls) -> None:
         """Lazy-load tools.json exactly once so every agent sees the same snapshot."""
         if LlmAgent._TOOLS_CATALOG is not None:
             return
 
-        path = Path("cais_spade_llm/initialization/tools.json")
+        path = Path(LlmAgent._TOOLS_CATALOG_PATH)
         try:
             LlmAgent._TOOLS_CATALOG = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "tools.json missing – run FunctionAnalyzer.build_tools_catalogue() first."
+                f"tools.json missing at {path} – run FunctionAnalyzer.build_tools_catalogue() first."
             ) from exc
 
         LlmAgent._TOOLS_BY_FUNC = {

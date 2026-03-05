@@ -24,6 +24,7 @@ _MODE_LABELS = list(_MODE_MAP.keys())
 
 def render(bridge: SystemBridge) -> None:
     ui.label("Dashboard").classes("text-2xl font-bold px-6 pt-6")
+    refresh_dag_now = lambda: None
 
     with ui.row().classes("w-full px-6 gap-6 items-start no-wrap"):
       # ── Left column: existing dashboard content ───────────
@@ -36,7 +37,7 @@ def render(bridge: SystemBridge) -> None:
             with ui.row().classes("items-end gap-6 flex-wrap"):
                 startup_source_select = ui.radio(
                     ["Generate Plan At Startup", "Use Verified Plan Set"],
-                    value="Generate Plan At Startup",
+                    value="Use Verified Plan Set",
                 ).props("inline")
 
             requirement_files = bridge.list_product_requirement_files()
@@ -78,7 +79,6 @@ def render(bridge: SystemBridge) -> None:
                 banner_hide_task: asyncio.Task | None = None
                 start_click_state = {"locked": False}
                 start_task: asyncio.Task | None = None
-                compatibility_cache: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
 
                 def _selected_files() -> tuple[str, str]:
                     req_file = str(requirement_select.value or "").strip()
@@ -91,30 +91,17 @@ def render(bridge: SystemBridge) -> None:
                     verified_source_row.style("display:flex;" if use_verified else "display:none;")
 
                 def _refresh_plan_set_options() -> None:
-                    req_file, safe_file = _selected_files()
-                    internal = _MODE_MAP.get(mode_select.value, "dry_run")
-                    env = "gazebo" if internal in ("dry_run", "simulation") else "real"
                     options: dict[str, str] = {}
 
-                    if req_file and safe_file and safe_file != "__NONE__":
-                        for row in bridge.list_bundles():
-                            bid = str(row.get("bundle_id", "")).strip()
-                            if not bid:
-                                continue
-                            status = str(row.get("status", "")).lower()
-                            if status != "verified":
-                                continue
-                            evaluation = bridge.evaluate_bundle_for_files(
-                                bid,
-                                req_file,
-                                safe_file,
-                                internal,
-                                env,
-                            )
-                            if not evaluation.get("ok", False):
-                                continue
-                            created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
-                            options[bid] = f"{created} | {bid}"
+                    for row in bridge.list_bundles():
+                        bid = str(row.get("bundle_id", "")).strip()
+                        if not bid:
+                            continue
+                        status = str(row.get("status", "")).lower()
+                        if status != "verified":
+                            continue
+                        created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
+                        options[bid] = f"{created} | {bid}"
 
                     current = str(plan_set_select.value or "").strip()
                     plan_set_select.options = options
@@ -136,48 +123,17 @@ def render(bridge: SystemBridge) -> None:
                     plan_set_select.set_enabled(str(startup_source_select.value) == "Use Verified Plan Set")
 
                 def _bundle_gate(*, strict: bool) -> tuple[bool, str]:
-                    req_file, safe_file = _selected_files()
-                    internal = _MODE_MAP.get(mode_select.value, "dry_run")
-                    env = "gazebo" if internal in ("dry_run", "simulation") else "real"
+                    source = str(startup_source_select.value or "")
+                    if source == "Use Verified Plan Set":
+                        bid = str(plan_set_select.value or "").strip()
+                        if not bid:
+                            return False, "Select a verified plan set."
+                        return True, ""
 
+                    req_file, _ = _selected_files()
                     if not req_file:
                         return False, "Select a product requirement file."
-
-                    source = str(startup_source_select.value or "")
-                    if source != "Use Verified Plan Set":
-                        return True, ""
-
-                    if safe_file == "__NONE__":
-                        return False, "Verified plan set mode requires a safety file (not None)."
-
-                    bid = str(plan_set_select.value or "").strip()
-                    if not bid:
-                        return False, "Select a verified plan set."
-
-                    if not strict:
-                        return True, ""
-
-                    cache_key = (bid, req_file, safe_file, f"{internal}/{env}")
-                    cached = compatibility_cache.get(cache_key)
-                    if cached is not None:
-                        return cached
-
-                    evaluation = bridge.evaluate_bundle_for_files(
-                        bid,
-                        req_file,
-                        safe_file,
-                        internal,
-                        env,
-                    )
-                    if evaluation.get("ok", False):
-                        out = (True, "")
-                        compatibility_cache[cache_key] = out
-                        return out
-                    reasons = evaluation.get("reasons", [])
-                    reason_text = ", ".join(str(r).replace("bundle", "plan_set") for r in reasons)
-                    out = (False, "Selected verified plan set incompatible: " + reason_text)
-                    compatibility_cache[cache_key] = out
-                    return out
+                    return True, ""
 
                 def _set_action_banner(kind: str, message: str, *, auto_hide_s: float | None = None) -> None:
                     nonlocal banner_hide_task
@@ -229,19 +185,6 @@ def render(bridge: SystemBridge) -> None:
                     bridge.execution_mode = internal
                     bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
 
-                    req_file, safe_file = _selected_files()
-                    if not req_file:
-                        _set_action_banner("warning", "Select a product requirement file.", auto_hide_s=6.0)
-                        return
-                    try:
-                        bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
-                    except Exception as exc:
-                        _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
-                        return
-
-                    bridge.selected_requirement_file = req_file
-                    bridge.selected_safety_file = safe_file or ""
-
                     bundle_ok, bundle_msg = _bundle_gate(strict=True)
                     if not bundle_ok:
                         _set_action_banner("warning", bundle_msg, auto_hide_s=8.0)
@@ -255,7 +198,54 @@ def render(bridge: SystemBridge) -> None:
                                 _set_action_banner("warning", "Select a verified plan set.", auto_hide_s=6.0)
                                 return
                             bridge.set_active_bundle(selected_plan_set_id)
+
+                            active = bridge.get_active_bundle() or {}
+                            manifest = active.get("manifest", {}) if isinstance(active, dict) else {}
+                            if not isinstance(manifest, dict):
+                                manifest = {}
+                            bundle_req_file = str(manifest.get("product_spec_file", "")).strip()
+                            bundle_safe_file = str(manifest.get("safety_file", "")).strip()
+                            if not bundle_req_file:
+                                _set_action_banner(
+                                    "error",
+                                    "Selected verified plan set is missing product requirement file in manifest.",
+                                    auto_hide_s=8.0,
+                                )
+                                return
+                            try:
+                                bridge.selected_product = bridge.resolve_product_init_for_requirement(bundle_req_file)
+                            except Exception as exc:
+                                _set_action_banner(
+                                    "error",
+                                    f"Verified plan set product mapping failed: {exc}",
+                                    auto_hide_s=8.0,
+                                )
+                                return
+
+                            # In verified-plan mode, startup should use the plan set's own files.
+                            bridge.selected_requirement_file = bundle_req_file
+                            bridge.selected_safety_file = bundle_safe_file
+
+                            # Keep visible selectors in sync when values exist in current options.
+                            req_opts = requirement_select.options if isinstance(requirement_select.options, dict) else {}
+                            safe_opts = safety_select.options if isinstance(safety_select.options, dict) else {}
+                            if bundle_req_file in req_opts:
+                                requirement_select.value = bundle_req_file
+                            if bundle_safe_file in safe_opts:
+                                safety_select.value = bundle_safe_file
                         else:
+                            req_file, safe_file = _selected_files()
+                            if not req_file:
+                                _set_action_banner("warning", "Select a product requirement file.", auto_hide_s=6.0)
+                                return
+                            try:
+                                bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
+                            except Exception as exc:
+                                _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
+                                return
+
+                            bridge.selected_requirement_file = req_file
+                            bridge.selected_safety_file = safe_file or ""
                             bridge.set_active_bundle(None)
                     except Exception as exc:
                         _set_action_banner("error", f"Failed to configure startup source: {exc}", auto_hide_s=8.0)
@@ -315,19 +305,26 @@ def render(bridge: SystemBridge) -> None:
                     finally:
                         _update_controls()
 
-                async def _reset_gazebo():
+                reset_scope_options = [
+                    "Reset All",
+                    "Reset Plan",
+                    "Reset Gazebo",
+                ]
+
+                async def _reset_selected():
                     if bridge._starting:
                         _set_action_banner("warning", "Start is in progress. Wait before reset.", auto_hide_s=4.0)
                         return
                     if bridge._stopping:
                         _set_action_banner("warning", "Stop is in progress. Wait before reset.", auto_hide_s=4.0)
                         return
+                    selected_scope = str(reset_scope_select.value or "Reset All").strip() or "Reset All"
 
-                    _set_action_banner("info", "Reset Gazebo clicked. Preparing reset...")
+                    _set_action_banner("info", f"{selected_scope} clicked. Preparing reset...")
                     try:
                         # Keep agent/world state consistent: stop system first if needed.
                         if bridge.system_running:
-                            _set_action_banner("info", "Stopping system before Gazebo reset...")
+                            _set_action_banner("info", f"Stopping system before {selected_scope.lower()}...")
                             await bridge.stop_system()
                             if bridge.system_running:
                                 _set_action_banner(
@@ -338,23 +335,50 @@ def render(bridge: SystemBridge) -> None:
                                 return
                             start_click_state["locked"] = False
 
-                        ok, msg = await asyncio.to_thread(bridge.ros2_reset_gazebo_environment)
-                        if ok:
-                            start_click_state["locked"] = False
+                        success_messages: list[str] = []
+                        warning_messages: list[str] = []
+
+                        if selected_scope in {"Reset Plan", "Reset All"}:
+                            ok_plan, msg_plan = await asyncio.to_thread(bridge.reset_plan_runtime_state)
+                            if ok_plan:
+                                success_messages.append(msg_plan)
+                            else:
+                                warning_messages.append(msg_plan)
+
+                        if selected_scope in {"Reset Gazebo", "Reset All"}:
+                            ok_gz, msg_gz = await asyncio.to_thread(bridge.ros2_reset_gazebo_environment)
+                            if ok_gz:
+                                success_messages.append(msg_gz)
+                            else:
+                                warning_messages.append(msg_gz)
+
+                        start_click_state["locked"] = False
+                        if success_messages and warning_messages:
+                            _set_action_banner(
+                                "warning",
+                                " ; ".join(success_messages + warning_messages),
+                                auto_hide_s=8.0,
+                            )
+                        elif warning_messages:
+                            _set_action_banner("warning", " ; ".join(warning_messages), auto_hide_s=8.0)
+                        else:
                             _set_action_banner(
                                 "success",
-                                "Gazebo scene reset to initial state. Click Start System.",
+                                " ; ".join(success_messages) or "Reset complete. Click Start System.",
                                 auto_hide_s=6.0,
                             )
-                        else:
-                            _set_action_banner("warning", f"Gazebo reset skipped: {msg}", auto_hide_s=8.0)
                     finally:
                         _update_controls()
 
-                with ui.row().classes("gap-4"):
+                with ui.row().classes("items-end gap-4 flex-wrap"):
                     start_btn = ui.button("Start System", on_click=_start, icon="play_arrow").props("color=green")
                     stop_btn = ui.button("Stop System", on_click=_stop, icon="stop").props("color=red")
-                    reset_btn = ui.button("Reset Gazebo", on_click=_reset_gazebo, icon="restart_alt").props("color=blue")
+                    reset_scope_select = ui.select(
+                        {opt: opt for opt in reset_scope_options},
+                        value="Reset All",
+                        label="Reset Scope",
+                    ).classes("w-44")
+                    reset_btn = ui.button("Reset", on_click=_reset_selected, icon="restart_alt").props("color=blue")
                 action_banner = ui.row().classes(
                     "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-blue-700 bg-blue-50"
                 )
@@ -406,10 +430,16 @@ def render(bridge: SystemBridge) -> None:
                         bridge.ros2_proc_status(name) == "running"
                         for name in ("gazebo_dual", "gazebo_xarm6", "gazebo_ur5e")
                     )
+                    reset_scope = str(reset_scope_select.value or "Reset All")
+                    if reset_scope == "Reset Gazebo":
+                        can_reset = gazebo_running or bridge.system_running
+                    else:
+                        # Plan reset can run even when Gazebo stack is not up.
+                        can_reset = True
                     start_btn.set_enabled(can_start)
                     stop_btn.set_enabled(bridge.system_running and not bridge._stopping)
                     reset_btn.set_enabled(
-                        (bridge.system_running or gazebo_running)
+                        can_reset
                         and not bridge._starting
                         and not bridge._stopping
                     )
@@ -425,16 +455,17 @@ def render(bridge: SystemBridge) -> None:
             ui.timer(1.0, _update_controls)
 
             def _refresh_selection_and_controls() -> None:
-                compatibility_cache.clear()
                 _update_source_picker_visibility()
                 _refresh_plan_set_options()
                 _update_controls()
+                refresh_dag_now()
 
             requirement_select.on_value_change(lambda e: _refresh_selection_and_controls())
             safety_select.on_value_change(lambda e: _refresh_selection_and_controls())
             startup_source_select.on_value_change(lambda e: _refresh_selection_and_controls())
             plan_set_select.on_value_change(lambda e: _refresh_selection_and_controls())
             mode_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            reset_scope_select.on_value_change(lambda e: _refresh_selection_and_controls())
             _refresh_selection_and_controls()
 
         # ── Agent Overview Grid ──────────────────────────────────────
@@ -488,16 +519,103 @@ def render(bridge: SystemBridge) -> None:
 
         ui.timer(2.0, _refresh_stats)
 
+        # ── Runtime Safety Rules ────────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Runtime Safety Rules").classes("text-lg font-semibold mb-2")
+            runtime_rules_table = ui.table(
+                columns=[
+                    {"name": "id", "label": "Rule ID", "field": "id", "sortable": True},
+                    {"name": "raw_text", "label": "Rule Text", "field": "raw_text"},
+                    {"name": "constraint_type", "label": "Type", "field": "constraint_type"},
+                    {"name": "ltlf", "label": "LTLf Formula", "field": "ltlf"},
+                ],
+                rows=[],
+            ).classes("w-full")
+
+            def _refresh_runtime_safety_rules():
+                rules = bridge.get_safety_rules()
+                rows = []
+                for i, r in enumerate(rules):
+                    rows.append(
+                        {
+                            "id": r.get("id", f"R{i}"),
+                            "raw_text": r.get("raw_text", r.get("text", str(r))),
+                            "constraint_type": r.get("constraint_type", ""),
+                            "ltlf": r.get("ltlf", r.get("formula", "")),
+                        }
+                    )
+                runtime_rules_table.rows = rows
+
+            ui.timer(5.0, _refresh_runtime_safety_rules)
+
+        # ── Runtime Safety State ────────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Runtime Safety State").classes("text-lg font-semibold mb-2")
+            runtime_safety_state = ui.code("{}", language="json").classes("w-full")
+
+            def _refresh_runtime_safety_state():
+                ss = bridge.get_safety_state()
+                runtime_safety_state.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
+
+            ui.timer(2.0, _refresh_runtime_safety_state)
+
+        # ── Runtime Blocked Tasks ───────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Runtime Blocked Tasks").classes("text-lg font-semibold mb-2")
+            runtime_blocked_container = ui.column().classes("w-full gap-2")
+
+            def _refresh_runtime_blocked_tasks():
+                runtime_blocked_container.clear()
+                ss = bridge.get_safety_state()
+                blocked = ss.get("blocked_tasks", {})
+                if not blocked:
+                    with runtime_blocked_container:
+                        ui.label("No blocked tasks").classes("text-slate-400 italic")
+                    return
+                with runtime_blocked_container:
+                    for tid, info in blocked.items():
+                        with ui.card().classes("w-full bg-red-50"):
+                            ui.label(f"Task: {tid}").classes("font-semibold")
+                            ui.label(
+                                f"Violated rule: {info.get('violated_rule', 'unknown')}"
+                            ).classes("text-sm text-red-600")
+
+            ui.timer(3.0, _refresh_runtime_blocked_tasks)
+
+        def _preview_or_runtime_nodes() -> list[dict]:
+            nodes = bridge.get_plan_nodes()
+            if nodes or bridge.system_running:
+                return nodes
+            source = str(startup_source_select.value or "")
+            selected_plan_set_id = str(plan_set_select.value or "").strip()
+            if source == "Use Verified Plan Set" and selected_plan_set_id:
+                return bridge.get_bundle_plan_nodes(selected_plan_set_id)
+            return []
+
+        def _preview_or_runtime_task_states(nodes: list[dict]) -> dict[str, str]:
+            task_states = bridge.get_task_states()
+            if task_states:
+                return task_states
+            fallback: dict[str, str] = {}
+            for node in nodes:
+                tid = str(node.get("id") or node.get("task_id") or "").strip()
+                if not tid:
+                    continue
+                fallback[tid] = str(node.get("status", "pending") or "pending")
+            return fallback
+
         # ── Task DAG ────────────────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Task DAG").classes("text-lg font-semibold mb-2")
             mermaid = ui.mermaid("graph TD\n    empty[No plan loaded]").classes("w-full")
 
             def _refresh_dag():
-                nodes = bridge.get_plan_nodes()
-                task_states = bridge.get_task_states()
+                nodes = _preview_or_runtime_nodes()
+                task_states = _preview_or_runtime_task_states(nodes)
                 mermaid.content = nodes_to_mermaid(nodes, task_states)
 
+            refresh_dag_now = _refresh_dag
+            _refresh_dag()
             ui.timer(2.0, _refresh_dag)
 
         # ── Task States Table ───────────────────────────────────────
@@ -521,7 +639,7 @@ def render(bridge: SystemBridge) -> None:
                     detail_label.text = "Node Detail"
                     detail_table.rows = []
                     return
-                nodes = bridge.get_plan_nodes()
+                nodes = _preview_or_runtime_nodes()
                 all_rows: list[dict] = []
                 row_idx = 0
                 for tid in task_ids:
@@ -539,7 +657,8 @@ def render(bridge: SystemBridge) -> None:
                 detail_table.rows = all_rows
 
             def _refresh_tasks():
-                ts = bridge.get_task_states()
+                nodes = _preview_or_runtime_nodes()
+                ts = _preview_or_runtime_task_states(nodes)
                 task_table.rows = [{"task_id": k, "status": v} for k, v in ts.items()]
                 if selected_task_ids:
                     _set_node_details(selected_task_ids)

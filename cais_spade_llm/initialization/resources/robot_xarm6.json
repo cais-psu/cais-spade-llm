@@ -10,7 +10,8 @@
       "pick_grasp",
       "pick_approach",
       "place_approach",
-      "place_insert"
+      "place_insert",
+      "move_home"
     ],
     "sg_slippage_mode": "once",
     "sg_slippage_scope": "xarm6",

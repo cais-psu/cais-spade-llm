@@ -10,7 +10,8 @@
       "pick_grasp",
       "pick_approach",
       "place_approach",
-      "place_insert"
+      "place_insert",
+      "move_home"
     ],
     "sg_slippage_mode": "off",
     "sg_slippage_scope": "ur5e",
@@ -35,9 +36,9 @@
           "topic": "/ur5e_rg2_gripper_traj_controller/joint_trajectory",
           "open": 0.11,
           "close": 0.02,
-          "move_time_sec": 0.4,
-          "settle_sec": 0.08,
-          "feedback_timeout_pad_sec": 0.5,
+          "move_time_sec": 0.55,
+          "settle_sec": 0.15,
+          "feedback_timeout_pad_sec": 1.5,
           "position_tolerance": 0.01
         },
         "services": {
@@ -51,14 +52,14 @@
         "attach": {
           "robot_model_name": "dual_robot",
           "attach_link_candidates": [
-            "ur5e_wrist_3_link",
+            "ur5e_rg2_gripper_tcp",
             "ur5e_tool0",
-            "ur5e_rg2_gripper_tcp"
+            "ur5e_wrist_3_link"
           ],
-          "primary_attach_link": "ur5e_wrist_3_link",
-          "detach_timeout_sec": 2.0,
+          "primary_attach_link": "ur5e_rg2_gripper_tcp",
+          "detach_timeout_sec": 3.0,
           "detach_max_link_attempts": 3,
-          "release_detach_timeout_sec": 5.0
+          "release_detach_timeout_sec": 8.0
         },
         "motion": {
           "approach_height_m": 0.2,
@@ -66,13 +67,13 @@
           "pick_tcp_z_bias_min_m": 0.003,
           "min_pick_tcp_z_m": 1.07,
           "place_surface_gap_m": -0.01,
-          "release_preopen_settle_sec": 0.15,
-          "release_postopen_settle_sec": 0.6,
-          "release_postdetach_settle_sec": 0.35,
+          "release_preopen_settle_sec": 0.25,
+          "release_postopen_settle_sec": 0.9,
+          "release_postdetach_settle_sec": 0.5,
           "release_descend_time_scale": 1.35,
-          "release_detach_retry_count": 2,
-          "release_detach_retry_delay_sec": 0.35,
-          "release_retry_lift_m": 0.005,
+          "release_detach_retry_count": 3,
+          "release_detach_retry_delay_sec": 0.55,
+          "release_retry_lift_m": 0.012,
           "trajectory_time_scale": 1.0
         },
         "parts_tuning": {

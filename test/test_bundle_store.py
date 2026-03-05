@@ -6,7 +6,7 @@ from cais_spade_llm.bundles.bundle_store import BundleStore
 
 
 def test_bundle_store_index_and_active_selection(tmp_path):
-    store = BundleStore(tmp_path / "user_verified")
+    store = BundleStore(tmp_path / "user_verified_plan")
 
     summary = {
         "bundle_id": "bundle_a",
@@ -39,7 +39,7 @@ def test_bundle_store_index_and_active_selection(tmp_path):
 
 
 def test_bundle_store_manifest_roundtrip(tmp_path):
-    store = BundleStore(tmp_path / "user_verified")
+    store = BundleStore(tmp_path / "user_verified_plan")
     bid = "bundle_b"
     bdir = store.bundle_dir(bid)
     manifest = {"bundle_id": bid, "status": "verified", "artifacts": {"plan_json": "plan/p.json"}}
@@ -55,7 +55,7 @@ def test_bundle_store_manifest_roundtrip(tmp_path):
 
 
 def test_bundle_store_update_bundle_summary(tmp_path):
-    store = BundleStore(tmp_path / "user_verified")
+    store = BundleStore(tmp_path / "user_verified_plan")
     summary = {
         "bundle_id": "bundle_c",
         "display_name": "Bundle C",

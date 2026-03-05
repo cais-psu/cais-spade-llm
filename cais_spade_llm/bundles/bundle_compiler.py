@@ -118,6 +118,7 @@ class BundleCompiler:
             from agents.central_controller.central_controller_agent import CentralControllerAgent
             from agents.central_controller.offline_safety_validator import OfflineSafetyValidator
             from agents.intelligent_product.product_agent import ProductAgent
+            from agents.shared_information.llm_agent import LlmAgent
             from resources.sensor.camera_module import CameraModule
         except ImportError:
             from cais_spade_llm.agents.central_controller.central_controller_agent import (
@@ -127,8 +128,9 @@ class BundleCompiler:
                 OfflineSafetyValidator,
             )
             from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
+            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
             from cais_spade_llm.resources.sensor.camera_module import CameraModule
-        return ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule
+        return ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule, LlmAgent
 
     async def compile_bundle(
         self,
@@ -199,9 +201,10 @@ class BundleCompiler:
         stamp = utc_now_compact()
         bundle_id = f"{stamp}__{product_stem}__{execution_mode}__{robot_env}__{short_hash}"
 
-        ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule = (
+        ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule, LlmAgent = (
             self._import_runtime_classes()
         )
+        LlmAgent.configure_shared_tools_catalogue(self.tools_path)
 
         resources = self._collect_resource_refs(robot_env=robot_env)
         resource_jids = [str(r.jid) for r in resources]
@@ -215,9 +218,14 @@ class BundleCompiler:
             plan_dir = tmp_dir / "plan"
             safety_dir = tmp_dir / "safety"
             validation_dir = tmp_dir / "validation"
+            catalog_dir = tmp_dir / "catalog"
             plan_dir.mkdir(parents=True, exist_ok=True)
             safety_dir.mkdir(parents=True, exist_ok=True)
             validation_dir.mkdir(parents=True, exist_ok=True)
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+
+            tools_snapshot_path = catalog_dir / "tools.json"
+            shutil.copyfile(self.tools_path, tools_snapshot_path)
 
             product_pw = str(product_meta.get("password", "none"))
             product_jid = str(
@@ -326,6 +334,7 @@ class BundleCompiler:
                     },
                     "source_hashes": source_hashes,
                     "artifacts": {
+                        "tools_json": str(tools_snapshot_path.relative_to(tmp_dir)),
                         "requirements_json": str(requirements_path.relative_to(tmp_dir)),
                         "plan_json": str(plan_path.relative_to(tmp_dir)),
                         "global_fsa_json": str(global_fsa_path.relative_to(tmp_dir)),

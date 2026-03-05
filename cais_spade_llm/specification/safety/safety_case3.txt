@@ -1,0 +1,3 @@
+[Safety Requirements]
+- xarm6 and ur5e should not approach to the assembly board to place at the same time.
+- xarm6 and ur5e should move back home after inserting the pins.

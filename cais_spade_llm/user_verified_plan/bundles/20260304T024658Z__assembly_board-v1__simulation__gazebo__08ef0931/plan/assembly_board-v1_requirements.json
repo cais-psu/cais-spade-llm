@@ -1,0 +1,28 @@
+{
+  "nodes": [
+    {
+      "id": "REQ_1",
+      "type": "requirement",
+      "raw_text": "Assemble part LCP from picking location prusa-mk4-1 to the assembly_board-v1.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "LCP",
+      "context": {
+        "origin": "prusa-mk4-1",
+        "destination": "assembly_board-v1"
+      }
+    },
+    {
+      "id": "REQ_2",
+      "type": "requirement",
+      "raw_text": "Assemble part MRP from picking location prusa-mk4-2 to the assembly_board-v1.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "MRP",
+      "context": {
+        "origin": "prusa-mk4-2",
+        "destination": "assembly_board-v1"
+      }
+    }
+  ]
+}

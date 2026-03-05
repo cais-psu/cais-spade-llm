@@ -48,6 +48,10 @@ class OnlineFsaMonitor:
         self.completed_task_ids: set[str] = set()
         self.failed_task_ids: set[str] = set()
 
+    def matches_fsa(self, fsa: Dict[str, Any]) -> bool:
+        """Return True when the provided FSA is structurally identical."""
+        return (self.fsa or {}) == (fsa or {})
+
     def _log_event(self, record: Dict[str, Any]) -> None:
         try:
             with self.history_path.open("a", encoding="utf-8") as f:
@@ -205,6 +209,17 @@ class OnlineFsaMonitor:
             for tr in self._from_map.get(state or "", [])
             if tr.get("task_id") and str(tr.get("event", "")).endswith(".start")
         })
+
+    def running_task_ids_from_state(self, state: Optional[str] = None) -> List[str]:
+        """
+        Task IDs currently marked as running in a plan FSA state.
+        """
+        parsed = self._parse_state(state or self.current_state or "")
+        return sorted(
+            str(info["run_task_id"])
+            for info in parsed.values()
+            if info.get("status") == "running" and info.get("run_task_id")
+        )
 
     def has_blocked_descendants(self, task_id: str) -> bool:
         """

@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "two robots should not entering the assembly board at the same time",
+      "constraint_type": "mutual_exclusion_zone",
+      "process": null,
+      "product": [],
+      "resources": [
+        "any"
+      ],
+      "event": null,
+      "context": {
+        "zone": "assembly_board-v1",
+        "concurrency_limit": 1,
+        "resource_type": "robot"
+      },
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap/assembly/any/any/pick_approach/zone_assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap/assembly/any/any/place_approach/zone_assembly_board-v1"
+        }
+      ],
+      "ltlf": "G !((ap001 | ap002) & X (ap001 | ap002))"
+    }
+  ]
+}

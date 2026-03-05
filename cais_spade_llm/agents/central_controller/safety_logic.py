@@ -58,6 +58,55 @@ class SafetyLogic:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             return ltlf_formula.to_dfa()
 
+    @staticmethod
+    def _normalize_resource_token(value: Any) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        return token.split("@")[0].lower()
+
+    @staticmethod
+    def _dedupe_keep_order(items: List[str]) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ordered
+
+    def _tool_grounding(self) -> tuple[set[str], dict[str, str], set[str], set[str]]:
+        """
+        Build capability grounding from tools_catalog.
+        Returns:
+          - allowed function names
+          - function -> process map
+          - allowed resource identifiers (owner-agent localparts)
+          - allowed process names
+        """
+        tools_catalog = getattr(self.controller_agent, "tools_catalog", []) or []
+        allowed_functions: set[str] = set()
+        function_process: dict[str, str] = {}
+        allowed_resources: set[str] = set()
+
+        for row in tools_catalog:
+            if not isinstance(row, dict):
+                continue
+            fn = str(row.get("function", "")).strip()
+            if fn:
+                allowed_functions.add(fn)
+                proc = str(row.get("process", "")).strip().lower()
+                if proc and fn not in function_process:
+                    function_process[fn] = proc
+
+            owner = self._normalize_resource_token(row.get("function_owner_agent"))
+            if owner:
+                allowed_resources.add(owner)
+
+        allowed_processes = set(function_process.values())
+        return allowed_functions, function_process, allowed_resources, allowed_processes
+
 
     # ------------------------------------------------------------------ #
     # 1. Load NL safety requirements
@@ -125,12 +174,16 @@ class SafetyLogic:
                 )
             structured = []
 
+        allowed_functions, function_process, allowed_resources, allowed_processes = (
+            self._tool_grounding()
+        )
+
         for idx, r in enumerate(structured, start=1):
             rule_id = r.get("id") or f"SAFE_{idx}"
 
             raw_text        = r.get("raw_text", "")
             constraint_type = r.get("constraint_type")
-            process         = r.get("process")
+            process_raw     = str(r.get("process", "") or "").strip().lower()
 
             product_raw = r.get("product")
             products = []
@@ -139,13 +192,46 @@ class SafetyLogic:
                 products = [str(p).strip() for p in product_raw if p]
 
             resources       = r.get("resources") or []
-            event           = r.get("event")
+            event_raw       = str(r.get("event", "") or "").strip()
             context         = r.get("context")       # expected to be dict or None
+
+            event: str | None = event_raw if event_raw in allowed_functions else None
+            if event_raw and event is None and self.logger:
+                self.logger.warning(
+                    "[SafetyLogic] Rule %s uses unsupported event '%s'; set event=null. "
+                    "Supported functions: %s",
+                    rule_id,
+                    event_raw,
+                    sorted(allowed_functions),
+                )
+
+            if event and event in function_process:
+                process = function_process[event]
+            elif process_raw in allowed_processes:
+                process = process_raw
+            else:
+                process = None
 
             # Normalize resources
             if not isinstance(resources, list):
                 resources = []
-            resources = [str(res).strip() for res in resources if res]
+            normalized_resources: list[str] = []
+            for res in resources:
+                token = self._normalize_resource_token(res)
+                if not token:
+                    continue
+                if token in {"any", "robot"}:
+                    normalized_resources = ["any"]
+                    break
+                if token in allowed_resources:
+                    normalized_resources.append(token)
+                elif self.logger:
+                    self.logger.warning(
+                        "[SafetyLogic] Rule %s references unsupported resource '%s'; dropped.",
+                        rule_id,
+                        token,
+                    )
+            resources = self._dedupe_keep_order(normalized_resources)
 
             # Normalize context (the LLM should return dict or None)
             if not isinstance(context, dict):
@@ -193,13 +279,27 @@ class SafetyLogic:
                     "[SafetyLogic] LLM safety logic generation failed: %s", exc
                 )
             self.logic_raw = {}
-            return msg + " LTLf logic generation failed."
+            raise RuntimeError(f"safety logic generation failed: {exc}") from exc
 
         # 2.5) split LTLf formulas that are conjunctions of independent AP groups
         self._split_rules_on_independent_conjuncts()
 
         # 3) inject labels + full APs + LTLf into rule nodes
         self._apply_labels_into_rules()
+
+        grounded_rules = [
+            rule
+            for rule in self.rules
+            if isinstance(rule, dict)
+            and rule.get("aps")
+            and str(rule.get("ltlf", "") or "").strip()
+        ]
+        if not grounded_rules:
+            allowed_functions, _, _, _ = self._tool_grounding()
+            raise RuntimeError(
+                "no grounded safety rules were generated from the current safety text. "
+                f"Supported function events: {sorted(allowed_functions)}"
+            )
 
         # 4) build a combined safety specification (optional)
         self.global_safety_spec = self._combine_safety_rules()
@@ -331,12 +431,19 @@ class SafetyLogic:
 
         result: Dict[str, Dict[str, Any]] = {}
         items = parsed.get("rules", [])
+        allowed_functions, function_process, allowed_resources, _ = self._tool_grounding()
+        rules_by_id = {
+            str(r.get("id")): r
+            for r in self.rules
+            if isinstance(r, dict) and r.get("id")
+        }
+        unresolved: dict[str, list[str]] = {}
 
         for item in items:
             if not isinstance(item, dict):
                 continue
-            rid  = item.get("id")
-            aps  = item.get("aps", [])
+            rid = str(item.get("id", "")).strip()
+            aps = item.get("aps", [])
             ltlf = item.get("ltlf", "")
 
             if not rid:
@@ -344,12 +451,117 @@ class SafetyLogic:
             if not isinstance(aps, list):
                 aps = []
 
-            aps = [str(a).strip() for a in aps if a]
+            raw_aps = [str(a).strip() for a in aps if a]
+            ltlf_text = str(ltlf).strip()
+
+            rule = rules_by_id.get(rid, {})
+            rule_event = str(rule.get("event", "") or "").strip()
+            rule_process = str(rule.get("process", "") or "").strip().lower()
+            rule_resources = rule.get("resources") or []
+            fallback_resource = "any"
+            if isinstance(rule_resources, list):
+                for raw_res in rule_resources:
+                    token = self._normalize_resource_token(raw_res)
+                    if not token:
+                        continue
+                    if token in {"any", "robot"}:
+                        fallback_resource = "any"
+                        break
+                    if token in allowed_resources:
+                        fallback_resource = token
+                        break
+
+            sanitized_aps: list[str] = []
+            unresolved_events_for_rule: list[str] = []
+
+            for raw_ap in raw_aps:
+                parts = raw_ap.split("/")
+                if len(parts) < 6:
+                    if self.logger:
+                        self.logger.warning(
+                            "[SafetyLogic] Rule %s AP '%s' ignored (expected 6 segments).",
+                            rid,
+                            raw_ap,
+                        )
+                    continue
+
+                prefix, ap_process, ap_product, ap_resource, ap_event, ap_context = parts[:6]
+                event_token = str(ap_event).strip()
+                if event_token not in allowed_functions:
+                    if rule_event in allowed_functions:
+                        event_token = rule_event
+                    else:
+                        unresolved_events_for_rule.append(event_token or raw_ap)
+                        continue
+
+                process_token = (
+                    function_process.get(event_token)
+                    or str(ap_process).strip().lower()
+                    or rule_process
+                    or "any"
+                )
+                product_token = str(ap_product).strip() or "any"
+                context_token = str(ap_context).strip() or "any"
+                prefix_token = str(prefix).strip() or "ap"
+
+                resource_token = self._normalize_resource_token(ap_resource)
+                if resource_token not in {"any", "robot"} and resource_token not in allowed_resources:
+                    resource_token = fallback_resource
+                if resource_token == "robot":
+                    resource_token = "any"
+                if not resource_token:
+                    resource_token = "any"
+
+                normalized_ap = "/".join(
+                    [
+                        prefix_token,
+                        process_token,
+                        product_token,
+                        resource_token,
+                        event_token,
+                        context_token,
+                    ]
+                )
+                ltlf_text = ltlf_text.replace(raw_ap, normalized_ap)
+                sanitized_aps.append(normalized_ap)
+
+            sanitized_aps = self._dedupe_keep_order(sanitized_aps)
+
+            if not sanitized_aps and rule_event in allowed_functions:
+                fallback_ap = "/".join(
+                    [
+                        "ap",
+                        function_process.get(rule_event, rule_process or "any"),
+                        "any",
+                        fallback_resource,
+                        rule_event,
+                        "any",
+                    ]
+                )
+                sanitized_aps = [fallback_ap]
+                if not ltlf_text or fallback_ap not in ltlf_text:
+                    ltlf_text = fallback_ap
+
+            if unresolved_events_for_rule:
+                unresolved[rid] = self._dedupe_keep_order(unresolved_events_for_rule)
+
+            if sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
+                ltlf_text = " & ".join(sanitized_aps) if len(sanitized_aps) > 1 else sanitized_aps[0]
 
             result[str(rid)] = {
-                "aps": aps,
-                "ltlf": str(ltlf).strip(),
+                "aps": sanitized_aps,
+                "ltlf": ltlf_text,
             }
+
+        blocking = {rid: evs for rid, evs in unresolved.items() if not result.get(rid, {}).get("aps")}
+        if blocking:
+            detail = ", ".join(
+                f"{rid}={events}" for rid, events in sorted(blocking.items())
+            )
+            raise RuntimeError(
+                "Safety logic references unsupported events that cannot be grounded to robot actions: "
+                f"{detail}. Supported functions: {sorted(allowed_functions)}"
+            )
 
         return result
 
