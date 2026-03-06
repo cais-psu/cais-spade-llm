@@ -26,7 +26,6 @@ from launch.actions import (
     OpaqueFunction,
     RegisterEventHandler,
     SetEnvironmentVariable,
-    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -37,6 +36,13 @@ from launch.event_handlers import OnProcessExit
 from uf_ros_lib.uf_robot_utils import get_xacro_content, generate_ros2_control_params_temp_file
 
 ROBOT_BASE_Y = 0.50
+CONTROLLER_MANAGER_TIMEOUT_SEC = '60.0'
+CONTROLLER_SERVICE_CALL_TIMEOUT_SEC = '20.0'
+CONTROLLER_SWITCH_TIMEOUT_SEC = '20.0'
+RG2_FINGER_WIDTH_EFFORT = '18'
+RG2_FINGER_WIDTH_VELOCITY = '0.40'
+XARM_GRIPPER_EFFORT = '12'
+XARM_GRIPPER_VELOCITY = '0.60'
 
 
 def _strip_gazebo_ros2_control_plugin(root):
@@ -45,6 +51,23 @@ def _strip_gazebo_ros2_control_plugin(root):
         plugin = gazebo_elem.find('plugin')
         if plugin is not None and 'gazebo_ros2_control' in (plugin.get('filename', '') + plugin.get('name', '')):
             root.remove(gazebo_elem)
+
+
+def _make_controller_spawner(controller_names):
+    return Node(
+        package='controller_manager',
+        executable='spawner',
+        output='screen',
+        arguments=[
+            *controller_names,
+            '--controller-manager', '/controller_manager',
+            '--controller-manager-timeout', CONTROLLER_MANAGER_TIMEOUT_SEC,
+            '--service-call-timeout', CONTROLLER_SERVICE_CALL_TIMEOUT_SEC,
+            '--switch-timeout', CONTROLLER_SWITCH_TIMEOUT_SEC,
+            '--activate-as-group',
+        ],
+        parameters=[{'use_sim_time': True}],
+    )
 
 
 def _inject_mimic_plugins(root, max_effort='5.0', sensitiveness='0.001'):
@@ -121,8 +144,8 @@ def _tune_rg2_joint_dynamics(root, prefix):
             continue
 
         if name == f'{prefix}finger_width':
-            limit.set('effort', '18')
-            limit.set('velocity', '0.15')
+            limit.set('effort', RG2_FINGER_WIDTH_EFFORT)
+            limit.set('velocity', RG2_FINGER_WIDTH_VELOCITY)
 
 
 def _tune_rg2_contact_properties(root, prefix):
@@ -173,8 +196,8 @@ def _tune_xarm_gripper_joint_dynamics(root, prefix):
         if limit is None:
             continue
         # Restore snappier motion; attach will be handled by IFRA LinkAttacher.
-        limit.set('effort', '12')
-        limit.set('velocity', '0.30')
+        limit.set('effort', XARM_GRIPPER_EFFORT)
+        limit.set('velocity', XARM_GRIPPER_VELOCITY)
 
 
 def _tune_xarm_grasp_fix_plugin(root):
@@ -537,93 +560,60 @@ def launch_setup(context, *args, **kwargs):
         Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
-    perception_actions = []
+    post_controller_actions = [auto_link_attacher]
+    perception_log = None
     if perception_script:
-        perception_actions.append(
-            TimerAction(
-                period=8.0,
-                actions=[
-                    ExecuteProcess(
-                        cmd=[
-                            'bash',
-                            '-lc',
-                            [
-                                'source /opt/ros/humble/setup.bash && '
-                                'source ',
-                                os.path.expanduser('~/ros2_ws/install/setup.bash'),
-                                ' && python3.10 ',
-                                perception_script,
-                                ' --ros-args -p use_sim_time:=true',
-                            ],
-                        ],
-                        output='screen',
-                        condition=IfCondition(run_perception),
-                    )
+        post_controller_actions.append(
+            ExecuteProcess(
+                cmd=[
+                    'bash',
+                    '-lc',
+                    [
+                        'source /opt/ros/humble/setup.bash && '
+                        'source ',
+                        os.path.expanduser('~/ros2_ws/install/setup.bash'),
+                        ' && python3.10 ',
+                        perception_script,
+                        ' --ros-args -p use_sim_time:=true',
+                    ],
                 ],
+                output='screen',
+                condition=IfCondition(run_perception),
             )
         )
     else:
-        perception_actions.append(
-            LogInfo(
-                msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
-                    'Skipping automatic perception startup.'
-            )
+        perception_log = LogInfo(
+            msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
+                'Skipping automatic perception startup.'
         )
 
-    # All controllers under the single /controller_manager
-    controller_nodes = [
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['joint_state_broadcaster',
-                       '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=[f'{xarm_prefix}xarm6_traj_controller',
-                       '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=[f'{xarm_prefix}xarm_gripper_traj_controller',
-                       '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['ur5e_joint_trajectory_controller',
-                       '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['ur5e_rg2_gripper_traj_controller',
-                       '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-    ]
+    controller_spawner = _make_controller_spawner([
+        'joint_state_broadcaster',
+        f'{xarm_prefix}xarm6_traj_controller',
+        f'{xarm_prefix}xarm_gripper_traj_controller',
+        'ur5e_joint_trajectory_controller',
+        'ur5e_rg2_gripper_traj_controller',
+    ])
 
     launch_actions = [
         gazebo_launch,
         combined_rsp,
-        # Delay spawn 30s to give Gazebo (WSL) time to fully initialize
-        TimerAction(period=30.0, actions=[combined_spawn]),
-        # Start auto attach/detach helper after spawn/controllers are up.
-        TimerAction(period=36.0, actions=[auto_link_attacher]),
+        combined_spawn,
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=combined_spawn,
-                on_exit=controller_nodes,
+                on_exit=[controller_spawner],
+            )
+        ),
+        RegisterEventHandler(
+            event_handler=OnProcessExit(
+                target_action=controller_spawner,
+                on_exit=post_controller_actions,
             )
         ),
     ]
-    launch_actions.extend(perception_actions)
+    if perception_log is not None:
+        launch_actions.append(perception_log)
     if set_gazebo_plugin_path is not None:
         launch_actions.insert(0, set_gazebo_plugin_path)
     return launch_actions

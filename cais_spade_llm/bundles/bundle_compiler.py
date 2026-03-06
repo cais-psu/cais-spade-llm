@@ -112,6 +112,43 @@ class BundleCompiler:
             return p
         return self.project_root / p
 
+    def _load_parent_plan_context(
+        self,
+        parent_bundle_id: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        bid = str(parent_bundle_id or "").strip()
+        if not bid:
+            return [], []
+
+        manifest = self.store.load_manifest(bid)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"parent plan set not found: {bid}")
+
+        root = self.store.bundle_dir(bid)
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+
+        requirements_nodes: list[dict[str, Any]] = []
+        requirements_rel = str(artifacts.get("requirements_json", "")).strip()
+        if requirements_rel:
+            requirements_path = (root / requirements_rel).resolve()
+            if requirements_path.exists():
+                requirements_payload = self._load_json(requirements_path)
+                raw_nodes = requirements_payload.get("nodes", [])
+                if isinstance(raw_nodes, list):
+                    requirements_nodes = [node for node in raw_nodes if isinstance(node, dict)]
+
+        task_nodes: list[dict[str, Any]] = []
+        plan_rel = str(artifacts.get("plan_json", "")).strip()
+        if plan_rel:
+            plan_path = (root / plan_rel).resolve()
+            if plan_path.exists():
+                plan_payload = self._load_json(plan_path)
+                raw_nodes = plan_payload.get("nodes", [])
+                if isinstance(raw_nodes, list):
+                    task_nodes = [node for node in raw_nodes if isinstance(node, dict)]
+
+        return requirements_nodes, task_nodes
+
     @staticmethod
     def _import_runtime_classes():
         try:
@@ -132,6 +169,102 @@ class BundleCompiler:
             from cais_spade_llm.resources.sensor.camera_module import CameraModule
         return ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule, LlmAgent
 
+    @staticmethod
+    def _task_nodes_hash(nodes: list[dict[str, Any]]) -> str:
+        task_nodes = [node for node in nodes if isinstance(node, dict) and node.get("type") == "task"]
+        canonical = json.dumps(task_nodes, sort_keys=True, separators=(",", ":"), default=str)
+        return sha256_text(canonical)
+
+    @staticmethod
+    def _violated_rules(violations: list[dict[str, Any]]) -> list[str]:
+        return sorted(
+            {
+                str(v.get("violated_rule_id"))
+                for v in violations
+                if isinstance(v, dict) and v.get("violated_rule_id")
+            }
+        )
+
+    @classmethod
+    def build_validation_payload(
+        cls,
+        *,
+        ok: bool,
+        violations: list[dict[str, Any]],
+        auto_replans_used: int,
+        stop_reason: str,
+    ) -> dict[str, Any]:
+        violated_rules = cls._violated_rules(violations)
+        return {
+            "ok": bool(ok),
+            "violations": violations,
+            "violated_rules": violated_rules,
+            "witness_count": len(violations),
+            "auto_replans_used": int(auto_replans_used),
+            "stop_reason": str(stop_reason),
+        }
+
+    @classmethod
+    async def run_offline_repair_loop(
+        cls,
+        *,
+        product_agent: Any,
+        validator: Any,
+        product_jid: str,
+        auto_replan_max_attempts: int,
+        seed_replan_violations: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        planner = product_agent.process_planner
+        if seed_replan_violations:
+            await planner.replan_with_feedback_offline(seed_replan_violations)
+            planner.compile_global_fsa()
+
+        auto_replans_used = 0
+        while True:
+            ok, violations = validator.validate_fsa_offline(
+                fsa=planner.global_fsa or {},
+                plan={"nodes": planner.nodes},
+                product_jid=product_jid,
+            )
+            if ok:
+                stop_reason = "initial_valid" if auto_replans_used == 0 else "repaired_valid"
+                return cls.build_validation_payload(
+                    ok=True,
+                    violations=violations,
+                    auto_replans_used=auto_replans_used,
+                    stop_reason=stop_reason,
+                )
+
+            if auto_replans_used >= auto_replan_max_attempts:
+                return cls.build_validation_payload(
+                    ok=False,
+                    violations=violations,
+                    auto_replans_used=auto_replans_used,
+                    stop_reason="max_attempts_reached",
+                )
+
+            before_hash = cls._task_nodes_hash(planner.nodes)
+            auto_replans_used += 1
+            try:
+                await planner.replan_with_feedback_offline(violations)
+                after_hash = cls._task_nodes_hash(planner.nodes)
+                if before_hash == after_hash:
+                    return cls.build_validation_payload(
+                        ok=False,
+                        violations=violations,
+                        auto_replans_used=auto_replans_used,
+                        stop_reason="repair_no_change",
+                    )
+                planner.compile_global_fsa()
+            except Exception:
+                log.exception("Offline replan attempt %d failed.", auto_replans_used)
+                return cls.build_validation_payload(
+                    ok=False,
+                    violations=violations,
+                    auto_replans_used=auto_replans_used,
+                    stop_reason="repair_exception",
+                )
+
     async def compile_bundle(
         self,
         *,
@@ -140,6 +273,9 @@ class BundleCompiler:
         robot_env: str,
         product_requirement_file: str | None = None,
         safety_requirement_file: str | None = None,
+        auto_replan_max_attempts: int = 3,
+        refinement_feedback: str = "",
+        parent_bundle_id: str = "",
     ) -> dict[str, Any]:
         if not self.tools_path.exists():
             raise FileNotFoundError(
@@ -158,7 +294,9 @@ class BundleCompiler:
         default_product_spec_file = str(product_meta.get("product_specification_file", "")).strip()
         product_spec_file = str(product_requirement_file or default_product_spec_file).strip()
         if not product_spec_file:
-            raise ValueError("product manifest missing product_specification_file")
+            raise ValueError(
+                "No product requirement file selected and product manifest has no product_specification_file default"
+            )
         product_spec_path = self._abs_path(product_spec_file)
         if not product_spec_path.exists():
             raise FileNotFoundError(f"requirements file missing: {product_spec_path}")
@@ -212,6 +350,11 @@ class BundleCompiler:
         os.environ["ROBOT_ENV"] = str(robot_env)
         os.environ["EXECUTION_MODE"] = str(execution_mode)
         os.environ.setdefault("PERCEPTION_BACKEND", "none")
+
+        auto_replan_max_attempts = max(0, min(int(auto_replan_max_attempts), 10))
+        refinement_feedback = str(refinement_feedback or "").strip()
+        parent_bundle_id = str(parent_bundle_id or "").strip()
+        previous_preview_requirements, previous_preview_tasks = self._load_parent_plan_context(parent_bundle_id)
 
         with self.store.generation_lock(timeout_sec=0.0):
             tmp_dir = self.store.create_temp_bundle_dir(bundle_id)
@@ -269,12 +412,19 @@ class BundleCompiler:
                     safety_dir,
                 )
 
-                await product_agent.process_planner.build_high_level(requirement_text)
+                await product_agent.process_planner.build_high_level(
+                    requirement_text,
+                    refinement_feedback=refinement_feedback,
+                    previous_preview_requirements=previous_preview_requirements,
+                )
                 requirements_path = plan_dir / f"{product_stem}_requirements.json"
                 await asyncio.to_thread(product_agent.process_planner.save, requirements_path)
 
                 await product_agent.process_planner.expand_requirements_to_tasks(
-                    safety_text=safety_text
+                    safety_text=safety_text,
+                    refinement_feedback=refinement_feedback,
+                    previous_preview_requirements=previous_preview_requirements,
+                    previous_preview_tasks=previous_preview_tasks,
                 )
                 plan_path = plan_dir / f"{product_stem}_plan.json"
                 await asyncio.to_thread(product_agent.process_planner.save, plan_path)
@@ -289,30 +439,28 @@ class BundleCompiler:
                     rules=safety_logic.rules,
                     dfa_map=dfa_map,
                 )
-                ok, violations = validator.validate_fsa_offline(
-                    fsa=product_agent.process_planner.global_fsa or {},
-                    plan={"nodes": product_agent.process_planner.nodes},
+                validation_payload = await self.run_offline_repair_loop(
+                    product_agent=product_agent,
+                    validator=validator,
                     product_jid=str(product_agent.jid),
+                    auto_replan_max_attempts=auto_replan_max_attempts,
                 )
-                violated_rules = sorted(
-                    {
-                        str(v.get("violated_rule_id"))
-                        for v in violations
-                        if v.get("violated_rule_id")
-                    }
+                await asyncio.to_thread(product_agent.process_planner.save, plan_path)
+                await asyncio.to_thread(
+                    product_agent.process_planner.save_global_fsa,
+                    global_fsa_path,
                 )
-                validation_payload = {
-                    "ok": bool(ok),
-                    "violations": violations,
-                    "violated_rules": violated_rules,
-                    "witness_count": len(violations),
-                }
                 validation_path = validation_dir / "offline_validation.json"
                 with validation_path.open("w", encoding="utf-8") as f:
                     json.dump(validation_payload, f, indent=2)
 
                 dot_files = sorted(p.name for p in safety_dir.glob("SAFE_*_dfa.dot"))
                 png_files = sorted(p.name for p in safety_dir.glob("SAFE_*_dfa.png"))
+                ok = bool(validation_payload.get("ok", False))
+                violated_rules = list(validation_payload.get("violated_rules", []))
+                witness_count = int(validation_payload.get("witness_count", 0))
+                auto_replans_used = int(validation_payload.get("auto_replans_used", 0))
+                stop_reason = str(validation_payload.get("stop_reason", "max_attempts_reached"))
                 status = BUNDLE_STATUS_DRAFT if ok else BUNDLE_STATUS_INVALID
                 manifest = {
                     "bundle_id": bundle_id,
@@ -333,6 +481,11 @@ class BundleCompiler:
                         "safety_model": getattr(cca_agent, "non_function_model", ""),
                     },
                     "source_hashes": source_hashes,
+                    "replan_policy": {
+                        "auto_replan_max_attempts": auto_replan_max_attempts,
+                    },
+                    "parent_bundle_id": parent_bundle_id,
+                    "refinement_feedback": refinement_feedback,
                     "artifacts": {
                         "tools_json": str(tools_snapshot_path.relative_to(tmp_dir)),
                         "requirements_json": str(requirements_path.relative_to(tmp_dir)),
@@ -346,7 +499,9 @@ class BundleCompiler:
                     "validation_summary": {
                         "ok": bool(ok),
                         "violated_rules": violated_rules,
-                        "witness_count": len(violations),
+                        "witness_count": witness_count,
+                        "auto_replans_used": auto_replans_used,
+                        "stop_reason": stop_reason,
                     },
                 }
 
@@ -360,8 +515,11 @@ class BundleCompiler:
                     "verified": False,
                     "product_name": product_name,
                     "product_spec_file": product_spec_file,
+                    "safety_file": safety_file,
                     "execution_mode": execution_mode,
                     "robot_env": robot_env,
+                    "parent_bundle_id": parent_bundle_id,
+                    "refinement_feedback": refinement_feedback,
                     "manifest_path": str(final_dir / "bundle_manifest.json"),
                 }
                 self.store.upsert_bundle_summary(summary)

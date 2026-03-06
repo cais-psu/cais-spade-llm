@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os, uuid
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -50,7 +52,7 @@ class ProductAgent(LlmAgent):
         :param resource_jids: List of RA JIDs to target (first is used).
         :param product_specification_file: Path to spec text (utf-8). Optional.
         :param instruction_override: If provided, this text is used instead of reading a file.
-        :param replan_mode: Online replanning strategy — "llm" (prompt-level guidance, default).
+        :param replan_mode: Online replanning strategy — "des", "llm", or "none".
         """
         super().__init__(jid, password, name=name, agent_role="product", **kw)
 
@@ -106,6 +108,35 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
+        self.runtime_repair_state = "idle"
+        self.plan_safety_alert: dict[str, Any] | None = None
+        self.kickoff_result: dict[str, Any] = {
+            "success": False,
+            "message": "kickoff pending",
+            "retries_used": 0,
+            "retries_max": 0,
+            "violated_rules": [],
+            "witness_count": 0,
+            "updated_at_utc": "",
+            "product_name": name,
+            "product_jid": str(self.jid),
+            "stage": "kickoff",
+            "alert": None,
+        }
+        self._kickoff_result_event = asyncio.Event()
+        precomputed_policy = (
+            self.precomputed_bundle.get("replan_policy", {})
+            if isinstance(self.precomputed_bundle.get("replan_policy"), dict)
+            else {}
+        )
+        if precomputed_policy:
+            try:
+                self._runtime_repair_max_attempts = max(
+                    0,
+                    min(int(precomputed_policy.get("auto_replan_max_attempts", 3) or 0), 10),
+                )
+            except Exception:
+                self._runtime_repair_max_attempts = 3
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -126,6 +157,141 @@ class ProductAgent(LlmAgent):
             "plan": {"nodes": nodes},
         }
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _violation_summary(violations: list[dict[str, Any]] | None) -> tuple[list[str], int]:
+        items = violations if isinstance(violations, list) else []
+        violated_rules = sorted(
+            {
+                str(v.get("violated_rule_id"))
+                for v in items
+                if isinstance(v, dict) and v.get("violated_rule_id")
+            }
+        )
+        return violated_rules, len(items)
+
+    def _task_nodes_hash(self) -> str:
+        task_nodes = [
+            node
+            for node in self.process_planner.nodes
+            if isinstance(node, dict) and node.get("type") == "task"
+        ]
+        canonical = json.dumps(task_nodes, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _build_plan_safety_alert(
+        self,
+        *,
+        stage: str,
+        message: str,
+        retries_used: int,
+        retries_max: int,
+        violations: list[dict[str, Any]] | None = None,
+        paused: bool = False,
+    ) -> dict[str, Any]:
+        violated_rules, witness_count = self._violation_summary(violations)
+        return {
+            "product_name": self.agent_name,
+            "product_jid": str(self.jid),
+            "stage": str(stage),
+            "message": str(message),
+            "retries_used": int(retries_used),
+            "retries_max": int(retries_max),
+            "violated_rules": violated_rules,
+            "witness_count": witness_count,
+            "paused": bool(paused),
+            "updated_at_utc": self._utc_now_iso(),
+        }
+
+    def _set_plan_safety_alert(
+        self,
+        *,
+        stage: str,
+        message: str,
+        retries_used: int,
+        retries_max: int,
+        violations: list[dict[str, Any]] | None = None,
+        paused: bool = False,
+    ) -> dict[str, Any]:
+        alert = self._build_plan_safety_alert(
+            stage=stage,
+            message=message,
+            retries_used=retries_used,
+            retries_max=retries_max,
+            violations=violations,
+            paused=paused,
+        )
+        self.plan_safety_alert = alert
+        return alert
+
+    def _clear_plan_safety_alert(self) -> None:
+        self.plan_safety_alert = None
+
+    def get_plan_safety_alert(self) -> dict[str, Any] | None:
+        return dict(self.plan_safety_alert) if isinstance(self.plan_safety_alert, dict) else None
+
+    def _set_kickoff_result(
+        self,
+        *,
+        success: bool,
+        message: str,
+        retries_used: int,
+        retries_max: int,
+        violations: list[dict[str, Any]] | None = None,
+        alert: dict[str, Any] | None = None,
+    ) -> None:
+        violated_rules, witness_count = self._violation_summary(violations)
+        self.kickoff_result = {
+            "success": bool(success),
+            "message": str(message),
+            "retries_used": int(retries_used),
+            "retries_max": int(retries_max),
+            "violated_rules": violated_rules,
+            "witness_count": witness_count,
+            "updated_at_utc": self._utc_now_iso(),
+            "product_name": self.agent_name,
+            "product_jid": str(self.jid),
+            "stage": "kickoff",
+            "alert": dict(alert) if isinstance(alert, dict) else None,
+        }
+        if not self._kickoff_result_event.is_set():
+            self._kickoff_result_event.set()
+
+    async def wait_for_kickoff_result(self, timeout: float | None = None) -> dict[str, Any]:
+        if not self._kickoff_result_event.is_set():
+            try:
+                if timeout is None:
+                    await self._kickoff_result_event.wait()
+                else:
+                    await asyncio.wait_for(self._kickoff_result_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                message = (
+                    f"{self.agent_name}: startup plan validation timed out after {timeout:.1f}s."
+                )
+                return {
+                    "success": False,
+                    "message": message,
+                    "retries_used": 0,
+                    "retries_max": 0,
+                    "violated_rules": [],
+                    "witness_count": 0,
+                    "updated_at_utc": self._utc_now_iso(),
+                    "product_name": self.agent_name,
+                    "product_jid": str(self.jid),
+                    "stage": "kickoff",
+                    "alert": self._build_plan_safety_alert(
+                        stage="kickoff",
+                        message=message,
+                        retries_used=0,
+                        retries_max=0,
+                        violations=[],
+                    ),
+                }
+        return dict(self.kickoff_result)
+
 
 
     def _persist_plan_snapshot(self) -> None:
@@ -140,7 +306,7 @@ class ProductAgent(LlmAgent):
             with self.plan_path.open("w", encoding="utf-8") as f:
                 json.dump({"nodes": self.process_planner.nodes}, f, indent=2)
 
-            self.logger.info(f"[Product] Saved plan to {self.plan_path.resolve()}")
+            self.logger.debug(f"[Product] Saved plan to {self.plan_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist plan snapshot.")
 
@@ -156,13 +322,15 @@ class ProductAgent(LlmAgent):
             payload = {
                 "part_tracker": self.part_tracker,
                 "execution_timeline": self.execution_timeline,
+                "runtime_repair_state": self.runtime_repair_state,
+                "plan_safety_alert": self.plan_safety_alert,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
             self.product_state_path.parent.mkdir(parents=True, exist_ok=True)
             with self.product_state_path.open("w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
 
-            self.logger.info(f"[Product] Saved product state to {self.product_state_path.resolve()}")
+            self.logger.debug(f"[Product] Saved product state to {self.product_state_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist product state.")
 
@@ -179,7 +347,7 @@ class ProductAgent(LlmAgent):
             with self.resource_state_path.open("w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
 
-            self.logger.info(f"[Product] Saved resource state to {self.resource_state_path.resolve()}")
+            self.logger.debug(f"[Product] Saved resource state to {self.resource_state_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist resource state.")
 
@@ -314,6 +482,11 @@ class ProductAgent(LlmAgent):
         if product_state:
             self.part_tracker = product_state.get("part_tracker", {})
             self.execution_timeline = product_state.get("execution_timeline", [])
+            runtime_repair_state = str(product_state.get("runtime_repair_state", "")).strip()
+            if runtime_repair_state:
+                self.runtime_repair_state = runtime_repair_state
+            alert = product_state.get("plan_safety_alert")
+            self.plan_safety_alert = dict(alert) if isinstance(alert, dict) else None
             self.logger.info(
                 f"[Product] Restored product state: {len(self.part_tracker)} parts, "
                 f"{len(self.execution_timeline)} timeline events"
@@ -391,9 +564,9 @@ class ProductAgent(LlmAgent):
         if self.product_specification_file:
             try:
                 cwd = os.getcwd()
-                self.logger.info(f"[Product] Current working directory: {cwd}")
+                self.logger.debug(f"[Product] Current working directory: {cwd}")
                 p = Path(self.product_specification_file)
-                self.logger.info(f"[Product] Attempting to open: {p.resolve()}")
+                self.logger.debug(f"[Product] Attempting to open: {p.resolve()}")
                 txt = p.read_text(encoding="utf-8").strip()
                 if txt:
                     return txt
@@ -670,65 +843,199 @@ class ProductAgent(LlmAgent):
     class _Kickoff(OneShotBehaviour):
         async def run(self):
             agent: "ProductAgent" = self.agent
+            retries_used = 0
+            used_precomputed = False
+            max_retries = 3
 
-            # Initial Plan Build
-            instruction = agent._extract_requirement_text()
-            safety_text = agent._read_safety_text()
-            agent.safety_text = safety_text  # Store for later use in replanning
+            try:
+                instruction = agent._extract_requirement_text()
+                safety_text = agent._read_safety_text()
+                agent.safety_text = safety_text
+                agent.runtime_repair_state = "idle"
+                agent._runtime_repair_fail_streak = 0
+                agent._clear_plan_safety_alert()
 
-            used_precomputed = agent._load_precomputed_plan_bundle()
-            if not used_precomputed:
-                await agent._build_plan(instruction, safety_text)
+                used_precomputed = agent._load_precomputed_plan_bundle()
+                max_retries = 0 if used_precomputed else 3
+                if not used_precomputed:
+                    if not instruction:
+                        raise RuntimeError("no product requirement text available for startup planning")
+                    await agent._build_plan(instruction, safety_text)
 
-            # Retry Loop for Safety
-            max_retries = 1 if used_precomputed else 3
-            attempt = 0
-            
-            while attempt < max_retries:
-                attempt += 1
-                agent.logger.info(f"[Product] Validating Plan (Attempt {attempt}/{max_retries})...")
-                
-                # 1. Send to CCA
-                payload = agent._build_plan_validation_payload()
-                msg = Message(to=agent.cca_jid)
-                msg.set_metadata("type", "plan_safety_check")
-                msg.body = json.dumps(payload)
-                await self.send(msg)
-                
-                # 2. Wait for Reply
-                reply = None
-                while reply is None:
-                    reply = await self.receive(timeout=5.0)
-
-                if reply.metadata.get("type") != "plan_safety_result":
-                    continue # or handle error
-
-                data = json.loads(reply.body)
-                is_safe = data.get("ok", False)
-                violations = data.get("violations", [])
-
-                if is_safe:
-                    agent.logger.info("[Product] Plan PASSED safety validation.")
-                    agent._ensure_plan_result_inbox()
-                    agent.add_behaviour(agent._PlanExecutor())
-                    return # Exit Kickoff successfully
-
-                if used_precomputed:
-                    agent.logger.error(
-                        "[Bundle] Precomputed plan failed safety validation (%d violations). Aborting kickoff.",
-                        len(violations),
+                while True:
+                    agent.logger.info(
+                        "[Product] Validating startup plan (auto-replans %d/%d)...",
+                        retries_used,
+                        max_retries,
                     )
-                    return
 
-                # 3. Handle Failure
-                agent.logger.warning(f"[Product] Plan FAILED safety check ({len(violations)} violations). Triggering Re-plan...")
-                
-                # Call the new Re-planning method
-                await agent.process_planner.replan_with_feedback_offline(violations)
-                
-                # Loop continues to validate the NEW plan
+                    payload = agent._build_plan_validation_payload()
+                    msg = Message(to=agent.cca_jid)
+                    msg.set_metadata("type", "plan_safety_check")
+                    msg.body = json.dumps(payload)
+                    await self.send(msg)
 
-            agent.logger.error("[Product] Max replanning attempts reached. Aborting.")
+                    reply = None
+                    while reply is None:
+                        reply = await self.receive(timeout=5.0)
+
+                    if reply.metadata.get("type") != "plan_safety_result":
+                        continue
+
+                    data = json.loads(reply.body or "{}")
+                    is_safe = bool(data.get("ok", False))
+                    violations = data.get("violations")
+                    if not isinstance(violations, list):
+                        violations = []
+
+                    if is_safe:
+                        message = (
+                            f"{agent.agent_name}: loaded verified plan set passed startup safety validation."
+                            if used_precomputed
+                            else f"{agent.agent_name}: startup plan passed safety validation."
+                        )
+                        agent.logger.info("[Product] Plan PASSED safety validation.")
+                        agent._clear_plan_safety_alert()
+                        agent._ensure_plan_result_inbox()
+                        agent.add_behaviour(agent._PlanExecutor())
+                        agent._set_kickoff_result(
+                            success=True,
+                            message=message,
+                            retries_used=retries_used,
+                            retries_max=max_retries,
+                            violations=[],
+                        )
+                        return
+
+                    if used_precomputed:
+                        message = (
+                            f"{agent.agent_name}: verified plan set failed startup safety validation "
+                            f"({len(violations)} witness(es)); startup aborted."
+                        )
+                        agent.logger.error(
+                            "[Bundle] Precomputed plan failed safety validation (%d violations). Aborting kickoff.",
+                            len(violations),
+                        )
+                        alert = agent._set_plan_safety_alert(
+                            stage="kickoff",
+                            message=message,
+                            retries_used=0,
+                            retries_max=0,
+                            violations=violations,
+                            paused=False,
+                        )
+                        agent._set_kickoff_result(
+                            success=False,
+                            message=message,
+                            retries_used=0,
+                            retries_max=0,
+                            violations=violations,
+                            alert=alert,
+                        )
+                        return
+
+                    if retries_used >= max_retries:
+                        message = (
+                            f"{agent.agent_name}: startup plan still violates safety after "
+                            f"{retries_used}/{max_retries} auto-replan attempt(s); startup aborted."
+                        )
+                        agent.logger.error("[Product] Max replanning attempts reached. Aborting.")
+                        alert = agent._set_plan_safety_alert(
+                            stage="kickoff",
+                            message=message,
+                            retries_used=retries_used,
+                            retries_max=max_retries,
+                            violations=violations,
+                            paused=False,
+                        )
+                        agent._set_kickoff_result(
+                            success=False,
+                            message=message,
+                            retries_used=retries_used,
+                            retries_max=max_retries,
+                            violations=violations,
+                            alert=alert,
+                        )
+                        return
+
+                    next_attempt = retries_used + 1
+                    before_hash = agent._task_nodes_hash()
+                    agent.logger.warning(
+                        "[Product] Startup plan failed safety check (%d violation(s)); triggering auto-replan %d/%d.",
+                        len(violations),
+                        next_attempt,
+                        max_retries,
+                    )
+                    try:
+                        retries_used = next_attempt
+                        await agent.process_planner.replan_with_feedback_offline(violations)
+                        if before_hash == agent._task_nodes_hash():
+                            message = (
+                                f"{agent.agent_name}: startup auto-replan produced no plan change on "
+                                f"attempt {retries_used}/{max_retries}; startup aborted."
+                            )
+                            alert = agent._set_plan_safety_alert(
+                                stage="kickoff",
+                                message=message,
+                                retries_used=retries_used,
+                                retries_max=max_retries,
+                                violations=violations,
+                                paused=False,
+                            )
+                            agent._set_kickoff_result(
+                                success=False,
+                                message=message,
+                                retries_used=retries_used,
+                                retries_max=max_retries,
+                                violations=violations,
+                                alert=alert,
+                            )
+                            return
+                        agent.process_planner.compile_global_fsa()
+                        await asyncio.to_thread(agent._persist_plan_snapshot)
+                        await asyncio.to_thread(agent.process_planner.save_global_fsa, agent.global_fsa_path)
+                    except Exception as exc:
+                        message = (
+                            f"{agent.agent_name}: startup auto-replan attempt {retries_used}/{max_retries} "
+                            f"failed ({exc}); startup aborted."
+                        )
+                        agent.logger.exception("[Product] Startup auto-replan attempt failed.")
+                        alert = agent._set_plan_safety_alert(
+                            stage="kickoff",
+                            message=message,
+                            retries_used=retries_used,
+                            retries_max=max_retries,
+                            violations=violations,
+                            paused=False,
+                        )
+                        agent._set_kickoff_result(
+                            success=False,
+                            message=message,
+                            retries_used=retries_used,
+                            retries_max=max_retries,
+                            violations=violations,
+                            alert=alert,
+                        )
+                        return
+            except Exception as exc:
+                message = f"{agent.agent_name}: kickoff failed ({exc})."
+                agent.logger.exception("[Product] Kickoff failed.")
+                alert = agent._set_plan_safety_alert(
+                    stage="kickoff",
+                    message=message,
+                    retries_used=retries_used,
+                    retries_max=max_retries,
+                    violations=[],
+                    paused=False,
+                )
+                agent._set_kickoff_result(
+                    success=False,
+                    message=message,
+                    retries_used=retries_used,
+                    retries_max=max_retries,
+                    violations=[],
+                    alert=alert,
+                )
 
     class _AckInbox(CyclicBehaviour):
         """Background behaviour that listens for acknowledgements from resource agents."""
@@ -924,6 +1231,9 @@ class ProductAgent(LlmAgent):
                         agent._runtime_repair_fail_streak,
                     )
                 agent._runtime_repair_fail_streak = 0
+                agent.runtime_repair_state = "idle"
+                agent._clear_plan_safety_alert()
+                await asyncio.to_thread(agent._persist_product_state)
                 return
 
             if agent._runtime_repair_inflight:
@@ -933,15 +1243,32 @@ class ProductAgent(LlmAgent):
                 return
 
             if agent._runtime_repair_fail_streak >= agent._runtime_repair_max_attempts:
+                message = (
+                    f"{agent.agent_name}: runtime plan validation still fails after "
+                    f"{agent._runtime_repair_fail_streak}/{agent._runtime_repair_max_attempts} "
+                    "auto-replan attempt(s); execution paused."
+                )
                 agent.logger.error(
-                    "[Product] Runtime plan validation still failing after %d repair attempt(s); giving up automatic retries.",
+                    "[Product] Runtime plan validation still failing after %d repair attempt(s); pausing execution.",
                     agent._runtime_repair_fail_streak,
                 )
+                agent.runtime_repair_state = "paused_after_failure"
+                agent._set_plan_safety_alert(
+                    stage="runtime",
+                    message=message,
+                    retries_used=agent._runtime_repair_fail_streak,
+                    retries_max=agent._runtime_repair_max_attempts,
+                    violations=violations,
+                    paused=True,
+                )
+                await asyncio.to_thread(agent._persist_product_state)
                 return
 
             agent._runtime_repair_inflight = True
+            agent.runtime_repair_state = "repairing"
             agent._runtime_repair_fail_streak += 1
             try:
+                before_hash = agent._task_nodes_hash()
                 agent.logger.warning(
                     "[Product] Runtime plan validation failed (%d violation(s)); triggering corrective replan attempt %d/%d.",
                     len(violations),
@@ -949,6 +1276,23 @@ class ProductAgent(LlmAgent):
                     agent._runtime_repair_max_attempts,
                 )
                 await agent.process_planner.replan_with_feedback_offline(violations)
+                if before_hash == agent._task_nodes_hash():
+                    message = (
+                        f"{agent.agent_name}: runtime auto-replan produced no plan change on "
+                        f"attempt {agent._runtime_repair_fail_streak}/{agent._runtime_repair_max_attempts}; "
+                        "execution paused."
+                    )
+                    agent.runtime_repair_state = "paused_after_failure"
+                    agent._set_plan_safety_alert(
+                        stage="runtime",
+                        message=message,
+                        retries_used=agent._runtime_repair_fail_streak,
+                        retries_max=agent._runtime_repair_max_attempts,
+                        violations=violations,
+                        paused=True,
+                    )
+                    await asyncio.to_thread(agent._persist_product_state)
+                    return
                 agent.process_planner.compile_global_fsa()
                 agent.process_planner.save_global_fsa(agent.global_fsa_path)
 
@@ -964,6 +1308,21 @@ class ProductAgent(LlmAgent):
                 agent.logger.exception(
                     "[Product] Corrective runtime replan attempt failed."
                 )
+                message = (
+                    f"{agent.agent_name}: runtime auto-replan attempt "
+                    f"{agent._runtime_repair_fail_streak}/{agent._runtime_repair_max_attempts} failed; "
+                    "execution paused."
+                )
+                agent.runtime_repair_state = "paused_after_failure"
+                agent._set_plan_safety_alert(
+                    stage="runtime",
+                    message=message,
+                    retries_used=agent._runtime_repair_fail_streak,
+                    retries_max=agent._runtime_repair_max_attempts,
+                    violations=violations,
+                    paused=True,
+                )
+                await asyncio.to_thread(agent._persist_product_state)
             finally:
                 agent._runtime_repair_inflight = False
 
@@ -978,6 +1337,10 @@ class ProductAgent(LlmAgent):
 
             # No resources? nothing to do
             if not agent.resource_jids:
+                return
+
+            if agent.runtime_repair_state != "idle":
+                await asyncio.sleep(0.5)
                 return
 
             # Ask planner for one ready task

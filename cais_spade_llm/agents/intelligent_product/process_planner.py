@@ -28,7 +28,13 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     # 1. NL → High-level requirements
     # ------------------------------------------------------------------ #
-    async def build_high_level(self, requirement_text: str) -> str:
+    async def build_high_level(
+        self,
+        requirement_text: str,
+        *,
+        refinement_feedback: str = "",
+        previous_preview_requirements: list[dict[str, Any]] | None = None,
+    ) -> str:
         """
         Parse natural-language manufacturing requirements into internal requirement nodes.
 
@@ -40,7 +46,11 @@ class ProcessPlanner:
         self.phase_to_node.clear()
 
         try:
-            structured = await self._llm_parse_requirements(requirement_text)
+            structured = await self._llm_parse_requirements(
+                requirement_text,
+                refinement_feedback=refinement_feedback,
+                previous_preview_requirements=previous_preview_requirements,
+            )
         except Exception as exc:
             self.logger.exception("[Planner] LLM requirement parsing failed: %s", exc)
             structured = []
@@ -72,11 +82,22 @@ class ProcessPlanner:
         return msg
 
 
-    async def _llm_parse_requirements(self, requirement_text: str) -> list[dict[str, Any]]:
+    async def _llm_parse_requirements(
+        self,
+        requirement_text: str,
+        *,
+        refinement_feedback: str = "",
+        previous_preview_requirements: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Call the LLM to parse requirements into a structured list."""
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
 
-        prompt = build_requirement_parse_prompt(requirement_text, tools_catalog)
+        prompt = build_requirement_parse_prompt(
+            requirement_text,
+            tools_catalog,
+            refinement_feedback=refinement_feedback,
+            previous_preview_requirements=previous_preview_requirements,
+        )
 
         raw = await self.product_agent.ask_llm(
             prompt=prompt,
@@ -120,7 +141,14 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     # 2. REQUIREMENT → LLM TASK EXPANSION (replaces hard-coded version)
     # ------------------------------------------------------------------ #
-    async def expand_requirements_to_tasks(self, safety_text: str = "") -> None:
+    async def expand_requirements_to_tasks(
+        self,
+        safety_text: str = "",
+        *,
+        refinement_feedback: str = "",
+        previous_preview_requirements: list[dict[str, Any]] | None = None,
+        previous_preview_tasks: list[dict[str, Any]] | None = None,
+    ) -> None:
         """
         Replace requirement nodes with task nodes produced by LLM.
 
@@ -168,7 +196,10 @@ class ProcessPlanner:
             tools_catalog=tools_catalog,
             resource_infos=resource_infos,
             caps_overview=caps_overview,
-            safety_text=safety_text
+            safety_text=safety_text,
+            refinement_feedback=refinement_feedback,
+            previous_preview_requirements=previous_preview_requirements,
+            previous_preview_tasks=previous_preview_tasks,
         )
 
         raw = await self.product_agent.ask_llm(
@@ -286,7 +317,11 @@ class ProcessPlanner:
         system_coordination_state: dict | None = None
     ) -> None:
         """Online replan — routes to DES or LLM based on replan_mode."""
-        if getattr(self.product_agent, "replan_mode", "llm") == "des":
+        replan_mode = str(getattr(self.product_agent, "replan_mode", "llm") or "llm").strip().lower()
+        if replan_mode == "none":
+            self.logger.info("[Planner] Online replanning disabled (replan_mode=none).")
+            return
+        if replan_mode == "des":
             await self.replan_with_feedback_des(
                 violations,
                 system_coordination_state=system_coordination_state,
@@ -427,10 +462,10 @@ class ProcessPlanner:
                 resource_jid=ra_jid,
             )
             if bid:
-                self.logger.info("[Planner] Bid from %s: complete=%s", ra_jid, bid.complete)
+                self.logger.debug("[Planner] Bid from %s: complete=%s", ra_jid, bid.complete)
                 bids.append(bid)
             else:
-                self.logger.info("[Planner] No bid from %s.", ra_jid)
+                self.logger.debug("[Planner] No bid from %s.", ra_jid)
 
 
         # 4. Compile M_e from all bids
@@ -850,7 +885,7 @@ class ProcessPlanner:
         payload = {"nodes": self.nodes}
         with p.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        self.logger.info(f"[Planner] Saved plan to {p.resolve()}")
+        self.logger.debug(f"[Planner] Saved plan to {p.resolve()}")
 
     def load(self, path: Path | str) -> None:
         p = Path(path)
@@ -860,7 +895,7 @@ class ProcessPlanner:
         with p.open("r", encoding="utf-8") as f:
             payload = json.load(f)
         self.nodes = payload.get("nodes", [])
-        self.logger.info(f"[Planner] Loaded plan from {p.resolve()}")
+        self.logger.debug(f"[Planner] Loaded plan from {p.resolve()}")
 
     # ------------------------------------------------------------------ #
     # Build Global FSA
@@ -1072,7 +1107,7 @@ class ProcessPlanner:
         with p.open("w", encoding="utf-8") as f:
             json.dump(self.global_fsa, f, indent=2)
 
-        self.logger.info(f"[Planner] Saved global FSA to {p.resolve()}")
+        self.logger.debug(f"[Planner] Saved global FSA to {p.resolve()}")
 
     def load_global_fsa(self, path: Path | str) -> None:
         p = Path(path)
@@ -1085,4 +1120,4 @@ class ProcessPlanner:
             self.logger.warning(f"[Planner] Invalid global FSA payload in {p}")
             return
         self.global_fsa = payload
-        self.logger.info(f"[Planner] Loaded global FSA from {p.resolve()}")
+        self.logger.debug(f"[Planner] Loaded global FSA from {p.resolve()}")

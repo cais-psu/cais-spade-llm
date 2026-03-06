@@ -206,6 +206,13 @@ def create_app() -> None:
             except Exception:
                 log.exception("App shutdown: stop_system failed")
 
+        # 1b) Stop tracked ROS2 launch processes so Gazebo/MoveIt/RViz do not
+        # survive the UI and carry stale sim-time TF buffers into the next run.
+        try:
+            bridge.ros2_stop_all()
+        except Exception:
+            log.debug("App shutdown: ROS2 process cleanup skipped")
+
         # 2) Stop XMPP server.
         try:
             await bridge._stop_xmpp_server()

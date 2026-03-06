@@ -355,7 +355,7 @@ class CentralControllerAgent(LlmAgent):
                 return
 
             # If allowed
-            agent.logger.info("[CCA] Safety OK: task=%s allowed.", task_id)
+            agent.logger.debug("[CCA] Safety OK: task=%s allowed.", task_id)
             await self._send_decision(resource_jid, task_id, "allow")
 
         async def _handle_runtime_event(

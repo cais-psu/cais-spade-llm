@@ -10,7 +10,7 @@ __pycache__/
 
 # Runtime / monitor artifacts
 cais_spade_llm/log/*.log
-cais_spade_llm/monitor/debug/*.md
+cais_spade_llm/monitor/debug/
 cais_spade_llm/monitor/history/*.jsonl
 cais_spade_llm/monitor/plan/*_plan.json
 cais_spade_llm/monitor/plan/*_global_fsa.json
@@ -18,3 +18,25 @@ cais_spade_llm/monitor/plan/*_requirements.json
 cais_spade_llm/monitor/state/*_product_state.json
 cais_spade_llm/monitor/state/*_resource_state.json
 cais_spade_llm/monitor/**/archive/
+
+# Generated DFA files (produced at runtime by safety logic)
+cais_spade_llm/safety/*.dot
+cais_spade_llm/safety/*.png
+cais_spade_llm/safety/cca_safety_logic.json
+cais_spade_llm/safety/archive/
+
+# Generated tool catalogues
+cais_spade_llm/initialization/tools.json
+initialization/tools.json
+
+# User-local verified artifacts
+cais_spade_llm/user_verified/
+cais_spade_llm/user_verified_plan/
+cais_spade_llm/user_verified_safety/
+
+# Generated intent previews
+cais_spade_llm/specification/safety/intent_previews.json
+cais_spade_llm/specification/safety/intent_approvals.json
+
+# Local environment files
+.env

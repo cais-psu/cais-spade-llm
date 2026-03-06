@@ -11,13 +11,17 @@ from pathlib import Path
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, TimerAction
+from launch.actions import IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from uf_ros_lib.uf_robot_utils import generate_ros2_control_params_temp_file, get_xacro_content
+
+CONTROLLER_MANAGER_TIMEOUT_SEC = '60.0'
+CONTROLLER_SERVICE_CALL_TIMEOUT_SEC = '20.0'
+CONTROLLER_SWITCH_TIMEOUT_SEC = '20.0'
 
 
 def _build_xarm6_description(context, prefix):
@@ -59,6 +63,23 @@ def _build_xarm6_description(context, prefix):
     )
 
 
+def _make_controller_spawner(controller_names):
+    return Node(
+        package='controller_manager',
+        executable='spawner',
+        output='screen',
+        arguments=[
+            *controller_names,
+            '--controller-manager', '/controller_manager',
+            '--controller-manager-timeout', CONTROLLER_MANAGER_TIMEOUT_SEC,
+            '--service-call-timeout', CONTROLLER_SERVICE_CALL_TIMEOUT_SEC,
+            '--switch-timeout', CONTROLLER_SWITCH_TIMEOUT_SEC,
+            '--activate-as-group',
+        ],
+        parameters=[{'use_sim_time': True}],
+    )
+
+
 def launch_setup(context, *args, **kwargs):
     prefix = 'xarm6_'
 
@@ -97,35 +118,20 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    controllers = [
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=[f'{prefix}xarm6_traj_controller', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=[f'{prefix}xarm_gripper_traj_controller', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-    ]
+    controller_spawner = _make_controller_spawner([
+        'joint_state_broadcaster',
+        f'{prefix}xarm6_traj_controller',
+        f'{prefix}xarm_gripper_traj_controller',
+    ])
 
     return [
         gazebo,
         state_publisher,
-        TimerAction(period=25.0, actions=[spawn]),
+        spawn,
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=spawn,
-                on_exit=controllers,
+                on_exit=[controller_spawner],
             )
         ),
     ]

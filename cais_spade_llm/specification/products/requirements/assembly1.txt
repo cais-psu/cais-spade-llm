@@ -1,0 +1,3 @@
+[Product Requirements]
+- assemble MCP to from printer to the assembly station
+- assemble LRP to from printer to the assembly station

@@ -11,6 +11,7 @@ from nicegui import ui
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
+from cais_spade_llm.ui.components.robot_status_card import render_robot_status_card
 
 
 # Execution mode labels → internal values.
@@ -39,6 +40,13 @@ def render(bridge: SystemBridge) -> None:
                     ["Generate Plan At Startup", "Use Verified Plan Set"],
                     value="Use Verified Plan Set",
                 ).props("inline")
+
+            product_init_files = bridge.list_product_files()
+            product_init_select = ui.select(
+                {f: Path(f).stem for f in product_init_files},
+                value=product_init_files[0] if product_init_files else None,
+                label="Product",
+            ).classes("w-64 mt-2")
 
             requirement_files = bridge.list_product_requirement_files()
             safety_files = bridge.list_safety_requirement_files()
@@ -92,6 +100,9 @@ def render(bridge: SystemBridge) -> None:
 
                 def _refresh_plan_set_options() -> None:
                     options: dict[str, str] = {}
+                    selected_product_stem = Path(
+                        str(product_init_select.value or "")
+                    ).stem or ""
 
                     for row in bridge.list_bundles():
                         bid = str(row.get("bundle_id", "")).strip()
@@ -99,6 +110,9 @@ def render(bridge: SystemBridge) -> None:
                             continue
                         status = str(row.get("status", "")).lower()
                         if status != "verified":
+                            continue
+                        bundle_product = str(row.get("product_name", "")).strip()
+                        if selected_product_stem and bundle_product and bundle_product != selected_product_stem:
                             continue
                         created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
                         options[bid] = f"{created} | {bid}"
@@ -238,11 +252,15 @@ def render(bridge: SystemBridge) -> None:
                             if not req_file:
                                 _set_action_banner("warning", "Select a product requirement file.", auto_hide_s=6.0)
                                 return
-                            try:
-                                bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
-                            except Exception as exc:
-                                _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
-                                return
+                            selected_product = str(product_init_select.value or "").strip()
+                            if selected_product:
+                                bridge.selected_product = selected_product
+                            else:
+                                try:
+                                    bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
+                                except Exception as exc:
+                                    _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
+                                    return
 
                             bridge.selected_requirement_file = req_file
                             bridge.selected_safety_file = safe_file or ""
@@ -269,7 +287,11 @@ def render(bridge: SystemBridge) -> None:
                             try:
                                 await bridge.start_system()
                                 if bridge.system_running:
-                                    _set_action_banner("success", "System started successfully.", auto_hide_s=5.0)
+                                    notice = bridge.consume_notice()
+                                    if notice:
+                                        _set_action_banner("warning", notice, auto_hide_s=10.0)
+                                    else:
+                                        _set_action_banner("success", "System started successfully.", auto_hide_s=5.0)
                                 else:
                                     reason = bridge.last_error or "unknown error"
                                     _set_action_banner("error", f"Start failed: {reason}", auto_hide_s=8.0)
@@ -386,10 +408,38 @@ def render(bridge: SystemBridge) -> None:
                 with action_banner:
                     action_banner_icon = ui.icon("info")
                     action_banner_label = ui.label("")
+                plan_safety_banner = ui.row().classes(
+                    "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-red-700 bg-red-50"
+                )
+                plan_safety_banner.style("display:none;")
+                with plan_safety_banner:
+                    plan_safety_banner_icon = ui.icon("warning")
+                    plan_safety_banner_label = ui.label("")
 
             # Error display.
             error_label = ui.label("").classes("text-red-500 text-sm mt-2")
             hw_probe = {"busy": False}
+
+            def _set_plan_safety_banner(alerts: list[dict]) -> None:
+                if not alerts:
+                    plan_safety_banner.style("display:none;")
+                    plan_safety_banner_label.text = ""
+                    return
+                first = alerts[0] if isinstance(alerts[0], dict) else {}
+                product = str(first.get("product_name", "product")).strip() or "product"
+                stage = str(first.get("stage", "runtime")).strip() or "runtime"
+                message = str(first.get("message", "")).strip() or "Plan safety alert."
+                retries_used = first.get("retries_used")
+                retries_max = first.get("retries_max")
+                retry_text = ""
+                if retries_used is not None and retries_max is not None:
+                    retry_text = f" auto-replans={retries_used}/{retries_max}."
+                extra = ""
+                if len(alerts) > 1:
+                    extra = f" (+{len(alerts) - 1} more)"
+                plan_safety_banner_icon.name = "warning"
+                plan_safety_banner_label.text = f"{product} [{stage}] {message}{retry_text}{extra}"
+                plan_safety_banner.style("display:flex;")
 
             def _update_controls():
                 try:
@@ -443,6 +493,7 @@ def render(bridge: SystemBridge) -> None:
                         and not bridge._starting
                         and not bridge._stopping
                     )
+                    _set_plan_safety_banner(bridge.get_plan_safety_alerts())
                     error_label.text = bridge.last_error or ""
                 except Exception as exc:
                     if hasattr(bridge, "_diag_emit"):
@@ -450,6 +501,7 @@ def render(bridge: SystemBridge) -> None:
                     start_btn.set_enabled(False)
                     stop_btn.set_enabled(False)
                     reset_btn.set_enabled(False)
+                    _set_plan_safety_banner([])
                     error_label.text = f"Dashboard control update failed: {exc}"
 
             ui.timer(1.0, _update_controls)
@@ -460,6 +512,7 @@ def render(bridge: SystemBridge) -> None:
                 _update_controls()
                 refresh_dag_now()
 
+            product_init_select.on_value_change(lambda e: _refresh_selection_and_controls())
             requirement_select.on_value_change(lambda e: _refresh_selection_and_controls())
             safety_select.on_value_change(lambda e: _refresh_selection_and_controls())
             startup_source_select.on_value_change(lambda e: _refresh_selection_and_controls())
@@ -518,6 +571,63 @@ def render(bridge: SystemBridge) -> None:
                 _stat_card("Safety Blocks", str(blocked), "shield")
 
         ui.timer(2.0, _refresh_stats)
+
+        def _preview_or_runtime_nodes() -> list[dict]:
+            nodes = bridge.get_plan_nodes()
+            if nodes or bridge.system_running:
+                return nodes
+            source = str(startup_source_select.value or "")
+            selected_plan_set_id = str(plan_set_select.value or "").strip()
+            if source == "Use Verified Plan Set" and selected_plan_set_id:
+                return bridge.get_bundle_plan_nodes(selected_plan_set_id)
+            return []
+
+        def _preview_or_runtime_task_states(nodes: list[dict]) -> dict[str, str]:
+            task_states = bridge.get_task_states()
+            if task_states:
+                return task_states
+            fallback: dict[str, str] = {}
+            for node in nodes:
+                tid = str(node.get("id") or node.get("task_id") or "").strip()
+                if not tid:
+                    continue
+                fallback[tid] = str(node.get("status", "pending") or "pending")
+            return fallback
+
+        # ── Task DAG ────────────────────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Task DAG").classes("text-lg font-semibold mb-2")
+            mermaid = ui.mermaid("graph TD\n    empty[No plan loaded]").classes("w-full")
+
+            def _refresh_dag():
+                nodes = _preview_or_runtime_nodes()
+                task_states = _preview_or_runtime_task_states(nodes)
+                mermaid.content = nodes_to_mermaid(nodes, task_states)
+
+            refresh_dag_now = _refresh_dag
+            _refresh_dag()
+            ui.timer(2.0, _refresh_dag)
+
+        # ── Live Robot Status ───────────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Live Robot Status").classes("text-lg font-semibold mb-2")
+            robot_status_container = ui.column().classes("w-full gap-4")
+
+            def _refresh_robot_status():
+                robot_status_container.clear()
+                states = bridge.get_robot_states()
+                if not states:
+                    with robot_status_container:
+                        ui.label("No robots available — start the system first").classes(
+                            "text-slate-400 italic"
+                        )
+                    return
+                with robot_status_container:
+                    for name, state in states.items():
+                        render_robot_status_card(name, state)
+
+            _refresh_robot_status()
+            ui.timer(2.0, _refresh_robot_status)
 
         # ── Runtime Safety Rules ────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -582,42 +692,6 @@ def render(bridge: SystemBridge) -> None:
 
             ui.timer(3.0, _refresh_runtime_blocked_tasks)
 
-        def _preview_or_runtime_nodes() -> list[dict]:
-            nodes = bridge.get_plan_nodes()
-            if nodes or bridge.system_running:
-                return nodes
-            source = str(startup_source_select.value or "")
-            selected_plan_set_id = str(plan_set_select.value or "").strip()
-            if source == "Use Verified Plan Set" and selected_plan_set_id:
-                return bridge.get_bundle_plan_nodes(selected_plan_set_id)
-            return []
-
-        def _preview_or_runtime_task_states(nodes: list[dict]) -> dict[str, str]:
-            task_states = bridge.get_task_states()
-            if task_states:
-                return task_states
-            fallback: dict[str, str] = {}
-            for node in nodes:
-                tid = str(node.get("id") or node.get("task_id") or "").strip()
-                if not tid:
-                    continue
-                fallback[tid] = str(node.get("status", "pending") or "pending")
-            return fallback
-
-        # ── Task DAG ────────────────────────────────────────────────
-        with ui.card().classes("w-full"):
-            ui.label("Task DAG").classes("text-lg font-semibold mb-2")
-            mermaid = ui.mermaid("graph TD\n    empty[No plan loaded]").classes("w-full")
-
-            def _refresh_dag():
-                nodes = _preview_or_runtime_nodes()
-                task_states = _preview_or_runtime_task_states(nodes)
-                mermaid.content = nodes_to_mermaid(nodes, task_states)
-
-            refresh_dag_now = _refresh_dag
-            _refresh_dag()
-            ui.timer(2.0, _refresh_dag)
-
         # ── Task States Table ───────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Task States").classes("text-lg font-semibold mb-2")
@@ -663,7 +737,6 @@ def render(bridge: SystemBridge) -> None:
                 if selected_task_ids:
                     _set_node_details(selected_task_ids)
                 elif ts:
-                    # Auto-show the currently running task, or the last active one.
                     active = next((k for k, v in ts.items() if "running" in v.lower()), None)
                     if not active:
                         active = next(
@@ -678,16 +751,19 @@ def render(bridge: SystemBridge) -> None:
 
         # ── Execution Timeline ──────────────────────────────────────
         with ui.card().classes("w-full"):
-            ui.label("Execution Timeline").classes("text-lg font-semibold mb-2")
-            timeline_table = ui.table(
-                columns=[
-                    {"name": "timestamp", "label": "Time", "field": "timestamp", "sortable": True},
-                    {"name": "task_id", "label": "Task", "field": "task_id", "sortable": True},
-                    {"name": "status", "label": "Status", "field": "status", "sortable": True},
-                    {"name": "resource_jid", "label": "Resource", "field": "resource_jid"},
-                ],
-                rows=[],
-            ).classes("w-full")
+            with ui.expansion("Execution Timeline", icon="timeline", value=False).classes("w-full"):
+                ui.label("Expand this panel to inspect the latest execution events.").classes(
+                    "text-xs text-slate-500 mb-2"
+                )
+                timeline_table = ui.table(
+                    columns=[
+                        {"name": "timestamp", "label": "Time", "field": "timestamp", "sortable": True},
+                        {"name": "task_id", "label": "Task", "field": "task_id", "sortable": True},
+                        {"name": "status", "label": "Status", "field": "status", "sortable": True},
+                        {"name": "resource_jid", "label": "Resource", "field": "resource_jid"},
+                    ],
+                    rows=[],
+                ).classes("w-full")
 
             def _refresh_timeline():
                 tl = bridge.get_execution_timeline()

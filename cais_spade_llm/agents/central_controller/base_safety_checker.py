@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, Dict, List, Tuple, Optional, FrozenSet
+from urllib.parse import parse_qsl
 
 class BaseSafetyChecker:
     """
@@ -28,6 +29,12 @@ class BaseSafetyChecker:
         for rule_id, dot_str in dfa_map.items():
             self.dfas[rule_id] = self._parse_dot(rule_id, dot_str)
 
+    @staticmethod
+    def _context_scalar_text(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value).strip()
+
     # ------------------------------------------------------------------ #
     # Shared: Task -> AP Mapping
     # ------------------------------------------------------------------ #
@@ -42,8 +49,9 @@ class BaseSafetyChecker:
           - resource:  exact match or wildcard ("any", "robot")
           - event:     must equal function_name
           - product:   must match params["part_name"] (or "product") unless "any"
-          - context:   if not "any", must match at least one param value
-                       or one of rule["context"].values().
+          - context:   if not "any", either:
+                       * composite key=value pairs joined by "&" must all match, or
+                       * legacy single-token matching falls back to raw value comparison
         """
         labels: List[str] = []
 
@@ -59,12 +67,16 @@ class BaseSafetyChecker:
         task_product = str(task_product).lower()
 
         # Normalize all param values to strings for comparison
-        param_value_strings = {str(v) for v in params.values() if v is not None}
+        param_value_strings = {
+            self._context_scalar_text(v) for v in params.values() if v is not None
+        }
 
         for rule in self.safety_rules:
             rule_context = rule.get("context") or {}
             # Also consider rule context values as potential matches
-            rule_ctx_value_strings = {str(v) for v in rule_context.values()}
+            rule_ctx_value_strings = {
+                self._context_scalar_text(v) for v in rule_context.values()
+            }
 
             for ap in rule.get("aps", []):
                 full = ap.get("full") or ""
@@ -91,21 +103,62 @@ class BaseSafetyChecker:
                 if ap_product != "any" and str(ap_product).lower() != task_product:
                     continue
 
-                # 4) Context match (generic, no function_name branching)
-                if ap_context != "any":
-                    # Context must match either:
-                    #   - one of this rule's context values, OR
-                    #   - one of this task's parameter values
-                    if (
-                        str(ap_context) not in rule_ctx_value_strings
-                        and str(ap_context) not in param_value_strings
-                    ):
-                        continue
+                # 4) Context match (supports composite serialized context segments)
+                if not self._context_matches(
+                    ap_context=str(ap_context),
+                    params=params,
+                    param_value_strings=param_value_strings,
+                    rule_context=rule_context,
+                    rule_ctx_value_strings=rule_ctx_value_strings,
+                ):
+                    continue
 
                 # If all predicates passed, this AP applies to this task.
                 labels.append(label)
 
         return labels
+
+    @staticmethod
+    def _context_pairs(ap_context: str) -> Optional[list[tuple[str, str]]]:
+        token = str(ap_context or "").strip()
+        if not token or token == "any" or "=" not in token:
+            return None
+        try:
+            pairs = parse_qsl(token, keep_blank_values=True, strict_parsing=False)
+        except Exception:
+            return None
+        return [(str(k), str(v)) for k, v in pairs if str(k)]
+
+    @classmethod
+    def _context_matches(
+        cls,
+        *,
+        ap_context: str,
+        params: dict[str, Any],
+        param_value_strings: set[str],
+        rule_context: dict[str, Any],
+        rule_ctx_value_strings: set[str],
+    ) -> bool:
+        token = str(ap_context or "").strip()
+        if token == "any":
+            return True
+
+        pairs = cls._context_pairs(token)
+        if not pairs:
+            return token in rule_ctx_value_strings or token in param_value_strings
+
+        for key, value in pairs:
+            if key in params:
+                if cls._context_scalar_text(params.get(key)) != value:
+                    return False
+                continue
+            if key in rule_context:
+                if cls._context_scalar_text(rule_context.get(key)) != value:
+                    return False
+                continue
+            if value not in param_value_strings and value not in rule_ctx_value_strings:
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Shared: DFA Transition Logic (The Math)

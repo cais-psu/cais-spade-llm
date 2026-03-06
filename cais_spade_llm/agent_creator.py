@@ -9,7 +9,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+import logging
 import utils
+
+_log = logging.getLogger(__name__)
+_REQ_DIR = Path("cais_spade_llm/specification/products/requirements")
 
 from agents.shared_information.user import User
 from agents.intelligent_product.product_agent import ProductAgent
@@ -200,6 +204,16 @@ def create_resource_agents(
             pass
     return agents
 
+def _default_requirement_file() -> str | None:
+    """Return the first .txt requirement file found, or None."""
+    if _REQ_DIR.is_dir():
+        files = sorted(_REQ_DIR.glob("*.txt"))
+        if files:
+            _log.info("[agent_creator] No product_specification_file set; using %s", files[0])
+            return str(files[0])
+    return None
+
+
 def create_product_agents(
     product_init_list: Iterable[str],
     resource_agents: list,
@@ -268,11 +282,13 @@ def create_product_agents(
                 name=name,
                 instructions=meta.get("instructions"),
                 product_specification_file=(
-                    product_requirement_file or meta.get("product_specification_file")
+                    product_requirement_file
+                    or meta.get("product_specification_file")
+                    or _default_requirement_file()
                 ),
                 product_geometry_file=meta.get("product_geometry_file"),
                 safety_file=(
-                    meta.get("safety_file")
+                    (meta.get("safety_file") or cca_meta.get("safety_file"))
                     if safety_file_override is _UNSET_OVERRIDE
                     else safety_file_override
                 ),

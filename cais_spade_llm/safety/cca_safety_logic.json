@@ -2,29 +2,55 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "SG must be place_part before MCP is place_part",
-      "constraint_type": "ordering_place_part",
-      "process": null,
-      "product": [
-        "sg",
-        "mcp"
-      ],
+      "raw_text": "xarm6 and ur5e should not approach to the assembly board to place at the same time.",
+      "constraint_type": "no_concurrent_place_approach",
+      "process": "assembly",
+      "product": [],
       "resources": [
-        "any"
+        "xarm6",
+        "ur5e"
       ],
-      "event": null,
-      "context": null,
+      "event": "place_approach",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
       "aps": [
         {
           "label": "ap002",
-          "full": "ap/assembly/sg/any/place_part/any"
+          "full": "ap/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
         },
         {
           "label": "ap001",
-          "full": "ap/assembly/mcp/any/place_part/any"
+          "full": "ap/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
         }
       ],
-      "ltlf": "(!ap001) U ap002"
+      "ltlf": "G !(ap002 & ap001)"
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "xarm6 and ur5e should move back home after inserting the pins.",
+      "constraint_type": "post_insertion_move_home",
+      "process": "assembly",
+      "product": [
+        "pins"
+      ],
+      "resources": [
+        "xarm6",
+        "ur5e"
+      ],
+      "event": "move_home",
+      "context": null,
+      "aps": [
+        {
+          "label": "ap004",
+          "full": "ap/assembly/pins/any/place_insert/destination_any"
+        },
+        {
+          "label": "ap003",
+          "full": "ap/assembly/pins/any/move_home/any"
+        }
+      ],
+      "ltlf": "G (ap004 -> F ap003)"
     }
   ]
 }

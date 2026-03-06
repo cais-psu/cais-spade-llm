@@ -47,14 +47,29 @@ _MONITOR = _BASE / "monitor"
 _LOG_DIR = _BASE / "log"
 _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements"
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
-_SAFETY_INTENT_APPROVALS = _SAFETY_REQUIREMENTS_DIR / "intent_approvals.json"
-_SAFETY_INTENT_PREVIEWS = _SAFETY_REQUIREMENTS_DIR / "intent_previews.json"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
-_SAFETY_PREVIEW_DIR = _USER_VERIFIED_PLAN / "safety_previews"
+_USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
+_SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
+_SAFETY_INTENT_PREVIEWS = _USER_VERIFIED_SAFETY / "intent_previews.json"
+_SAFETY_PREVIEW_DIR = _USER_VERIFIED_SAFETY / "previews"
+_SAFETY_VERIFIED_DIR = _USER_VERIFIED_SAFETY / "verified"
+_SAFETY_PREVIEW_HISTORY_LIMIT = 10
 _GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "worlds" / "table.world"
 _RESETTABLE_GAZEBO_MODEL_PREFIXES = ("gear_", "rect_pin_", "circ_pin_")
+
+
+def _legacy_safety_intent_approvals_path() -> Path:
+    return _SAFETY_REQUIREMENTS_DIR / "intent_approvals.json"
+
+
+def _legacy_safety_intent_previews_path() -> Path:
+    return _SAFETY_REQUIREMENTS_DIR / "intent_previews.json"
+
+
+def _legacy_safety_preview_dir() -> Path:
+    return _USER_VERIFIED_PLAN / "safety_previews"
 
 
 class SystemBridge:
@@ -79,7 +94,7 @@ class SystemBridge:
         "ur5e": ("hardware_ur5e_driver", "hardware_ur5e_moveit"),
     }
     _GAZEBO_PREWARM_TIMEOUT_S = 60.0
-    _GAZEBO_PREWARM_START_DELAY_S = 2.0
+    _GAZEBO_PREWARM_START_DELAY_S = 0.5
     _GAZEBO_PREWARM_READY_WAIT_S = 60.0
 
     @classmethod
@@ -106,6 +121,7 @@ class SystemBridge:
         self._starting: bool = False
         self._stopping: bool = False
         self.last_error: Optional[str] = None
+        self.last_notice: Optional[str] = None
 
         # Configuration (set from UI before start).
         self.execution_mode: str = "simulation"
@@ -145,6 +161,7 @@ class SystemBridge:
         self._startup_seq: int = 0
         self._startup_phase: str = "idle"
         self._startup_phase_ts: float = time.monotonic()
+        self._cached_plan_safety_alerts: list[dict[str, Any]] = []
         self._agent_creator_cached: Any | None = None
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
@@ -176,6 +193,17 @@ class SystemBridge:
         self._startup_phase = str(phase)
         self._startup_phase_ts = time.monotonic()
         self._diag_emit(f"startup phase -> {self._startup_phase}")
+
+    def _clear_cached_plan_safety_alerts(self) -> None:
+        self._cached_plan_safety_alerts = []
+
+    def _cache_plan_safety_alerts(self, alerts: list[dict[str, Any]]) -> None:
+        self._cached_plan_safety_alerts = [dict(a) for a in alerts if isinstance(a, dict)]
+
+    def consume_notice(self) -> str | None:
+        notice = str(self.last_notice or "").strip()
+        self.last_notice = None
+        return notice or None
 
     def log_event_loop_lag(self, lag_sec: float) -> None:
         """Called by UI watchdog to diagnose websocket disconnect/freeze windows."""
@@ -345,7 +373,9 @@ class SystemBridge:
         for init_file in self.list_product_files():
             try:
                 ctx = self._resolve_product_context(init_file, include_hashes=False)
-                options.add(self._norm_path(ctx["product_spec_file"]))
+                product_spec_file = str(ctx.get("product_spec_file", "")).strip()
+                if product_spec_file:
+                    options.add(self._norm_path(product_spec_file))
             except Exception:
                 continue
         if _PRODUCT_REQUIREMENTS_DIR.exists():
@@ -354,40 +384,381 @@ class SystemBridge:
         return sorted(options)
 
     def _load_safety_intent_approvals(self) -> dict[str, Any]:
-        try:
-            with _SAFETY_INTENT_APPROVALS.open("r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception:
-            raw = {}
-        approvals = raw.get("approvals", {}) if isinstance(raw, dict) else {}
-        if not isinstance(approvals, dict):
-            approvals = {}
-        return {
-            "schema_version": 1,
-            "approvals": approvals,
-        }
+        source = _SAFETY_INTENT_APPROVALS
+        raw = self._read_json_dict(_SAFETY_INTENT_APPROVALS)
+        if not raw and _legacy_safety_intent_approvals_path() != _SAFETY_INTENT_APPROVALS:
+            legacy_raw = self._read_json_dict(_legacy_safety_intent_approvals_path())
+            if legacy_raw:
+                raw = legacy_raw
+                source = _legacy_safety_intent_approvals_path()
+
+        normalized = self._normalize_safety_intent_approvals_payload(raw)
+        if source != _SAFETY_INTENT_APPROVALS or normalized != raw:
+            self._save_safety_intent_approvals(normalized)
+            if source != _SAFETY_INTENT_APPROVALS:
+                _legacy_safety_intent_approvals_path().unlink(missing_ok=True)
+        return normalized
 
     def _save_safety_intent_approvals(self, payload: dict[str, Any]) -> None:
-        _SAFETY_REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(_SAFETY_INTENT_APPROVALS, payload)
+        _USER_VERIFIED_SAFETY.mkdir(parents=True, exist_ok=True)
+        normalized = self._normalize_safety_intent_approvals_payload(payload)
+        atomic_json_write(_SAFETY_INTENT_APPROVALS, normalized)
+        if _legacy_safety_intent_approvals_path() != _SAFETY_INTENT_APPROVALS:
+            _legacy_safety_intent_approvals_path().unlink(missing_ok=True)
 
     def _load_safety_intent_previews(self) -> dict[str, Any]:
-        try:
-            with _SAFETY_INTENT_PREVIEWS.open("r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception:
-            raw = {}
-        previews = raw.get("previews", {}) if isinstance(raw, dict) else {}
-        if not isinstance(previews, dict):
-            previews = {}
-        return {
-            "schema_version": 1,
-            "previews": previews,
-        }
+        source = _SAFETY_INTENT_PREVIEWS
+        raw = self._read_json_dict(_SAFETY_INTENT_PREVIEWS)
+        if not raw and _legacy_safety_intent_previews_path() != _SAFETY_INTENT_PREVIEWS:
+            legacy_raw = self._read_json_dict(_legacy_safety_intent_previews_path())
+            if legacy_raw:
+                raw = legacy_raw
+                source = _legacy_safety_intent_previews_path()
+        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(raw)
+        if source != _SAFETY_INTENT_PREVIEWS or normalized != raw:
+            _USER_VERIFIED_SAFETY.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(_SAFETY_INTENT_PREVIEWS, normalized)
+            self._cleanup_safety_preview_dirs(referenced_dirs, removed_dirs)
+            if source != _SAFETY_INTENT_PREVIEWS:
+                _legacy_safety_intent_previews_path().unlink(missing_ok=True)
+        return normalized
 
     def _save_safety_intent_previews(self, payload: dict[str, Any]) -> None:
-        _SAFETY_REQUIREMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(_SAFETY_INTENT_PREVIEWS, payload)
+        _USER_VERIFIED_SAFETY.mkdir(parents=True, exist_ok=True)
+        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(payload)
+        atomic_json_write(_SAFETY_INTENT_PREVIEWS, normalized)
+        self._cleanup_safety_preview_dirs(referenced_dirs, removed_dirs)
+        if _legacy_safety_intent_previews_path() != _SAFETY_INTENT_PREVIEWS:
+            _legacy_safety_intent_previews_path().unlink(missing_ok=True)
+
+    @staticmethod
+    def _normalize_approval_record(safety_key: str, record: dict[str, Any]) -> dict[str, Any]:
+        out = dict(record)
+        out["approved"] = bool(record.get("approved", False))
+        if not out["approved"]:
+            out.pop("verified_file", None)
+            return out
+
+        safety_path = Path(str(safety_key)).resolve()
+        if not safety_path.exists():
+            out["approved"] = False
+            out.pop("verified_file", None)
+            return out
+
+        raw_text = safety_path.read_text(encoding="utf-8")
+        safety_text = raw_text.strip()
+        if not safety_text:
+            out["approved"] = False
+            out.pop("verified_file", None)
+            return out
+
+        current_hash = sha256_text(safety_text)
+        approved_hash = str(out.get("safety_sha256", "")).strip()
+        if approved_hash != current_hash:
+            out.pop("verified_file", None)
+            return out
+
+        _SAFETY_VERIFIED_DIR.mkdir(parents=True, exist_ok=True)
+        target = _SAFETY_VERIFIED_DIR / f"{slug(safety_path.stem)}__{approved_hash[:8]}.txt"
+        if not target.exists() or target.read_text(encoding="utf-8") != raw_text:
+            target.write_text(raw_text, encoding="utf-8")
+        out["verified_file"] = str(target.resolve())
+        return out
+
+    def _normalize_safety_intent_approvals_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_approvals = payload.get("approvals", {}) if isinstance(payload, dict) else {}
+        approvals = raw_approvals if isinstance(raw_approvals, dict) else {}
+        normalized: dict[str, dict[str, Any]] = {}
+        referenced_files: set[Path] = set()
+
+        for raw_key, raw_record in approvals.items():
+            safety_key = str(raw_key or "").strip()
+            if not safety_key or not isinstance(raw_record, dict):
+                continue
+            record = self._normalize_approval_record(safety_key, raw_record)
+            verified_file = str(record.get("verified_file", "")).strip()
+            if verified_file:
+                referenced_files.add(Path(verified_file).resolve())
+            normalized[safety_key] = record
+
+        self._cleanup_verified_safety_files(referenced_files)
+        return {
+            "schema_version": 1,
+            "approvals": normalized,
+        }
+
+    @staticmethod
+    def _preview_record_dir(record: dict[str, Any]) -> Path | None:
+        raw = str(record.get("preview_dir", "")).strip()
+        if not raw:
+            return None
+        try:
+            candidate = Path(raw).resolve()
+        except Exception:
+            return None
+        for root in (_SAFETY_PREVIEW_DIR, _legacy_safety_preview_dir()):
+            try:
+                candidate.relative_to(root.resolve())
+                return candidate
+            except Exception:
+                continue
+        return None
+
+    def _normalize_preview_record(self, record: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+        out = dict(record)
+        preview_dir = self._preview_record_dir(record)
+        preview_id = str(out.get("preview_id", "")).strip()
+
+        if preview_dir is not None:
+            legacy_root = _legacy_safety_preview_dir().resolve()
+            try:
+                preview_dir.relative_to(legacy_root)
+                target_dir = (_SAFETY_PREVIEW_DIR / preview_dir.name).resolve()
+                _SAFETY_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+                if preview_dir.exists():
+                    if target_dir.exists():
+                        shutil.rmtree(preview_dir, ignore_errors=True)
+                    else:
+                        shutil.move(str(preview_dir), str(target_dir))
+                preview_dir = target_dir
+            except Exception:
+                pass
+        elif preview_id:
+            preview_dir = (_SAFETY_PREVIEW_DIR / preview_id).resolve()
+
+        if preview_dir is not None:
+            out["preview_dir"] = str(preview_dir)
+            logic_path = preview_dir / "cca_safety_logic.json"
+            out["safety_logic_json"] = str(logic_path.resolve())
+            out["dfa_dot_files"] = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.dot"))
+            out["dfa_png_files"] = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.png"))
+            logic_payload = self._read_json_dict(logic_path)
+            rules = logic_payload.get("rules", []) if isinstance(logic_payload, dict) else []
+            if isinstance(rules, list):
+                out["rules_count"] = len([rule for rule in rules if isinstance(rule, dict)])
+
+        return out, preview_dir
+
+    def _normalize_safety_intent_previews_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], set[Path], set[Path]]:
+        raw_previews = payload.get("previews", {}) if isinstance(payload, dict) else {}
+        previews = raw_previews if isinstance(raw_previews, dict) else {}
+        normalized_previews: dict[str, list[dict[str, Any]]] = {}
+        referenced_dirs: set[Path] = set()
+        removed_dirs: set[Path] = set()
+
+        for raw_key, raw_entries in previews.items():
+            safety_key = str(raw_key or "").strip()
+            if not safety_key:
+                continue
+            entries = self._preview_history_entries(raw_entries)
+            normalized_entries: list[tuple[dict[str, Any], Path | None]] = []
+            for entry in entries:
+                normalized_entry, preview_dir = self._normalize_preview_record(entry)
+                logic_path = Path(str(normalized_entry.get("safety_logic_json", "")).strip())
+                if (
+                    preview_dir is None
+                    or not preview_dir.exists()
+                    or not logic_path.exists()
+                ):
+                    continue
+                normalized_entries.append((normalized_entry, preview_dir.resolve()))
+            kept_entries = normalized_entries[:_SAFETY_PREVIEW_HISTORY_LIMIT]
+            if kept_entries:
+                normalized_previews[safety_key] = [entry for entry, _ in kept_entries]
+            for _, preview_dir in kept_entries:
+                if preview_dir is not None:
+                    referenced_dirs.add(preview_dir)
+            for _, preview_dir in normalized_entries[_SAFETY_PREVIEW_HISTORY_LIMIT:]:
+                if preview_dir is not None:
+                    removed_dirs.add(preview_dir)
+
+        return (
+            {
+                "schema_version": 1,
+                "previews": normalized_previews,
+            },
+            referenced_dirs,
+            removed_dirs,
+        )
+
+    @staticmethod
+    def _cleanup_safety_preview_dirs(referenced_dirs: set[Path], removed_dirs: set[Path]) -> None:
+        for preview_dir in sorted(removed_dirs):
+            shutil.rmtree(preview_dir, ignore_errors=True)
+
+        for root in (_SAFETY_PREVIEW_DIR, _legacy_safety_preview_dir()):
+            if not root.exists():
+                continue
+            for child in root.iterdir():
+                if not child.is_dir():
+                    continue
+                try:
+                    resolved = child.resolve()
+                    resolved.relative_to(root.resolve())
+                except Exception:
+                    continue
+                if resolved in referenced_dirs:
+                    continue
+                shutil.rmtree(resolved, ignore_errors=True)
+            if root == _legacy_safety_preview_dir():
+                try:
+                    next(root.iterdir())
+                except StopIteration:
+                    root.rmdir()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _cleanup_verified_safety_files(referenced_files: set[Path]) -> None:
+        if not _SAFETY_VERIFIED_DIR.exists():
+            return
+        for child in _SAFETY_VERIFIED_DIR.iterdir():
+            if not child.is_file():
+                continue
+            try:
+                resolved = child.resolve()
+                resolved.relative_to(_SAFETY_VERIFIED_DIR.resolve())
+            except Exception:
+                continue
+            if resolved in referenced_files:
+                continue
+            child.unlink(missing_ok=True)
+
+    @staticmethod
+    def _preview_history_entries(entries: Any) -> list[dict[str, Any]]:
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return []
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    @staticmethod
+    def _find_preview_record(
+        entries: list[dict[str, Any]], preview_id: str
+    ) -> dict[str, Any]:
+        target = str(preview_id or "").strip()
+        if not target:
+            return {}
+        for entry in entries:
+            if str(entry.get("preview_id", "")).strip() == target:
+                return entry
+        return {}
+
+    def _preview_record_rules(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(record, dict):
+            return []
+        preview_dir = Path(str(record.get("preview_dir", "")).strip())
+        logic_path_raw = str(record.get("safety_logic_json", "")).strip()
+        logic_path = Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        if not logic_path.exists():
+            return []
+        logic_payload = self._read_json_dict(logic_path)
+        raw_rules = logic_payload.get("rules", [])
+        return raw_rules if isinstance(raw_rules, list) else []
+
+    @staticmethod
+    def _preview_prompt_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prompt_rules: list[dict[str, Any]] = []
+        for idx, rule in enumerate(rules, start=1):
+            if not isinstance(rule, dict):
+                continue
+            prompt_rules.append(
+                {
+                    "id": str(rule.get("id", "")).strip() or f"SAFE_{idx}",
+                    "raw_text": str(rule.get("raw_text", "")).strip(),
+                    "constraint_type": str(rule.get("constraint_type", "")).strip(),
+                    "process": rule.get("process"),
+                    "product": rule.get("product"),
+                    "resources": rule.get("resources"),
+                    "event": rule.get("event"),
+                    "context": rule.get("context"),
+                    "aps": [
+                        str(ap.get("full", "")).strip()
+                        for ap in (rule.get("aps") or [])
+                        if isinstance(ap, dict) and str(ap.get("full", "")).strip()
+                    ],
+                    "ltlf": str(rule.get("ltlf", "")).strip(),
+                }
+            )
+        return prompt_rules
+
+    @staticmethod
+    def _rule_aps_signature(rule: dict[str, Any]) -> list[str]:
+        aps = rule.get("aps", []) if isinstance(rule, dict) else []
+        out: list[str] = []
+        for ap in aps if isinstance(aps, list) else []:
+            if isinstance(ap, dict):
+                full = str(ap.get("full", "")).strip()
+                if full:
+                    out.append(full)
+            else:
+                text = str(ap or "").strip()
+                if text:
+                    out.append(text)
+        return sorted(set(out))
+
+    @classmethod
+    def _summarize_safety_preview_diff(
+        cls,
+        previous_rules: list[dict[str, Any]],
+        current_rules: list[dict[str, Any]],
+    ) -> str:
+        if not previous_rules:
+            return "No previous preview comparison available."
+
+        previous_map = {
+            str(rule.get("id", "")).strip(): rule
+            for rule in previous_rules
+            if isinstance(rule, dict) and str(rule.get("id", "")).strip()
+        }
+        current_map = {
+            str(rule.get("id", "")).strip(): rule
+            for rule in current_rules
+            if isinstance(rule, dict) and str(rule.get("id", "")).strip()
+        }
+
+        lines: list[str] = []
+        previous_ids = set(previous_map)
+        current_ids = set(current_map)
+        for rid in sorted(current_ids - previous_ids):
+            lines.append(f"{rid}: new rule in current preview.")
+        for rid in sorted(previous_ids - current_ids):
+            lines.append(f"{rid}: removed from current preview.")
+
+        shared_ids = sorted(previous_ids & current_ids)
+        for rid in shared_ids:
+            old = previous_map[rid]
+            new = current_map[rid]
+            changed_fields: list[str] = []
+            for field in ("raw_text", "constraint_type", "ltlf"):
+                if str(old.get(field, "")).strip() != str(new.get(field, "")).strip():
+                    changed_fields.append(field)
+            if cls._rule_aps_signature(old) != cls._rule_aps_signature(new):
+                changed_fields.append("aps")
+            if changed_fields:
+                lines.append(f"{rid}: changed {', '.join(changed_fields)}.")
+
+        if not lines:
+            return "Current preview matches the previous preview on rule text, APs, and LTLf."
+        return "\n".join(lines)
+
+    @staticmethod
+    def _preview_history_summary(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        summary: list[dict[str, Any]] = []
+        for entry in entries[:_SAFETY_PREVIEW_HISTORY_LIMIT]:
+            summary.append(
+                {
+                    "preview_id": str(entry.get("preview_id", "")).strip(),
+                    "generated_at_utc": str(entry.get("generated_at_utc", "")).strip(),
+                    "parent_preview_id": str(entry.get("parent_preview_id", "")).strip(),
+                    "refinement_feedback": str(entry.get("refinement_feedback", "")).strip(),
+                    "rules_count": int(entry.get("rules_count", 0) or 0),
+                }
+            )
+        return summary
 
     @staticmethod
     def _flatten_dfa_transitions(parsed_dfa: dict[str, Any]) -> list[dict[str, str]]:
@@ -439,13 +810,11 @@ class SystemBridge:
 
     @staticmethod
     def _ltlf_plain_feedback(rule: dict[str, Any]) -> str:
-        """Provide operator-facing natural-language meaning of AP + LTLf."""
-        raw_text = str(rule.get("raw_text", "")).strip()
+        """Fallback operator-facing interpretation of the generated AP + LTLf."""
         ltlf = str(rule.get("ltlf", "")).strip()
         aps = rule.get("aps", []) if isinstance(rule.get("aps"), list) else []
 
         ap_map: dict[str, str] = {}
-        ap_brief: list[str] = []
         for ap in aps:
             if not isinstance(ap, dict):
                 continue
@@ -454,48 +823,75 @@ class SystemBridge:
             if not label or not full:
                 continue
             ap_map[label] = full
-            ap_brief.append(f"{label} = {full}")
-
-        formula_for_user = ltlf
-        for label, full in ap_map.items():
-            formula_for_user = formula_for_user.replace(label, f"[{label}:{full}]")
-
-        if raw_text:
-            summary = f"Intent statement: {raw_text}."
-        else:
-            summary = "Intent statement: (not provided)."
-
-        rule_expl = ""
-        # Common ordering pattern: ((!a) U b) => b must happen before a
-        normalized = ltlf.replace(" ", "")
+        normalized = re.sub(r"\s+", "", ltlf)
         m_order = (
             re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
             or re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
         )
-        if m_order:
-            blocked = m_order.group(1)
-            required = m_order.group(2)
-            blocked_full = ap_map.get(blocked, blocked)
-            required_full = ap_map.get(required, required)
-            rule_expl = (
-                f"Ordering meaning: event {required_full} must happen before event {blocked_full} can occur."
-            )
-        elif " U " in ltlf:
-            rule_expl = (
-                "Temporal meaning: the condition after 'U' must eventually occur, "
-                "and the condition before 'U' must hold until then."
-            )
-        elif ltlf.startswith("G(") or ltlf.startswith("G "):
-            rule_expl = "Temporal meaning: this must hold globally (at all times)."
-        elif "->" in ltlf:
-            rule_expl = "Temporal meaning: whenever the left side happens, the right side must follow."
-        else:
-            rule_expl = "Temporal meaning: evaluate this formula over AP events across execution."
+        m_response = re.fullmatch(r"G\((ap\d+)->F(ap\d+)\)", normalized)
 
-        ap_expl = "AP mapping: " + (", ".join(ap_brief) if ap_brief else "no AP labels generated.")
+        if ltlf.startswith("G !(") or ltlf.startswith("G!("):
+            events = [full for _, full in sorted(ap_map.items())]
+            if events:
+                return (
+                    "This generated rule forbids simultaneous overlap among these grounded events: "
+                    + "; ".join(events)
+                    + "."
+                )
+            return "This generated rule is a global mutual-exclusion constraint over the generated AP events."
+        if m_response:
+            trigger = ap_map.get(m_response.group(1), m_response.group(1))
+            response = ap_map.get(m_response.group(2), m_response.group(2))
+            return f"Whenever {trigger} occurs, {response} must eventually follow."
+        if m_order:
+            earlier = ap_map.get(m_order.group(1), m_order.group(1))
+            later = ap_map.get(m_order.group(2), m_order.group(2))
+            return f"The generated ordering requires {earlier} to happen before {later}."
+        if " U " in ltlf:
+            return (
+                "This generated rule uses an until-condition: the left-hand condition must hold "
+                "until the right-hand condition becomes true."
+            )
+        if ltlf.startswith("G(") or ltlf.startswith("G "):
+            return "This generated rule is a global constraint that must hold throughout execution."
+        if ltlf:
+            return f"This generated rule constrains execution according to the formula {ltlf}."
+        return "No generated interpretation is available for this rule."
+
+    @classmethod
+    def _preview_interpretation_summary(cls, rules: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for idx, rule in enumerate(rules, start=1):
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id", "")).strip() or f"SAFE_{idx}"
+            interpretation = str(rule.get("generated_interpretation", "")).strip() or cls._ltlf_plain_feedback(rule)
+            lines.append(f"- {rid}: {interpretation}")
+        return "\n".join(lines) if lines else "No generated rule interpretation available."
+
+    @staticmethod
+    def _diagnose_dfa_artifact(dot_text: str, parsed_dfa: dict[str, Any]) -> tuple[str, str]:
+        raw = str(dot_text or "").strip()
+        if not raw:
+            return ("missing", "No DFA artifact was generated for this rule.")
+
+        transitions = parsed_dfa.get("transitions", {}) if isinstance(parsed_dfa, dict) else {}
+        has_labeled_transitions = bool(re.search(r"\[label=\".+?\"\]", raw))
+        has_parsed_transitions = False
+        if isinstance(transitions, dict):
+            has_parsed_transitions = any(bool(edges) for edges in transitions.values())
+
+        if has_labeled_transitions and has_parsed_transitions:
+            return ("ok", "")
+
+        if shutil.which("mona") is None:
+            return (
+                "backend_missing",
+                "DFA graph unavailable: the MONA executable is not installed, so ltlf2dfa returned placeholder output.",
+            )
         return (
-            f"{summary} {rule_expl} "
-            f"Generated formula: {formula_for_user or '(empty)'}. {ap_expl}"
+            "invalid",
+            "DFA graph unavailable: ltlf2dfa returned placeholder DOT with no labeled transitions.",
         )
 
     def _parse_rule_dfas(
@@ -536,11 +932,9 @@ class SystemBridge:
 
         payload = self._load_safety_intent_previews()
         previews = payload.get("previews", {})
-        entries = previews.get(safety_key, []) if isinstance(previews, dict) else []
-        if isinstance(entries, dict):
-            entries = [entries]
-        if not isinstance(entries, list):
-            entries = []
+        entries = self._preview_history_entries(
+            previews.get(safety_key, []) if isinstance(previews, dict) else []
+        )
         if not entries:
             return {
                 "available": False,
@@ -569,6 +963,15 @@ class SystemBridge:
         logic_payload = self._read_json_dict(logic_path)
         raw_rules = logic_payload.get("rules", [])
         rules: list[dict[str, Any]] = raw_rules if isinstance(raw_rules, list) else []
+        preview_interpretation_summary = str(
+            logic_payload.get("preview_interpretation_summary", "") or ""
+        ).strip()
+        parent_preview_id = str(latest.get("parent_preview_id", "")).strip()
+        parent_record = self._find_preview_record(entries[1:], parent_preview_id)
+        if not parent_record and len(entries) > 1:
+            parent_record = entries[1]
+        parent_rules = self._preview_record_rules(parent_record)
+        diff_summary = self._summarize_safety_preview_diff(parent_rules, rules)
 
         dfa_map: dict[str, str] = {}
         for rule in rules:
@@ -590,6 +993,8 @@ class SystemBridge:
             parsed = parsed_dfas.get(rid, {})
             dot_path = preview_dir / f"{rid}_dfa.dot"
             png_path = preview_dir / f"{rid}_dfa.png"
+            generated_interpretation = str(rule.get("generated_interpretation", "")).strip() or self._ltlf_plain_feedback(rule)
+            dfa_status, dfa_diagnostic = self._diagnose_dfa_artifact(dfa_map.get(rid, ""), parsed)
             preview_rules.append(
                 {
                     "id": rid,
@@ -597,7 +1002,8 @@ class SystemBridge:
                     "constraint_type": str(rule.get("constraint_type", "")),
                     "ltlf": str(rule.get("ltlf", "")),
                     "aps": rule.get("aps", []) if isinstance(rule.get("aps"), list) else [],
-                    "ltlf_plain_feedback": self._ltlf_plain_feedback(rule),
+                    "generated_interpretation": generated_interpretation,
+                    "ltlf_plain_feedback": generated_interpretation,
                     "dfa_dot": dfa_map.get(rid, ""),
                     "dfa_dot_path": str(dot_path) if dot_path.exists() else "",
                     "dfa_png_path": str(png_path) if png_path.exists() else "",
@@ -606,8 +1012,13 @@ class SystemBridge:
                     "dfa_ap_symbols": parsed.get("ap_symbols", []) if isinstance(parsed.get("ap_symbols"), list) else [],
                     "dfa_transitions": self._flatten_dfa_transitions(parsed),
                     "dfa_meaning": self._dfa_plain_meaning(rule, parsed),
+                    "dfa_status": dfa_status,
+                    "dfa_diagnostic": dfa_diagnostic,
                 }
             )
+
+        if not preview_interpretation_summary:
+            preview_interpretation_summary = self._preview_interpretation_summary(preview_rules)
 
         preview_hash = str(latest.get("safety_sha256", "")).strip()
         hash_matches = bool(current_hash and preview_hash and current_hash == preview_hash)
@@ -618,10 +1029,26 @@ class SystemBridge:
             "current_hash": current_hash,
             "hash_matches_current": hash_matches,
             "record": latest,
+            "refinement_feedback": str(latest.get("refinement_feedback", "")).strip(),
+            "parent_record": {
+                "preview_id": str(parent_record.get("preview_id", "")).strip(),
+                "generated_at_utc": str(parent_record.get("generated_at_utc", "")).strip(),
+            }
+            if parent_record
+            else {},
+            "history": self._preview_history_summary(entries),
+            "diff_summary": diff_summary,
+            "preview_interpretation_summary": preview_interpretation_summary,
             "rules": preview_rules,
         }
 
-    def generate_safety_rule_preview(self, safety_requirement_file: str) -> dict[str, Any]:
+    def generate_safety_rule_preview(
+        self,
+        safety_requirement_file: str,
+        *,
+        refinement_feedback: str = "",
+        parent_preview_id: str = "",
+    ) -> dict[str, Any]:
         if self.system_running or self._starting or self._stopping:
             raise RuntimeError("cannot generate safety preview while system lifecycle is active")
         self._ensure_called_from_worker_thread("generate_safety_rule_preview")
@@ -639,6 +1066,22 @@ class SystemBridge:
 
         safety_hash = sha256_text(safety_text)
         safety_key = self._norm_path(safety_path)
+        payload = self._load_safety_intent_previews()
+        previews = payload.get("previews", {})
+        if not isinstance(previews, dict):
+            previews = {}
+        history = self._preview_history_entries(previews.get(safety_key, []))
+        requested_parent_id = str(parent_preview_id or "").strip()
+        parent_record: dict[str, Any] = {}
+        if requested_parent_id:
+            parent_record = self._find_preview_record(history, requested_parent_id)
+            if not parent_record:
+                raise ValueError(f"parent preview not found: {requested_parent_id}")
+        elif str(refinement_feedback or "").strip() and history:
+            parent_record = history[0]
+        prompt_preview_rules = self._preview_prompt_rules(
+            self._preview_record_rules(parent_record)
+        )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         preview_id = f"{stamp}__{slug(safety_path.stem)}__{safety_hash[:8]}"
         preview_dir = _SAFETY_PREVIEW_DIR / preview_id
@@ -649,7 +1092,7 @@ class SystemBridge:
             preview_dir = _SAFETY_PREVIEW_DIR / preview_id
         preview_dir.mkdir(parents=True, exist_ok=False)
 
-        _, CentralControllerAgent, _, _ = self.bundle_compiler._import_runtime_classes()
+        _, CentralControllerAgent, _, _, _ = self.bundle_compiler._import_runtime_classes()
         resources = self.bundle_compiler._collect_resource_refs(
             robot_env=str(self.robot_env or "gazebo")
         )
@@ -666,7 +1109,12 @@ class SystemBridge:
 
         try:
             async def _run_preview() -> dict[str, str]:
-                await safety_logic.build_safety_rules_and_logic(safety_text)
+                await safety_logic.build_safety_rules_and_logic(
+                    safety_text,
+                    refinement_feedback=str(refinement_feedback or "").strip(),
+                    previous_preview_rules=prompt_preview_rules,
+                )
+                await safety_logic.build_preview_interpretations()
                 await asyncio.to_thread(safety_logic.save, preview_dir / "cca_safety_logic.json")
                 return await asyncio.to_thread(safety_logic.build_dfas_per_rule, preview_dir)
 
@@ -682,28 +1130,52 @@ class SystemBridge:
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "safety_file": safety_key,
             "safety_sha256": safety_hash,
+            "refinement_feedback": str(refinement_feedback or "").strip(),
+            "parent_preview_id": str(parent_record.get("preview_id", "")).strip(),
             "preview_dir": str(preview_dir.resolve()),
             "safety_logic_json": str((preview_dir / "cca_safety_logic.json").resolve()),
             "dfa_dot_files": dot_files,
             "dfa_png_files": png_files,
             "rules_count": len(getattr(safety_logic, "rules", []) or []),
+            "prompt_context_rules_count": len(prompt_preview_rules),
         }
 
-        payload = self._load_safety_intent_previews()
-        previews = payload.get("previews", {})
-        if not isinstance(previews, dict):
-            previews = {}
-        history = previews.get(safety_key, [])
-        if isinstance(history, dict):
-            history = [history]
-        if not isinstance(history, list):
-            history = []
         history.insert(0, record)
-        previews[safety_key] = history[:20]
+        previews[safety_key] = history[:_SAFETY_PREVIEW_HISTORY_LIMIT]
         payload["previews"] = previews
         self._save_safety_intent_previews(payload)
 
         return self.get_safety_rule_preview(safety_key)
+
+    def delete_safety_intent_previews(self, safety_requirement_file: str) -> None:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            return
+        safety_path = self._abs_project_path(raw).resolve()
+        safety_key = self._norm_path(safety_path)
+        payload = self._load_safety_intent_previews()
+        previews = payload.get("previews", {}) if isinstance(payload, dict) else {}
+        if not isinstance(previews, dict):
+            previews = {}
+        previews.pop(safety_key, None)
+        payload["previews"] = previews
+        self._save_safety_intent_previews(payload)
+
+    def delete_safety_intent_state(self, safety_requirement_file: str) -> None:
+        raw = str(safety_requirement_file or "").strip()
+        if not raw:
+            return
+        safety_path = self._abs_project_path(raw).resolve()
+        safety_key = self._norm_path(safety_path)
+        self.delete_safety_intent_previews(safety_key)
+
+        payload = self._load_safety_intent_approvals()
+        approvals = payload.get("approvals", {}) if isinstance(payload, dict) else {}
+        if not isinstance(approvals, dict):
+            approvals = {}
+        approvals.pop(safety_key, None)
+        payload["approvals"] = approvals
+        self._save_safety_intent_approvals(payload)
 
     def evaluate_safety_intent_approval(self, safety_requirement_file: str) -> dict[str, Any]:
         raw = str(safety_requirement_file or "").strip()
@@ -813,9 +1285,15 @@ class SystemBridge:
         approvals[safety_key] = record
         payload["approvals"] = approvals
         self._save_safety_intent_approvals(payload)
+        saved_payload = self._load_safety_intent_approvals()
+        saved_record = (
+            saved_payload.get("approvals", {}).get(safety_key, {})
+            if isinstance(saved_payload.get("approvals", {}), dict)
+            else {}
+        )
         return {
             "approved": True,
-            "record": record,
+            "record": saved_record if isinstance(saved_record, dict) else record,
             "safety_file": safety_key,
         }
 
@@ -842,6 +1320,7 @@ class SystemBridge:
             "safety_sha256": safety_hash,
             "note": str(note or "").strip(),
         }
+        record.pop("verified_file", None)
 
         payload = self._load_safety_intent_approvals()
         approvals = payload.get("approvals", {})
@@ -850,9 +1329,15 @@ class SystemBridge:
         approvals[safety_key] = record
         payload["approvals"] = approvals
         self._save_safety_intent_approvals(payload)
+        saved_payload = self._load_safety_intent_approvals()
+        saved_record = (
+            saved_payload.get("approvals", {}).get(safety_key, {})
+            if isinstance(saved_payload.get("approvals", {}), dict)
+            else {}
+        )
         return {
             "approved": False,
-            "record": record,
+            "record": saved_record if isinstance(saved_record, dict) else record,
             "safety_file": safety_key,
         }
 
@@ -884,8 +1369,6 @@ class SystemBridge:
         raw = self.load_config(str(p))
         product_name, product_meta = self._first_manifest_entry(raw)
         product_spec_path_raw = str(product_meta.get("product_specification_file", "")).strip()
-        if not product_spec_path_raw:
-            raise ValueError(f"product init missing product_specification_file: {p}")
 
         cca_raw = self.load_config(str(_CCA_INIT))
         if "cca" in cca_raw and isinstance(cca_raw["cca"], dict):
@@ -895,15 +1378,22 @@ class SystemBridge:
         safety_path = str(cca_meta.get("safety_file", "")).strip()
         if not safety_path:
             safety_path = str(product_meta.get("safety_file", "")).strip()
-        if not safety_path:
-            raise ValueError("safety_file is missing in cca/product manifest")
-        req_file = self._abs_project_path(product_spec_path_raw).resolve()
-        safe_file = self._abs_project_path(safety_path).resolve()
-        source_hashes = self._compute_source_hashes(req_file, safe_file) if include_hashes else {}
+
+        req_file_str = ""
+        if product_spec_path_raw:
+            req_file_str = str(self._abs_project_path(product_spec_path_raw).resolve())
+        safe_file_str = ""
+        if safety_path:
+            safe_file_str = str(self._abs_project_path(safety_path).resolve())
+        source_hashes = {}
+        if include_hashes and req_file_str and safe_file_str:
+            source_hashes = self._compute_source_hashes(
+                Path(req_file_str), Path(safe_file_str)
+            )
         return {
             "product_name": product_name,
-            "product_spec_file": str(req_file),
-            "safety_file": str(safe_file),
+            "product_spec_file": req_file_str,
+            "safety_file": safe_file_str,
             "product_init_file": str(p.resolve()),
             "source_hashes": source_hashes,
         }
@@ -962,6 +1452,71 @@ class SystemBridge:
         if status != BUNDLE_STATUS_VERIFIED:
             raise ValueError(f"plan set {bid} is not verified (status={status or 'unknown'})")
         self.bundle_store.set_active_bundle_id(bid)
+
+    def _bundle_missing_linked_files(self, manifest: dict[str, Any] | None) -> list[str]:
+        data = manifest if isinstance(manifest, dict) else {}
+        if not data:
+            return ["manifest_missing"]
+
+        missing: list[str] = []
+        refs = (
+            ("product_requirement_file_missing", str(data.get("product_spec_file", "")).strip()),
+            ("safety_requirement_file_missing", str(data.get("safety_file", "")).strip()),
+        )
+        for reason, raw_path in refs:
+            if not raw_path:
+                missing.append(reason)
+                continue
+            candidate = self._abs_project_path(raw_path).resolve()
+            if not candidate.exists():
+                missing.append(reason)
+        return missing
+
+    def get_bundle_delete_policy(self, bundle_id: str) -> dict[str, Any]:
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            return {
+                "bundle_id": "",
+                "exists": False,
+                "can_delete": False,
+                "status": "unknown",
+                "missing_links": [],
+                "reason": "plan set id is missing",
+            }
+
+        summary = self.bundle_store.get_bundle_summary(bid) or {}
+        manifest = self.bundle_store.load_manifest(bid) or {}
+        bundle_dir = self.bundle_store.bundle_dir(bid)
+        if not summary and not manifest and not bundle_dir.exists():
+            return {
+                "bundle_id": bid,
+                "exists": False,
+                "can_delete": False,
+                "status": "unknown",
+                "missing_links": [],
+                "reason": "plan set not found",
+            }
+
+        status = str(manifest.get("status") or summary.get("status") or "").strip().lower() or "unknown"
+        missing_links = self._bundle_missing_linked_files(manifest)
+        manifest_missing = "manifest_missing" in missing_links
+        can_delete = status != BUNDLE_STATUS_VERIFIED or manifest_missing or bool(
+            [reason for reason in missing_links if reason != "manifest_missing"]
+        )
+        if can_delete:
+            reason = "ok"
+        elif status == BUNDLE_STATUS_VERIFIED:
+            reason = "verified_plan_set_requires_unverify"
+        else:
+            reason = "ok"
+        return {
+            "bundle_id": bid,
+            "exists": True,
+            "can_delete": can_delete,
+            "status": status,
+            "missing_links": missing_links,
+            "reason": reason,
+        }
 
     def check_bundle_compatibility(
         self,
@@ -1064,6 +1619,80 @@ class SystemBridge:
             return False
         return sha256_file(snapshot_path) == expected
 
+    @staticmethod
+    def _describe_bundle_incompatibility_reasons(reasons: list[str]) -> str:
+        labels = {
+            "bundle_id_missing": "active plan set id is missing",
+            "manifest_missing": "plan set manifest is missing",
+            "bundle_not_verified": "plan set is not verified",
+            "product_spec_file": "selected product requirement file changed",
+            "execution_mode": "execution mode changed",
+            "robot_env": "robot environment changed",
+            "safety_file_none": "safety was disabled",
+            "safety_file": "selected safety file changed",
+            "requirements_sha256": "product requirement file contents changed",
+            "safety_sha256": "safety file contents changed",
+            "tools_sha256": "bundled tools snapshot changed or is missing",
+            "prompts_sha256": "prompts.py changed",
+        }
+        details: list[str] = []
+        for reason in reasons:
+            raw = str(reason or "").strip()
+            if not raw:
+                continue
+            if raw.startswith("context_error:"):
+                details.append(raw.split(":", 1)[1].strip() or "startup context changed")
+                continue
+            details.append(labels.get(raw, raw.replace("_", " ")))
+        seen: set[str] = set()
+        ordered = []
+        for item in details:
+            if item in seen:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ", ".join(ordered) if ordered else "current selection no longer matches the plan set"
+
+    def _resolve_startup_bundle_context(
+        self,
+        *,
+        product_spec_file: str,
+        execution_mode: str,
+        robot_env: str,
+        safety_requirement_file: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        active_id = self.bundle_store.get_active_bundle_id()
+        if not active_id:
+            return None, None
+
+        ok, reasons = self.check_bundle_compatibility(
+            active_id,
+            product_spec_file,
+            execution_mode,
+            robot_env,
+            safety_requirement_file,
+        )
+        if not ok:
+            detail = self._describe_bundle_incompatibility_reasons(reasons)
+            self.bundle_store.set_active_bundle_id(None)
+            notice = (
+                f"System started without verified plan set '{active_id}': it was deactivated "
+                f"because {detail}."
+            )
+            self._diag_emit(f"[Bundle] Auto-deactivated incompatible active bundle {active_id}: {detail}")
+            log.warning("Auto-deactivated incompatible active plan set %s: %s", active_id, detail)
+            return None, notice
+
+        return (
+            self._resolve_active_bundle_context(
+                product_spec_file=product_spec_file,
+                execution_mode=execution_mode,
+                robot_env=robot_env,
+                safety_requirement_file=safety_requirement_file,
+            ),
+            None,
+        )
+
     def list_compatible_bundles(
         self,
         product_spec_file: str,
@@ -1158,6 +1787,9 @@ class SystemBridge:
         *,
         product_requirement_file: str | None = None,
         safety_requirement_file: str | None = None,
+        auto_replan_max_attempts: int | None = None,
+        refinement_feedback: str = "",
+        parent_bundle_id: str = "",
     ) -> dict[str, Any]:
         if self.system_running or self._starting or self._stopping:
             raise RuntimeError("cannot generate plan set while system lifecycle is active")
@@ -1194,6 +1826,7 @@ class SystemBridge:
             if str(safety_requirement_file or "").strip()
             else None
         )
+        resolved_auto_replan_max_attempts = 3 if auto_replan_max_attempts is None else auto_replan_max_attempts
 
         return asyncio.run(
             self.bundle_compiler.compile_bundle(
@@ -1202,6 +1835,9 @@ class SystemBridge:
                 robot_env=resolved_robot_env,
                 product_requirement_file=req_file or None,
                 safety_requirement_file=safety_override,
+                auto_replan_max_attempts=resolved_auto_replan_max_attempts,
+                refinement_feedback=str(refinement_feedback or "").strip(),
+                parent_bundle_id=str(parent_bundle_id or "").strip(),
             )
         )
 
@@ -1271,18 +1907,20 @@ class SystemBridge:
 
         summary = self.bundle_store.get_bundle_summary(bid) or {}
         manifest = self.bundle_store.load_manifest(bid) or {}
-        if not summary and not manifest:
+        bundle_dir = self.bundle_store.bundle_dir(bid)
+        if not summary and not manifest and not bundle_dir.exists():
             raise ValueError(f"plan-set not found: {bid}")
 
         status = str(manifest.get("status") or summary.get("status") or "").strip().lower()
-        if status == BUNDLE_STATUS_VERIFIED:
+        delete_policy = self.get_bundle_delete_policy(bid)
+        if not delete_policy.get("can_delete", False):
             raise ValueError("verified plan set cannot be deleted; unverify it first")
 
-        bundle_dir = self.bundle_store.bundle_dir(bid)
+        bundle_dir_existed = bundle_dir.exists()
         if bundle_dir.exists():
             shutil.rmtree(bundle_dir, ignore_errors=True)
 
-        removed = self.bundle_store.delete_bundle_summary(bid)
+        removed = self.bundle_store.delete_bundle_summary(bid) or bundle_dir_existed or bool(summary) or bool(manifest)
         if self.bundle_store.get_active_bundle_id() == bid:
             self.bundle_store.set_active_bundle_id(None)
 
@@ -1452,54 +2090,51 @@ class SystemBridge:
         product_agent.safety_text = safety_text
 
         try:
-            async def _run_replan() -> None:
-                task_nodes = [
-                    n for n in product_agent.process_planner.nodes
-                    if n.get("type") == "task"
-                ]
-                pred_map = {
-                    str(n.get("id")): list(n.get("predecessors", []))
-                    for n in task_nodes
-                    if n.get("id")
+            task_nodes = [
+                n for n in product_agent.process_planner.nodes
+                if n.get("type") == "task"
+            ]
+            pred_map = {
+                str(n.get("id")): list(n.get("predecessors", []))
+                for n in task_nodes
+                if n.get("id")
+            }
+            seed_violations = [
+                {
+                    "violated_rule_id": "USER_EDIT",
+                    "violation_text": f"Operator requested plan changes: {message}",
+                    "violation_logic": "manual_edit_request",
+                    "witness_trace": [],
+                    "relevant_tasks": task_nodes,
+                    "relevant_pred_map": pred_map,
                 }
-                violations = [
-                    {
-                        "violated_rule_id": "USER_EDIT",
-                        "violation_text": f"Operator requested plan changes: {message}",
-                        "violation_logic": "manual_edit_request",
-                        "witness_trace": [],
-                        "relevant_tasks": task_nodes,
-                        "relevant_pred_map": pred_map,
-                    }
-                ]
-                await product_agent.process_planner.replan_with_feedback_offline(violations)
-
-            asyncio.run(_run_replan())
-            product_agent.process_planner.save(plan_path)
-            product_agent.process_planner.save_global_fsa(fsa_path)
-
+            ]
             validator = OfflineSafetyValidator(
                 rules=rules,
                 dfa_map=dfa_map,
             )
-            ok, violations = validator.validate_fsa_offline(
-                fsa=product_agent.process_planner.global_fsa or {},
-                plan={"nodes": product_agent.process_planner.nodes},
-                product_jid=product_jid,
+            replan_policy = manifest.get("replan_policy", {}) if isinstance(manifest.get("replan_policy"), dict) else {}
+            try:
+                auto_replan_max_attempts = int(replan_policy.get("auto_replan_max_attempts", 3) or 0)
+            except Exception:
+                auto_replan_max_attempts = 3
+            auto_replan_max_attempts = max(0, min(auto_replan_max_attempts, 10))
+
+            validation_payload = asyncio.run(
+                self.bundle_compiler.run_offline_repair_loop(
+                    product_agent=product_agent,
+                    validator=validator,
+                    product_jid=product_jid,
+                    auto_replan_max_attempts=auto_replan_max_attempts,
+                    seed_replan_violations=seed_violations,
+                )
             )
-            violated_rules = sorted(
-                {
-                    str(v.get("violated_rule_id"))
-                    for v in violations
-                    if v.get("violated_rule_id")
-                }
-            )
-            validation_payload = {
-                "ok": bool(ok),
-                "violations": violations,
-                "violated_rules": violated_rules,
-                "witness_count": len(violations),
-            }
+            product_agent.process_planner.save(plan_path)
+            product_agent.process_planner.save_global_fsa(fsa_path)
+
+            ok = bool(validation_payload.get("ok", False))
+            violated_rules = list(validation_payload.get("violated_rules", []))
+            witness_count = int(validation_payload.get("witness_count", 0))
             validation_path.parent.mkdir(parents=True, exist_ok=True)
             validation_path.write_text(
                 json.dumps(validation_payload, indent=2),
@@ -1510,10 +2145,15 @@ class SystemBridge:
             manifest["status"] = new_status
             manifest["verified"] = False
             manifest["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["replan_policy"] = {
+                "auto_replan_max_attempts": auto_replan_max_attempts,
+            }
             manifest["validation_summary"] = {
                 "ok": bool(ok),
                 "violated_rules": violated_rules,
-                "witness_count": len(violations),
+                "witness_count": witness_count,
+                "auto_replans_used": int(validation_payload.get("auto_replans_used", 0)),
+                "stop_reason": str(validation_payload.get("stop_reason", "")),
             }
             self.bundle_store.overwrite_manifest(bid, manifest)
             summary = self.bundle_store.update_bundle_summary(
@@ -1530,7 +2170,10 @@ class SystemBridge:
                 "bundle_id": bid,
                 "status": new_status,
                 "validation_ok": bool(ok),
-                "witness_count": len(violations),
+                "witness_count": witness_count,
+                "auto_replans_used": int(validation_payload.get("auto_replans_used", 0)),
+                "auto_replan_max_attempts": auto_replan_max_attempts,
+                "stop_reason": str(validation_payload.get("stop_reason", "")),
                 "summary": summary,
                 "manifest": manifest,
                 "task_count": len(
@@ -1590,6 +2233,16 @@ class SystemBridge:
             "execution_mode": manifest.get("execution_mode"),
             "robot_env": manifest.get("robot_env"),
             "status": manifest.get("status"),
+            "replan_policy": (
+                dict(manifest.get("replan_policy", {}))
+                if isinstance(manifest.get("replan_policy"), dict)
+                else {}
+            ),
+            "validation_summary": (
+                dict(manifest.get("validation_summary", {}))
+                if isinstance(manifest.get("validation_summary"), dict)
+                else {}
+            ),
             "manifest_path": str(self.bundle_store.manifest_path(active_id)),
             "artifacts": artifacts_abs,
         }
@@ -1681,6 +2334,8 @@ class SystemBridge:
             return
         self._starting = True
         self.last_error = None
+        self.last_notice = None
+        self._clear_cached_plan_safety_alerts()
         self._startup_seq += 1
         startup_id = self._startup_seq
         startup_t0 = time.monotonic()
@@ -1812,13 +2467,15 @@ class SystemBridge:
             else:
                 selected_safety_for_compat = None
 
-            bundle_context = await asyncio.to_thread(
-                self._resolve_active_bundle_context,
+            bundle_context, bundle_notice = await asyncio.to_thread(
+                self._resolve_startup_bundle_context,
                 product_spec_file=selected_product_file,
                 execution_mode=self.execution_mode,
                 robot_env=self.robot_env,
                 safety_requirement_file=selected_safety_for_compat,
             )
+            if bundle_notice:
+                self.last_notice = bundle_notice
             if bundle_context:
                 self._diag_emit(
                     f"[Bundle] startup using bundle_id={bundle_context.get('bundle_id', '')}"
@@ -1915,7 +2572,46 @@ class SystemBridge:
                     f"startup#{startup_id} product {name} started in {time.monotonic() - t_pa:.2f}s"
                 )
 
+            self._set_startup_phase("wait_product_kickoff")
+            kickoff_results: list[dict[str, Any]] = []
+            for pa in self.product_agents:
+                wait_for_kickoff = getattr(pa, "wait_for_kickoff_result", None)
+                if not callable(wait_for_kickoff):
+                    kickoff_results.append(
+                        {
+                            "success": False,
+                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: kickoff wait unavailable",
+                        }
+                    )
+                    continue
+                result = await wait_for_kickoff(timeout=180.0)
+                if isinstance(result, dict):
+                    kickoff_results.append(result)
+                else:
+                    kickoff_results.append(
+                        {
+                            "success": False,
+                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: invalid kickoff result",
+                        }
+                    )
+
+            kickoff_failures = [r for r in kickoff_results if not bool(r.get("success", False))]
+            if kickoff_failures:
+                cached_alerts = []
+                messages = []
+                for failure in kickoff_failures:
+                    alert = failure.get("alert")
+                    if isinstance(alert, dict) and alert:
+                        cached_alerts.append(alert)
+                    msg = str(failure.get("message", "")).strip()
+                    if msg:
+                        messages.append(msg)
+                if cached_alerts:
+                    self._cache_plan_safety_alerts(cached_alerts)
+                raise RuntimeError(" ; ".join(messages) or "product kickoff safety validation failed")
+
             self.system_running = True
+            self._clear_cached_plan_safety_alerts()
             self._set_startup_phase("startup_complete")
             log.info("All agents started successfully.")
             self._diag_emit(
@@ -1943,6 +2639,7 @@ class SystemBridge:
         try:
             await self._cleanup_agents()
             self.system_running = False
+            self._clear_cached_plan_safety_alerts()
             log.info("All agents stopped.")
         finally:
             self._stopping = False
@@ -2455,17 +3152,32 @@ class SystemBridge:
         process_name: str | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str | None:
-        target = str(service_name).strip()
-        if not target:
+        return self._wait_for_ros_services(
+            [service_name],
+            timeout_sec=timeout_sec,
+            process_name=process_name,
+            cancel_event=cancel_event,
+        )
+
+    def _wait_for_ros_services(
+        self,
+        service_names: list[str] | tuple[str, ...],
+        timeout_sec: float = 20.0,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        poll_interval_sec: float = 0.5,
+    ) -> str | None:
+        targets = [str(name).strip() for name in service_names if str(name).strip()]
+        if not targets:
             return "service name is empty"
 
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
-                return f"{target} wait cancelled"
+                return f"{', '.join(targets)} wait cancelled"
 
             if process_name and self.ros2_proc_status(process_name) != "running":
-                return f"{process_name} exited before {target} became available"
+                return f"{process_name} exited before {', '.join(targets)} became available"
 
             ok, out = self._ros2_command_output(
                 "ros2 service list",
@@ -2476,13 +3188,17 @@ class SystemBridge:
             )
             if ok:
                 services = [line.strip() for line in out.splitlines() if line.strip()]
-                if any(s == target or s.endswith(target) for s in services):
+                if all(
+                    any(s == target or s.endswith(target) for s in services)
+                    for target in targets
+                ):
                     return None
-            time.sleep(1.5)
+            time.sleep(max(0.1, float(poll_interval_sec)))
 
+        targets_text = ", ".join(targets)
         if process_name and self.ros2_proc_status(process_name) != "running":
-            return f"{process_name} exited before {target} became available"
-        return f"{target} not available within {timeout_sec:.0f}s"
+            return f"{process_name} exited before {targets_text} became available"
+        return f"{targets_text} not available within {timeout_sec:.0f}s"
 
     def _wait_for_driver_ready(self, robot: str, timeout_sec: float = 18.0) -> str | None:
         key = str(robot).strip().lower()
@@ -2791,15 +3507,14 @@ class SystemBridge:
                 # lightweight shell probe (`ros2 service list`).  This avoids
                 # creating heavyweight ROS2 controllers before the simulation
                 # stack is actually ready.
-                for svc in ("/compute_cartesian_path", "/detect_all"):
-                    wait_err = self._wait_for_ros_service(
-                        svc,
-                        timeout_sec=self._GAZEBO_PREWARM_READY_WAIT_S,
-                        cancel_event=self._gazebo_prewarm_cancel,
-                    )
-                    if wait_err:
-                        log.info("Gazebo prewarm skipped (service not ready): %s", wait_err)
-                        return
+                wait_err = self._wait_for_ros_services(
+                    ["/compute_cartesian_path", "/detect_all"],
+                    timeout_sec=self._GAZEBO_PREWARM_READY_WAIT_S,
+                    cancel_event=self._gazebo_prewarm_cancel,
+                )
+                if wait_err:
+                    log.info("Gazebo prewarm skipped (service not ready): %s", wait_err)
+                    return
 
                 log.info(
                     "Gazebo prewarm: all required services detected for %s — "
@@ -2896,6 +3611,10 @@ class SystemBridge:
             self.robot_env = "gazebo"
             self._stop_teleop_server()
             if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+                # If a prior Gazebo session died outside the normal stop path,
+                # make sure stale helper/controller listeners do not survive
+                # into the next sim-time epoch.
+                self._shutdown_gazebo_prewarm_controllers()
                 self._kill_stale_gazebo_helpers()
 
         cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
@@ -3030,6 +3749,7 @@ class SystemBridge:
         if self._stopping:
             return False, "System stop is in progress. Wait before reset."
 
+        self._clear_cached_plan_safety_alerts()
         counts = self._archive_monitors()
         total = sum(int(v) for v in counts.values()) if isinstance(counts, dict) else 0
         if total <= 0:
@@ -3723,6 +4443,23 @@ class SystemBridge:
             timeline.extend(tl)
         return timeline
 
+    def get_plan_safety_alerts(self) -> list[dict[str, Any]]:
+        alerts: list[dict[str, Any]] = []
+        for pa in self.product_agents:
+            getter = getattr(pa, "get_plan_safety_alert", None)
+            if callable(getter):
+                try:
+                    alert = getter()
+                except Exception:
+                    alert = None
+            else:
+                alert = getattr(pa, "plan_safety_alert", None)
+            if isinstance(alert, dict) and alert:
+                alerts.append(dict(alert))
+        if alerts:
+            return alerts
+        return [dict(a) for a in self._cached_plan_safety_alerts]
+
     def get_part_tracker(self) -> dict[str, dict[str, Any]]:
         merged = {}
         for pa in self.product_agents:
@@ -3737,7 +4474,8 @@ class SystemBridge:
 
     def get_safety_state(self) -> dict[str, Any]:
         if not self.cca:
-            return {}
+            alerts = self.get_plan_safety_alerts()
+            return {"plan_alerts": alerts} if alerts else {}
         result: dict[str, Any] = {}
         sm = getattr(self.cca, "safety_monitor", None)
         if sm:
@@ -3748,6 +4486,7 @@ class SystemBridge:
             result["fsa_state"] = getattr(fm, "current_state", None)
             result["fsa_completed"] = list(getattr(fm, "completed_tasks", []))
         result["blocked_tasks"] = getattr(self.cca, "blocked_tasks", {})
+        result["plan_alerts"] = self.get_plan_safety_alerts()
         return result
 
     def get_log_paths(self) -> dict[str, str]:

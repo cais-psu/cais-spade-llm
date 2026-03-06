@@ -544,8 +544,9 @@ class Ros2PickPlaceController:
             )
             return False
 
-        # Best effort gripper feedback readiness.
-        feedback_deadline = min(deadline, time.monotonic() + 5.0)
+        # Best effort gripper feedback readiness. Keep the warmup short so
+        # Gazebo startup is gated by core services, not late joint-state echo.
+        feedback_deadline = min(deadline, time.monotonic() + 1.0)
         while time.monotonic() < feedback_deadline:
             if self._get_joint_position(self.gripper_joint) is not None:
                 break

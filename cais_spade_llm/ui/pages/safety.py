@@ -59,6 +59,8 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         selected_preview_rule = {"id": ""}
         preview_generation_state = {"busy": False}
         verification_lock_state = {"locked": False}
+        refinement_feedback_drafts: dict[str, str] = {}
+        active_feedback_file = {"path": ""}
 
         with ui.row().classes("w-full gap-2 items-end flex-nowrap"):
             req_select = ui.select(
@@ -81,6 +83,12 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         req_editor = ui.textarea(label="Edit requirements").classes(
             "w-full font-mono"
         ).props("outlined autogrow")
+        ui.label(
+            "Optional refinement feedback: explain what was wrong in the previous preview and how it should change."
+        ).classes("text-xs text-slate-500")
+        refinement_feedback = ui.textarea(label="Refinement Feedback").classes(
+            "w-full font-mono"
+        ).props("outlined autogrow")
 
         with ui.row().classes("w-full mt-2 items-start justify-between"):
             with ui.row().classes("gap-2 items-center"):
@@ -88,6 +96,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     "Generate Safety Rule",
                     icon="auto_fix_high",
                 ).props("flat color=primary")
+                regenerate_btn = ui.button(
+                    "Regenerate With Feedback",
+                    icon="restart_alt",
+                ).props("flat color=secondary")
                 generate_loading_row = ui.row().classes("items-center gap-2 text-primary")
                 with generate_loading_row:
                     ui.spinner(size="sm")
@@ -116,6 +128,13 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 "Generate first, review LTLf and DFA, then verify safety."
             ).classes("text-xs text-slate-600 mb-2")
 
+            ui.label("Generated Rule Interpretation").classes("text-sm font-semibold")
+            preview_interpretation_summary = ui.label(
+                "Generated rule interpretation will appear after preview generation."
+            ).classes(
+                "w-full text-sm text-slate-700 whitespace-pre-wrap bg-white border border-slate-200 rounded px-3 py-2 mb-2"
+            )
+
             preview_rules_table = ui.table(
                 columns=[
                     {"name": "id", "label": "Rule ID", "field": "id", "sortable": True},
@@ -128,17 +147,24 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 selection="single",
             ).classes("w-full")
 
+            ui.label("DFA Graphs").classes("text-sm font-semibold mt-2")
+            preview_dfa_gallery = ui.row().classes("w-full gap-4 items-start flex-wrap")
             ui.label("Generated LTLf").classes("text-sm font-semibold mt-2")
             preview_ltlf = ui.code("No rule selected.", language="text").classes("w-full")
-            ui.label("Rule Interpretation").classes("text-sm font-semibold mt-2")
-            preview_ltlf_feedback = ui.code(
-                "Natural-language explanation will appear after selecting a rule.",
+            ui.label("Latest Refinement Feedback").classes("text-sm font-semibold mt-2")
+            preview_refinement_feedback = ui.code(
+                "No refinement feedback recorded for this preview.",
+                language="text",
+            ).classes("w-full")
+            ui.label("Previous vs Current Preview").classes("text-sm font-semibold mt-2")
+            preview_diff_summary = ui.code(
+                "No previous preview comparison available.",
                 language="text",
             ).classes("w-full")
             ui.label("AP Mapping").classes("text-sm font-semibold mt-2")
             preview_ap_map = ui.code("{}", language="json").classes("w-full")
-            ui.label("DFA Meaning").classes("text-sm font-semibold mt-2")
-            preview_dfa_meaning = ui.label("No DFA preview generated yet.").classes("text-sm text-slate-700")
+            ui.label("DFA Status").classes("text-sm font-semibold mt-2")
+            preview_dfa_status = ui.label("No DFA preview generated yet.").classes("text-sm text-slate-700")
             ui.label("DFA Transitions").classes("text-sm font-semibold mt-2")
             preview_dfa_transitions = ui.table(
                 columns=[
@@ -151,9 +177,16 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ).classes("w-full")
             ui.label("DFA DOT").classes("text-sm font-semibold mt-2")
             preview_dfa_dot = ui.code("No DFA DOT generated yet.", language="text").classes("w-full")
-            ui.label("DFA Graph").classes("text-sm font-semibold mt-2")
-            preview_dfa_image = ui.html(
-                "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
+            ui.label("Preview History").classes("text-sm font-semibold mt-2")
+            preview_history_table = ui.table(
+                columns=[
+                    {"name": "preview_id", "label": "Preview ID", "field": "preview_id"},
+                    {"name": "generated_at_utc", "label": "Generated", "field": "generated_at_utc"},
+                    {"name": "parent_preview_id", "label": "Parent", "field": "parent_preview_id"},
+                    {"name": "refinement_feedback", "label": "Feedback", "field": "refinement_feedback"},
+                ],
+                rows=[],
+                row_key="preview_id",
             ).classes("w-full")
 
         def _intent_reason_text(reason: str) -> str:
@@ -203,48 +236,68 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             except Exception:
                 return ""
 
-        def _clear_preview_detail() -> None:
+        def _clear_rule_detail() -> None:
             preview_ltlf.content = "No rule selected."
-            preview_ltlf_feedback.content = "Natural-language explanation will appear after selecting a rule."
             preview_ap_map.content = "{}"
-            preview_dfa_meaning.text = "No DFA preview generated yet."
+            preview_dfa_status.text = "No DFA preview generated yet."
+            preview_dfa_status.classes(replace="text-sm text-slate-700")
             preview_dfa_transitions.rows = []
             preview_dfa_dot.content = "No DFA DOT generated yet."
-            preview_dfa_image.content = (
-                "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
+
+        def _render_preview_dfa_gallery(rules: list[dict[str, object]]) -> None:
+            preview_dfa_gallery.clear()
+            with preview_dfa_gallery:
+                if not rules:
+                    ui.label("No DFA graphs generated yet.").classes("text-sm text-slate-500 italic")
+                    return
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    rid = str(rule.get("id", "") or "rule")
+                    dfa_status = str(rule.get("dfa_status", "") or "").strip()
+                    dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
+                    data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
+                    with ui.card().classes("bg-white border border-slate-200 w-[calc(50%-0.5rem)] min-w-[18rem]"):
+                        ui.label(rid).classes("text-sm font-semibold")
+                        if data_url and dfa_status == "ok":
+                            ui.html(
+                                f"<img src='{data_url}' style='max-width:100%;height:auto;"
+                                "border:1px solid #e2e8f0;border-radius:8px;' />"
+                            ).classes("w-full")
+                        else:
+                            ui.label(dfa_diagnostic or "DFA image unavailable.").classes(
+                                "text-sm text-slate-500 italic whitespace-pre-wrap"
+                            )
+
+        def _clear_preview_detail() -> None:
+            _clear_rule_detail()
+            _render_preview_dfa_gallery([])
+            preview_interpretation_summary.text = (
+                "Generated rule interpretation will appear after preview generation."
             )
+            preview_refinement_feedback.content = "No refinement feedback recorded for this preview."
+            preview_diff_summary.content = "No previous preview comparison available."
+            preview_history_table.rows = []
 
         def _set_preview_rule_detail(rule_id: str) -> None:
             rid = str(rule_id or "").strip()
             rule = preview_rules_cache.get(rid)
             if not rule:
-                _clear_preview_detail()
+                _clear_rule_detail()
                 return
             preview_ltlf.content = str(rule.get("ltlf", "") or "(empty)")
-            preview_ltlf_feedback.content = str(
-                rule.get(
-                    "ltlf_plain_feedback",
-                    "No natural-language explanation available for this rule.",
-                )
-            )
             preview_ap_map.content = json.dumps(rule.get("aps", []), indent=2)
-            preview_dfa_meaning.text = str(
-                rule.get("dfa_meaning", "No DFA meaning available.")
-            )
+            dfa_status = str(rule.get("dfa_status", "") or "").strip()
+            dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
+            if dfa_status == "ok":
+                preview_dfa_status.text = "DFA generated successfully."
+                preview_dfa_status.classes(replace="text-sm text-green-700")
+            else:
+                preview_dfa_status.text = dfa_diagnostic or "DFA preview unavailable."
+                preview_dfa_status.classes(replace="text-sm text-amber-700")
             transitions = rule.get("dfa_transitions", [])
             preview_dfa_transitions.rows = transitions if isinstance(transitions, list) else []
             preview_dfa_dot.content = str(rule.get("dfa_dot", "") or "No DFA DOT generated.")
-
-            data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
-            if data_url:
-                preview_dfa_image.content = (
-                    f"<img src='{data_url}' style='max-width:100%;height:auto;"
-                    "border:1px solid #e2e8f0;border-radius:8px;' />"
-                )
-            else:
-                preview_dfa_image.content = (
-                    "<div class='text-slate-400 italic text-sm'>DFA image unavailable.</div>"
-                )
 
         def _refresh_intent_status() -> None:
             selected = str(req_select.value or "").strip()
@@ -259,6 +312,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 reload_btn.set_enabled(False)
                 delete_btn.set_enabled(False)
                 generate_btn.set_enabled(False)
+                regenerate_btn.set_enabled(False)
                 create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
                 if upload_widget is not None:
                     upload_widget.set_enabled(False)
@@ -278,6 +332,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 reload_btn.set_enabled(False)
                 delete_btn.set_enabled(False)
                 generate_btn.set_enabled(False)
+                regenerate_btn.set_enabled(False)
                 create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
                 if upload_widget is not None:
                     upload_widget.set_enabled(False)
@@ -332,6 +387,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             delete_btn.set_enabled(can_mutate_file)
             create_btn.set_enabled(can_create)
             generate_btn.set_enabled(can_mutate_file)
+            regenerate_btn.set_enabled(can_mutate_file)
             if upload_widget is not None:
                 upload_widget.set_enabled(can_mutate_file)
 
@@ -393,6 +449,19 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     "but file changed after generation. Regenerate preview."
                 )
                 preview_status_label.classes(replace="text-xs text-amber-700 mt-1")
+            preview_interpretation_summary.text = str(
+                payload.get("preview_interpretation_summary", "")
+                or "No generated rule interpretation available for this preview."
+            )
+            preview_refinement_feedback.content = str(
+                payload.get("refinement_feedback", "") or "No refinement feedback recorded for this preview."
+            )
+            preview_diff_summary.content = str(
+                payload.get("diff_summary", "") or "No previous preview comparison available."
+            )
+            preview_history_table.rows = payload.get("history", []) if isinstance(
+                payload.get("history"), list
+            ) else []
 
             rows: list[dict] = []
             for idx, rule in enumerate(payload.get("rules", []), start=1):
@@ -409,6 +478,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     }
                 )
             preview_rules_table.rows = rows
+            _render_preview_dfa_gallery(list(preview_rules_cache.values()))
 
             target_rid = selected_preview_rule["id"]
             if target_rid not in preview_rules_cache and rows:
@@ -417,13 +487,18 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if target_rid:
                 _set_preview_rule_detail(target_rid)
             else:
-                _clear_preview_detail()
+                _clear_rule_detail()
 
             _refresh_intent_status()
 
         def _load_req():
+            prior_selected = str(active_feedback_file.get("path", "") or "").strip()
+            if prior_selected:
+                refinement_feedback_drafts[prior_selected] = str(refinement_feedback.value or "")
             if not req_select.value:
                 req_editor.value = ""
+                refinement_feedback.value = ""
+                active_feedback_file["path"] = ""
                 status_label.text = ""
                 _refresh_preview()
                 return
@@ -431,6 +506,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if path.exists():
                 req_editor.value = path.read_text()
                 status_label.text = ""
+            selected = str(req_select.value or "").strip()
+            refinement_feedback.value = refinement_feedback_drafts.get(selected, "")
+            active_feedback_file["path"] = selected
             _refresh_preview()
 
         def _refresh_file_list(select_path: str | None = None):
@@ -475,6 +553,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 return
             path = Path(req_select.value)
             name = path.name
+            bridge.delete_safety_intent_state(str(path))
             if path.exists():
                 path.unlink()
             status_label.text = f"Deleted {name}"
@@ -565,7 +644,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             name_input.value = ""
             _refresh_file_list(str(dest))
 
-        async def _generate_preview() -> None:
+        async def _generate_preview(use_feedback: bool = False) -> None:
             if preview_generation_state["busy"]:
                 return
             if bridge.system_running:
@@ -578,18 +657,62 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if not selected:
                 ui.notify("Select a safety requirement file first.", type="warning")
                 return
+            selected_path = Path(selected)
+            try:
+                selected_path.write_text(str(req_editor.value or ""), encoding="utf-8")
+                status_label.text = f"Saved {selected_path.name}"
+                status_label.classes(replace="text-sm text-green-600")
+            except Exception as exc:
+                ui.notify(f"Failed to save safety requirements before preview generation: {exc}", type="negative")
+                return
+            feedback_text = ""
+            parent_preview_id = ""
+            if use_feedback:
+                feedback_text = str(refinement_feedback.value or "").strip()
+                refinement_feedback_drafts[selected] = feedback_text
+                if not feedback_text:
+                    ui.notify("Enter refinement feedback before regenerating.", type="warning")
+                    return
+                current_record = preview_state.get("payload", {}).get("record", {})
+                if isinstance(current_record, dict):
+                    parent_preview_id = str(current_record.get("preview_id", "")).strip()
             _set_preview_generation_busy(True)
-            preview_status_label.text = "Generating safety rule preview..."
+            preview_status_label.text = (
+                "Regenerating safety rule preview with refinement feedback..."
+                if use_feedback
+                else "Generating safety rule preview..."
+            )
             preview_status_label.classes(replace="text-xs text-blue-700 mt-1")
             try:
-                ui.notify("Generating safety rule preview...", type="info")
-                await asyncio.to_thread(bridge.generate_safety_rule_preview, selected)
-                ui.notify("Safety rule preview generated.", type="positive")
+                ui.notify(
+                    "Regenerating safety rule preview with feedback..."
+                    if use_feedback
+                    else "Generating safety rule preview...",
+                    type="info",
+                )
+                await asyncio.to_thread(
+                    bridge.generate_safety_rule_preview,
+                    selected,
+                    refinement_feedback=feedback_text,
+                    parent_preview_id=parent_preview_id,
+                )
+                ui.notify(
+                    "Safety rule preview regenerated with feedback."
+                    if use_feedback
+                    else "Safety rule preview generated.",
+                    type="positive",
+                )
             except Exception as exc:
                 ui.notify(f"Safety preview generation failed: {exc}", type="negative")
             finally:
                 _set_preview_generation_busy(False)
                 _refresh_preview()
+
+        async def _generate_initial_preview() -> None:
+            await _generate_preview(False)
+
+        async def _regenerate_preview_with_feedback() -> None:
+            await _generate_preview(True)
 
         def _approve_intent() -> None:
             if bridge.system_running:
@@ -637,13 +760,15 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         req_select.on_value_change(_load_req)
         preview_rules_table.on_select(_on_preview_rule_select)
         create_btn.on_click(_create_new)
-        generate_btn.on_click(_generate_preview)
+        generate_btn.on_click(_generate_initial_preview)
+        regenerate_btn.on_click(_regenerate_preview_with_feedback)
 
         _refresh_file_list()
 
         def _update_readonly():
             readonly = bridge.system_running or preview_generation_state["busy"] or verification_lock_state["locked"]
             req_editor.props(f"readonly={str(readonly).lower()}")
+            refinement_feedback.props(f"readonly={str(readonly).lower()}")
             _refresh_intent_status()
 
         ui.timer(2.0, _update_readonly)

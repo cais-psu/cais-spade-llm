@@ -145,11 +145,41 @@ def build_task_expansion_prompt(
     tools_catalog: list,
     resource_infos: list,
     caps_overview: str,
-    safety_text: str = ""
+    safety_text: str = "",
+    refinement_feedback: str = "",
+    previous_preview_requirements: list[dict] | None = None,
+    previous_preview_tasks: list[dict] | None = None,
 ) -> str:
     """
     Create the LLM prompt for expanding requirements into tasks.
     """
+    previous_requirements_json = json.dumps(
+        previous_preview_requirements or [], ensure_ascii=False, indent=2
+    )
+    previous_tasks_json = json.dumps(
+        previous_preview_tasks or [], ensure_ascii=False, indent=2
+    )
+    refinement_section = ""
+    feedback_text = str(refinement_feedback or "").strip()
+    if feedback_text or previous_preview_requirements or previous_preview_tasks:
+        refinement_section = dedent(f"""
+
+HUMAN-IN-THE-LOOP REFINEMENT CONTEXT:
+- HUMAN_REFINEMENT_FEEDBACK:
+{feedback_text or "(none)"}
+
+- PREVIOUS_PARSED_REQUIREMENTS:
+{previous_requirements_json}
+
+- PREVIOUS_TASK_DAG:
+{previous_tasks_json}
+
+Use this refinement context to improve the new task DAG.
+- If the feedback says the previous plan grounded the wrong part, resource, parameter, or dependency, correct it.
+- Preserve correct parts of the previous plan unless the feedback asks for a change.
+- Do not merely restate the previous plan; revise it when the feedback indicates a problem.
+""")
+
     return dedent(f"""\
 {TASK_EXPANSION_INSTRUCTIONS}
 
@@ -167,6 +197,7 @@ REQUIREMENTS:
 
 SAFETY CONSTRAINTS:
 {safety_text if safety_text else "No specific safety constraints provided."}
+{refinement_section}
 """)
 
 import json
@@ -223,12 +254,39 @@ Guidelines:
 - Never fabricate machines, parts, or locations that are not implied.
 """)
 
-def build_requirement_parse_prompt(requirement_text: str, tools_catalog: list) -> str:
+def build_requirement_parse_prompt(
+    requirement_text: str,
+    tools_catalog: list,
+    refinement_feedback: str = "",
+    previous_preview_requirements: list[dict] | None = None,
+) -> str:
+    previous_requirements_json = json.dumps(
+        previous_preview_requirements or [], ensure_ascii=False, indent=2
+    )
+    refinement_section = ""
+    feedback_text = str(refinement_feedback or "").strip()
+    if feedback_text or previous_preview_requirements:
+        refinement_section = dedent(f"""
+
+HUMAN-IN-THE-LOOP REFINEMENT CONTEXT:
+- HUMAN_REFINEMENT_FEEDBACK:
+{feedback_text or "(none)"}
+
+- PREVIOUS_PARSED_REQUIREMENTS:
+{previous_requirements_json}
+
+Use this refinement context to improve the new structured requirements.
+- If the feedback says the previous parse used the wrong part name, phase, process_type, or context key, correct it.
+- Preserve correct grounding unless the feedback asks for a change.
+- Do not merely restate the previous parse; revise it when the feedback indicates a problem.
+""")
+
     return dedent(f"""
 {REQUIREMENT_PARSE_PROMPT}
 
 TOOLS_CATALOGUE (for reference):
 {json.dumps(tools_catalog, ensure_ascii=False)}
+{refinement_section}
 
 Convert the following instructions into structured requirements:
 {requirement_text}
@@ -282,11 +340,13 @@ FIELD RULES
 
 • context
   - Represent contextual information as an OBJECT (dictionary).
-  - Keys correspond to contextual roles implied by the tools or the text
-    (e.g., location, target, source, zone, area, machine, buffer, fixture).
+  - Keys correspond to ontology-aligned contextual roles implied by the tools or the text.
+  - Use concise canonical role names, not prose fragments or sentence snippets.
   - Values should be canonical identifiers whenever possible, drawn from
     TOOLS_CATALOGUE or CAPABILITY_OVERVIEW, or normalized from the
     natural language when no direct canonical match exists.
+  - The object must be FLAT: keys map only to scalar values (string, number, or boolean).
+  - Do NOT return nested objects, arrays, or free-form explanation text in context.
   - Include all relevant context dimensions in:
         "context": { "<key>": "<value>", ... }
   - If no meaningful contextual information applies, set context to null.
@@ -324,12 +384,34 @@ def build_safety_parse_prompt(
     safety_text: str,
     tools_catalog: list[dict],
     capability_overview: str = "",
+    refinement_feedback: str = "",
+    previous_preview_rules: list[dict] | None = None,
 ) -> str:
     """
     Prompt to convert raw NL safety text into structured safety rules.
     Includes tools and capability information for grounding.
     """
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
+    previous_preview_json = json.dumps(
+        previous_preview_rules or [], ensure_ascii=False, indent=2
+    )
+    refinement_section = ""
+    feedback_text = str(refinement_feedback or "").strip()
+    if feedback_text or previous_preview_rules:
+        refinement_section = dedent(f"""
+
+HUMAN-IN-THE-LOOP REFINEMENT CONTEXT:
+- HUMAN_REFINEMENT_FEEDBACK:
+{feedback_text or "(none)"}
+
+- PREVIOUS_PREVIEW_RULES:
+{previous_preview_json}
+
+Use this refinement context to improve the new structured rules.
+- If the feedback points out a wrong grounding or wrong interpretation, fix it.
+- Preserve parts that are already correct unless the feedback asks for a change.
+- Do not merely restate the previous preview; revise it when the feedback indicates a problem.
+""")
 
     return dedent(f"""
 You are the SAFETY RULE PARSER.
@@ -344,6 +426,7 @@ CAPABILITY_OVERVIEW:
 
 Use these catalogues to choose grounded processes, events, resources,
 and canonical context identifiers.
+{refinement_section}
 
 SAFETY_TEXT:
 {safety_text}
@@ -444,13 +527,21 @@ LTLf: (!b) U a
 # ----------------------------------------------------------------------
 # Safety logic prompt
 # ----------------------------------------------------------------------
-def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> str:
+def build_safety_logic_prompt(
+    rules: list[dict],
+    tools_catalog: list[dict],
+    refinement_feedback: str = "",
+    previous_preview_rules: list[dict] | None = None,
+) -> str:
     """
     Prompt to convert structured safety rules -> AP strings + LTLf.
     Includes the TOOLS_CATALOGUE and uses the AP/LTLf templates + few-shot.
     """
     rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
+    previous_preview_json = json.dumps(
+        previous_preview_rules or [], ensure_ascii=False, indent=2
+    )
     allowed_events = sorted(
         {
             str(t.get("function", "")).strip()
@@ -459,6 +550,23 @@ def build_safety_logic_prompt(rules: list[dict], tools_catalog: list[dict]) -> s
         }
     )
     allowed_events_text = ", ".join(allowed_events) if allowed_events else "(none)"
+    refinement_section = ""
+    feedback_text = str(refinement_feedback or "").strip()
+    if feedback_text or previous_preview_rules:
+        refinement_section = dedent(f"""
+
+HUMAN-IN-THE-LOOP REFINEMENT CONTEXT:
+- HUMAN_REFINEMENT_FEEDBACK:
+{feedback_text or "(none)"}
+
+- PREVIOUS_PREVIEW_RULES:
+{previous_preview_json}
+
+Use this refinement context to improve the new AP grounding and LTLf.
+- If the feedback says the previous preview chose the wrong AP event, rule family, or resource scope, correct it.
+- Preserve parts that are already correct unless the feedback explicitly asks for a change.
+- Do not merely restate the previous preview; revise it when the feedback indicates a problem.
+""")
 
     return dedent(f"""
 You are the SAFETY LOGIC GENERATOR.
@@ -476,6 +584,21 @@ Your task for each rule:
 
 Use the tool information in the TOOLS_CATALOGUE so that processes, events,
 resources, and context in the APs stay aligned with actual system behavior.
+
+GENERIC TEMPORAL FAMILIES:
+- precedence / before / ordering:
+  use two APs where the earlier AP must happen before the later AP
+- mutex / no_concurrent / simultaneous / overlap prohibition:
+  use APs that must never hold at the same time
+- response / after / follow-up:
+  use trigger APs and response APs where each trigger must eventually be followed by its matching response
+- absence / forbidden / never:
+  use APs that must never occur
+- until:
+  use the left AP as the condition that must hold until the right AP becomes true
+
+If a rule clearly matches one of these generic families, keep the AP set simple and aligned to that family.
+Do not invent unnecessarily complex formulas when a standard temporal family applies.
 
 MANDATORY EVENT GROUNDING:
 - In every AP string `ap/<process>/<product>/<resource>/<event>/<context>`,
@@ -497,6 +620,7 @@ MANDATORY EVENT GROUNDING:
 
 === LTLf FEW-SHOT EXAMPLES (GENERIC) ===
 {SAFETY_LTLF_FEWSHOT}
+{refinement_section}
 
 Response format:
   - Return a single JSON object.
@@ -519,6 +643,41 @@ Expected JSON structure:
 Do not include explanations or comments outside this JSON.
 
 INPUT RULES:
+{rules_json}
+""").strip()
+
+
+def build_safety_interpretation_prompt(rules: list[dict]) -> str:
+    """Prompt to explain what the generated safety rules actually enforce."""
+    rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
+    return dedent(f"""
+You are the SAFETY PREVIEW INTERPRETER.
+
+You are given generated safety rules that already include grounded APs and LTLf
+formulas. Explain what the GENERATED rules actually enforce.
+
+Rules for interpretation:
+- Base the explanation on the generated APs and the generated LTLf.
+- Do NOT simply restate the original raw_text requirement.
+- Do NOT use the phrase "intent statement".
+- Use the concrete grounded resources, events, products, and context from the APs.
+- If the generated rule is narrower, broader, asymmetric, or otherwise different
+  from the original requirement, say so plainly.
+- Keep the explanation short, operator-facing, and easy to understand.
+- Do not dump raw formula syntax unless it helps explain a mismatch.
+
+Return valid JSON only:
+{{
+  "preview_summary": "- SAFE_1: one concise sentence\\n- SAFE_2: one concise sentence",
+  "rules": [
+    {{
+      "id": "SAFE_1",
+      "interpretation": "One concise operator-facing sentence explaining what this generated rule enforces."
+    }}
+  ]
+}}
+
+GENERATED_RULES:
 {rules_json}
 """).strip()
 

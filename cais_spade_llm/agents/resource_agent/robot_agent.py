@@ -749,7 +749,7 @@ class RobotAgent(ResourceAgent):
         while elapsed < duration:
             await asyncio.sleep(interval)
             elapsed += interval
-            self.logger.info(
+            self.logger.debug(
                 "[%s] ... %s (%.1f / %.1f sec)", robot, description, elapsed, duration
             )
 

@@ -13,18 +13,18 @@ from pathlib import Path
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, OpaqueFunction, TimerAction
+from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-SPEED_LIMIT_SCALE = 2.5
-ACC_LIMIT_SCALE = 2.0
+SPEED_LIMIT_SCALE = 3.0
+ACC_LIMIT_SCALE = 2.5
 DEFAULT_VELOCITY_SCALING = 1.0
 DEFAULT_ACCELERATION_SCALING = 1.0
-RG2_MAX_VELOCITY = 0.25
-RG2_MAX_ACCELERATION = 1.0
+RG2_MAX_VELOCITY = 0.40
+RG2_MAX_ACCELERATION = 1.50
 
 
 def _scale_joint_limits(joint_limits):
@@ -309,7 +309,8 @@ def launch_setup(context, *args, **kwargs):
 
     return [
         gazebo,
-        TimerAction(period=40.0, actions=[move_group, rviz]),
+        move_group,
+        rviz,
     ]
 
 

@@ -35,6 +35,116 @@ class BundleStore:
                 }
             )
 
+    def _normalize_bundle_summary(
+        self,
+        bundle_id: str,
+        summary: dict[str, Any] | None,
+        manifest: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        out = dict(summary or {})
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            raise ValueError("bundle_id is required")
+
+        out["bundle_id"] = bid
+        out["manifest_path"] = str(self.manifest_path(bid))
+
+        manifest_data = manifest if isinstance(manifest, dict) else None
+        if manifest_data is None:
+            out["display_name"] = (
+                str(out.get("display_name", "")).strip()
+                or f"{bid} | INVALID (manifest missing)"
+            )
+            out["created_at_utc"] = str(out.get("created_at_utc", "")).strip()
+            out["status"] = "invalid"
+            out["verified"] = False
+            return out
+
+        out["display_name"] = str(
+            manifest_data.get("display_name")
+            or out.get("display_name")
+            or bid
+        ).strip()
+        out["created_at_utc"] = str(
+            manifest_data.get("created_at_utc")
+            or out.get("created_at_utc")
+            or ""
+        ).strip()
+
+        status = str(
+            manifest_data.get("status")
+            or out.get("status")
+            or "invalid"
+        ).strip().lower()
+        out["status"] = status or "invalid"
+        out["verified"] = bool(
+            manifest_data.get("verified")
+            if "verified" in manifest_data
+            else out.get("verified", False)
+        )
+
+        for field in (
+            "product_name",
+            "product_spec_file",
+            "safety_file",
+            "execution_mode",
+            "robot_env",
+        ):
+            value = manifest_data.get(field)
+            if value is not None:
+                out[field] = value
+
+        return out
+
+    def _reconcile_index_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_rows = payload.get("bundles", []) if isinstance(payload, dict) else []
+        indexed_rows = raw_rows if isinstance(raw_rows, list) else []
+        indexed_by_id: dict[str, dict[str, Any]] = {}
+        for row in indexed_rows:
+            if not isinstance(row, dict):
+                continue
+            bid = str(row.get("bundle_id", "")).strip()
+            if not bid:
+                continue
+            indexed_by_id[bid] = dict(row)
+
+        normalized_rows: list[dict[str, Any]] = []
+        present_ids: set[str] = set()
+        if self.bundles_dir.exists():
+            for bundle_dir in sorted(self.bundles_dir.iterdir(), key=lambda p: p.name):
+                if not bundle_dir.is_dir():
+                    continue
+                bundle_id = str(bundle_dir.name).strip()
+                if not bundle_id or bundle_id.startswith("."):
+                    continue
+                manifest = self.load_manifest(bundle_id)
+                summary = self._normalize_bundle_summary(
+                    bundle_id,
+                    indexed_by_id.get(bundle_id),
+                    manifest,
+                )
+                normalized_rows.append(summary)
+                present_ids.add(bundle_id)
+
+        active_bundle_id = str(payload.get("active_bundle_id", "")).strip() or None
+        if active_bundle_id and active_bundle_id not in present_ids:
+            active_bundle_id = None
+        elif active_bundle_id:
+            manifest = self.load_manifest(active_bundle_id)
+            status = str(
+                (manifest or {}).get("status")
+                or indexed_by_id.get(active_bundle_id, {}).get("status")
+                or ""
+            ).strip().lower()
+            if not manifest or status != "verified":
+                active_bundle_id = None
+
+        return {
+            "schema_version": int(payload.get("schema_version", INDEX_SCHEMA_VERSION)),
+            "active_bundle_id": active_bundle_id,
+            "bundles": normalized_rows,
+        }
+
     def _load_index(self) -> dict[str, Any]:
         self._ensure_layout()
         try:
@@ -47,11 +157,20 @@ class BundleStore:
         if not isinstance(bundles, list):
             bundles = []
 
-        return {
+        normalized = self._reconcile_index_payload(
+            {
+                "schema_version": int(payload.get("schema_version", INDEX_SCHEMA_VERSION)),
+                "active_bundle_id": payload.get("active_bundle_id"),
+                "bundles": bundles,
+            }
+        )
+        if normalized != {
             "schema_version": int(payload.get("schema_version", INDEX_SCHEMA_VERSION)),
             "active_bundle_id": payload.get("active_bundle_id"),
             "bundles": bundles,
-        }
+        }:
+            self._save_index(normalized)
+        return normalized
 
     def _save_index(self, data: dict[str, Any]) -> None:
         atomic_json_write(self.index_path, data)

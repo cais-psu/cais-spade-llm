@@ -6,21 +6,7 @@
     "domain": "localhost",
     "functions": [],
     "instructions": "This product requires to be printed and assembled as specified.",
-    "cad_path": "cais_spade_llm/specification/products/cad/assembly_board/",
-    "cad_files": [
-      "small_gear.scad",
-      "medium_gear.scad",
-      "large_gear.scad",
-      "small_circular_pin.scad",
-      "medium_circular_pin.scad",
-      "large_circular_pin.scad",
-      "small_rectangular_pin.scad",
-      "medium_rectangular_pin.scad",
-      "large_rectangular_pin.scad"
-    ],
-    "product_specification_file": "cais_spade_llm/specification/products/requirements/assembly_board-v1.txt",
     "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json",
-    "safety_file": "cais_spade_llm/specification/safety/safety_requirements.txt",
     "replan_mode": "des"
   }
 }

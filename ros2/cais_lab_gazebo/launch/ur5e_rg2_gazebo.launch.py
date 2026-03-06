@@ -20,7 +20,6 @@ from launch.actions import (
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
-    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
@@ -28,6 +27,12 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+CONTROLLER_MANAGER_TIMEOUT_SEC = '60.0'
+CONTROLLER_SERVICE_CALL_TIMEOUT_SEC = '20.0'
+CONTROLLER_SWITCH_TIMEOUT_SEC = '20.0'
+RG2_FINGER_WIDTH_EFFORT = '18'
+RG2_FINGER_WIDTH_VELOCITY = '0.40'
 
 
 def _strip_world_links_and_joints(root):
@@ -74,6 +79,34 @@ def _inject_mimic_plugins(root):
         ET.SubElement(plugin_elem, 'offset').text = mimic.get('offset', '0.0')
         ET.SubElement(plugin_elem, 'sensitiveness').text = '0.0'
         ET.SubElement(plugin_elem, 'maxEffort').text = '100.0'
+
+
+def _tune_rg2_joint_dynamics(root, prefix):
+    for joint in root.findall('joint'):
+        if joint.get('name') != f'{prefix}finger_width':
+            continue
+        limit = joint.find('limit')
+        if limit is None:
+            continue
+        limit.set('effort', RG2_FINGER_WIDTH_EFFORT)
+        limit.set('velocity', RG2_FINGER_WIDTH_VELOCITY)
+
+
+def _make_controller_spawner(controller_names):
+    return Node(
+        package='controller_manager',
+        executable='spawner',
+        output='screen',
+        arguments=[
+            *controller_names,
+            '--controller-manager', '/controller_manager',
+            '--controller-manager-timeout', CONTROLLER_MANAGER_TIMEOUT_SEC,
+            '--service-call-timeout', CONTROLLER_SERVICE_CALL_TIMEOUT_SEC,
+            '--switch-timeout', CONTROLLER_SWITCH_TIMEOUT_SEC,
+            '--activate-as-group',
+        ],
+        parameters=[{'use_sim_time': True}],
+    )
 
 
 def _build_ur5e_rg2_description(controllers_yaml):
@@ -127,6 +160,7 @@ def _build_ur5e_rg2_description(controllers_yaml):
 
     _strip_gazebo_ros2_control_plugin(onrobot_root)
     _inject_mimic_plugins(onrobot_root)
+    _tune_rg2_joint_dynamics(onrobot_root, onrobot_prefix)
     _strip_world_links_and_joints(onrobot_root)
 
     for elem in list(onrobot_root):
@@ -217,77 +251,63 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    controllers = [
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['ur5e_joint_trajectory_controller', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['ur5e_rg2_gripper_traj_controller', '--controller-manager', '/controller_manager'],
-            parameters=[{'use_sim_time': True}],
-        ),
-    ]
+    controller_spawner = _make_controller_spawner([
+        'joint_state_broadcaster',
+        'ur5e_joint_trajectory_controller',
+        'ur5e_rg2_gripper_traj_controller',
+    ])
 
     perception_candidates = [
         Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
         Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
-    perception_actions = []
+    post_controller_actions = []
+    perception_log = None
     if perception_script:
-        perception_actions.append(
-            TimerAction(
-                period=8.0,
-                actions=[
-                    ExecuteProcess(
-                        cmd=[
-                            'bash',
-                            '-lc',
-                            [
-                                'source /opt/ros/humble/setup.bash && '
-                                'source ',
-                                os.path.expanduser('~/ros2_ws/install/setup.bash'),
-                                ' && python3.10 ',
-                                perception_script,
-                                ' --ros-args -p use_sim_time:=true',
-                            ],
-                        ],
-                        output='screen',
-                        condition=IfCondition(run_perception),
-                    )
+        post_controller_actions.append(
+            ExecuteProcess(
+                cmd=[
+                    'bash',
+                    '-lc',
+                    [
+                        'source /opt/ros/humble/setup.bash && '
+                        'source ',
+                        os.path.expanduser('~/ros2_ws/install/setup.bash'),
+                        ' && python3.10 ',
+                        perception_script,
+                        ' --ros-args -p use_sim_time:=true',
+                    ],
                 ],
+                output='screen',
+                condition=IfCondition(run_perception),
             )
         )
     else:
-        perception_actions.append(
-            LogInfo(
-                msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
-                    'Skipping automatic perception startup.'
-            )
+        perception_log = LogInfo(
+            msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
+                'Skipping automatic perception startup.'
         )
 
     launch_actions = [
         gazebo,
         state_publisher,
-        TimerAction(period=30.0, actions=[spawn]),
+        spawn,
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=spawn,
-                on_exit=controllers,
-                )
+                on_exit=[controller_spawner],
+            )
+        ),
+        RegisterEventHandler(
+            event_handler=OnProcessExit(
+                target_action=controller_spawner,
+                on_exit=post_controller_actions,
+            )
         ),
     ]
-    launch_actions.extend(perception_actions)
+    if perception_log is not None:
+        launch_actions.append(perception_log)
     return launch_actions
 
 

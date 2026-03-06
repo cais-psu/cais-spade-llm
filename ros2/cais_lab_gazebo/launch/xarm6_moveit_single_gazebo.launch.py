@@ -11,15 +11,15 @@ import yaml
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, OpaqueFunction, TimerAction
+from launch.actions import IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from uf_ros_lib.moveit_configs_builder import MoveItConfigsBuilder
 from uf_ros_lib.uf_robot_utils import generate_ros2_control_params_temp_file
 
-SPEED_LIMIT_SCALE = 2.5
-ACC_LIMIT_SCALE = 2.0
+SPEED_LIMIT_SCALE = 3.0
+ACC_LIMIT_SCALE = 2.5
 DEFAULT_VELOCITY_SCALING = 1.0
 DEFAULT_ACCELERATION_SCALING = 1.0
 
@@ -127,7 +127,7 @@ def launch_setup(context, *args, **kwargs):
 
     return [
         gazebo,
-        TimerAction(period=35.0, actions=[moveit]),
+        moveit,
     ]
 
 

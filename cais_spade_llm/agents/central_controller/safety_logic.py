@@ -7,12 +7,16 @@ import io
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
+import re
+import shutil
+from urllib.parse import quote
 from ltlf2dfa.parser.ltlf import LTLfParser
 from graphviz import Source
 
 from prompts import (
     build_safety_parse_prompt,
     build_safety_logic_prompt,
+    build_safety_interpretation_prompt,
 )
 
 class SafetyLogic:
@@ -43,6 +47,7 @@ class SafetyLogic:
 
         # Optional combined safety spec: {"aps": {label: full}, "formula": "φ_safety"}
         self.global_safety_spec: Dict[str, Any] = {}
+        self.preview_interpretation_summary: str = ""
 
         # store one DFA (DOT string) per rule
         self.rule_dfas: Dict[str, str] = {}
@@ -57,6 +62,89 @@ class SafetyLogic:
         err = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             return ltlf_formula.to_dfa()
+
+    @staticmethod
+    def _fallback_rule_interpretation(rule: dict[str, Any]) -> str:
+        ltlf = str(rule.get("ltlf", "") or "").strip()
+        aps = rule.get("aps", []) if isinstance(rule.get("aps"), list) else []
+
+        ap_map: dict[str, str] = {}
+        for ap in aps:
+            if not isinstance(ap, dict):
+                continue
+            label = str(ap.get("label", "")).strip()
+            full = str(ap.get("full", "")).strip()
+            if label and full:
+                ap_map[label] = full
+
+        normalized = re.sub(r"\s+", "", ltlf)
+        order_match = (
+            re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
+            or re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
+        )
+        response_match = re.fullmatch(r"G\((ap\d+)->F(ap\d+)\)", normalized)
+
+        if ltlf.startswith("G !(") or ltlf.startswith("G!("):
+            explained = [full for _, full in sorted(ap_map.items())]
+            if explained:
+                joined = "; ".join(explained)
+                return (
+                    "This generated rule treats the following grounded events as mutually exclusive: "
+                    f"{joined}. Those events are not allowed to overlap in time."
+                )
+            return "This generated rule is a global mutual-exclusion constraint over the generated AP events."
+
+        if response_match:
+            trigger = ap_map.get(response_match.group(1), response_match.group(1))
+            response = ap_map.get(response_match.group(2), response_match.group(2))
+            return f"Whenever {trigger} happens, {response} must eventually happen afterwards."
+
+        if order_match:
+            earlier = ap_map.get(order_match.group(1), order_match.group(1))
+            later = ap_map.get(order_match.group(2), order_match.group(2))
+            return f"The generated ordering requires {earlier} to occur before {later}."
+
+        if " U " in ltlf:
+            return (
+                "This generated rule uses an until-condition: the left-hand condition must hold "
+                "until the right-hand condition becomes true."
+            )
+
+        if ltlf.startswith("G(") or ltlf.startswith("G "):
+            return "This generated rule is a global constraint that must hold throughout execution."
+
+        if ltlf:
+            return (
+                "This generated rule constrains execution according to the grounded AP events in the "
+                f"formula {ltlf}."
+            )
+        return "No generated interpretation is available for this rule."
+
+    @classmethod
+    def _fallback_preview_interpretation_summary(cls, rules: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id", "")).strip() or "rule"
+            interp = str(rule.get("generated_interpretation", "")).strip() or cls._fallback_rule_interpretation(rule)
+            lines.append(f"- {rid}: {interp}")
+        return "\n".join(lines) if lines else "No generated rule interpretation available."
+
+    @staticmethod
+    def _is_placeholder_dfa_dot(dot_text: str) -> bool:
+        raw = str(dot_text or "").strip()
+        if not raw:
+            return True
+        if re.search(r"\[label=\".+?\"\]", raw):
+            return False
+        return "init -> 1;" in raw and "0.0;" in raw
+
+    @staticmethod
+    def _placeholder_dfa_message() -> str:
+        if shutil.which("mona") is None:
+            return "MONA is not installed, so ltlf2dfa returned placeholder output"
+        return "ltlf2dfa returned placeholder DFA output"
 
     @staticmethod
     def _normalize_resource_token(value: Any) -> str:
@@ -75,6 +163,428 @@ class SafetyLogic:
             seen.add(item)
             ordered.append(item)
         return ordered
+
+    @staticmethod
+    def _normalize_context_scalar(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value).strip()
+
+    @classmethod
+    def _normalize_context_object(cls, value: Any) -> Optional[dict[str, str]]:
+        if not isinstance(value, dict):
+            return None
+
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            if raw_value is None or isinstance(raw_value, (dict, list, tuple, set)):
+                continue
+            value_text = cls._normalize_context_scalar(raw_value)
+            if not value_text:
+                continue
+            normalized[key] = value_text
+
+        return normalized or None
+
+    @classmethod
+    def _serialize_context_object(cls, value: Any) -> str:
+        normalized = cls._normalize_context_object(value)
+        if not normalized:
+            return "any"
+
+        items = []
+        for key, raw_val in sorted(normalized.items()):
+            key_text = quote(str(key), safe="-_.~")
+            val_text = quote(str(raw_val), safe="-_.~")
+            items.append(f"{key_text}={val_text}")
+        return "&".join(items) if items else "any"
+
+    @staticmethod
+    def _ap_segments(ap: str) -> Optional[dict[str, str]]:
+        parts = str(ap or "").split("/", 5)
+        if len(parts) != 6:
+            return None
+        prefix, process, product, resource, event, context = parts
+        return {
+            "prefix": str(prefix).strip(),
+            "process": str(process).strip().lower(),
+            "product": str(product).strip().lower(),
+            "resource": str(resource).strip().lower(),
+            "event": str(event).strip(),
+            "context": str(context).strip(),
+        }
+
+    @staticmethod
+    def _normalized_rule_text(
+        rule: dict[str, Any], refinement_feedback: str = ""
+    ) -> str:
+        pieces = [
+            str(rule.get("constraint_type", "") or ""),
+            str(rule.get("raw_text", "") or ""),
+        ]
+        return " ".join(piece.strip().lower() for piece in pieces if piece).strip()
+
+    @staticmethod
+    def _contains_any(text: str, cues: tuple[str, ...]) -> bool:
+        return any(cue in text for cue in cues)
+
+    @staticmethod
+    def _tokenize_for_overlap(value: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", str(value or "").lower())
+
+    @classmethod
+    def _term_overlap_score(cls, term: str, text: str) -> int:
+        term_tokens = cls._tokenize_for_overlap(str(term).replace("_", " "))
+        text_tokens = cls._tokenize_for_overlap(text)
+        if not term_tokens or not text_tokens:
+            return 0
+
+        score = 0
+        for needle in term_tokens:
+            for token in text_tokens:
+                if token == needle or token.startswith(needle) or needle.startswith(token):
+                    score += 1
+                    break
+        return score
+
+    @classmethod
+    def _pick_scored_ap(
+        cls,
+        parsed_aps: list[tuple[str, dict[str, str]]],
+        text: str,
+        *,
+        exclude: set[str] | None = None,
+    ) -> Optional[str]:
+        blocked = exclude or set()
+        best_ap: Optional[str] = None
+        best_score = -1
+
+        for ap, segments in parsed_aps:
+            if ap in blocked:
+                continue
+            score = 0
+            score += 4 * cls._term_overlap_score(segments.get("event", ""), text)
+            score += 2 * cls._term_overlap_score(segments.get("product", ""), text)
+            score += cls._term_overlap_score(segments.get("resource", ""), text)
+            score += cls._term_overlap_score(segments.get("context", "").replace("&", " "), text)
+            if score > best_score:
+                best_score = score
+                best_ap = ap
+
+        return best_ap if best_score > 0 else None
+
+    @classmethod
+    def _infer_ltlf_family(
+        cls,
+        rule: dict[str, Any],
+        aps: list[str],
+        refinement_feedback: str = "",
+    ) -> Optional[str]:
+        if not aps:
+            return None
+
+        text = cls._normalized_rule_text(rule, refinement_feedback)
+        if not text:
+            return None
+
+        precedence_cues = (
+            "before",
+            "precedence",
+            "precedes",
+            "ordering",
+            "ordered",
+            "prior to",
+        )
+        precedence_gate_cues = (
+            "must not",
+            "should not",
+            "cannot",
+            "can't",
+            "not begin",
+            "not start",
+            "only after",
+        )
+        mutex_cues = (
+            "same time",
+            "simultaneous",
+            "simultaneously",
+            "concurrent",
+            "mutual exclusion",
+            "mutex",
+            "overlap",
+            "together",
+        )
+        response_cues = (
+            " after ",
+            "_after_",
+            "followed by",
+            "follow_up",
+            "follow-up",
+            "response",
+            "post_",
+            "post-",
+        )
+        absence_cues = (
+            "never",
+            "forbidden",
+            "must not",
+            "should not",
+            "cannot",
+            "can't",
+        )
+        until_cues = (" until ", "_until_", "until")
+
+        if len(aps) >= 2 and cls._contains_any(text, precedence_cues):
+            return "precedence"
+        if (
+            len(aps) >= 2
+            and "until" in text
+            and cls._contains_any(text, precedence_gate_cues)
+        ):
+            return "precedence"
+        if len(aps) >= 2 and cls._contains_any(text, mutex_cues):
+            return "mutex"
+        if len(aps) >= 2 and cls._contains_any(text, response_cues):
+            return "response"
+        if len(aps) >= 2 and cls._contains_any(text, until_cues):
+            return "until"
+        if cls._contains_any(text, absence_cues):
+            return "absence"
+        return None
+
+    @classmethod
+    def _pick_precedence_pair(
+        cls,
+        rule: dict[str, Any],
+        aps: list[str],
+        refinement_feedback: str = "",
+    ) -> Optional[tuple[str, str]]:
+        parsed_aps = [
+            (ap, segments)
+            for ap in aps
+            if (segments := cls._ap_segments(ap)) is not None
+        ]
+        if len(parsed_aps) < 2:
+            return None
+
+        rule_event = str(rule.get("event", "") or "").strip()
+        products = [
+            str(product).strip().lower()
+            for product in (rule.get("product") or [])
+            if str(product or "").strip()
+        ]
+
+        def select_by_product(product_name: str) -> Optional[str]:
+            candidates = [
+                ap
+                for ap, segments in parsed_aps
+                if segments.get("product") == product_name
+            ]
+            if rule_event:
+                event_candidates = [
+                    ap
+                    for ap in candidates
+                    if (cls._ap_segments(ap) or {}).get("event") == rule_event
+                ]
+                if event_candidates:
+                    return event_candidates[0]
+            return candidates[0] if candidates else None
+
+        if len(products) >= 2:
+            earlier = select_by_product(products[0])
+            later = select_by_product(products[1])
+            if earlier and later and earlier != later:
+                return earlier, later
+
+        text = cls._normalized_rule_text(rule, refinement_feedback)
+        if "before" in text:
+            before_text, after_text = re.split(r"\bbefore\b", text, maxsplit=1)
+            later = cls._pick_scored_ap(parsed_aps, after_text)
+            earlier = cls._pick_scored_ap(
+                parsed_aps,
+                before_text,
+                exclude={later} if later else None,
+            )
+            if earlier and later and earlier != later:
+                return earlier, later
+
+        return parsed_aps[0][0], parsed_aps[1][0]
+
+    @classmethod
+    def _pair_response_aps(
+        cls,
+        rule: dict[str, Any],
+        aps: list[str],
+        refinement_feedback: str = "",
+    ) -> list[tuple[str, str]]:
+        parsed_aps = [
+            (ap, segments)
+            for ap in aps
+            if (segments := cls._ap_segments(ap)) is not None
+        ]
+        if len(parsed_aps) < 2:
+            return []
+
+        text = cls._normalized_rule_text(rule, refinement_feedback)
+        response_event = str(rule.get("event", "") or "").strip()
+        if not response_event:
+            before_text = text
+            after_text = ""
+            if "after" in text:
+                before_text, after_text = re.split(r"\bafter\b", text, maxsplit=1)
+            event_counts: dict[str, int] = {}
+            for _, segments in parsed_aps:
+                event_name = segments.get("event", "")
+                if event_name:
+                    event_counts[event_name] = event_counts.get(event_name, 0) + 1
+
+            best_event = ""
+            best_score = 0
+            for event_name in event_counts:
+                score = cls._term_overlap_score(event_name, before_text)
+                score -= cls._term_overlap_score(event_name, after_text)
+                if score > best_score:
+                    best_score = score
+                    best_event = event_name
+            response_event = best_event
+
+        if not response_event:
+            return []
+
+        response_aps = [
+            (ap, segments)
+            for ap, segments in parsed_aps
+            if segments.get("event") == response_event
+        ]
+        trigger_aps = [
+            (ap, segments)
+            for ap, segments in parsed_aps
+            if segments.get("event") != response_event
+        ]
+        if not response_aps or not trigger_aps:
+            return []
+
+        pairs: list[tuple[str, str]] = []
+        used_triggers: set[str] = set()
+
+        for response_ap, response_segments in response_aps:
+            matched_trigger: Optional[str] = None
+            for trigger_ap, trigger_segments in trigger_aps:
+                if trigger_ap in used_triggers:
+                    continue
+                if trigger_segments.get("resource") == response_segments.get("resource"):
+                    matched_trigger = trigger_ap
+                    break
+            if not matched_trigger:
+                for trigger_ap, trigger_segments in trigger_aps:
+                    if trigger_ap in used_triggers:
+                        continue
+                    if (
+                        response_segments.get("product") != "any"
+                        and trigger_segments.get("product") == response_segments.get("product")
+                    ):
+                        matched_trigger = trigger_ap
+                        break
+            if not matched_trigger:
+                for trigger_ap, _ in trigger_aps:
+                    if trigger_ap not in used_triggers:
+                        matched_trigger = trigger_ap
+                        break
+
+            if not matched_trigger:
+                continue
+
+            used_triggers.add(matched_trigger)
+            pairs.append((matched_trigger, response_ap))
+
+        return pairs
+
+    @classmethod
+    def _pick_until_pair(
+        cls,
+        rule: dict[str, Any],
+        aps: list[str],
+        refinement_feedback: str = "",
+    ) -> Optional[tuple[str, str]]:
+        parsed_aps = [
+            (ap, segments)
+            for ap in aps
+            if (segments := cls._ap_segments(ap)) is not None
+        ]
+        if len(parsed_aps) < 2:
+            return None
+
+        text = cls._normalized_rule_text(rule, refinement_feedback)
+        if "until" in text:
+            left_text, right_text = re.split(r"\buntil\b", text, maxsplit=1)
+            right = cls._pick_scored_ap(parsed_aps, right_text)
+            left = cls._pick_scored_ap(
+                parsed_aps,
+                left_text,
+                exclude={right} if right else None,
+            )
+            if left and right and left != right:
+                return left, right
+
+        return parsed_aps[0][0], parsed_aps[1][0]
+
+    @classmethod
+    def _compile_ltlf_for_rule(
+        cls,
+        rule: dict[str, Any],
+        aps: list[str],
+        refinement_feedback: str = "",
+    ) -> Optional[str]:
+        family = cls._infer_ltlf_family(rule, aps, refinement_feedback)
+        if family == "precedence":
+            pair = cls._pick_precedence_pair(rule, aps, refinement_feedback)
+            if not pair:
+                return None
+            earlier, later = pair
+            return f"((!{later}) U {earlier})"
+
+        if family == "mutex":
+            if len(aps) < 2:
+                return None
+            if len(aps) == 2:
+                return f"G !({aps[0]} & {aps[1]})"
+            pair_terms: list[str] = []
+            for idx, left in enumerate(aps):
+                for right in aps[idx + 1 :]:
+                    pair_terms.append(f"({left} & {right})")
+            if not pair_terms:
+                return None
+            return f"G !({' | '.join(pair_terms)})"
+
+        if family == "response":
+            pairs = cls._pair_response_aps(rule, aps, refinement_feedback)
+            if not pairs:
+                return None
+            if len(pairs) == 1:
+                trigger, response = pairs[0]
+                return f"G ({trigger} -> F {response})"
+            pair_terms = [
+                f"({trigger} -> F {response})" for trigger, response in pairs
+            ]
+            return f"G ({' & '.join(pair_terms)})"
+
+        if family == "absence":
+            if not aps:
+                return None
+            body = aps[0] if len(aps) == 1 else " | ".join(aps)
+            return f"G !({body})"
+
+        if family == "until":
+            pair = cls._pick_until_pair(rule, aps, refinement_feedback)
+            if not pair:
+                return None
+            left, right = pair
+            return f"({left} U {right})"
+
+        return None
 
     def _tool_grounding(self) -> tuple[set[str], dict[str, str], set[str], set[str]]:
         """
@@ -145,7 +655,12 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # 2. NL → structured safety rules (via LLM)
     # ------------------------------------------------------------------ #
-    async def build_safety_rules(self, safety_text: str) -> str:
+    async def build_safety_rules(
+        self,
+        safety_text: str,
+        refinement_feedback: str = "",
+        previous_preview_rules: list[dict[str, Any]] | None = None,
+    ) -> str:
         """
         Use the LLM to parse natural-language safety rules into structured
         safety rule nodes.
@@ -166,7 +681,11 @@ class SafetyLogic:
         self.global_safety_spec.clear()
 
         try:
-            structured = await self._llm_parse_safety_rules(safety_text)
+            structured = await self._llm_parse_safety_rules(
+                safety_text,
+                refinement_feedback=refinement_feedback,
+                previous_preview_rules=previous_preview_rules,
+            )
         except Exception as exc:
             if self.logger:
                 self.logger.exception(
@@ -234,8 +753,7 @@ class SafetyLogic:
             resources = self._dedupe_keep_order(normalized_resources)
 
             # Normalize context (the LLM should return dict or None)
-            if not isinstance(context, dict):
-                context = None   # DO NOT override dicts
+            context = self._normalize_context_object(context)
 
             node: Dict[str, Any] = {
                 "id": rule_id,
@@ -257,7 +775,12 @@ class SafetyLogic:
         return msg
 
 
-    async def build_safety_rules_and_logic(self, safety_text: str) -> str:
+    async def build_safety_rules_and_logic(
+        self,
+        safety_text: str,
+        refinement_feedback: str = "",
+        previous_preview_rules: list[dict[str, Any]] | None = None,
+    ) -> str:
         """
         High-level helper:
 
@@ -266,13 +789,20 @@ class SafetyLogic:
           3) inject AP labels + full AP strings + LTLf into each rule
           4) build an optional global safety specification
         """
-        msg = await self.build_safety_rules(safety_text)
+        msg = await self.build_safety_rules(
+            safety_text,
+            refinement_feedback=refinement_feedback,
+            previous_preview_rules=previous_preview_rules,
+        )
         if not self.rules:
             return msg
 
         # 2) structured rules -> APs + LTLf (raw)
         try:
-            self.logic_raw = await self._llm_build_safety_logic()
+            self.logic_raw = await self._llm_build_safety_logic(
+                refinement_feedback=refinement_feedback,
+                previous_preview_rules=previous_preview_rules,
+            )
         except Exception as exc:
             if self.logger:
                 self.logger.exception(
@@ -313,10 +843,70 @@ class SafetyLogic:
 
         return msg
 
+    async def build_preview_interpretations(self) -> dict[str, Any]:
+        """Generate preview-only natural-language explanations for the grounded rules."""
+        if not self.rules:
+            self.preview_interpretation_summary = ""
+            return {"preview_summary": "", "rules": []}
+
+        prompt = build_safety_interpretation_prompt(self.rules)
+        parsed: dict[str, Any] = {}
+        try:
+            raw = await self.controller_agent.ask_llm(
+                prompt=prompt,
+                with_functions=False,
+                temperature=0.0,
+            )
+            if isinstance(raw, dict):
+                raise RuntimeError("ask_llm returned dict; expected JSON string.")
+            parsed = json.loads(raw)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    "[SafetyLogic] Preview interpretation generation failed; using fallback text: %s",
+                    exc,
+                )
+
+        by_id: dict[str, str] = {}
+        for item in parsed.get("rules", []) if isinstance(parsed.get("rules"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get("id", "")).strip()
+            interpretation = str(item.get("interpretation", "")).strip()
+            if rid and interpretation:
+                by_id[rid] = interpretation
+
+        for rule in self.rules:
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id", "")).strip()
+            interpretation = by_id.get(rid) or self._fallback_rule_interpretation(rule)
+            rule["generated_interpretation"] = interpretation
+
+        self.preview_interpretation_summary = self._fallback_preview_interpretation_summary(self.rules)
+
+        return {
+            "preview_summary": self.preview_interpretation_summary,
+            "rules": [
+                {
+                    "id": str(rule.get("id", "")).strip(),
+                    "interpretation": str(rule.get("generated_interpretation", "")).strip(),
+                }
+                for rule in self.rules
+                if isinstance(rule, dict)
+            ],
+        }
+
     # ------------------------------------------------------------------ #
     # LLM call: NL → structured safety rules
     # ------------------------------------------------------------------ #
-    async def _llm_parse_safety_rules(self, safety_text: str) -> list[dict[str, Any]]:
+    async def _llm_parse_safety_rules(
+        self,
+        safety_text: str,
+        *,
+        refinement_feedback: str = "",
+        previous_preview_rules: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Call the LLM with SAFETY_PARSE_PROMPT and tools_catalog, return
         a cleaned list of structured safety rules.
@@ -329,7 +919,13 @@ class SafetyLogic:
             except Exception:
                 capability_overview = ""
 
-        prompt = build_safety_parse_prompt(safety_text, tools_catalog, capability_overview)
+        prompt = build_safety_parse_prompt(
+            safety_text,
+            tools_catalog,
+            capability_overview,
+            refinement_feedback=refinement_feedback,
+            previous_preview_rules=previous_preview_rules,
+        )
 
         raw = await self.controller_agent.ask_llm(
             prompt=prompt,
@@ -367,9 +963,7 @@ class SafetyLogic:
                 resources = []
 
             # context is now expected to be an object (dict) or null
-            context = r.get("context")
-            if not isinstance(context, dict):
-                context = None
+            context = self._normalize_context_object(r.get("context"))
 
             cleaned.append(
                 {
@@ -389,7 +983,12 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # LLM call: structured rules → AP strings + LTLf
     # ------------------------------------------------------------------ #
-    async def _llm_build_safety_logic(self) -> Dict[str, Dict[str, Any]]:
+    async def _llm_build_safety_logic(
+        self,
+        *,
+        refinement_feedback: str = "",
+        previous_preview_rules: list[dict[str, Any]] | None = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Use the LLM to convert self.rules into AP lists + LTLf formulas.
 
@@ -403,7 +1002,12 @@ class SafetyLogic:
             return {}
 
         tools_catalog = getattr(self.controller_agent, "tools_catalog", [])
-        prompt = build_safety_logic_prompt(self.rules, tools_catalog)
+        prompt = build_safety_logic_prompt(
+            self.rules,
+            tools_catalog,
+            refinement_feedback=refinement_feedback,
+            previous_preview_rules=previous_preview_rules,
+        )
 
         raw = await self.controller_agent.ask_llm(
             prompt=prompt,
@@ -457,6 +1061,10 @@ class SafetyLogic:
             rule = rules_by_id.get(rid, {})
             rule_event = str(rule.get("event", "") or "").strip()
             rule_process = str(rule.get("process", "") or "").strip().lower()
+            rule_context = self._normalize_context_object(rule.get("context"))
+            rule_context_token = (
+                self._serialize_context_object(rule_context) if rule_context else ""
+            )
             rule_resources = rule.get("resources") or []
             fallback_resource = "any"
             if isinstance(rule_resources, list):
@@ -501,7 +1109,7 @@ class SafetyLogic:
                     or "any"
                 )
                 product_token = str(ap_product).strip() or "any"
-                context_token = str(ap_context).strip() or "any"
+                context_token = rule_context_token or str(ap_context).strip() or "any"
                 prefix_token = str(prefix).strip() or "ap"
 
                 resource_token = self._normalize_resource_token(ap_resource)
@@ -535,7 +1143,7 @@ class SafetyLogic:
                         "any",
                         fallback_resource,
                         rule_event,
-                        "any",
+                        rule_context_token or "any",
                     ]
                 )
                 sanitized_aps = [fallback_ap]
@@ -545,7 +1153,14 @@ class SafetyLogic:
             if unresolved_events_for_rule:
                 unresolved[rid] = self._dedupe_keep_order(unresolved_events_for_rule)
 
-            if sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
+            deterministic_ltlf = self._compile_ltlf_for_rule(
+                rule,
+                sanitized_aps,
+                refinement_feedback=refinement_feedback,
+            )
+            if deterministic_ltlf:
+                ltlf_text = deterministic_ltlf
+            elif sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
                 ltlf_text = " & ".join(sanitized_aps) if len(sanitized_aps) > 1 else sanitized_aps[0]
 
             result[str(rid)] = {
@@ -880,6 +1495,18 @@ class SafetyLogic:
             dot_path = out_dir / f"{rid}_dfa.dot"
             dot_path.write_text(dfa_dot, encoding="utf-8")
 
+            if self._is_placeholder_dfa_dot(dfa_dot):
+                png_path = out_dir / f"{rid}_dfa.png"
+                png_path.unlink(missing_ok=True)
+                if self.logger:
+                    self.logger.warning(
+                        "[SafetyLogic] DFA (DOT) for %s saved to %s, but %s; skipping Graphviz render.",
+                        rid,
+                        dot_path,
+                        self._placeholder_dfa_message(),
+                    )
+                continue
+
             if self.logger:
                 self.logger.info(
                     "[SafetyLogic] DFA (DOT) for %s built and saved to %s",
@@ -939,6 +1566,17 @@ class SafetyLogic:
         dot_path = out_dir / "cca_safety_dfa.dot"
         dot_path.write_text(dfa_dot, encoding="utf-8")
 
+        if self._is_placeholder_dfa_dot(dfa_dot):
+            png_path = out_dir / "cca_safety_dfa.png"
+            png_path.unlink(missing_ok=True)
+            if self.logger:
+                self.logger.warning(
+                    "[SafetyLogic] DFA (DOT) saved to %s, but %s; skipping Graphviz render.",
+                    dot_path,
+                    self._placeholder_dfa_message(),
+                )
+            return dfa_dot
+
         if self.logger:
             self.logger.info("[SafetyLogic] DFA (DOT) built and saved to %s", dot_path)
 
@@ -973,7 +1611,10 @@ class SafetyLogic:
         p = Path(path) if path else self.structured_safety_path
         p.parent.mkdir(parents=True, exist_ok=True)
 
-        payload = {"rules": self.rules}
+        payload = {
+            "preview_interpretation_summary": self.preview_interpretation_summary,
+            "rules": self.rules,
+        }
 
         with p.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -998,6 +1639,9 @@ class SafetyLogic:
 
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
+        self.preview_interpretation_summary = str(
+            data.get("preview_interpretation_summary", "") or ""
+        ).strip()
         self.rules = data.get("rules", [])
 
         # Rebuild global spec if LTLf is already present

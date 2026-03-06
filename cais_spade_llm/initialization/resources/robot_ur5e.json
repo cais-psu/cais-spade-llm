@@ -74,7 +74,7 @@
           "release_detach_retry_count": 3,
           "release_detach_retry_delay_sec": 0.55,
           "release_retry_lift_m": 0.012,
-          "trajectory_time_scale": 1.0
+          "trajectory_time_scale": 0.8
         },
         "parts_tuning": {
           "insertion_depth_m": 0.0025
