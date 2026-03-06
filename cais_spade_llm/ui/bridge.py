@@ -290,6 +290,10 @@ class SystemBridge:
             return p
         return _PROJECT_ROOT / p
 
+    @staticmethod
+    def _default_product_requirement_path(product_name: str) -> Path:
+        return (_PRODUCT_REQUIREMENTS_DIR / f"{str(product_name).strip()}.txt").resolve()
+
     def _compute_source_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
         if not requirement_file.exists():
             raise FileNotFoundError(f"requirements file missing: {requirement_file}")
@@ -368,7 +372,14 @@ class SystemBridge:
         ctx = self._resolve_product_init_for_requirement(requirement_file)
         return str(ctx["product_init_file"])
 
-    def list_product_requirement_files(self) -> list[str]:
+    def list_product_requirement_files(self, product_init_file: str | None = None) -> list[str]:
+        if product_init_file:
+            try:
+                ctx = self._resolve_product_context(product_init_file, include_hashes=False)
+            except Exception:
+                return []
+            product_spec_file = str(ctx.get("product_spec_file", "")).strip()
+            return [self._norm_path(product_spec_file)] if product_spec_file else []
         options: set[str] = set()
         for init_file in self.list_product_files():
             try:
@@ -378,9 +389,6 @@ class SystemBridge:
                     options.add(self._norm_path(product_spec_file))
             except Exception:
                 continue
-        if _PRODUCT_REQUIREMENTS_DIR.exists():
-            for p in sorted(_PRODUCT_REQUIREMENTS_DIR.glob("*.txt")):
-                options.add(self._norm_path(p))
         return sorted(options)
 
     def _load_safety_intent_approvals(self) -> dict[str, Any]:
@@ -1382,11 +1390,13 @@ class SystemBridge:
         req_file_str = ""
         if product_spec_path_raw:
             req_file_str = str(self._abs_project_path(product_spec_path_raw).resolve())
+        elif product_name:
+            req_file_str = str(self._default_product_requirement_path(product_name))
         safe_file_str = ""
         if safety_path:
             safe_file_str = str(self._abs_project_path(safety_path).resolve())
         source_hashes = {}
-        if include_hashes and req_file_str and safe_file_str:
+        if include_hashes and req_file_str and safe_file_str and Path(req_file_str).exists():
             source_hashes = self._compute_source_hashes(
                 Path(req_file_str), Path(safe_file_str)
             )

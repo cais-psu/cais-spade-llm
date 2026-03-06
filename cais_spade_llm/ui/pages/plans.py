@@ -64,6 +64,7 @@ def render(bridge: SystemBridge) -> None:
                 active_label = ui.label("Startup plan set: none").classes("text-sm text-slate-700 mt-2")
                 bundle_select = ui.select({}, label="Generated Plan Sets").classes("w-full")
                 status_label = ui.label("No plan set selected.").classes("text-sm text-slate-600")
+                replan_count_label = ui.label("Offline Replans Used: 0 / 0").classes("text-sm text-slate-600")
                 meta = ui.code("{}", language="json").classes("w-full")
                 ui.label(
                     "Optional refinement feedback: explain what was wrong in the previous plan set and how it should change."
@@ -269,9 +270,24 @@ def render(bridge: SystemBridge) -> None:
                     auto_replans_used = 0
             return max(0, min(auto_replans_used, 10)), max(0, min(max_attempts, 10))
 
+        def _refresh_product_select_options() -> None:
+            files = bridge.list_product_files()
+            options = {f: Path(f).stem for f in files}
+            current = str(product_init_select.value or "").strip()
+            product_init_select.options = options
+            product_init_select.update()
+            if current in options:
+                product_init_select.value = current
+            else:
+                product_init_select.value = next(iter(options.keys()), None)
+
         def _refresh_requirement_select_options() -> None:
-            files = bridge.list_product_requirement_files()
-            options = {f: Path(f).name for f in files}
+            product_init_file = str(product_init_select.value or "").strip()
+            files = bridge.list_product_requirement_files(product_init_file)
+            options = {
+                f: Path(f).name + (" [missing]" if not Path(f).exists() else "")
+                for f in files
+            }
             current = str(requirement_select.value or "").strip()
             requirement_select.options = options
             requirement_select.update()
@@ -409,6 +425,10 @@ def render(bridge: SystemBridge) -> None:
                 else ""
             )
             retry_summary = f"auto-replans={auto_replans_used}/{auto_replan_max}"
+            replan_count_label.text = (
+                f"Offline Replans Used: {auto_replans_used} / {auto_replan_max}"
+            )
+            replan_count_label.classes(replace="text-sm text-slate-600")
 
             if selected_eval:
                 status = str(selected_eval.get("status", "")).lower()
@@ -460,6 +480,8 @@ def render(bridge: SystemBridge) -> None:
                 else:
                     status_label.text = "No plan set generated for selected requirement/safety files."
                 status_label.classes(replace="text-sm text-slate-600")
+                replan_count_label.text = "Offline Replans Used: 0 / 0"
+                replan_count_label.classes(replace="text-sm text-slate-600")
                 meta.content = "{}"
                 _render_graphs("")
 
@@ -514,6 +536,7 @@ def render(bridge: SystemBridge) -> None:
                 return
             refresh_state["busy"] = True
             try:
+                _refresh_product_select_options()
                 _refresh_requirement_select_options()
                 _refresh_safety_select_options()
                 req_file, safety_file = _selected_files()

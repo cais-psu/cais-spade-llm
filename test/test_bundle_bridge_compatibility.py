@@ -19,6 +19,7 @@ from cais_spade_llm.bundles.models import sha256_file
 from cais_spade_llm.prompts import build_requirement_parse_prompt, build_task_expansion_prompt
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.pages.products import (
+    _delete_product_manifest,
     _default_product_meta,
     _normalize_product_meta,
     _unlink_geometry_from_products,
@@ -1043,6 +1044,50 @@ def test_bridge_generate_verified_bundle_forwards_refinement_feedback():
     assert captured["auto_replan_max_attempts"] == 2
 
 
+def test_bridge_product_requirement_listing_only_uses_product_manifests(tmp_path):
+    bridge = SystemBridge()
+
+    product_dir = tmp_path / "initialization" / "products"
+    product_dir.mkdir(parents=True, exist_ok=True)
+    req_dir = tmp_path / "specification" / "products" / "requirements"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    linked_req = req_dir / "demo_product.txt"
+    orphan_req = req_dir / "orphan.txt"
+    linked_req.write_text("[Product Requirements]\n- demo\n", encoding="utf-8")
+    orphan_req.write_text("[Product Requirements]\n- orphan\n", encoding="utf-8")
+    product_path = product_dir / "demo_product.json"
+    _write_json(
+        product_path,
+        {
+            "demo_product": {
+                "type": "product",
+                "jid": "demo_product@localhost",
+                "password": "none",
+                "domain": "localhost",
+                "functions": [],
+                "instructions": "demo",
+            }
+        },
+    )
+
+    original_product_dir = bridge_module._PRODUCT_DIR
+    original_req_dir = bridge_module._PRODUCT_REQUIREMENTS_DIR
+    try:
+        bridge_module._PRODUCT_DIR = product_dir
+        bridge_module._PRODUCT_REQUIREMENTS_DIR = req_dir
+
+        ctx = bridge._resolve_product_context(str(product_path), include_hashes=False)
+        listed = bridge.list_product_requirement_files(str(product_path))
+        listed_all = bridge.list_product_requirement_files()
+    finally:
+        bridge_module._PRODUCT_DIR = original_product_dir
+        bridge_module._PRODUCT_REQUIREMENTS_DIR = original_req_dir
+
+    assert ctx["product_spec_file"] == str(linked_req.resolve())
+    assert listed == [str(linked_req.resolve())]
+    assert listed_all == [str(linked_req.resolve())]
+
+
 def test_plan_prompt_builders_include_refinement_context():
     req_prompt = build_requirement_parse_prompt(
         "[Product Requirements]\n- assemble MCP\n",
@@ -1092,6 +1137,16 @@ def test_default_product_meta_sets_default_instructions_and_requirement_path():
         "cais_spade_llm/specification/products/requirements/demo_product.txt"
     )
     assert meta["replan_mode"] == "des"
+
+
+def test_delete_product_manifest_removes_existing_json_file(tmp_path):
+    product_path = tmp_path / "demo_product.json"
+    product_path.write_text('{"demo_product": {}}', encoding="utf-8")
+
+    deleted = _delete_product_manifest(product_path)
+
+    assert deleted is True
+    assert product_path.exists() is False
 
 
 def test_unlink_geometry_from_products_clears_matching_geometry_paths(tmp_path):

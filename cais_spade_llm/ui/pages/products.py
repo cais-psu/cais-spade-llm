@@ -223,6 +223,17 @@ def _unlink_geometry_from_products(bridge: SystemBridge, geometry_path: str | Pa
     return cleared_products
 
 
+def _delete_product_manifest(product_path: str | Path | None) -> bool:
+    raw = str(product_path or "").strip()
+    if not raw:
+        return False
+    path = Path(raw)
+    if not path.exists() or path.suffix != ".json":
+        return False
+    path.unlink()
+    return True
+
+
 def render(bridge: SystemBridge) -> None:
     ui.add_head_html(
         """
@@ -266,6 +277,17 @@ def render(bridge: SystemBridge) -> None:
             _refresh_geo_options()
 
             config_display_ref: dict[str, Any] = {"widget": None}
+
+            def _refresh_product_options(select_path: str | None = None) -> None:
+                files = bridge.list_product_files()
+                product_select.options = {f: Path(f).stem for f in files}
+                if select_path and select_path in product_select.options:
+                    product_select.value = select_path
+                elif files:
+                    product_select.value = files[0]
+                else:
+                    product_select.value = None
+                product_select.update()
 
             def _refresh_json_viewer():
                 widget = config_display_ref.get("widget")
@@ -392,7 +414,7 @@ def render(bridge: SystemBridge) -> None:
                                 }
                             )
 
-            with ui.expansion("Edit Configuration", icon="settings", value=True).classes("w-full"):
+            with ui.expansion("Edit Configuration", icon="settings", value=False).classes("w-full"):
                 ui.label(
                     "Edit the product JSON as table rows. Extra keys are allowed; cad_path is ignored and removed."
                 ).classes("text-xs text-slate-500")
@@ -508,8 +530,31 @@ def render(bridge: SystemBridge) -> None:
                     product_status_label.text = f"Save failed: {e}"
                     product_status_label.classes(replace="text-sm text-red-600")
 
+            def _delete_product() -> None:
+                path_str = str(_product_state.get("path", "") or "").strip()
+                name = str(_product_state.get("name", "") or "").strip()
+                if not path_str or not name:
+                    product_status_label.text = "No product selected"
+                    product_status_label.classes(replace="text-sm text-amber-600")
+                    return
+                deleted = _delete_product_manifest(path_str)
+                if not deleted:
+                    product_status_label.text = f"Product file missing: {Path(path_str).name}"
+                    product_status_label.classes(replace="text-sm text-amber-600")
+                    _refresh_product_options()
+                    _load_product()
+                    _refresh_requirement_file_list()
+                    return
+                product_status_label.text = f"Deleted {name}"
+                product_status_label.classes(replace="text-sm text-green-600")
+                _refresh_product_options()
+                _load_product()
+                _refresh_requirement_file_list()
+                _refresh_json_viewer()
+
             with ui.row().classes("gap-2 mt-1"):
                 ui.button("Save Product", on_click=_save_product, icon="save").props("color=primary")
+                ui.button("Delete Product", on_click=_delete_product, icon="delete").props("flat color=red")
 
             product_select.on_value_change(_load_product)
 
@@ -618,10 +663,7 @@ def render(bridge: SystemBridge) -> None:
                     dest.write_text(json.dumps(product_data, indent=2), encoding="utf-8")
 
                     # Refresh product dropdown.
-                    updated_files = bridge.list_product_files()
-                    product_select.options = {f: Path(f).stem for f in updated_files}
-                    product_select.update()
-                    product_select.value = str(dest)
+                    _refresh_product_options(str(dest))
 
                     create_status.text = f"Created {name}"
                     create_status.classes(replace="text-sm text-green-600")

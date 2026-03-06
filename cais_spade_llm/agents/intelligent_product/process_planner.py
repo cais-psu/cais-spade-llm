@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
@@ -591,7 +592,8 @@ class ProcessPlanner:
         Supports MODIFICATION, INSERTION, and DELETION.
         Called by both PDDL replanner and pure-LLM replanner paths.
         """
-        node_map = {n["id"]: n for n in self.nodes}
+        original_nodes = deepcopy(self.nodes)
+        node_map = {n["id"]: n for n in original_nodes}
 
         for t in modified_tasks:
             tid = t.get("id")
@@ -645,9 +647,11 @@ class ProcessPlanner:
 
             target["status"] = "pending"
 
-        self.nodes = list(node_map.values())
+        tentative_nodes = list(node_map.values())
+        self._ensure_graph_consistency(tentative_nodes)
+        self._validate_task_graph(tentative_nodes)
 
-        self._ensure_graph_consistency()
+        self.nodes = tentative_nodes
 
         self.logger.info(
             "[Planner] Re-planning successful. Merged %d modifications.",
@@ -812,18 +816,20 @@ class ProcessPlanner:
                             conflict_task_ids.add(str(rt["id"]))
 
         return conflict_task_ids
-    def _ensure_graph_consistency(self) -> None:
+    def _ensure_graph_consistency(self, nodes: Optional[List[Dict[str, Any]]] = None) -> None:
         """
         Helper to ensure that if A lists B as a predecessor, 
         B lists A as a successor (and vice versa).
         This fixes 'one-sided' edits from the LLM.
         """
-        node_map = {n["id"]: n for n in self.nodes}
-        
+        working_nodes = nodes if nodes is not None else self.nodes
+        node_map = {n["id"]: n for n in working_nodes}
+
         for nid, node in node_map.items():
             # 1. Sync Predecessors -> Successors
             # If 'node' thinks 'pid' is a predecessor, make sure 'pid' knows 'node' is a successor.
-            preds = node.get("predecessors", [])
+            preds = list(dict.fromkeys(node.get("predecessors", []) or []))
+            node["predecessors"] = preds
             for pid in preds:
                 if pid in node_map:
                     p_node = node_map[pid]
@@ -832,12 +838,94 @@ class ProcessPlanner:
             
             # 2. Sync Successors -> Predecessors
             # If 'node' thinks 'sid' is a successor, make sure 'sid' knows 'node' is a predecessor.
-            succs = node.get("successors", [])
+            succs = list(dict.fromkeys(node.get("successors", []) or []))
+            node["successors"] = succs
             for sid in succs:
                 if sid in node_map:
                     s_node = node_map[sid]
                     if nid not in s_node.get("predecessors", []):
                         s_node.setdefault("predecessors", []).append(nid)
+
+    def _validate_task_graph(self, nodes: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Reject invalid task graphs before FSA compilation or execution."""
+        working_nodes = nodes if nodes is not None else self.nodes
+        tasks = [n for n in working_nodes if n.get("type") == "task"]
+        node_map = {n["id"]: n for n in tasks}
+        successors: Dict[str, List[str]] = {nid: [] for nid in node_map}
+        indegree: Dict[str, int] = {nid: 0 for nid in node_map}
+
+        for nid, node in node_map.items():
+            for pid in node.get("predecessors", []) or []:
+                if pid not in node_map:
+                    raise ValueError(
+                        f"Task graph references unknown predecessor '{pid}' from task '{nid}'."
+                    )
+                if pid == nid:
+                    raise ValueError(f"Task graph contains a self-dependency on '{nid}'.")
+                if nid not in successors[pid]:
+                    successors[pid].append(nid)
+                    indegree[nid] += 1
+
+        q = deque(sorted(nid for nid, degree in indegree.items() if degree == 0))
+        visited: List[str] = []
+
+        while q:
+            nid = q.popleft()
+            visited.append(nid)
+            for sid in successors[nid]:
+                indegree[sid] -= 1
+                if indegree[sid] == 0:
+                    q.append(sid)
+
+        if len(visited) == len(node_map):
+            return
+
+        cycle = self._extract_task_cycle(node_map, successors)
+        if cycle:
+            cycle_text = " -> ".join(cycle)
+            raise ValueError(f"Task graph must remain a DAG; cycle detected: {cycle_text}")
+
+        remaining = sorted(nid for nid, degree in indegree.items() if degree > 0)
+        raise ValueError(
+            "Task graph must remain a DAG; unresolved cyclic dependency among tasks: "
+            + ", ".join(remaining)
+        )
+
+    def _extract_task_cycle(
+        self,
+        node_map: Dict[str, Dict[str, Any]],
+        successors: Dict[str, List[str]],
+    ) -> List[str]:
+        """Return one cycle path for diagnostics, e.g. A -> B -> A."""
+        color: Dict[str, int] = {nid: 0 for nid in node_map}
+        stack: List[str] = []
+        stack_index: Dict[str, int] = {}
+
+        def _dfs(nid: str) -> List[str]:
+            color[nid] = 1
+            stack_index[nid] = len(stack)
+            stack.append(nid)
+
+            for sid in successors.get(nid, []):
+                if color[sid] == 0:
+                    cycle = _dfs(sid)
+                    if cycle:
+                        return cycle
+                elif color[sid] == 1:
+                    start = stack_index[sid]
+                    return stack[start:] + [sid]
+
+            stack.pop()
+            stack_index.pop(nid, None)
+            color[nid] = 2
+            return []
+
+        for nid in node_map:
+            if color[nid] == 0:
+                cycle = _dfs(nid)
+                if cycle:
+                    return cycle
+        return []
 
     def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Return the first node with the matching id (or None)."""
@@ -907,6 +995,8 @@ class ProcessPlanner:
         tasks = [n for n in self.nodes if n.get("type") == "task"]
         if not tasks:
             raise ValueError("No task nodes exist in self.nodes (cannot compile FSA).")
+
+        self._validate_task_graph(self.nodes)
 
         by_id = {t["id"]: t for t in tasks}
 

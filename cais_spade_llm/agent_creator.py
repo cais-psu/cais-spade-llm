@@ -204,8 +204,13 @@ def create_resource_agents(
             pass
     return agents
 
-def _default_requirement_file() -> str | None:
-    """Return the first .txt requirement file found, or None."""
+def _default_requirement_file(product_name: str | None = None) -> str | None:
+    """Return the default requirement file path for a product, falling back to the first .txt file."""
+    name = str(product_name or "").strip()
+    if name:
+        candidate = _REQ_DIR / f"{name}.txt"
+        _log.info("[agent_creator] No product_specification_file set; defaulting to %s", candidate)
+        return str(candidate)
     if _REQ_DIR.is_dir():
         files = sorted(_REQ_DIR.glob("*.txt"))
         if files:
@@ -284,7 +289,7 @@ def create_product_agents(
                 product_specification_file=(
                     product_requirement_file
                     or meta.get("product_specification_file")
-                    or _default_requirement_file()
+                    or _default_requirement_file(name)
                 ),
                 product_geometry_file=meta.get("product_geometry_file"),
                 safety_file=(
