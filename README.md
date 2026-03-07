@@ -15,7 +15,7 @@ This README is the deployment contract for a new engineer or an LLM. It is writt
 
 This repository is deployable on a new PC, but not all modes are equally turnkey.
 
-| Mode | Clone + Poetry only | Extra setup required | Notes |
+| Mode | After host tools install | Extra setup required | Notes |
 | --- | --- | --- | --- |
 | `dry_run` | Yes | No | Best first-run path |
 | `simulation` | No | ROS 2 Humble + Gazebo workspace | A bootstrap script is included |
@@ -23,11 +23,25 @@ This repository is deployable on a new PC, but not all modes are equally turnkey
 
 Important limits:
 
-- Core dependencies install from Poetry, but the UI still uses a checked-in [`requirements-ui.txt`](requirements-ui.txt) because the current `spade` and `nicegui` dependency constraints do not solve cleanly together in Poetry.
+- Core dependencies install from Poetry, but the UI still uses a checked-in [`requirements-ui.txt`](requirements-ui.txt) because the current `spade` and `nicegui` dependency constraints do not solve cleanly together in Poetry. If you want the web UI or the default `python -m cais_spade_llm` entry point, you need this file. If you only run `--headless`, you can skip it.
+- On a brand-new Ubuntu/WSL machine, the `dry_run` path still needs a few base OS packages first: `git`, `curl`, `python3-pip`, and `python3.10-venv`.
 - Gazebo simulation still depends on an external ROS 2 workspace under `~/ros2_ws`.
 - Physical perception is not turnkey yet because these files are still stubs:
   - [`cais_spade_llm/resources/sensor/physical/detect_all_service.py`](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
   - [`cais_spade_llm/resources/sensor/physical/detect_part_service.py`](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
+
+## Guidance for LLM-Assisted Setup
+
+If an engineer or an LLM turns this README into machine setup instructions, use this format:
+
+- Give the normal install and run steps first.
+- At the very end, include one final section titled `Sudo Commands Summary`.
+- That final section should repeat every command that needs `sudo` for the requested setup mode on that machine.
+- Do not imply that a fresh Ubuntu/WSL machine is `clone only` if host packages are still missing.
+- If Gazebo/MoveIt still will not launch, end with a short `What Is Still Missing` section that names the exact missing file, package, or workspace step and the next command the user should run.
+- State whether [`requirements-ui.txt`](requirements-ui.txt) is required:
+  - required for the NiceGUI web UI and the default entry point
+  - optional only for headless-only usage
 
 ## Fastest Successful Bring-Up
 
@@ -35,7 +49,21 @@ Use this path on any new PC to confirm the repo works before touching Gazebo or 
 
 ### 1. Install host tools
 
-Required:
+For a fresh Ubuntu 22.04 / WSL2 machine, this is the shortest reproducible path:
+
+```bash
+sudo apt update
+sudo apt install -y git curl python3-pip python3.10-venv
+
+# Optional, but useful for saved DOT/graph rendering
+sudo apt install -y graphviz
+
+curl -sSL https://install.python-poetry.org | python3
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Required for the `dry_run` path:
 
 - Python `3.10`
 - Poetry
@@ -63,9 +91,18 @@ OPENAI_API_KEY=...
 ### 3. Install Python dependencies
 
 ```bash
+poetry config virtualenvs.in-project true
 poetry install
 poetry run pip install -r requirements-ui.txt
 ```
+
+`requirements-ui.txt` installs `nicegui`, which is needed for the web UI. If you plan to run only:
+
+```bash
+poetry run python -m cais_spade_llm.ui_main --headless
+```
+
+you can skip the `poetry run pip install -r requirements-ui.txt` step.
 
 ### 4. Start the UI
 
@@ -127,6 +164,57 @@ make headless
 
 `simulation` mode requires ROS 2 Humble and Gazebo outside the Poetry environment.
 
+### System packages required for simulation
+
+If `/opt/ros/humble/setup.bash` is not present on the machine yet, install ROS 2 Humble first.
+
+On Ubuntu 22.04 / WSL2:
+
+```bash
+sudo apt install -y locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+sudo apt install -y software-properties-common curl
+
+# Only add the ROS apt repo manually if the machine does not already have
+# /etc/apt/sources.list.d/ros2.sources from ros-apt-source.
+if [ ! -e /etc/apt/sources.list.d/ros2.sources ]; then
+  sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+    http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+    | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+fi
+
+# If apt reports a conflicting Signed-By error, disable the duplicate manual file
+# and keep the existing ros2.sources entry.
+if [ -e /etc/apt/sources.list.d/ros2.sources ] && [ -e /etc/apt/sources.list.d/ros2.list ]; then
+  sudo mv /etc/apt/sources.list.d/ros2.list /etc/apt/sources.list.d/ros2.list.disabled
+fi
+
+sudo apt update
+sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep
+sudo rosdep init
+rosdep update
+```
+
+For this repository's dual-robot Gazebo setup, also install:
+
+```bash
+sudo apt install -y \
+  ros-humble-moveit \
+  ros-humble-gazebo-ros-pkgs \
+  ros-humble-gazebo-ros2-control \
+  ros-humble-ur-description \
+  ros-humble-ur-moveit-config \
+  ros-humble-controller-manager \
+  ros-humble-joint-state-broadcaster \
+  ros-humble-joint-trajectory-controller \
+  ros-humble-xacro \
+  ros-humble-robot-state-publisher
+```
+
 ### One-time Gazebo workspace bootstrap
 
 This repo now includes:
@@ -138,8 +226,21 @@ It will:
 - create or reuse `~/ros2_ws`
 - clone `xarm_ros2`
 - clone `OnRobot_ROS2_Description`
-- copy this repo's custom world and launch file into the ROS 2 workspace
-- run `colcon build`
+- copy this repo's custom world, launch, config, and RViz files into the ROS 2 workspace
+- copy the custom config and RViz assets into the installed `xarm_gazebo` package share that the launch files read at runtime
+- run `colcon build --packages-skip d435i_xarm_setup`
+
+Why `d435i_xarm_setup` is skipped:
+
+- it is an optional xArm camera / hand-eye example package
+- it depends on `object_recognition_msgs`
+- it is not required for this repository's dual-robot Gazebo + MoveIt launch path
+
+If you later want that optional package too:
+
+```bash
+sudo apt install -y ros-humble-object-recognition-msgs
+```
 
 Run:
 
@@ -153,11 +254,40 @@ or:
 bash scripts/bootstrap_gazebo_workspace.sh
 ```
 
+If this step has not been completed yet, the UI `Dual Robots` launch will not work because it requires:
+
+```bash
+~/ros2_ws/install/setup.bash
+```
+
+If the UI reports:
+
+```text
+ROS2 workspace is not built yet: missing /home/<user>/ros2_ws/install/setup.bash.
+```
+
+the next step is:
+
+```bash
+cd /path/to/cais-spade-llm
+make bootstrap-gazebo
+```
+
+If `make bootstrap-gazebo` fails, finish the missing ROS 2 / Gazebo apt packages from `System packages required for simulation`, then rerun it.
+
 ### Start Gazebo
+
+To match the UI Control page's `Dual Robots` button, launch:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
+ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+```
+
+If you want the lower-level world bring-up without the combined MoveIt launch, use:
+
+```bash
 ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py
 ```
 
@@ -241,6 +371,56 @@ Alternative entry points:
 ```bash
 poetry run python -m cais_spade_llm.ui_main
 poetry run python -m cais_spade_llm.ui_main --headless
+```
+
+## Sudo Commands Summary
+
+This section is intentionally redundant. It lists only the commands that require `sudo` on a new Ubuntu 22.04 / WSL2 desktop.
+
+If you only want the `dry_run` path:
+
+```bash
+sudo apt update
+sudo apt install -y git curl python3-pip python3.10-venv
+sudo apt install -y graphviz
+```
+
+If you also need ROS 2 Humble and Gazebo simulation:
+
+```bash
+sudo apt install -y locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+sudo apt install -y software-properties-common curl
+
+if [ ! -e /etc/apt/sources.list.d/ros2.sources ]; then
+  sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+    http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+    | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+fi
+
+if [ -e /etc/apt/sources.list.d/ros2.sources ] && [ -e /etc/apt/sources.list.d/ros2.list ]; then
+  sudo mv /etc/apt/sources.list.d/ros2.list /etc/apt/sources.list.d/ros2.list.disabled
+fi
+
+sudo apt update
+sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep
+sudo rosdep init
+
+sudo apt install -y \
+  ros-humble-moveit \
+  ros-humble-gazebo-ros-pkgs \
+  ros-humble-gazebo-ros2-control \
+  ros-humble-ur-description \
+  ros-humble-ur-moveit-config \
+  ros-humble-controller-manager \
+  ros-humble-joint-state-broadcaster \
+  ros-humble-joint-trajectory-controller \
+  ros-humble-xacro \
+  ros-humble-robot-state-publisher
 ```
 
 ## If You Want True "Clone And Deploy Anywhere"

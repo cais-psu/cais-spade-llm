@@ -29,15 +29,37 @@ fi
 
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
+mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
+mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
 
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/worlds/table.world" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds/table.world"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/worlds/"*.world \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds/"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/launch/"*.py \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch/"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/config/"*.yaml \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config/"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz/"*.rviz \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz/"
 
+# ROS setup scripts are not consistently safe under `set -u`.
+set +u
 source "${ROS_SETUP}"
+set -u
+
 cd "${ROS2_WS}"
-colcon build
+# Skip optional xArm vision/hand-eye package that pulls in
+# object_recognition_msgs, which is not needed for this repo's dual-robot
+# Gazebo + MoveIt bring-up.
+colcon build --packages-skip d435i_xarm_setup
+
+# Upstream xarm_gazebo installs only `worlds/` and `launch/`. Our custom dual-
+# robot flow also requires `config/` and `rviz/` assets at runtime.
+mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
+mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/config/"*.yaml \
+  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config/"
+cp "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz/"*.rviz \
+  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz/"
 
 cat <<EOF
 
@@ -46,7 +68,7 @@ Gazebo workspace is ready.
 Next steps:
   source ${ROS_SETUP}
   source ${ROS2_WS}/install/setup.bash
-  ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py
+  ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
 
 Then, in a separate terminal:
   cd ${REPO_ROOT}

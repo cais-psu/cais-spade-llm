@@ -96,6 +96,11 @@ class SystemBridge:
     _GAZEBO_PREWARM_TIMEOUT_S = 60.0
     _GAZEBO_PREWARM_START_DELAY_S = 0.5
     _GAZEBO_PREWARM_READY_WAIT_S = 60.0
+    _GAZEBO_WORKSPACE_LAUNCH_FILES = {
+        "gazebo_dual": "dual_moveit_gazebo.launch.py",
+        "gazebo_xarm6": "xarm6_moveit_single_gazebo.launch.py",
+        "gazebo_ur5e": "ur5e_rg2_moveit_gazebo.launch.py",
+    }
 
     @classmethod
     def instance(cls) -> SystemBridge:
@@ -3000,6 +3005,128 @@ class SystemBridge:
             ur5e_ip=self.hardware_ips.get("ur5e", self._HW_IP_DEFAULTS["ur5e"]),
         )
 
+    @staticmethod
+    def _ros2_setup_path() -> Path:
+        return Path("/opt/ros/humble/setup.bash")
+
+    @staticmethod
+    def _ros2_workspace_root() -> Path:
+        return Path.home() / "ros2_ws"
+
+    @classmethod
+    def _ros2_workspace_setup_path(cls) -> Path:
+        return cls._ros2_workspace_root() / "install" / "setup.bash"
+
+    @classmethod
+    def _ros2_workspace_launch_dir(cls) -> Path:
+        return cls._ros2_workspace_root() / "src" / "xarm_ros2" / "xarm_gazebo" / "launch"
+
+    @classmethod
+    def _ros2_workspace_install_pkg_path(cls, pkg_name: str) -> Path:
+        return cls._ros2_workspace_root() / "install" / str(pkg_name).strip()
+
+    @classmethod
+    def _ros2_workspace_install_share_pkg_path(cls, pkg_name: str) -> Path:
+        pkg_name = str(pkg_name).strip()
+        return cls._ros2_workspace_install_pkg_path(pkg_name) / "share" / pkg_name
+
+    @staticmethod
+    def _ros2_system_share_pkg_path(pkg_name: str) -> Path:
+        return Path("/opt/ros/humble/share") / str(pkg_name).strip()
+
+    @classmethod
+    def _ros2_launch_required_paths(cls, name: str) -> list[tuple[Path, str]]:
+        launch_key = str(name or "").strip().lower()
+        xarm_gazebo_share = cls._ros2_workspace_install_share_pkg_path("xarm_gazebo")
+        workspace_xarm = (
+            (
+                cls._ros2_workspace_install_pkg_path("xarm_gazebo"),
+                "ROS2 workspace is missing package 'xarm_gazebo'. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                cls._ros2_workspace_install_pkg_path("xarm_moveit_config"),
+                "ROS2 workspace is missing package 'xarm_moveit_config'. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        moveit_core = (
+            (
+                cls._ros2_system_share_pkg_path("moveit_ros_move_group"),
+                "MoveIt is not installed. Install `ros-humble-moveit`.",
+            ),
+        )
+        ur_stack = (
+            (
+                cls._ros2_system_share_pkg_path("ur_description"),
+                "UR description is not installed. Install `ros-humble-ur-description`.",
+            ),
+            (
+                cls._ros2_system_share_pkg_path("ur_moveit_config"),
+                "UR MoveIt config is not installed. Install `ros-humble-ur-moveit-config`.",
+            ),
+        )
+        onrobot_ws = (
+            (
+                cls._ros2_workspace_install_pkg_path("onrobot_description"),
+                "ROS2 workspace is missing package 'onrobot_description'. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        dual_assets = (
+            (
+                xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
+                "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
+                "ROS2 workspace is missing the UR5e initial positions config. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                xarm_gazebo_share / "rviz" / "dual_moveit.rviz",
+                "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        ur_assets = (
+            (
+                xarm_gazebo_share / "config" / "ur5e_rg2_controllers.yaml",
+                "ROS2 workspace is missing the UR5e RG2 controller config. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+
+        if launch_key == "gazebo_dual":
+            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *dual_assets]
+        if launch_key == "gazebo_xarm6":
+            return [*workspace_xarm, *moveit_core]
+        if launch_key == "gazebo_ur5e":
+            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *ur_assets]
+        return []
+
+    def _ros2_launch_prereq_error(self, name: str) -> str | None:
+        ros_setup = self._ros2_setup_path()
+        if not ros_setup.is_file():
+            return (
+                f"ROS 2 Humble is not installed: missing {ros_setup}. "
+                "Install the README simulation dependencies first."
+            )
+
+        ws_setup = self._ros2_workspace_setup_path()
+        if not ws_setup.is_file():
+            return (
+                f"ROS2 workspace is not built yet: missing {ws_setup}. "
+                "Run `make bootstrap-gazebo` after installing the README simulation packages."
+            )
+
+        launch_file = self._GAZEBO_WORKSPACE_LAUNCH_FILES.get(str(name or "").strip().lower())
+        if launch_file:
+            launch_path = self._ros2_workspace_launch_dir() / launch_file
+            if not launch_path.is_file():
+                return (
+                    f"ROS2 workspace is missing {launch_file} at {launch_path}. "
+                    "Re-run `make bootstrap-gazebo` to copy the custom Gazebo launch files and rebuild."
+                )
+        for required_path, remedy in self._ros2_launch_required_paths(name):
+            if not required_path.exists():
+                return f"Missing ROS dependency at {required_path}. {remedy}"
+        return None
+
     def _perception_backend_for_mode(self) -> str:
         mode = str(self.execution_mode or "").strip().lower()
         if mode == "simulation":
@@ -3596,6 +3723,9 @@ class SystemBridge:
             return f"Unknown process: {name}"
         if self.ros2_proc_status(name) == "running":
             return f"{name} is already running"
+        prereq_err = self._ros2_launch_prereq_error(name)
+        if prereq_err:
+            return prereq_err
         if name == "perception":
             backend = str(
                 os.environ.get("PERCEPTION_BACKEND", self._perception_backend_for_mode())
