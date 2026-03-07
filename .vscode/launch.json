@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.venv/bin/python"
+            "python": "${workspaceFolder}/scripts/ros_python.sh"
         }
     ]
 }

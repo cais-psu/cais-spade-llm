@@ -465,6 +465,38 @@ def test_bridge_wait_for_ros_services_checks_targets_in_single_probe():
     assert calls == ["ros2 service list"]
 
 
+def test_bridge_probe_sim_services_allows_start_when_only_perception_is_missing():
+    bridge = SystemBridge()
+
+    def _fake_ros2_command_output(command: str, **kwargs):
+        assert command == "ros2 service list"
+        return True, "/compute_cartesian_path\n/ATTACHLINK\n/DETACHLINK\n"
+
+    bridge._ros2_command_output = _fake_ros2_command_output  # type: ignore[method-assign]
+
+    ready, reason = bridge._probe_sim_services(timeout_sec=2.0)
+
+    assert ready is True
+    assert "/detect_all" in reason
+    assert "Start is allowed" in reason
+
+
+def test_bridge_probe_sim_services_blocks_until_core_services_are_ready():
+    bridge = SystemBridge()
+
+    def _fake_ros2_command_output(command: str, **kwargs):
+        assert command == "ros2 service list"
+        return True, "/compute_cartesian_path\n/detect_all\n"
+
+    bridge._ros2_command_output = _fake_ros2_command_output  # type: ignore[method-assign]
+
+    ready, reason = bridge._probe_sim_services(timeout_sec=2.0)
+
+    assert ready is False
+    assert "/ATTACHLINK" in reason
+    assert "/DETACHLINK" in reason
+
+
 def test_bridge_save_safety_previews_prunes_old_history_and_orphans(tmp_path):
     bridge = SystemBridge()
     safety_file = tmp_path / "safety.txt"

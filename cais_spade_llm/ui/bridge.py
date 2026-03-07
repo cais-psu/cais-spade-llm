@@ -20,7 +20,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
 from cais_spade_llm.bundles.models import (
@@ -96,6 +96,16 @@ class SystemBridge:
     _GAZEBO_PREWARM_TIMEOUT_S = 60.0
     _GAZEBO_PREWARM_START_DELAY_S = 0.5
     _GAZEBO_PREWARM_READY_WAIT_S = 60.0
+    _SIM_CORE_SERVICES = (
+        "/compute_cartesian_path",
+        "/ATTACHLINK",
+        "/DETACHLINK",
+    )
+    _SIM_PERCEPTION_SERVICES = ("/detect_all",)
+    _SIM_PREWARM_SHELL_SERVICES = ("/compute_cartesian_path",)
+    _ENABLE_GAZEBO_TIMING_LOGS = str(
+        os.getenv("CAIS_SPADE_GAZEBO_TIMING", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     _GAZEBO_WORKSPACE_LAUNCH_FILES = {
         "gazebo_dual": "dual_moveit_gazebo.launch.py",
         "gazebo_xarm6": "xarm6_moveit_single_gazebo.launch.py",
@@ -160,6 +170,9 @@ class SystemBridge:
         self._sim_ready_cache_ts: float = 0.0
         self._sim_ready_cache: tuple[bool, str] = (False, "Simulation startup check pending.")
         self._sim_ready_probe_inflight: bool = False
+        self._gazebo_launch_seq: int = 0
+        self._gazebo_launch_timing_lock = threading.Lock()
+        self._gazebo_launch_timing: dict[str, Any] | None = None
         self.hardware_ips = self._load_hardware_ips()
         self._hw_ping_cache: dict[str, dict[str, Any]] = {}
         self._hw_ping_last_ts: float = 0.0
@@ -198,6 +211,195 @@ class SystemBridge:
         self._startup_phase = str(phase)
         self._startup_phase_ts = time.monotonic()
         self._diag_emit(f"startup phase -> {self._startup_phase}")
+
+    def _gazebo_timing_emit(self, message: str) -> None:
+        """Emit Gazebo/MoveIt startup timing lines when explicitly enabled."""
+        if not self._ENABLE_GAZEBO_TIMING_LOGS:
+            return
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+        line = f"{ts} - ui.bridge - INFO - [GAZEBO-TIMING] {message}"
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+        log.info("[GAZEBO-TIMING] %s", message)
+
+    def _begin_gazebo_launch_timing(self, launch_name: str, pid: int) -> int:
+        launch_key = str(launch_name or "").strip().lower()
+        with self._gazebo_launch_timing_lock:
+            self._gazebo_launch_seq += 1
+            launch_id = self._gazebo_launch_seq
+            self._gazebo_launch_timing = {
+                "id": launch_id,
+                "name": launch_key,
+                "pid": int(pid),
+                "t0": time.monotonic(),
+                "phase1_t0": None,
+                "services_seen": {},
+                "targets": [],
+                "last_pending": (),
+                "last_pending_emit_ts": 0.0,
+            }
+        self._gazebo_timing_emit(
+            f"launch#{launch_id} start name={launch_key} pid={pid}"
+        )
+        return launch_id
+
+    def _gazebo_launch_timing_snapshot(self) -> dict[str, Any] | None:
+        with self._gazebo_launch_timing_lock:
+            if self._gazebo_launch_timing is None:
+                return None
+            return dict(self._gazebo_launch_timing)
+
+    def _gazebo_phase1_begin(self, targets: list[str]) -> None:
+        now = time.monotonic()
+        launch_id: int | None = None
+        launch_elapsed: float = 0.0
+        with self._gazebo_launch_timing_lock:
+            meta = self._gazebo_launch_timing
+            if meta is None:
+                return
+            meta["phase1_t0"] = now
+            meta["targets"] = list(targets)
+            launch_id = int(meta.get("id", 0))
+            launch_elapsed = now - float(meta.get("t0", now))
+        self._gazebo_timing_emit(
+            "launch#"
+            f"{launch_id} phase1 waiting for services={','.join(targets)} "
+            f"launch_elapsed={launch_elapsed:.2f}s"
+        )
+
+    def _gazebo_note_service_ready(self, service_name: str, detected_ts: float) -> None:
+        service = str(service_name or "").strip()
+        if not service:
+            return
+        launch_id: int | None = None
+        launch_elapsed: float = 0.0
+        phase1_elapsed: float = 0.0
+        with self._gazebo_launch_timing_lock:
+            meta = self._gazebo_launch_timing
+            if meta is None:
+                return
+            seen = meta.setdefault("services_seen", {})
+            if service in seen:
+                return
+            seen[service] = float(detected_ts)
+            launch_id = int(meta.get("id", 0))
+            launch_t0 = float(meta.get("t0", detected_ts))
+            phase1_t0 = float(meta.get("phase1_t0", launch_t0))
+            launch_elapsed = float(detected_ts) - launch_t0
+            phase1_elapsed = float(detected_ts) - phase1_t0
+        self._gazebo_timing_emit(
+            "launch#"
+            f"{launch_id} service_ready name={service} "
+            f"launch_elapsed={launch_elapsed:.2f}s phase1_elapsed={phase1_elapsed:.2f}s"
+        )
+
+    def _gazebo_note_services_pending(
+        self,
+        missing_services: list[str] | tuple[str, ...],
+        detected_ts: float,
+    ) -> None:
+        missing = tuple(str(name).strip() for name in missing_services if str(name).strip())
+        if not missing:
+            return
+
+        launch_id: int | None = None
+        launch_elapsed: float = 0.0
+        phase1_elapsed: float = 0.0
+        should_emit = False
+        with self._gazebo_launch_timing_lock:
+            meta = self._gazebo_launch_timing
+            if meta is None:
+                return
+            last_pending = tuple(meta.get("last_pending", ()))
+            last_emit_ts = float(meta.get("last_pending_emit_ts", 0.0) or 0.0)
+            if missing != last_pending or (float(detected_ts) - last_emit_ts) >= 5.0:
+                meta["last_pending"] = missing
+                meta["last_pending_emit_ts"] = float(detected_ts)
+                should_emit = True
+            launch_id = int(meta.get("id", 0))
+            launch_t0 = float(meta.get("t0", detected_ts))
+            phase1_t0 = float(meta.get("phase1_t0", launch_t0))
+            launch_elapsed = float(detected_ts) - launch_t0
+            phase1_elapsed = float(detected_ts) - phase1_t0
+        if not should_emit:
+            return
+        self._gazebo_timing_emit(
+            "launch#"
+            f"{launch_id} waiting still_missing={','.join(missing)} "
+            f"launch_elapsed={launch_elapsed:.2f}s phase1_elapsed={phase1_elapsed:.2f}s"
+        )
+
+    def _gazebo_phase1_complete(self) -> None:
+        now = time.monotonic()
+        launch_id: int | None = None
+        launch_elapsed: float = 0.0
+        phase1_elapsed: float = 0.0
+        with self._gazebo_launch_timing_lock:
+            meta = self._gazebo_launch_timing
+            if meta is None:
+                return
+            launch_id = int(meta.get("id", 0))
+            launch_t0 = float(meta.get("t0", now))
+            phase1_t0 = float(meta.get("phase1_t0", launch_t0))
+            launch_elapsed = now - launch_t0
+            phase1_elapsed = now - phase1_t0
+        self._gazebo_timing_emit(
+            f"launch#{launch_id} phase1 complete launch_elapsed={launch_elapsed:.2f}s "
+            f"phase1_elapsed={phase1_elapsed:.2f}s"
+        )
+
+    def _gazebo_phase1_failed(self, detail: str) -> None:
+        now = time.monotonic()
+        launch_id: int | None = None
+        launch_elapsed: float = 0.0
+        phase1_elapsed: float = 0.0
+        with self._gazebo_launch_timing_lock:
+            meta = self._gazebo_launch_timing
+            if meta is None:
+                return
+            launch_id = int(meta.get("id", 0))
+            launch_t0 = float(meta.get("t0", now))
+            phase1_t0 = float(meta.get("phase1_t0", launch_t0))
+            launch_elapsed = now - launch_t0
+            phase1_elapsed = now - phase1_t0
+        self._gazebo_timing_emit(
+            f"launch#{launch_id} phase1 failed launch_elapsed={launch_elapsed:.2f}s "
+            f"phase1_elapsed={phase1_elapsed:.2f}s detail={detail}"
+        )
+
+    def _gazebo_note_prewarm_start(self, robot: str) -> None:
+        meta = self._gazebo_launch_timing_snapshot()
+        if not meta:
+            return
+        launch_elapsed = time.monotonic() - float(meta.get("t0", time.monotonic()))
+        self._gazebo_timing_emit(
+            f"launch#{meta.get('id', 0)} prewarm start robot={robot} "
+            f"launch_elapsed={launch_elapsed:.2f}s"
+        )
+
+    def _gazebo_note_prewarm_result(self, robot: str, ok: bool, elapsed: float, detail: str = "") -> None:
+        meta = self._gazebo_launch_timing_snapshot()
+        if not meta:
+            return
+        launch_elapsed = time.monotonic() - float(meta.get("t0", time.monotonic()))
+        result = "ready" if ok else "failed"
+        suffix = f" detail={detail}" if str(detail).strip() else ""
+        self._gazebo_timing_emit(
+            f"launch#{meta.get('id', 0)} prewarm {result} robot={robot} "
+            f"elapsed={elapsed:.2f}s launch_elapsed={launch_elapsed:.2f}s{suffix}"
+        )
+
+    def _gazebo_launch_complete(self, ready_count: int, total_targets: int) -> None:
+        meta = self._gazebo_launch_timing_snapshot()
+        if not meta:
+            return
+        launch_elapsed = time.monotonic() - float(meta.get("t0", time.monotonic()))
+        self._gazebo_timing_emit(
+            f"launch#{meta.get('id', 0)} ready services_and_prewarm complete "
+            f"targets_ready={ready_count}/{total_targets} launch_elapsed={launch_elapsed:.2f}s"
+        )
 
     def _clear_cached_plan_safety_alerts(self) -> None:
         self._cached_plan_safety_alerts = []
@@ -3070,6 +3272,16 @@ class SystemBridge:
                 "ROS2 workspace is missing package 'onrobot_description'. Re-run `make bootstrap-gazebo`.",
             ),
         )
+        link_attacher_ws = (
+            (
+                cls._ros2_workspace_install_pkg_path("linkattacher_msgs"),
+                "ROS2 workspace is missing package 'linkattacher_msgs'. Re-run `make bootstrap-gazebo` to install IFRA LinkAttacher.",
+            ),
+            (
+                cls._ros2_workspace_install_pkg_path("ros2_linkattacher"),
+                "ROS2 workspace is missing package 'ros2_linkattacher'. Re-run `make bootstrap-gazebo` to install IFRA LinkAttacher.",
+            ),
+        )
         dual_assets = (
             (
                 xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
@@ -3092,11 +3304,11 @@ class SystemBridge:
         )
 
         if launch_key == "gazebo_dual":
-            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *dual_assets]
+            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *dual_assets]
         if launch_key == "gazebo_xarm6":
-            return [*workspace_xarm, *moveit_core]
+            return [*workspace_xarm, *moveit_core, *link_attacher_ws]
         if launch_key == "gazebo_ur5e":
-            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *ur_assets]
+            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *ur_assets]
         return []
 
     def _ros2_launch_prereq_error(self, name: str) -> str | None:
@@ -3153,7 +3365,7 @@ class SystemBridge:
         )
 
     def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
-        """Return whether Gazebo+MoveIt simulation startup is fully ready for agent start."""
+        """Return whether Gazebo simulation startup is ready enough for agent start."""
         now = time.monotonic()
         if not self._any_running(self._GAZEBO_PROCESS_NAMES):
             result = (False, "Gazebo stack is not running. Launch Gazebo + MoveIt first.")
@@ -3161,13 +3373,41 @@ class SystemBridge:
             self._sim_ready_cache = result
             return result
 
-        # If prewarm completed successfully, services were confirmed ready.
-        if self._gazebo_prewarm_done.is_set():
-            result = (True, "")
+        # Non-force path is called from a 1s UI timer. Keep it cheap and avoid
+        # repeatedly spawning `ros2 service list`, which can be expensive.
+        with self._gazebo_prewarm_lock:
+            prewarm_done = self._gazebo_prewarm_done.is_set()
+            prewarm_inflight = bool(
+                (self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive())
+                or self._gazebo_prewarm_pending
+            )
+            probe_inflight = self._sim_ready_probe_inflight
+
+        # If prewarm completed successfully, core services were confirmed ready.
+        # Perception is probed separately so a slow /detect_all does not block
+        # agent startup or the dashboard readiness banner.
+        if prewarm_done:
+            if force:
+                result = self._probe_sim_services(timeout_sec=6.0)
+                self._sim_ready_cache_ts = now
+                self._sim_ready_cache = result
+                return result
+            if (not probe_inflight) and (now - self._sim_ready_cache_ts) >= 3.0:
+                self._schedule_sim_ready_probe()
+            if self._sim_ready_cache[0]:
+                return self._sim_ready_cache
+            result = (True, self._simulation_perception_warning())
             self._sim_ready_cache = result
             self._sim_ready_cache_ts = now
-            if force:
-                return result
+            return result
+
+        if prewarm_inflight:
+            result = (
+                False,
+                "Simulation startup is still initializing ROS services and controller prewarm. Please wait...",
+            )
+            self._sim_ready_cache_ts = now
+            self._sim_ready_cache = result
             return result
 
         if force:
@@ -3176,19 +3416,8 @@ class SystemBridge:
             self._sim_ready_cache = result
             return result
 
-        # Non-force path is called from a 1s UI timer. Keep it cheap and avoid
-        # repeatedly spawning `ros2 service list`, which can be expensive.
-        with self._gazebo_prewarm_lock:
-            prewarm_inflight = bool(
-                (self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive())
-                or self._gazebo_prewarm_pending
-            )
-
-        if prewarm_inflight:
-            result = (False, "Simulation startup is still initializing ROS services. Please wait...")
-            self._sim_ready_cache_ts = now
-            self._sim_ready_cache = result
-            return result
+        if (not probe_inflight) and (now - self._sim_ready_cache_ts) >= 2.0:
+            self._schedule_sim_ready_probe()
 
         # If prewarm is not running (e.g., user launched Gazebo outside the UI),
         # expose the last cached answer but do not shell out on every timer tick.
@@ -3209,18 +3438,24 @@ class SystemBridge:
             )
 
         services = [line.strip() for line in out.splitlines() if line.strip()]
-        required_services = ("/compute_cartesian_path", "/detect_all")
-        missing = [
+        missing_core = [
             svc
-            for svc in required_services
+            for svc in self._SIM_CORE_SERVICES
             if not any(name == svc or name.endswith(svc) for name in services)
         ]
-        if missing:
+        if missing_core:
             return (
                 False,
-                "Simulation startup is not done yet. Waiting for services: "
-                + ", ".join(missing),
+                "Simulation startup is not done yet. Waiting for core services: "
+                + ", ".join(missing_core),
             )
+        missing_perception = [
+            svc
+            for svc in self._SIM_PERCEPTION_SERVICES
+            if not any(name == svc or name.endswith(svc) for name in services)
+        ]
+        if missing_perception:
+            return (True, self._simulation_perception_warning(missing_perception))
         return (True, "")
 
     def _probe_sim_services_worker(self) -> None:
@@ -3231,6 +3466,48 @@ class SystemBridge:
         finally:
             with self._gazebo_prewarm_lock:
                 self._sim_ready_probe_inflight = False
+
+    def _schedule_sim_ready_probe(self) -> None:
+        with self._gazebo_prewarm_lock:
+            if self._sim_ready_probe_inflight:
+                return
+            self._sim_ready_probe_inflight = True
+        threading.Thread(
+            target=self._probe_sim_services_worker,
+            daemon=True,
+        ).start()
+
+    @classmethod
+    def _simulation_perception_warning(
+        cls,
+        missing_services: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
+        missing = [
+            str(name).strip()
+            for name in (missing_services or cls._SIM_PERCEPTION_SERVICES)
+            if str(name).strip()
+        ]
+        if not missing:
+            return ""
+        return (
+            "Perception is still warming up: "
+            + ", ".join(missing)
+            + ". Start is allowed, but perception-dependent tasks may need a few more seconds."
+        )
+
+    @staticmethod
+    def _simulation_prewarm_failure_message(
+        failures: list[str] | tuple[str, ...],
+    ) -> str:
+        details = [str(item).strip() for item in failures if str(item).strip()]
+        if not details:
+            return (
+                "Simulation startup is not done yet. Controller prewarm failed before all robots were ready."
+            )
+        return (
+            "Simulation startup is not done yet. Controller prewarm failed: "
+            + "; ".join(details)
+        )
 
     def _any_running(self, names: set[str]) -> bool:
         return any(self.ros2_proc_status(name) == "running" for name in names)
@@ -3303,12 +3580,16 @@ class SystemBridge:
         process_name: str | None = None,
         cancel_event: threading.Event | None = None,
         poll_interval_sec: float = 0.5,
+        progress_cb: Callable[[str, float], None] | None = None,
+        pending_cb: Callable[[list[str], float], None] | None = None,
     ) -> str | None:
         targets = [str(name).strip() for name in service_names if str(name).strip()]
         if not targets:
             return "service name is empty"
 
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        seen_targets: set[str] = set()
+        last_missing = list(targets)
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
                 return f"{', '.join(targets)} wait cancelled"
@@ -3325,17 +3606,32 @@ class SystemBridge:
             )
             if ok:
                 services = [line.strip() for line in out.splitlines() if line.strip()]
-                if all(
-                    any(s == target or s.endswith(target) for s in services)
-                    for target in targets
-                ):
+                target_matches: dict[str, bool] = {}
+                for target in targets:
+                    matched = any(s == target or s.endswith(target) for s in services)
+                    target_matches[target] = matched
+                    if matched and target not in seen_targets:
+                        seen_targets.add(target)
+                        if progress_cb is not None:
+                            try:
+                                progress_cb(target, time.monotonic())
+                            except Exception:
+                                pass
+                last_missing = [target for target, matched in target_matches.items() if not matched]
+                if last_missing and pending_cb is not None:
+                    try:
+                        pending_cb(last_missing, time.monotonic())
+                    except Exception:
+                        pass
+                if all(target_matches.values()):
                     return None
             time.sleep(max(0.1, float(poll_interval_sec)))
 
         targets_text = ", ".join(targets)
         if process_name and self.ros2_proc_status(process_name) != "running":
             return f"{process_name} exited before {targets_text} became available"
-        return f"{targets_text} not available within {timeout_sec:.0f}s"
+        missing_text = ", ".join(last_missing or targets)
+        return f"{missing_text} not available within {timeout_sec:.0f}s"
 
     def _wait_for_driver_ready(self, robot: str, timeout_sec: float = 18.0) -> str | None:
         key = str(robot).strip().lower()
@@ -3506,11 +3802,12 @@ class SystemBridge:
             named_positions = {}
         return controller, named_positions
 
-    def _prewarm_gazebo_controller(self, robot: str) -> None:
+    def _prewarm_gazebo_controller(self, robot: str) -> tuple[bool, float, str]:
+        start_ts = time.monotonic()
         robot_key = str(robot or "").strip().lower()
         settings = self._load_gazebo_controller_settings(robot_key)
         if settings is None:
-            return
+            return False, time.monotonic() - start_ts, "controller config missing"
         controller_cfg, named_positions = settings
 
         with self._gazebo_prewarm_lock:
@@ -3519,7 +3816,7 @@ class SystemBridge:
             try:
                 if existing.wait_for_services(timeout_sec=1.0):
                     log.info("Gazebo prewarm already ready for %s", robot_key)
-                    return
+                    return True, time.monotonic() - start_ts, "reused existing controller"
             except Exception:
                 pass
             try:
@@ -3544,9 +3841,10 @@ class SystemBridge:
             )
         except Exception:
             log.exception("Gazebo prewarm failed importing controller modules for %s", robot_key)
-            return
+            return False, time.monotonic() - start_ts, "controller import failure"
 
         controller = None
+        detail = ""
         try:
             if robot_key == "xarm6":
                 prewarm_node = f"xarm6_prewarm_controller_{os.getpid()}_{int(time.monotonic() * 1000) % 1000000}"
@@ -3573,7 +3871,7 @@ class SystemBridge:
                     joint_states_topic=UR5E_JOINT_STATES_TOPIC,
                 )
             else:
-                return
+                return False, time.monotonic() - start_ts, f"unknown robot {robot_key}"
 
             start = time.monotonic()
             ok = bool(controller.wait_for_services(timeout_sec=self._GAZEBO_PREWARM_TIMEOUT_S))
@@ -3589,10 +3887,17 @@ class SystemBridge:
                         pass
                 controller = None  # kept alive for reuse; cleaned up when Gazebo stops
                 log.info("Gazebo prewarm ready for %s in %.2fs", robot_key, elapsed)
+                return True, time.monotonic() - start_ts, "controller ready"
             else:
                 log.warning("Gazebo prewarm not ready for %s after %.2fs", robot_key, elapsed)
+                detail = str(
+                    getattr(controller, "_last_failure_message", "") or "wait_for_services returned false"
+                ).strip()
+                return False, time.monotonic() - start_ts, detail
         except Exception:
             log.exception("Gazebo prewarm exception for %s", robot_key)
+            detail = "exception during controller prewarm"
+            return False, time.monotonic() - start_ts, detail
         finally:
             if controller is not None:
                 try:
@@ -3640,19 +3945,34 @@ class SystemBridge:
                     log.info("Gazebo prewarm skipped; no Gazebo stack running.")
                     return
 
-                # Phase 1: Wait until MoveIt + perception services appear via
-                # lightweight shell probe (`ros2 service list`).  This avoids
-                # creating heavyweight ROS2 controllers before the simulation
-                # stack is actually ready.
+                # Phase 1: Wait only for the lightweight, consistently visible
+                # MoveIt service via `ros2 service list`.  Custom Gazebo world
+                # plugins like ATTACHLINK/DETACHLINK can be slow or flaky to
+                # appear in shell probes under WSL even when direct ROS clients
+                # can already connect, so those are verified in phase 2 by the
+                # controller's actual service clients.
+                phase1_targets = list(self._SIM_PREWARM_SHELL_SERVICES)
+                self._gazebo_phase1_begin(phase1_targets)
                 wait_err = self._wait_for_ros_services(
-                    ["/compute_cartesian_path", "/detect_all"],
+                    phase1_targets,
                     timeout_sec=self._GAZEBO_PREWARM_READY_WAIT_S,
                     cancel_event=self._gazebo_prewarm_cancel,
+                    progress_cb=self._gazebo_note_service_ready,
+                    pending_cb=self._gazebo_note_services_pending,
                 )
                 if wait_err:
+                    self._gazebo_phase1_failed(wait_err)
                     log.info("Gazebo prewarm skipped (service not ready): %s", wait_err)
                     return
 
+                self._gazebo_phase1_complete()
+                probe_result = self._probe_sim_services(timeout_sec=3.0)
+                if not probe_result[0]:
+                    probe_result = (True, self._simulation_perception_warning())
+                self._sim_ready_cache = probe_result
+                self._sim_ready_cache_ts = time.monotonic()
+                if probe_result[1]:
+                    log.info("Gazebo prewarm: %s", probe_result[1])
                 log.info(
                     "Gazebo prewarm: all required services detected for %s — "
                     "creating controllers...",
@@ -3665,13 +3985,38 @@ class SystemBridge:
                 # cost when "Start System" is pressed.
                 if self._gazebo_prewarm_cancel.is_set():
                     return
+                ready_count = 0
+                failures: list[str] = []
                 for robot_key in targets:
                     if self._gazebo_prewarm_cancel.is_set():
                         return
-                    self._prewarm_gazebo_controller(robot_key)
+                    self._gazebo_note_prewarm_start(robot_key)
+                    ok, elapsed, detail = self._prewarm_gazebo_controller(robot_key)
+                    if ok:
+                        ready_count += 1
+                    else:
+                        detail_text = str(detail or "controller not ready").strip() or "controller not ready"
+                        failures.append(f"{robot_key}: {detail_text}")
+                    self._gazebo_note_prewarm_result(robot_key, ok, elapsed, detail)
 
-                # Signal that prewarm is done so simulation_start_ready() unblocks.
-                self._gazebo_prewarm_done.set()
+                if ready_count == len(targets):
+                    # Signal that prewarm is done so simulation_start_ready() unblocks.
+                    self._gazebo_prewarm_done.set()
+                    self._gazebo_launch_complete(ready_count, len(targets))
+                    continue
+
+                self._sim_ready_cache = (
+                    False,
+                    self._simulation_prewarm_failure_message(failures),
+                )
+                self._sim_ready_cache_ts = time.monotonic()
+                meta = self._gazebo_launch_timing_snapshot()
+                if meta:
+                    self._gazebo_timing_emit(
+                        f"launch#{meta.get('id', 0)} prewarm incomplete "
+                        f"targets_ready={ready_count}/{len(targets)} detail={' | '.join(failures)}"
+                    )
+                return
         except Exception:
             log.exception("Gazebo prewarm worker crashed.")
         finally:
@@ -3707,6 +4052,13 @@ class SystemBridge:
             )
             self._gazebo_prewarm_thread.start()
         log.info("Queued Gazebo controller prewarm for %s", ",".join(sorted(targets)))
+        meta = self._gazebo_launch_timing_snapshot()
+        if meta:
+            launch_elapsed = time.monotonic() - float(meta.get("t0", time.monotonic()))
+            self._gazebo_timing_emit(
+                f"launch#{meta.get('id', 0)} prewarm queued targets={','.join(sorted(targets))} "
+                f"launch_elapsed={launch_elapsed:.2f}s"
+            )
 
     @staticmethod
     def _kill_stale_gazebo_helpers() -> None:
@@ -3768,6 +4120,7 @@ class SystemBridge:
             self._ros2_procs[name] = proc
             log.info("Started ROS2 process %s (pid=%d)", name, proc.pid)
             if name in self._GAZEBO_PROCESS_NAMES:
+                self._begin_gazebo_launch_timing(name, proc.pid)
                 self._queue_gazebo_prewarm(name)
             return None
         except Exception as exc:

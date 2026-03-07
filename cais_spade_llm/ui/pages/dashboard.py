@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, Callable
 
-from nicegui import ui
+from nicegui import context, ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
@@ -24,6 +25,31 @@ _MODE_LABELS = list(_MODE_MAP.keys())
 
 
 def render(bridge: SystemBridge) -> None:
+    client = context.client
+    timers: list[Any] = []
+
+    def _managed_timer(interval: float, callback, **kwargs):
+        def _safe_callback():
+            if getattr(client, "_deleted", False):
+                return None
+            return callback()
+
+        timer = ui.timer(interval, _safe_callback, **kwargs)
+        timers.append(timer)
+        return timer
+
+    def _cancel_timers(*_) -> None:
+        for timer in timers:
+            try:
+                timer.cancel(with_current_invocation=True)
+            except TypeError:
+                timer.cancel()
+            except Exception:
+                pass
+        timers.clear()
+
+    client.on_delete(_cancel_timers)
+
     ui.label("Dashboard").classes("text-2xl font-bold px-6 pt-6")
     refresh_dag_now = lambda: None
 
@@ -86,6 +112,7 @@ def render(bridge: SystemBridge) -> None:
             with ui.column().classes("w-full gap-2 mt-4"):
                 banner_hide_task: asyncio.Task | None = None
                 start_click_state = {"locked": False}
+                gazebo_launch_state = {"busy": False}
                 start_task: asyncio.Task | None = None
 
                 def _selected_files() -> tuple[str, str]:
@@ -269,7 +296,13 @@ def render(bridge: SystemBridge) -> None:
                         _set_action_banner("error", f"Failed to configure startup source: {exc}", auto_hide_s=8.0)
                         return
 
-                    if not _check_prerequisites(bridge, internal, prereq_banner):
+                    if not _check_prerequisites(
+                        bridge,
+                        internal,
+                        prereq_banner,
+                        launch_simulation=_launch_gazebo_dual,
+                        launch_simulation_busy=gazebo_launch_state["busy"],
+                    ):
                         detail = f" {bridge.last_error}" if bridge.last_error else ""
                         _set_action_banner(
                             "warning",
@@ -325,6 +358,44 @@ def render(bridge: SystemBridge) -> None:
                         else:
                             _set_action_banner("error", "Stop failed. System is still running.", auto_hide_s=8.0)
                     finally:
+                        _update_controls()
+
+                async def _launch_gazebo_dual():
+                    if gazebo_launch_state["busy"]:
+                        _set_action_banner(
+                            "warning",
+                            "Gazebo + MoveIt launch already in progress...",
+                            auto_hide_s=4.0,
+                        )
+                        return
+
+                    if any(
+                        bridge.ros2_proc_status(name) == "running"
+                        for name in ("gazebo_dual", "gazebo_xarm6", "gazebo_ur5e")
+                    ):
+                        _set_action_banner(
+                            "warning",
+                            "Gazebo stack is already running.",
+                            auto_hide_s=4.0,
+                        )
+                        _update_controls()
+                        return
+
+                    gazebo_launch_state["busy"] = True
+                    _update_controls()
+                    _set_action_banner("info", "Launching Gazebo + MoveIt...")
+                    try:
+                        err = await asyncio.to_thread(bridge.ros2_start, "gazebo_dual")
+                        if err:
+                            _set_action_banner("warning", err, auto_hide_s=8.0)
+                        else:
+                            _set_action_banner(
+                                "success",
+                                "Gazebo + MoveIt launched. Waiting for ROS services...",
+                                auto_hide_s=6.0,
+                            )
+                    finally:
+                        gazebo_launch_state["busy"] = False
                         _update_controls()
 
                 reset_scope_options = [
@@ -459,7 +530,13 @@ def render(bridge: SystemBridge) -> None:
                     if bridge._starting and not bridge.system_running:
                         prereqs_met = False
                     else:
-                        prereqs_met = _check_prerequisites(bridge, internal, prereq_banner)
+                        prereqs_met = _check_prerequisites(
+                            bridge,
+                            internal,
+                            prereq_banner,
+                            launch_simulation=_launch_gazebo_dual,
+                            launch_simulation_busy=gazebo_launch_state["busy"],
+                        )
 
                     bundle_ok, bundle_msg = _bundle_gate(strict=False)
                     if not bundle_ok:
@@ -504,7 +581,7 @@ def render(bridge: SystemBridge) -> None:
                     _set_plan_safety_banner([])
                     error_label.text = f"Dashboard control update failed: {exc}"
 
-            ui.timer(1.0, _update_controls)
+            _managed_timer(1.0, _update_controls)
 
             def _refresh_selection_and_controls() -> None:
                 _update_source_picker_visibility()
@@ -544,7 +621,7 @@ def render(bridge: SystemBridge) -> None:
                         ui.label(agent["type"]).classes("text-xs text-slate-500 uppercase")
                         ui.label(agent["jid"]).classes("text-xs text-slate-400 truncate")
 
-        ui.timer(2.0, _refresh_agents)
+        _managed_timer(2.0, _refresh_agents)
 
         # ── Quick Stats ──────────────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -570,7 +647,7 @@ def render(bridge: SystemBridge) -> None:
                 blocked = len(safety.get("blocked_tasks", {}))
                 _stat_card("Safety Blocks", str(blocked), "shield")
 
-        ui.timer(2.0, _refresh_stats)
+        _managed_timer(2.0, _refresh_stats)
 
         def _preview_or_runtime_nodes() -> list[dict]:
             nodes = bridge.get_plan_nodes()
@@ -606,7 +683,7 @@ def render(bridge: SystemBridge) -> None:
 
             refresh_dag_now = _refresh_dag
             _refresh_dag()
-            ui.timer(2.0, _refresh_dag)
+            _managed_timer(2.0, _refresh_dag)
 
         # ── Live Robot Status ───────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -627,7 +704,7 @@ def render(bridge: SystemBridge) -> None:
                         render_robot_status_card(name, state)
 
             _refresh_robot_status()
-            ui.timer(2.0, _refresh_robot_status)
+            _managed_timer(2.0, _refresh_robot_status)
 
         # ── Runtime Safety Rules ────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -656,7 +733,7 @@ def render(bridge: SystemBridge) -> None:
                     )
                 runtime_rules_table.rows = rows
 
-            ui.timer(5.0, _refresh_runtime_safety_rules)
+            _managed_timer(5.0, _refresh_runtime_safety_rules)
 
         # ── Runtime Safety State ────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -667,7 +744,7 @@ def render(bridge: SystemBridge) -> None:
                 ss = bridge.get_safety_state()
                 runtime_safety_state.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
 
-            ui.timer(2.0, _refresh_runtime_safety_state)
+            _managed_timer(2.0, _refresh_runtime_safety_state)
 
         # ── Runtime Blocked Tasks ───────────────────────────────────
         with ui.card().classes("w-full"):
@@ -690,7 +767,7 @@ def render(bridge: SystemBridge) -> None:
                                 f"Violated rule: {info.get('violated_rule', 'unknown')}"
                             ).classes("text-sm text-red-600")
 
-            ui.timer(3.0, _refresh_runtime_blocked_tasks)
+            _managed_timer(3.0, _refresh_runtime_blocked_tasks)
 
         # ── Task States Table ───────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -747,7 +824,7 @@ def render(bridge: SystemBridge) -> None:
                     if active:
                         _set_node_details([active])
 
-            ui.timer(2.0, _refresh_tasks)
+            _managed_timer(2.0, _refresh_tasks)
 
         # ── Execution Timeline ──────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -769,7 +846,7 @@ def render(bridge: SystemBridge) -> None:
                 tl = bridge.get_execution_timeline()
                 timeline_table.rows = tl[-50:]
 
-            ui.timer(3.0, _refresh_timeline)
+            _managed_timer(3.0, _refresh_timeline)
 
         # ── Node Detail ─────────────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -808,9 +885,20 @@ def render(bridge: SystemBridge) -> None:
         )
 
 
-def _check_prerequisites(bridge: SystemBridge, mode: str, banner: ui.column) -> bool:
+def _check_prerequisites(
+    bridge: SystemBridge,
+    mode: str,
+    banner: ui.column,
+    *,
+    launch_simulation: Callable[[], Any] | None = None,
+    launch_simulation_busy: bool = False,
+) -> bool:
     """Check if prerequisites are met for the selected mode. Updates the banner. Returns True if OK."""
     banner.clear()
+
+    def _suppress_sim_ready_note(message: str) -> bool:
+        text = str(message or "").strip().lower()
+        return text.startswith("perception is still warming up:")
 
     if bridge.system_running:
         return True  # Already running, don't block.
@@ -845,7 +933,13 @@ def _check_prerequisites(bridge: SystemBridge, mode: str, banner: ui.column) -> 
             sim_ready = True
 
         with banner:
-            if gazebo_running and sim_ready:
+            if gazebo_running and sim_ready and sim_reason and not _suppress_sim_ready_note(sim_reason):
+                with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
+                    ui.icon("info").classes("text-lg")
+                    with ui.column().classes("gap-1"):
+                        ui.label("Gazebo + MoveIt are ready.").classes("text-sm font-semibold")
+                        ui.label(sim_reason).classes("text-xs")
+            elif gazebo_running and sim_ready:
                 with ui.row().classes("items-center gap-2 text-green-600"):
                     ui.icon("check_circle").classes("text-sm")
                     ui.label("Gazebo + MoveIt are ready — safe to start.").classes("text-sm")
@@ -858,12 +952,17 @@ def _check_prerequisites(bridge: SystemBridge, mode: str, banner: ui.column) -> 
             else:
                 with ui.row().classes("items-center gap-2 text-amber-600 bg-amber-50 p-3 rounded"):
                     ui.icon("warning").classes("text-lg")
-                    with ui.column().classes("gap-1"):
+                    with ui.column().classes("gap-2"):
                         ui.label("Gazebo is not running.").classes("text-sm font-semibold")
-                        with ui.row().classes("items-center gap-1"):
-                            ui.label("Go to").classes("text-sm")
-                            ui.link("Control", "/control").classes("text-sm font-semibold")
-                            ui.label("to launch Gazebo + MoveIt first.").classes("text-sm")
+                        ui.label("Launch Gazebo + MoveIt first.").classes("text-sm")
+                        launch_btn = ui.button(
+                            "Start Gazebo + MoveIt",
+                            on_click=launch_simulation,
+                            icon="play_arrow",
+                        ).props("dense color=amber")
+                        launch_btn.set_enabled(
+                            launch_simulation is not None and not launch_simulation_busy
+                        )
         return gazebo_running and sim_ready
 
     if mode == "physical":

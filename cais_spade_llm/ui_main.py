@@ -89,6 +89,10 @@ def _run_headless() -> None:
 
 def _run_ui() -> None:
     """Run the NiceGUI operator console (default mode)."""
+    print(
+        "UI started. Use Control to launch Gazebo + MoveIt, then Dashboard > Start System to start agents.",
+        flush=True,
+    )
     from cais_spade_llm.ui.app import create_app
     create_app()
 

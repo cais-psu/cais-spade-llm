@@ -725,9 +725,15 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     def _snapshot_state(self) -> Dict[str, Any]:
         """Robot-specific state snapshot (override)."""
+        controller_ready = True
+        if self.execution_mode != "dry_run":
+            controller_ready = bool(
+                self._controller is not None
+                and getattr(self._controller, "is_usable", lambda: False)()
+            )
         return {
             "execution_mode": self.execution_mode,
-            "controller_ready": self._controller is not None if self.execution_mode != "dry_run" else True,
+            "controller_ready": controller_ready,
             "held_part": self._held_part,
             "current_state": self._current_state,
             "position": self._position.copy(),

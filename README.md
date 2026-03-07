@@ -110,6 +110,8 @@ you can skip the `poetry run pip install -r requirements-ui.txt` step.
 poetry run python -m cais_spade_llm
 ```
 
+If you launch the app from VS Code, use the checked-in debug configuration in [`.vscode/launch.json`](.vscode/launch.json). It now runs Python through [`scripts/ros_python.sh`](scripts/ros_python.sh), which sources `/opt/ros/humble/setup.bash` and `~/ros2_ws/install/setup.bash` first so simulation controllers can import `rclpy`.
+
 The UI runs on `http://localhost:8080`.
 
 ### 5. First-run recommendation
@@ -226,9 +228,19 @@ It will:
 - create or reuse `~/ros2_ws`
 - clone `xarm_ros2`
 - clone `OnRobot_ROS2_Description`
+- clone `IFRA_LinkAttacher`
 - copy this repo's custom world, launch, config, and RViz files into the ROS 2 workspace
+- copy this repo's patched IFRA `gazebo_link_attacher.cpp` into the workspace before build
 - copy the custom config and RViz assets into the installed `xarm_gazebo` package share that the launch files read at runtime
 - run `colcon build --packages-skip d435i_xarm_setup`
+
+The IFRA LinkAttacher build is required for this repository's Gazebo grasp/attach flow:
+
+- workspace package `linkattacher_msgs`
+- workspace package `ros2_linkattacher`
+- Gazebo services `/ATTACHLINK` and `/DETACHLINK`
+
+If those are missing, startup may succeed but simulated grasp attach/detach will be disabled.
 
 Why `d435i_xarm_setup` is skipped:
 
@@ -274,6 +286,16 @@ make bootstrap-gazebo
 ```
 
 If `make bootstrap-gazebo` fails, finish the missing ROS 2 / Gazebo apt packages from `System packages required for simulation`, then rerun it.
+
+After a successful bootstrap, verify the IFRA attacher services once:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 service list | grep -E '/ATTACHLINK|/DETACHLINK'
+```
+
+If they are missing, restart the Gazebo launch once so it reloads the new plugin build.
 
 ### Start Gazebo
 

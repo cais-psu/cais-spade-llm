@@ -885,17 +885,18 @@ class Ros2PickPlaceController:
             move_time_s=self.gripper_move_time_sec,
             wait_s=self.gripper_settle_sec,
             require_target=True,
+            log_target_miss=False,
         )
         if not open_ok:
-            self._log().warn("Release open target not reached; retrying gripper open once")
             open_ok = self._gripper_command(
                 self.gripper_open,
                 "OPEN — releasing (retry)",
-                move_time_s=max(0.8, self.gripper_move_time_sec * 1.5),
-                wait_s=max(0.10, self.gripper_settle_sec),
+                move_time_s=max(1.2, self.gripper_move_time_sec * 2.0),
+                wait_s=max(0.20, self.gripper_settle_sec * 1.5),
                 require_target=True,
+                log_target_miss=False,
             )
-        if not open_ok:
+        if not open_ok and self.execution_mode == "physical":
             return {
                 "success": False,
                 "message": "failed to open gripper to release part",
@@ -1109,7 +1110,13 @@ class Ros2PickPlaceController:
         with self._joint_lock:
             return self._joint_positions.get(joint_name)
 
-    def _wait_for_gripper_target(self, target: float, timeout_sec: float) -> bool:
+    def _wait_for_gripper_target(
+        self,
+        target: float,
+        timeout_sec: float,
+        *,
+        log_miss: bool = True,
+    ) -> bool:
         deadline = time.monotonic() + timeout_sec
         saw_feedback = False
         last_pos = None
@@ -1122,6 +1129,8 @@ class Ros2PickPlaceController:
                     return True
             time.sleep(0.02)
 
+        if not log_miss:
+            return False
         if not saw_feedback:
             self._log().warn(
                 f"No joint-state feedback for '{self.gripper_joint}' while waiting gripper move"
@@ -1139,6 +1148,7 @@ class Ros2PickPlaceController:
         move_time_s: float | None = None,
         wait_s: float | None = None,
         require_target: bool = False,
+        log_target_miss: bool | None = None,
     ) -> bool:
         if not self._gripper_pub:
             self._log().error("Gripper publisher is not configured")
@@ -1146,6 +1156,8 @@ class Ros2PickPlaceController:
 
         move_time_s = self.gripper_move_time_sec if move_time_s is None else float(move_time_s)
         wait_s = self.gripper_settle_sec if wait_s is None else float(wait_s)
+        if log_target_miss is None:
+            log_target_miss = bool(require_target)
 
         self._log().info(f"Gripper: {label} (position={position:.3f})")
         traj = self._JointTrajectory()
@@ -1163,11 +1175,16 @@ class Ros2PickPlaceController:
         self._gripper_pub.publish(traj)
 
         feedback_timeout = max(move_time_s + self.gripper_feedback_timeout_pad_sec, 1.0)
-        reached = self._wait_for_gripper_target(position, feedback_timeout)
+        reached = self._wait_for_gripper_target(
+            position,
+            feedback_timeout,
+            log_miss=bool(log_target_miss),
+        )
         if require_target and not reached:
-            self._log().error(
-                f"Gripper command did not reach required target: target={position:.3f}"
-            )
+            if log_target_miss:
+                self._log().error(
+                    f"Gripper command did not reach required target: target={position:.3f}"
+                )
             return False
         time.sleep(max(0.0, wait_s))
         return True

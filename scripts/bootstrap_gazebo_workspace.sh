@@ -27,6 +27,12 @@ else
   echo "OnRobot_ROS2_Description already present at ${ROS2_WS}/src/OnRobot_ROS2_Description"
 fi
 
+if [[ ! -d "${ROS2_WS}/src/IFRA_LinkAttacher/.git" ]]; then
+  git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git "${ROS2_WS}/src/IFRA_LinkAttacher"
+else
+  echo "IFRA_LinkAttacher already present at ${ROS2_WS}/src/IFRA_LinkAttacher"
+fi
+
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
@@ -40,6 +46,8 @@ cp "${REPO_ROOT}/ros2/cais_lab_gazebo/config/"*.yaml \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config/"
 cp "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz/"*.rviz \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz/"
+cp "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
+  "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp"
 
 # ROS setup scripts are not consistently safe under `set -u`.
 set +u
