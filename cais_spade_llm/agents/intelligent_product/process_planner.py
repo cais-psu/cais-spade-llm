@@ -999,6 +999,35 @@ class ProcessPlanner:
         self._validate_task_graph(self.nodes)
 
         by_id = {t["id"]: t for t in tasks}
+        tools_catalog = list(getattr(self.product_agent, "tools_catalog", []) or [])
+
+        def _resource_short_name(value: str) -> str:
+            token = str(value or "").strip()
+            if "@" in token:
+                token = token.split("@", 1)[0]
+            return token.lower()
+
+        tool_meta_by_resource_fn: Dict[tuple[str, str], dict[str, Any]] = {}
+        fallback_tool_meta_by_fn: Dict[str, dict[str, Any]] = {}
+        for row in tools_catalog:
+            if not isinstance(row, dict):
+                continue
+            fn = str(row.get("function", "")).strip()
+            if not fn:
+                continue
+            owner = _resource_short_name(str(row.get("function_owner_agent", "")).strip())
+            if owner:
+                tool_meta_by_resource_fn.setdefault((owner, fn), row)
+            fallback_tool_meta_by_fn.setdefault(fn, row)
+
+        def _tool_meta_for_task(task: dict[str, Any]) -> dict[str, Any]:
+            resource = _resource_short_name(str(task.get("resource_jid", "")).strip())
+            fn = str(task.get("function_name", "")).strip()
+            return (
+                tool_meta_by_resource_fn.get((resource, fn))
+                or fallback_tool_meta_by_fn.get(fn)
+                or {}
+            )
 
         # ---- deterministic per-resource local order ----
         res_to_tasks: Dict[str, List[str]] = defaultdict(list)
@@ -1145,6 +1174,9 @@ class ProcessPlanner:
                             "resource_jid": res,
                             "task_id": tid,
                             "function_name": by_id[tid].get("function_name"),
+                            "params": dict(by_id[tid].get("params") or {}),
+                            "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
+                            "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
                         })
 
                 # RUNNING → done
@@ -1166,6 +1198,9 @@ class ProcessPlanner:
                         "resource_jid": res,
                         "task_id": tid,
                         "function_name": by_id[tid].get("function_name"),
+                        "params": dict(by_id[tid].get("params") or {}),
+                        "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
+                        "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
                     })
 
         fsa = {

@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import contextlib
 import io
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 import re
 import shutil
 from urllib.parse import quote
-from ltlf2dfa.parser.ltlf import LTLfParser
-from graphviz import Source
+try:
+    from ltlf2dfa.parser.ltlf import LTLfParser
+except Exception:  # pragma: no cover - dependency may be absent in lightweight test envs
+    LTLfParser = None  # type: ignore[assignment]
+
+try:
+    from graphviz import Source
+except Exception:  # pragma: no cover - dependency may be absent in lightweight test envs
+    Source = None  # type: ignore[assignment]
 
 from prompts import (
     build_safety_parse_prompt,
@@ -617,6 +625,543 @@ class SafetyLogic:
         allowed_processes = set(function_process.values())
         return allowed_functions, function_process, allowed_resources, allowed_processes
 
+    def _tool_rows(self) -> list[dict[str, Any]]:
+        return [
+            row for row in (getattr(self.controller_agent, "tools_catalog", []) or [])
+            if isinstance(row, dict)
+        ]
+
+    def _allowed_state_names(self) -> set[str]:
+        states: set[str] = set()
+        for row in self._tool_rows():
+            for key in ("in_state", "out_state"):
+                token = str(row.get(key, "") or "").strip()
+                if token and token.lower() != "any":
+                    states.add(token)
+        return states
+
+    def _tool_rows_for_resource(self, resource: str) -> list[dict[str, Any]]:
+        token = self._normalize_resource_token(resource)
+        rows: list[dict[str, Any]] = []
+        for row in self._tool_rows():
+            owner = self._normalize_resource_token(row.get("function_owner_agent"))
+            if token and owner and owner != token:
+                continue
+            rows.append(row)
+        return rows
+
+    def _tool_row_for_action(self, resource: str, function_name: str) -> Optional[dict[str, Any]]:
+        token = self._normalize_resource_token(resource)
+        fn = str(function_name or "").strip()
+        fallback: Optional[dict[str, Any]] = None
+        for row in self._tool_rows():
+            if str(row.get("function", "")).strip() != fn:
+                continue
+            owner = self._normalize_resource_token(row.get("function_owner_agent"))
+            if owner and token and owner == token:
+                return row
+            fallback = fallback or row
+        return fallback
+
+    @staticmethod
+    def _normalize_state_name(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        elif value is None:
+            items = []
+        else:
+            items = [value]
+        out: list[str] = []
+        for item in items:
+            token = str(item or "").strip()
+            if token:
+                out.append(token)
+        return out
+
+    def _resolve_rule_resources(self, rule: dict[str, Any]) -> list[str]:
+        _, _, allowed_resources, _ = self._tool_grounding()
+        resources = [
+            self._normalize_resource_token(resource)
+            for resource in (rule.get("resources") or [])
+            if self._normalize_resource_token(resource)
+        ]
+        concrete = [resource for resource in resources if resource != "any"]
+        if concrete:
+            return self._dedupe_keep_order(concrete)
+        return sorted(allowed_resources)
+
+    @staticmethod
+    def _ast_contains_resource_var(node: Any) -> bool:
+        if isinstance(node, dict):
+            if "resource_var" in node and str(node.get("resource_var", "")).strip():
+                return True
+            return any(SafetyLogic._ast_contains_resource_var(value) for value in node.values())
+        if isinstance(node, list):
+            return any(SafetyLogic._ast_contains_resource_var(value) for value in node)
+        return False
+
+    @classmethod
+    def _bind_resource_var(cls, node: Any, resource: str) -> Any:
+        if isinstance(node, list):
+            return [cls._bind_resource_var(value, resource) for value in node]
+        if not isinstance(node, dict):
+            return node
+        bound: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "resource_var":
+                bound["resource"] = resource
+                continue
+            bound[key] = cls._bind_resource_var(value, resource)
+        return bound
+
+    def _normalize_atom_product(self, rule: dict[str, Any], node: dict[str, Any]) -> str:
+        explicit = str(node.get("product", "") or "").strip().lower()
+        if explicit:
+            return explicit
+        products = [
+            str(product).strip().lower()
+            for product in (rule.get("product") or [])
+            if str(product or "").strip()
+        ]
+        return products[0] if len(products) == 1 else "any"
+
+    def _normalize_atom_context(self, rule: dict[str, Any], node: dict[str, Any]) -> dict[str, str] | None:
+        explicit = self._normalize_context_object(node.get("context"))
+        if explicit:
+            return explicit
+        return self._normalize_context_object(rule.get("context"))
+
+    def _normalize_atom_resource(self, rule: dict[str, Any], node: dict[str, Any]) -> str:
+        explicit = self._normalize_resource_token(node.get("resource"))
+        if explicit:
+            return explicit
+        resources = self._resolve_rule_resources(rule)
+        return resources[0] if len(resources) == 1 else "any"
+
+    @staticmethod
+    def _normalize_process_token(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _normalize_resource_type_token(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _selector_match_spec(
+        self,
+        rule: dict[str, Any],
+        node: dict[str, Any],
+    ) -> dict[str, Any]:
+        match = node.get("match") or {}
+        if not isinstance(match, dict):
+            match = {}
+
+        explicit_states = {
+            self._normalize_state_name(state)
+            for state in self._normalize_string_list(match.get("states"))
+            if self._normalize_state_name(state)
+        }
+        functions = {
+            str(fn).strip()
+            for fn in self._normalize_string_list(match.get("functions"))
+            if str(fn).strip()
+        }
+
+        process_token = self._normalize_process_token(
+            match.get("process") or node.get("process") or rule.get("process")
+        )
+        resource_type_token = self._normalize_resource_type_token(
+            match.get("resource_type") or node.get("resource_type")
+        )
+
+        return {
+            "context": self._normalize_context_object(match.get("context")),
+            "states": explicit_states,
+            "functions": functions,
+            "process": process_token,
+            "resource_type": resource_type_token,
+        }
+
+    def _match_selector_row(
+        self,
+        row: dict[str, Any],
+        selector_context: dict[str, str] | None,
+        *,
+        selector_process: str = "",
+        selector_resource_type: str = "",
+        selector_functions: Optional[set[str]] = None,
+    ) -> bool:
+        row_process = self._normalize_process_token(row.get("process"))
+        row_resource_type = self._normalize_resource_type_token(row.get("resource_type"))
+        row_function = str(row.get("function", "")).strip()
+
+        if selector_process and row_process != selector_process:
+            return False
+        if selector_resource_type and row_resource_type != selector_resource_type:
+            return False
+        if selector_functions and row_function not in selector_functions:
+            return False
+
+        if not selector_context:
+            return True
+        required_context_keys = [
+            str(key).strip()
+            for key in (row.get("required_context_keys") or [])
+            if str(key).strip()
+        ]
+        if not required_context_keys:
+            return False
+        required = set(required_context_keys)
+        return set(selector_context.keys()).issubset(required)
+
+    def _selector_context_token(
+        self,
+        rule: dict[str, Any],
+        selector_node: dict[str, Any],
+    ) -> str:
+        match = selector_node.get("match") or {}
+        if not isinstance(match, dict):
+            match = {}
+        selector_context = self._normalize_context_object(match.get("context"))
+        if selector_context:
+            return self._serialize_context_object(selector_context)
+        rule_context = self._normalize_context_object(rule.get("context"))
+        return self._serialize_context_object(rule_context)
+
+    def _matching_rows_for_selector(
+        self,
+        rule: dict[str, Any],
+        selector_node: dict[str, Any],
+        *,
+        resource: str = "",
+    ) -> list[dict[str, Any]]:
+        match_spec = self._selector_match_spec(rule, selector_node)
+        rows = self._tool_rows_for_resource(resource) if resource else self._tool_rows()
+        return [
+            row
+            for row in rows
+            if self._match_selector_row(
+                row,
+                match_spec["context"],
+                selector_process=match_spec["process"],
+                selector_resource_type=match_spec["resource_type"],
+                selector_functions=match_spec["functions"] or None,
+            )
+        ]
+
+    def _candidate_resources_from_rows(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[str]:
+        owners: list[str] = []
+        for row in rows:
+            owner = self._normalize_resource_token(row.get("function_owner_agent"))
+            if owner:
+                owners.append(owner)
+        return self._dedupe_keep_order(owners)
+
+    def _candidate_resources_for_ast_node(
+        self,
+        rule: dict[str, Any],
+        node: Any,
+    ) -> list[set[str]]:
+        candidate_sets: list[set[str]] = []
+
+        if isinstance(node, list):
+            for item in node:
+                candidate_sets.extend(self._candidate_resources_for_ast_node(rule, item))
+            return candidate_sets
+
+        if not isinstance(node, dict):
+            return candidate_sets
+
+        node_type = str(node.get("type", "") or "").strip()
+        has_resource_var = bool(str(node.get("resource_var", "") or "").strip())
+
+        if has_resource_var and node_type == "ap_selector":
+            rows = self._matching_rows_for_selector(rule, node)
+            owners = self._candidate_resources_from_rows(rows)
+            if owners:
+                candidate_sets.append(set(owners))
+        elif has_resource_var and node_type == "ap_event_atom":
+            function_name = str(node.get("function", "")).strip()
+            node_process = self._normalize_process_token(node.get("process") or rule.get("process"))
+            node_resource_type = self._normalize_resource_type_token(node.get("resource_type"))
+            node_context = self._normalize_context_object(node.get("context"))
+            rows = []
+            for row in self._tool_rows():
+                if function_name and str(row.get("function", "")).strip() != function_name:
+                    continue
+                if not self._match_selector_row(
+                    row,
+                    node_context,
+                    selector_process=node_process,
+                    selector_resource_type=node_resource_type,
+                ):
+                    continue
+                rows.append(row)
+            owners = self._candidate_resources_from_rows(rows)
+            if owners:
+                candidate_sets.append(set(owners))
+        elif has_resource_var and node_type == "ap_state_atom":
+            state_name = self._normalize_state_name(node.get("state"))
+            node_process = self._normalize_process_token(node.get("process") or rule.get("process"))
+            node_resource_type = self._normalize_resource_type_token(node.get("resource_type"))
+            node_context = self._normalize_context_object(node.get("context"))
+            rows = []
+            for row in self._tool_rows():
+                row_states = {
+                    self._normalize_state_name(row.get("in_state")),
+                    self._normalize_state_name(row.get("out_state")),
+                }
+                row_states.discard("")
+                row_states.discard("any")
+                if state_name and state_name not in row_states:
+                    continue
+                if not self._match_selector_row(
+                    row,
+                    node_context,
+                    selector_process=node_process,
+                    selector_resource_type=node_resource_type,
+                ):
+                    continue
+                rows.append(row)
+            owners = self._candidate_resources_from_rows(rows)
+            if owners:
+                candidate_sets.append(set(owners))
+
+        for value in node.values():
+            candidate_sets.extend(self._candidate_resources_for_ast_node(rule, value))
+        return candidate_sets
+
+    def _resolve_ast_resource_bindings(
+        self,
+        rule: dict[str, Any],
+        ast: dict[str, Any],
+    ) -> list[str]:
+        base_resources = self._resolve_rule_resources(rule)
+        base_set = set(base_resources)
+        candidate_sets = self._candidate_resources_for_ast_node(rule, ast)
+        if not candidate_sets:
+            return base_resources
+
+        allowed = set.intersection(*candidate_sets) if candidate_sets else set()
+        if base_set:
+            allowed &= base_set
+        if not allowed:
+            return []
+        return [resource for resource in base_resources if resource in allowed]
+
+    def _expand_selector(self, rule: dict[str, Any], selector_node: dict[str, Any]) -> list[str]:
+        resource = self._normalize_atom_resource(rule, selector_node)
+        match_spec = self._selector_match_spec(rule, selector_node)
+        explicit_states = match_spec["states"]
+        include_entry_events = bool(selector_node.get("include_entry_events", True))
+        include_state_aps = bool(selector_node.get("include_state_aps", True))
+        context_token = self._selector_context_token(rule, selector_node)
+        product_token = self._normalize_atom_product(rule, selector_node)
+
+        matching_rows = self._matching_rows_for_selector(rule, selector_node, resource=resource)
+
+        persistent_states: list[str] = []
+        state_process: dict[str, str] = {}
+        for row in matching_rows:
+            out_state = self._normalize_state_name(row.get("out_state"))
+            if not out_state or out_state.lower() == "any":
+                continue
+            if explicit_states and out_state not in explicit_states:
+                continue
+            if out_state not in state_process:
+                state_process[out_state] = str(
+                    row.get("process") or rule.get("process") or "any"
+                ).strip().lower() or "any"
+            persistent_states.append(out_state)
+
+        persistent_state_set = set(persistent_states)
+        expanded: list[str] = []
+
+        if include_entry_events and persistent_state_set:
+            for row in matching_rows:
+                out_state = self._normalize_state_name(row.get("out_state"))
+                in_state = self._normalize_state_name(row.get("in_state"))
+                if out_state not in persistent_state_set:
+                    continue
+                if in_state in persistent_state_set:
+                    continue
+                process_token = str(
+                    row.get("process") or rule.get("process") or "any"
+                ).strip().lower() or "any"
+                function_name = str(row.get("function", "")).strip()
+                if not function_name:
+                    continue
+                expanded.append(
+                    "/".join(
+                        [
+                            "ap_event",
+                            process_token,
+                            product_token,
+                            resource,
+                            function_name,
+                            context_token,
+                        ]
+                    )
+                )
+
+        if include_state_aps and persistent_state_set:
+            for state_name in self._dedupe_keep_order(persistent_states):
+                expanded.append(
+                    "/".join(
+                        [
+                            "ap_state",
+                            state_process.get(state_name, str(rule.get("process") or "any").strip().lower() or "any"),
+                            product_token,
+                            resource,
+                            state_name,
+                            context_token,
+                        ]
+                    )
+                )
+
+        return self._dedupe_keep_order(expanded)
+
+    def _compile_ast_event_atom(self, rule: dict[str, Any], node: dict[str, Any]) -> tuple[str, list[str]]:
+        function_name = str(node.get("function", "")).strip()
+        if not function_name:
+            raise RuntimeError("ap_event_atom is missing function")
+        resource = self._normalize_atom_resource(rule, node)
+        tool_row = self._tool_row_for_action(resource, function_name)
+        process_token = str(
+            (tool_row or {}).get("process") or rule.get("process") or "any"
+        ).strip().lower() or "any"
+        product_token = self._normalize_atom_product(rule, node)
+        context_token = self._serialize_context_object(self._normalize_atom_context(rule, node))
+        ap = "/".join(
+            [
+                "ap_event",
+                process_token,
+                product_token,
+                resource,
+                function_name,
+                context_token,
+            ]
+        )
+        return ap, [ap]
+
+    def _compile_ast_state_atom(self, rule: dict[str, Any], node: dict[str, Any]) -> tuple[str, list[str]]:
+        state_name = self._normalize_state_name(node.get("state"))
+        if not state_name:
+            raise RuntimeError("ap_state_atom is missing state")
+        resource = self._normalize_atom_resource(rule, node)
+        process_token = self._normalize_process_token(node.get("process") or rule.get("process")) or "any"
+        product_token = self._normalize_atom_product(rule, node)
+        context_token = self._serialize_context_object(self._normalize_atom_context(rule, node))
+        ap = "/".join(
+            [
+                "ap_state",
+                process_token,
+                product_token,
+                resource,
+                state_name,
+                context_token,
+            ]
+        )
+        return ap, [ap]
+
+    def _compile_formula_ast_node(
+        self,
+        rule: dict[str, Any],
+        node: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        if not isinstance(node, dict):
+            raise RuntimeError(f"invalid formula_ast node: {node!r}")
+
+        node_type = str(node.get("type", "") or "").strip()
+        if node_type == "ap_event_atom":
+            return self._compile_ast_event_atom(rule, node)
+        if node_type == "ap_state_atom":
+            return self._compile_ast_state_atom(rule, node)
+        if node_type == "ap_selector":
+            aps = self._expand_selector(rule, node)
+            if not aps:
+                raise RuntimeError(
+                    f"ap_selector for rule {rule.get('id')} did not expand to any APs"
+                )
+            if len(aps) == 1:
+                return aps[0], aps
+            return f"({' | '.join(aps)})", aps
+
+        op = str(node.get("op", "") or "").strip()
+        if not op:
+            raise RuntimeError(f"formula_ast node is missing op/type: {node!r}")
+
+        if op in {"G", "F", "X", "!"}:
+            arg_formula, arg_aps = self._compile_formula_ast_node(rule, node.get("arg") or {})
+            if op == "!":
+                return f"!({arg_formula})", arg_aps
+            return f"{op} ({arg_formula})", arg_aps
+
+        if op in {"&", "|"}:
+            raw_args = node.get("args")
+            if raw_args is None:
+                raw_args = [node.get("left"), node.get("right")]
+            args = [arg for arg in raw_args if isinstance(arg, dict)]
+            compiled = [self._compile_formula_ast_node(rule, arg) for arg in args]
+            formulas = [formula for formula, _ in compiled if formula]
+            aps: list[str] = []
+            for _, leaf_aps in compiled:
+                aps.extend(leaf_aps)
+            if not formulas:
+                raise RuntimeError(f"operator {op} has no operands")
+            joiner = f" {op} "
+            if len(formulas) == 1:
+                return formulas[0], self._dedupe_keep_order(aps)
+            return f"({joiner.join(formulas)})", self._dedupe_keep_order(aps)
+
+        if op in {"->", "U"}:
+            left_formula, left_aps = self._compile_formula_ast_node(rule, node.get("left") or {})
+            right_formula, right_aps = self._compile_formula_ast_node(rule, node.get("right") or {})
+            return (
+                f"({left_formula} {op} {right_formula})",
+                self._dedupe_keep_order(left_aps + right_aps),
+            )
+
+        raise RuntimeError(f"unsupported formula_ast operator '{op}'")
+
+    def _compile_formula_ast_for_rule(
+        self,
+        rule: dict[str, Any],
+        formula_ast: dict[str, Any],
+    ) -> Dict[str, Any]:
+        ast = deepcopy(formula_ast)
+        if self._ast_contains_resource_var(ast):
+            resources = self._resolve_ast_resource_bindings(rule, ast)
+            compiled_terms: list[str] = []
+            aps: list[str] = []
+            for resource in resources:
+                bound_ast = self._bind_resource_var(ast, resource)
+                formula, node_aps = self._compile_formula_ast_node(rule, bound_ast)
+                compiled_terms.append(f"({formula})")
+                aps.extend(node_aps)
+            if not compiled_terms:
+                raise RuntimeError(
+                    f"formula_ast for rule {rule.get('id')} has resource_var but no grounded resources"
+                )
+            return {
+                "formula_ast": formula_ast,
+                "aps": self._dedupe_keep_order(aps),
+                "ltlf": " & ".join(compiled_terms),
+            }
+
+        formula, aps = self._compile_formula_ast_node(rule, ast)
+        return {
+            "formula_ast": formula_ast,
+            "aps": self._dedupe_keep_order(aps),
+            "ltlf": formula,
+        }
+
 
     # ------------------------------------------------------------------ #
     # 1. Load NL safety requirements
@@ -1036,6 +1581,7 @@ class SafetyLogic:
         result: Dict[str, Dict[str, Any]] = {}
         items = parsed.get("rules", [])
         allowed_functions, function_process, allowed_resources, _ = self._tool_grounding()
+        allowed_states = self._allowed_state_names()
         rules_by_id = {
             str(r.get("id")): r
             for r in self.rules
@@ -1052,13 +1598,19 @@ class SafetyLogic:
 
             if not rid:
                 continue
+
+            rule = rules_by_id.get(rid, {})
+            formula_ast = item.get("formula_ast")
+            if isinstance(formula_ast, dict):
+                compiled = self._compile_formula_ast_for_rule(rule, formula_ast)
+                result[str(rid)] = compiled
+                continue
+
             if not isinstance(aps, list):
                 aps = []
 
             raw_aps = [str(a).strip() for a in aps if a]
             ltlf_text = str(ltlf).strip()
-
-            rule = rules_by_id.get(rid, {})
             rule_event = str(rule.get("event", "") or "").strip()
             rule_process = str(rule.get("process", "") or "").strip().lower()
             rule_context = self._normalize_context_object(rule.get("context"))
@@ -1094,23 +1646,9 @@ class SafetyLogic:
                     continue
 
                 prefix, ap_process, ap_product, ap_resource, ap_event, ap_context = parts[:6]
-                event_token = str(ap_event).strip()
-                if event_token not in allowed_functions:
-                    if rule_event in allowed_functions:
-                        event_token = rule_event
-                    else:
-                        unresolved_events_for_rule.append(event_token or raw_ap)
-                        continue
-
-                process_token = (
-                    function_process.get(event_token)
-                    or str(ap_process).strip().lower()
-                    or rule_process
-                    or "any"
-                )
-                product_token = str(ap_product).strip() or "any"
+                raw_prefix = str(prefix).strip()
+                product_token = str(ap_product).strip().lower() or "any"
                 context_token = rule_context_token or str(ap_context).strip() or "any"
-                prefix_token = str(prefix).strip() or "ap"
 
                 resource_token = self._normalize_resource_token(ap_resource)
                 if resource_token not in {"any", "robot"} and resource_token not in allowed_resources:
@@ -1120,25 +1658,79 @@ class SafetyLogic:
                 if not resource_token:
                     resource_token = "any"
 
-                normalized_ap = "/".join(
-                    [
-                        prefix_token,
-                        process_token,
-                        product_token,
-                        resource_token,
-                        event_token,
-                        context_token,
-                    ]
-                )
-                ltlf_text = ltlf_text.replace(raw_ap, normalized_ap)
-                sanitized_aps.append(normalized_ap)
+                if raw_prefix in {"ap", "ap_event"}:
+                    event_token = str(ap_event).strip()
+                    if event_token not in allowed_functions:
+                        if rule_event in allowed_functions:
+                            event_token = rule_event
+                        else:
+                            unresolved_events_for_rule.append(event_token or raw_ap)
+                            continue
+
+                    process_token = (
+                        function_process.get(event_token)
+                        or str(ap_process).strip().lower()
+                        or rule_process
+                        or "any"
+                    )
+                    normalized_ap = "/".join(
+                        [
+                            "ap_event",
+                            process_token,
+                            product_token,
+                            resource_token,
+                            event_token,
+                            context_token,
+                        ]
+                    )
+                    ltlf_text = ltlf_text.replace(raw_ap, normalized_ap)
+                    sanitized_aps.append(normalized_ap)
+                    continue
+
+                if raw_prefix in {"ap_state", "sp"}:
+                    state_token = self._normalize_state_name(ap_event)
+                    if allowed_states and state_token not in allowed_states:
+                        if self.logger:
+                            self.logger.warning(
+                                "[SafetyLogic] Rule %s state AP '%s' ignored (unsupported state '%s').",
+                                rid,
+                                raw_ap,
+                                state_token,
+                            )
+                        continue
+                    process_token = (
+                        str(ap_process).strip().lower()
+                        or rule_process
+                        or "any"
+                    )
+                    normalized_ap = "/".join(
+                        [
+                            "ap_state",
+                            process_token,
+                            product_token,
+                            resource_token,
+                            state_token,
+                            context_token,
+                        ]
+                    )
+                    ltlf_text = ltlf_text.replace(raw_ap, normalized_ap)
+                    sanitized_aps.append(normalized_ap)
+                    continue
+
+                if self.logger:
+                    self.logger.warning(
+                        "[SafetyLogic] Rule %s AP '%s' ignored (unsupported prefix '%s').",
+                        rid,
+                        raw_ap,
+                        raw_prefix,
+                    )
 
             sanitized_aps = self._dedupe_keep_order(sanitized_aps)
 
             if not sanitized_aps and rule_event in allowed_functions:
                 fallback_ap = "/".join(
                     [
-                        "ap",
+                        "ap_event",
                         function_process.get(rule_event, rule_process or "any"),
                         "any",
                         fallback_resource,
@@ -1158,7 +1750,9 @@ class SafetyLogic:
                 sanitized_aps,
                 refinement_feedback=refinement_feedback,
             )
-            if deterministic_ltlf:
+            if deterministic_ltlf and all(
+                str(ap).startswith(("ap_event/", "ap/")) for ap in sanitized_aps
+            ):
                 ltlf_text = deterministic_ltlf
             elif sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
                 ltlf_text = " & ".join(sanitized_aps) if len(sanitized_aps) > 1 else sanitized_aps[0]
@@ -1389,6 +1983,7 @@ class SafetyLogic:
 
             raw_aps = raw_logic.get("aps", [])
             raw_ltlf = raw_logic.get("ltlf", "")
+            raw_formula_ast = raw_logic.get("formula_ast")
 
             # Build list of {label, full}
             labeled_aps = [
@@ -1404,6 +1999,8 @@ class SafetyLogic:
 
             rule["aps"] = labeled_aps
             rule["ltlf"] = formula
+            if raw_formula_ast is not None:
+                rule["formula_ast"] = raw_formula_ast
 
     # ------------------------------------------------------------------ #
     # Combine all rules into one global safety spec
@@ -1462,6 +2059,11 @@ class SafetyLogic:
                 self.logger.warning("[SafetyLogic] No safety rules to build DFAs for.")
             return {}
 
+        if LTLfParser is None:
+            raise RuntimeError(
+                "ltlf2dfa is not installed; DFA generation is unavailable in this environment."
+            )
+
         parser = LTLfParser()
         out_dir = Path(out_dir) if out_dir else Path("cais_spade_llm/safety")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1514,6 +2116,13 @@ class SafetyLogic:
                 )
 
             # Render PNG via Graphviz
+            if Source is None:
+                if self.logger:
+                    self.logger.warning(
+                        "[SafetyLogic] graphviz is not installed; skipping DFA render for %s.",
+                        rid,
+                    )
+                continue
             try:
                 src = Source(dfa_dot)
                 render_path = src.render(
@@ -1545,6 +2154,11 @@ class SafetyLogic:
             if self.logger:
                 self.logger.warning("[SafetyLogic] No global LTLf safety formula to convert.")
             return None
+
+        if LTLfParser is None:
+            raise RuntimeError(
+                "ltlf2dfa is not installed; DFA generation is unavailable in this environment."
+            )
 
         try:
             parser = LTLfParser()
@@ -1583,6 +2197,12 @@ class SafetyLogic:
         # -------------------------
         # Graphviz Visualization
         # -------------------------
+        if Source is None:
+            if self.logger:
+                self.logger.warning(
+                    "[SafetyLogic] graphviz is not installed; skipping global DFA render."
+                )
+            return dfa_dot
         try:
             src = Source(dfa_dot)
             render_path = src.render(

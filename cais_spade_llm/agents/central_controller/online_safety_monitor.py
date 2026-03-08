@@ -13,13 +13,22 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
     Maintains the LIVE state of the factory.
     Inherits parsing/transition logic from BaseSafetyChecker.
     """
-    def __init__(self, dfa_dots: Dict[str, str], safety_rules: list[dict]) -> None:
-        super().__init__(dfa_dots, safety_rules)
+    def __init__(
+        self,
+        dfa_dots: Dict[str, str],
+        safety_rules: list[dict],
+        tools_catalog: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        super().__init__(dfa_dots, safety_rules, tools_catalog=tools_catalog)
 
         self.logger = logging.getLogger("OnlineSafetyMonitor")
 
         # STATE: Track currently running actions across the factory
         self.running_aps: Set[str] = set()
+
+        # STATE: Track currently active state APs across the factory
+        self.resource_state_aps: Dict[str, Set[str]] = {}
+        self.resource_states: Dict[str, Dict[str, Any]] = {}
 
         # STATE: Current DFA state pointer for every rule
         self.current_states: Dict[str, str] = {
@@ -42,6 +51,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         function_name = data.get("function_name")
         params        = data.get("params") or {}
         status        = data.get("status") or "running"
+        current_state = data.get("current_state")
 
         if not (resource_jid and function_name):
             self.logger.warning("resource_event missing resource_jid or function_name.")
@@ -53,27 +63,74 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             "function_name": function_name,
             "params": params,
             "status": status,
+            "current_state": current_state,
             "failure_context": data.get("failure_context") or {},
         }
+
+    def seed_resource_states(self, resource_snapshots: Dict[str, Dict[str, Any]]) -> None:
+        """Seed initial persistent state APs from resource snapshots when available."""
+        for resource_jid, snapshot in (resource_snapshots or {}).items():
+            if not isinstance(snapshot, dict):
+                continue
+            current_state = str(snapshot.get("current_state", "") or "").strip()
+            if not current_state:
+                continue
+            self._update_resource_state(resource_jid, current_state, params={})
+
+    def _all_state_aps(self) -> Set[str]:
+        active: Set[str] = set()
+        for labels in self.resource_state_aps.values():
+            active |= set(labels)
+        return active
+
+    def _update_resource_state(
+        self,
+        resource_jid: str,
+        current_state: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+    ) -> None:
+        payload = dict(params or {})
+        self.resource_states[str(resource_jid)] = {
+            "current_state": str(current_state),
+            "params": payload,
+        }
+        self.resource_state_aps[str(resource_jid)] = set(
+            self._map_state_to_aps(resource_jid, str(current_state), payload)
+        )
 
     # ------------------------------------------------------------------ #
     # 2. Logic Handling (Start/Finish)
     # ------------------------------------------------------------------ #
-    def online_safety_validation(self, candidate_aps: List[str]) -> Tuple[bool, dict[str, Any]]:
+    def online_safety_validation(
+        self,
+        candidate_aps: List[str],
+        *,
+        predicted_state_aps: Optional[List[str]] = None,
+    ) -> Tuple[bool, dict[str, Any]]:
         """
         Pure safety validation step: check if adding candidate APs would violate any rule.
         Does NOT mutate state.
         """
+        predicted = list(predicted_state_aps or [])
+
         # If no safety rules apply to this task, allow it.
-        if not candidate_aps:
+        if not candidate_aps and not predicted:
             return True, {
                 "running_snapshot": list(self.running_aps),
+                "state_snapshot": sorted(self._all_state_aps()),
                 "next_states": {},
                 "candidate_aps": candidate_aps,
+                "predicted_state_aps": predicted,
             }
 
         # Combine Running + Candidate to see the "Next World State"
-        sigma = frozenset(set(self.running_aps) | set(candidate_aps))
+        sigma = frozenset(
+            set(self.running_aps)
+            | self._all_state_aps()
+            | set(candidate_aps)
+            | set(predicted)
+        )
 
         next_states: Dict[str, str] = {}
         violated_rule = None
@@ -101,12 +158,16 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
                 "violated_to": violated_to,
                 "candidate_aps": candidate_aps,
                 "running_snapshot": list(self.running_aps),
+                "state_snapshot": sorted(self._all_state_aps()),
+                "predicted_state_aps": predicted,
             }
 
         return True, {
             "running_snapshot": list(self.running_aps),
+            "state_snapshot": sorted(self._all_state_aps()),
             "next_states": next_states,
             "candidate_aps": candidate_aps,
+            "predicted_state_aps": predicted,
         }
 
     def process_start_event(self, event: dict[str, Any]) -> Tuple[bool, dict[str, Any]]:
@@ -119,14 +180,23 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         candidate_aps = self._map_task_to_aps(
             event["resource_jid"], event["function_name"], event["params"]
         )
-        allowed, info = self.online_safety_validation(candidate_aps)
+        predicted_state_aps = self._predict_state_aps(
+            event["resource_jid"], event["function_name"], event["params"]
+        )
+        allowed, info = self.online_safety_validation(
+            candidate_aps,
+            predicted_state_aps=predicted_state_aps,
+        )
 
         if not allowed:
             return False, info
 
         # Only update running_aps; do NOT advance DFA.
         self.running_aps.update(candidate_aps)
-        return True, {"running_snapshot": list(self.running_aps)}
+        return True, {
+            "running_snapshot": list(self.running_aps),
+            "state_snapshot": sorted(self._all_state_aps()),
+        }
 
     def process_finish_event(self, event: dict[str, Any]) -> None:
         """
@@ -140,11 +210,20 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         for ap in finished_aps:
             self.running_aps.discard(ap)
 
-        if not finished_aps:
-            return
+        current_state = str(event.get("current_state", "") or "").strip()
+        if current_state:
+            self._update_resource_state(
+                event["resource_jid"],
+                current_state,
+                params=event.get("params") or {},
+            )
 
         # Advance DFA with the original APs to mark this action as completed.
-        sigma = frozenset(set(self.running_aps) | set(finished_aps))
+        sigma = frozenset(
+            set(self.running_aps)
+            | self._all_state_aps()
+            | set(finished_aps)
+        )
         next_states: Dict[str, str] = {}
         for rule_id in self.dfas:
             prev = self.current_states.get(rule_id, "1")
@@ -163,3 +242,11 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         )
         for ap in failed_aps:
             self.running_aps.discard(ap)
+
+        current_state = str(event.get("current_state", "") or "").strip()
+        if current_state:
+            self._update_resource_state(
+                event["resource_jid"],
+                current_state,
+                params=event.get("params") or {},
+            )

@@ -431,6 +431,7 @@ class ResourceAgent(LlmAgent):
                         "params": fn_args,
                         "status": final_status,  # e.g. "completed", "blocked", etc.
                         "failure_context": failure_context,
+                        "current_state": state_after.get("current_state", "idle"),
                     })
                     # fire-and-forget so we don't block on CCA
                     asyncio.create_task(self.send(done_msg))
@@ -467,6 +468,7 @@ class ResourceAgent(LlmAgent):
                         "params": fn_args,
                         "status": final_status,
                         "failure_context": failure_context,
+                        "current_state": state_after.get("current_state", "idle"),
                     })
                     await self.send(fail_msg)
                 except Exception:

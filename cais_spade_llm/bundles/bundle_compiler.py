@@ -438,6 +438,7 @@ class BundleCompiler:
                 validator = OfflineSafetyValidator(
                     rules=safety_logic.rules,
                     dfa_map=dfa_map,
+                    tools_catalog=getattr(product_agent, "tools_catalog", []),
                 )
                 validation_payload = await self.run_offline_repair_loop(
                     product_agent=product_agent,

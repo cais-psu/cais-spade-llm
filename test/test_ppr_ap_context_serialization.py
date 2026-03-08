@@ -120,7 +120,7 @@ def test_safety_logic_rebuilds_ap_context_from_structured_rule_context(tmp_path:
         "destination": "assembly/board-v1",
         "precondition_state": "ready now",
     }
-    assert full_aps == [f"ap/assembly/mcp/ur5e/place_insert/{expected_context}"]
+    assert full_aps == [f"ap_event/assembly/mcp/ur5e/place_insert/{expected_context}"]
     assert expected_context in str(logic.logic_raw["SAFE_1"]["ltlf"])
     assert "legacy_context" not in str(logic.logic_raw["SAFE_1"]["ltlf"])
 

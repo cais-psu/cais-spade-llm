@@ -2329,6 +2329,7 @@ class SystemBridge:
             validator = OfflineSafetyValidator(
                 rules=rules,
                 dfa_map=dfa_map,
+                tools_catalog=getattr(product_agent, "tools_catalog", []),
             )
             replan_policy = manifest.get("replan_policy", {}) if isinstance(manifest.get("replan_policy"), dict) else {}
             try:

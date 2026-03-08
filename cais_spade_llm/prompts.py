@@ -32,7 +32,7 @@ Product Agent role:
 - Input will often be a JSON like:
   {
     "assembly_instruction": "...",
-    "available_tools": { "assembly": ["ur5e", "xarm6"], "pick": ["ur5e"], ... }
+    "available_tools": { "assembly": ["resource_a", "resource_b"], "pick": ["resource_a"], ... }
   }
 - Choose ONE function from "available_tools" that best fits the instruction.
 - If multiple owners exist, pick ONE; if uncertain, omit it.
@@ -437,39 +437,37 @@ SAFETY_TEXT:
 # ----------------------------------------------------------------------
 
 SAFETY_AP_TEMPLATE_DOC = dedent("""
-Atomic propositions (APs) describe discrete system events or conditions.
+Atomic propositions (APs) describe discrete system events or persistent states.
 
-Use the format:
-  ap/<process>/<product>/<resource>/<event>/<context>
+The compiler emits only these two final AP kinds:
 
-Each segment is derived from:
-  • the structured safety rule fields produced during parsing
-      (process, product, resources, event, context)
-  • the values available in the TOOLS_CATALOGUE
+1. Event APs
+   ap_event/<process>/<product>/<resource>/<function>/<context>
 
-Segment meanings:
-  - process: operational phase associated with the event
+2. State APs
+   ap_state/<process>/<product>/<resource>/<state>/<context>
+
+Shared segment meanings:
+  - process: operational phase associated with the function/state
   - product: referenced product, or "any" if not specific
-  - resource: - If the safety meaning does NOT depend on which specific resource executes the event, prefer "any" for the resource segment even when
-                multiple concrete resources exist in the system.                                
-  - event: the action or condition described by the rule
-  - context: a compact representation of the relevant contextual
-             information for this event (e.g. derived from one or more
-             entries in the rule's context map, such as location, zone, machine, buffer)
+  - resource: concrete resource identifier, or "any" if resource identity
+              does not matter for the rule
+  - function/state: tool function name for `ap_event`, discrete resource
+                    state name for `ap_state`
+  - context: compact representation of relevant contextual information
+             (for example location, zone, machine, buffer, destination)
 
-Segments should be:
-  - lowercase
-  - underscore-separated when needed
-  - consistent with the parsed rule fields and tool definitions
+Context rules:
+  - If the rule has no context, use "any".
+  - When multiple context entries are present, combine them systematically
+    as compact key/value bindings.
+  - Context must stay aligned with the parsed rule and TOOLS_CATALOGUE.
 
-When multiple context entries are present (e.g. locations),
-the context segment may combine them into a single token in a
-systematic way (for example by concatenating key/value information)
-as long as it remains concise and semantically meaningful.
-
-APs should not introduce any new processes, events, resources, or context
-information that are not present in the parsed rule or TOOLS_CATALOGUE.
-If the rule has no context (null), use "any" for the context segment.
+General rules:
+  - Segments should be lowercase and underscore-separated when needed.
+  - Do not invent new processes, functions, states, resources, or context
+    values that are not grounded in the parsed rule or TOOLS_CATALOGUE.
+  - `ap_selector` is compile-time only and must never appear in final APs.
 """).strip()
 
 SAFETY_LTLF_TEMPLATE_DOC = dedent("""
@@ -524,6 +522,78 @@ APs: a, b   # a = earlier event, b = later event
 LTLf: (!b) U a
 """).strip()
 
+SAFETY_FORMULA_AST_TEMPLATE_DOC = dedent("""
+Return a typed `formula_ast`, not final AP strings.
+
+Leaf node types:
+
+1. `ap_event_atom`
+   - Represents one event AP that the compiler will turn into:
+     `ap_event/<process>/<product>/<resource>/<function>/<context>`
+   - Shape:
+     {
+       "type": "ap_event_atom",
+       "resource": "<catalog resource id>" | "any",
+       "resource_var": "$r",         # optional instead of resource
+       "process": "<optional process id>",
+       "resource_type": "<optional resource type>",
+       "function": "<tool function name>",
+       "product": "<product or any>", # optional
+       "context": { ... }             # optional flat object
+     }
+
+2. `ap_state_atom`
+   - Represents one persistent state AP that the compiler will turn into:
+     `ap_state/<process>/<product>/<resource>/<state>/<context>`
+   - Shape:
+     {
+       "type": "ap_state_atom",
+       "resource": "<catalog resource id>" | "any",
+       "resource_var": "$r",        # optional instead of resource
+       "process": "<optional process id>",
+       "resource_type": "<optional resource type>",
+       "state": "<state name>",
+       "product": "<product or any>", # optional
+       "context": { ... }            # optional flat object
+     }
+
+3. `ap_selector`
+   - Compile-time macro only. Use this when the rule describes a condition like
+     being at a workstation, inside a machine area, or within a state slice,
+     and the compiler should infer the
+     relevant `ap_event` + `ap_state` terms from the tools/state graph.
+   - Shape:
+     {
+       "type": "ap_selector",
+       "resource": "<catalog resource id>" | "any",
+       "resource_var": "$r",         # optional instead of resource
+       "match": {
+         "process": "<optional process id>",
+         "resource_type": "<optional resource type>",
+         "functions": ["<optional function name>", "..."],
+         "context": { ... },         # optional flat object
+         "states": ["<optional state name>", "..."]
+       },
+       "include_entry_events": true,
+       "include_state_aps": true
+     }
+
+General grounding rules:
+- Prefer `resource_var` when the same rule pattern should be expanded over all matching resources.
+- `resource_var` is grounded by the compiler from matching tool rows, not by a fixed robot list.
+- `states` is optional; omit it when the compiler should infer the relevant persistent states.
+
+Allowed temporal operator nodes:
+- {"op": "G", "arg": ...}
+- {"op": "F", "arg": ...}
+- {"op": "X", "arg": ...}
+- {"op": "!", "arg": ...}
+- {"op": "&", "args": [node1, node2, ...]}
+- {"op": "|", "args": [node1, node2, ...]}
+- {"op": "->", "left": node1, "right": node2}
+- {"op": "U", "left": node1, "right": node2}
+""").strip()
+
 # ----------------------------------------------------------------------
 # Safety logic prompt
 # ----------------------------------------------------------------------
@@ -550,6 +620,15 @@ def build_safety_logic_prompt(
         }
     )
     allowed_events_text = ", ".join(allowed_events) if allowed_events else "(none)"
+    allowed_states = sorted(
+        {
+            str(t.get(key, "")).strip()
+            for t in (tools_catalog or [])
+            for key in ("in_state", "out_state")
+            if str(t.get(key, "")).strip() and str(t.get(key, "")).strip().lower() != "any"
+        }
+    )
+    allowed_states_text = ", ".join(allowed_states) if allowed_states else "(none)"
     refinement_section = ""
     feedback_text = str(refinement_feedback or "").strip()
     if feedback_text or previous_preview_rules:
@@ -578,44 +657,49 @@ For each structured safety rule in INPUT RULES you receive fields such as:
   - process, product, resources, event, context
 
 Your task for each rule:
-  1) Define a set of APs using the AP template.
-  2) Define one LTLf safety formula that reflects the meaning of raw_text,
-     using only the APs you defined for that rule.
+  1) Build a typed `formula_ast` over event/state atoms.
+  2) Use `ap_selector` when the rule refers to a condition like being at a workstation,
+     inside a machine area, or within a state slice, and the compiler should infer
+     the concrete `ap_event` and `ap_state` terms.
 
-Use the tool information in the TOOLS_CATALOGUE so that processes, events,
-resources, and context in the APs stay aligned with actual system behavior.
+The system will deterministically compile your `formula_ast` into concrete
+AP strings, then into an LTLf formula, then into a DFA.
+Do NOT emit final AP strings yourself.
 
 GENERIC TEMPORAL FAMILIES:
 - precedence / before / ordering:
-  use two APs where the earlier AP must happen before the later AP
+  use two atoms where the earlier condition must happen before the later one
 - mutex / no_concurrent / simultaneous / overlap prohibition:
-  use APs that must never hold at the same time
+  use two conditions that must never hold at the same time
 - response / after / follow-up:
-  use trigger APs and response APs where each trigger must eventually be followed by its matching response
+  use trigger and response conditions where each trigger must eventually be followed by its matching response
 - absence / forbidden / never:
-  use APs that must never occur
+  use a condition that must never occur
 - until:
-  use the left AP as the condition that must hold until the right AP becomes true
+  use the left condition as the condition that must hold until the right one becomes true
 
-If a rule clearly matches one of these generic families, keep the AP set simple and aligned to that family.
-Do not invent unnecessarily complex formulas when a standard temporal family applies.
+If a rule clearly matches one of these generic families, keep the AST simple and aligned to that family.
+Do not invent unnecessarily complex formulas when a standard temporal pattern applies.
 
-MANDATORY EVENT GROUNDING:
-- In every AP string `ap/<process>/<product>/<resource>/<event>/<context>`,
-  the `<event>` segment MUST be one of these exact function names:
+MANDATORY GROUNDING:
+- In every `ap_event_atom`, the `function` field MUST be one of these exact function names:
   {allowed_events_text}
-- Do NOT invent free-text events (for example: "enter_zone", "move_to_area")
-  unless that exact function exists in the allowed list above.
-- If a rule cannot be grounded to an allowed event, prefer the parsed rule's
-  existing `event` field only when it is also in the allowed list.
+- In every `ap_state_atom`, the `state` field SHOULD be one of these known states:
+  {allowed_states_text}
+- Use `ap_selector` instead of inventing many explicit atoms when the rule refers
+  to a condition like being at a location, being inside a machine/station area,
+  or being in a state slice.
 
 === TOOLS_CATALOGUE ===
 {tools_json}
 
-=== AP TEMPLATE ===
+=== FINAL AP KINDS (for reference only; compiler emits these) ===
 {SAFETY_AP_TEMPLATE_DOC}
 
-=== LTLf TEMPLATE ===
+=== FORMULA_AST TEMPLATE ===
+{SAFETY_FORMULA_AST_TEMPLATE_DOC}
+
+=== LTLf TEMPLATE (semantic target) ===
 {SAFETY_LTLF_TEMPLATE_DOC}
 
 === LTLf FEW-SHOT EXAMPLES (GENERIC) ===
@@ -625,7 +709,7 @@ MANDATORY EVENT GROUNDING:
 Response format:
   - Return a single JSON object.
   - For each input rule, produce an output entry with the same "id",
-    together with its AP list and LTLf formula.
+    together with its `formula_ast`.
 
 Expected JSON structure:
 
@@ -633,8 +717,7 @@ Expected JSON structure:
   "rules": [
     {{
       "id": "<same id as input rule>",
-      "aps": ["ap/process/product/resource/event/context", ...],
-      "ltlf": "<one LTLf formula over these APs>"
+      "formula_ast": {{ ... typed AST ... }}
     }},
     ...
   ]
@@ -869,9 +952,10 @@ STRICT RULES FOR MODIFICATION:
       - State transition examples:
         * pick_grasp: in_state="ready" → out_state="picked"
         * place_approach: in_state="picked" → out_state="positioned"
-        * place_insert: in_state="positioned" → out_state="idle"
+        * place_insert: in_state="positioned" → out_state="placed"
+        * move_home: in_state="any" → out_state="idle"
       - Build multi-step sequences by connecting compatible states
-      - Example: To assemble a part: pick_grasp (→picked) → move_loaded (→positioned) → place_insert (→idle)
+      - Example: To assemble a part: pick_grasp (→picked) → move_loaded (→positioned) → place_insert (→placed) → move_home (→idle)
 
    b) CHECK WORKSPACE BOUNDARIES:
       - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
@@ -887,16 +971,16 @@ STRICT RULES FOR MODIFICATION:
           "id": "RECOVER_FAILED_PART",
           "function_name": "pick_grasp",
           "params": {{ "part_name": "SG", "location": "failed_position" }},
-          "resource_jid": "ur5e@localhost",  // ← Selected because part is in UR5e's workspace
-          "change_reason": "INSERTION: UR5e picks failed part (in UR5e workspace, not xArm6)"
+          "resource_jid": "resource_a@localhost",  // ← Selected because part is in resource_a's workspace
+          "change_reason": "INSERTION: resource_a picks failed part (reachable by resource_a)"
         }},
         {{
           "id": "STAGE_FOR_XARM",
           "function_name": "release_to_staging",
           "params": {{ "part_name": "SG", "location": "staging_zone_neutral" }},
-          "resource_jid": "ur5e@localhost",
+          "resource_jid": "resource_a@localhost",
           "predecessors": ["RECOVER_FAILED_PART"],
-          "change_reason": "INSERTION: Stage part in neutral zone for xArm6 to access (LLM-generated recovery action)"
+          "change_reason": "INSERTION: Stage part in neutral zone for another capable resource to access (LLM-generated recovery action)"
         }}
         ```
 

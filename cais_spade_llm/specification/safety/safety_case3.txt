@@ -1,0 +1,2 @@
+[Safety Requirements]
+- each arm should move back home after placing its part is done.

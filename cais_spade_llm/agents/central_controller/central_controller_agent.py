@@ -461,7 +461,15 @@ class CentralControllerAgent(LlmAgent):
                         event["function_name"],
                         event.get("params") or {},
                     )
-                    allowed, _ = agent.safety_monitor.online_safety_validation(candidate_aps)
+                    predicted_state_aps = agent.safety_monitor._predict_state_aps(
+                        event["resource_jid"],
+                        event["function_name"],
+                        event.get("params") or {},
+                    )
+                    allowed, _ = agent.safety_monitor.online_safety_validation(
+                        candidate_aps,
+                        predicted_state_aps=predicted_state_aps,
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[CCA] Failed to non-mutating re-check for blocked task=%s; keeping queued.",
@@ -525,7 +533,18 @@ class CentralControllerAgent(LlmAgent):
                             )
 
                         safety_logic.rule_dfas = dfa_map
-                        agent.safety_monitor = OnlineSafetyMonitor(dfa_map, agent.safety_rules)
+                        agent.safety_monitor = OnlineSafetyMonitor(
+                            dfa_map,
+                            agent.safety_rules,
+                            tools_catalog=getattr(agent, "tools_catalog", []),
+                        )
+                        agent.safety_monitor.seed_resource_states(
+                            {
+                                str(getattr(ra, "jid", "")): ra._snapshot_state()
+                                for ra in agent.resource_agents
+                                if hasattr(ra, "_snapshot_state")
+                            }
+                        )
                         agent.logger.info(
                             "[Bundle] Using precomputed safety bundle_id=%s path=%s rules=%d",
                             bundle.get("bundle_id", ""),
@@ -560,7 +579,18 @@ class CentralControllerAgent(LlmAgent):
 
             # Initialize the NEW OnlineSafetyMonitor
             #
-            agent.safety_monitor = OnlineSafetyMonitor(dfa_map, agent.safety_rules)
+            agent.safety_monitor = OnlineSafetyMonitor(
+                dfa_map,
+                agent.safety_rules,
+                tools_catalog=getattr(agent, "tools_catalog", []),
+            )
+            agent.safety_monitor.seed_resource_states(
+                {
+                    str(getattr(ra, "jid", "")): ra._snapshot_state()
+                    for ra in agent.resource_agents
+                    if hasattr(ra, "_snapshot_state")
+                }
+            )
 
             agent.logger.info(
                 "[CCA] _InitCCA completed. Monitor online with %d rules.",
@@ -604,7 +634,8 @@ class CentralControllerAgent(LlmAgent):
             if agent.safety_logic and agent.safety_logic.rule_dfas:
                 validator = OfflineSafetyValidator(
                     rules=agent.safety_rules,
-                    dfa_map=agent.safety_logic.rule_dfas
+                    dfa_map=agent.safety_logic.rule_dfas,
+                    tools_catalog=getattr(agent, "tools_catalog", []),
                 )
 
                 ok, violations = validator.validate_fsa_offline(

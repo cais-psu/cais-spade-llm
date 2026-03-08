@@ -12,7 +12,7 @@ def rebuild():
     
     FunctionAnalyzer.build_tools_catalogue(
         agents=[xarm, ur5e], 
-        outfile="initialization/tools.json"
+        outfile="cais_spade_llm/initialization/tools.json"
     )
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ class RobotAgent(ResourceAgent):
         self._held_part: Optional[str] = None
 
         # Runtime state tracking for replanning context
-        self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed
+        self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed (placed = at destination, part released)
         self._position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"  # open, closed
         # Use pre-initialized controller (from Gazebo prewarm) if available,
@@ -576,7 +576,7 @@ class RobotAgent(ResourceAgent):
         resource_type: robot
 
         in_state: positioned
-        out_state: idle
+        out_state: placed
         part_in_state: in_transit
 
         required_context_keys: [destination]
@@ -664,7 +664,7 @@ class RobotAgent(ResourceAgent):
 
         placed = self._held_part
         self._held_part = None
-        self._current_state = "idle"
+        self._current_state = "placed"
         self._gripper_state = "open"
         payload["placed_location"] = destination_location
         if not payload.get("content"):
@@ -683,7 +683,7 @@ class RobotAgent(ResourceAgent):
         resource_type: robot
 
         in_state: any
-        out_state: any
+        out_state: idle
 
         context: []
 

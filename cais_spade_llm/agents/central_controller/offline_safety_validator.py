@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Set, FrozenSet, Optional
 from collections import defaultdict, deque
+from copy import deepcopy
+import json
 import re
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+
 from agents.central_controller.base_safety_checker import BaseSafetyChecker
 
 
@@ -42,10 +45,18 @@ class OfflineSafetyValidator(BaseSafetyChecker):
 
     # Guardrail: stop if product graph explodes (tune as needed)
     MAX_PRODUCT_STATES: int = 200_000
+    _RUNNING_TASK_RE = re.compile(
+        r"([^=,\s]+)=\([^)]*?run=([^:,\)]+):([A-Za-z0-9_-]+)"
+    )
 
-    def __init__(self, rules: List[Dict[str, Any]], dfa_map: Dict[str, str]) -> None:
+    def __init__(
+        self,
+        rules: List[Dict[str, Any]],
+        dfa_map: Dict[str, str],
+        tools_catalog: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         # BaseSafetyChecker signature is (dfa_map, rules)
-        super().__init__(dfa_map, rules)
+        super().__init__(dfa_map, rules, tools_catalog=tools_catalog)
         self.rule_lookup: Dict[str, Dict[str, Any]] = {r["id"]: r for r in rules if r.get("id")}
 
     # ------------------------------------------------------------------ #
@@ -87,6 +98,9 @@ class OfflineSafetyValidator(BaseSafetyChecker):
         # Optional: task_id -> node lookup from plan
         task_lookup = self._build_task_lookup(plan)
 
+        task_meta_lookup = self._build_transition_task_lookup(enabled, task_lookup)
+        initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
+
         all_violations: List[Dict[str, Any]] = []
 
         for rule in self.safety_rules:
@@ -110,6 +124,8 @@ class OfflineSafetyValidator(BaseSafetyChecker):
                 enabled=enabled,
                 aps_for_rule=aps_for_rule,
                 task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                initial_resource_states=initial_resource_states,
             )
 
             # Keep only ONE witness per rule
@@ -143,90 +159,225 @@ class OfflineSafetyValidator(BaseSafetyChecker):
                 out[str(nid)] = n
         return out
 
-    # ------------------------------------------------------------------ #
-    # AP (SIGMA) MAPPING FOR FSA TRANSITIONS
-    # ------------------------------------------------------------------ #
-    def _sigma_for_transition(
+    @staticmethod
+    def _merge_task_metadata(dest: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("task_id", "resource_jid", "function_name", "in_state", "out_state"):
+            value = src.get(key)
+            if value is None:
+                continue
+            token = str(value).strip()
+            if token:
+                dest[key] = value
+        params = src.get("params")
+        if isinstance(params, dict):
+            if dest.get("params") is None:
+                dest["params"] = {}
+            if params:
+                dest["params"] = dict(params)
+        return dest
+
+    def _build_transition_task_lookup(
         self,
-        t: Dict[str, Any],
-        aps_for_rule: Set[str],
+        enabled: Dict[str, List[Dict[str, Any]]],
         task_lookup: Dict[str, Dict[str, Any]],
-    ) -> FrozenSet[str]:
-        """
-        Compute sigma (AP label set) emitted by a plant transition, projected to this rule's AP alphabet.
+    ) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
 
-        Preferred:
-          - Use semantic mapping from task metadata (resource/function/params) via BaseSafetyChecker._map_task_to_aps.
-        Fallback:
-          - If we cannot map, return empty sigma (safe but may cause false negatives).
-        """
-        # Try to obtain task metadata from transition itself
-        resource_jid = t.get("resource_jid") or ""
-        function_name = t.get("function_name") or ""
-        params = t.get("params") or None
+        for task_id, node in task_lookup.items():
+            out[str(task_id)] = self._merge_task_metadata({}, dict(node))
 
-        # If not present, try plan lookup by task_id
-        if (not function_name or params is None or not resource_jid) and t.get("task_id"):
-            node = task_lookup.get(str(t["task_id"]))
-            if node:
-                resource_jid = resource_jid or (node.get("resource_jid") or "")
-                function_name = function_name or (node.get("function_name") or "")
-                if params is None:
-                    params = node.get("params") or {}
+        for transitions in enabled.values():
+            for transition in transitions:
+                task_id = str(transition.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                entry = out.setdefault(task_id, {})
+                self._merge_task_metadata(entry, transition)
+                if task_lookup.get(task_id):
+                    self._merge_task_metadata(entry, task_lookup[task_id])
+                entry["task_id"] = task_id
+                if "params" not in entry:
+                    entry["params"] = {}
 
-        if params is None:
-            params = {}
+        return out
 
-        if not resource_jid or not function_name:
-            # No semantic info → cannot map APs reliably in your current framework
-            return frozenset()
+    def _transition_task_meta(
+        self,
+        transition: Dict[str, Any],
+        task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        task_id = str(transition.get("task_id") or "").strip()
+        meta: Dict[str, Any] = {}
+        if task_id and task_id in task_meta_lookup:
+            self._merge_task_metadata(meta, task_meta_lookup[task_id])
+        if task_id and task_id in task_lookup:
+            self._merge_task_metadata(meta, task_lookup[task_id])
+        self._merge_task_metadata(meta, transition)
+        if task_id:
+            meta["task_id"] = task_id
+        if not isinstance(meta.get("params"), dict):
+            meta["params"] = {}
+        return meta
 
-        full_sigma = self._map_task_to_aps(resource_jid, function_name, params)
-        return frozenset(ap for ap in full_sigma if ap in aps_for_rule)
+    def _running_tasks_from_state(self, x: str) -> List[Dict[str, str]]:
+        running: List[Dict[str, str]] = []
+        for match in self._RUNNING_TASK_RE.finditer(str(x or "")):
+            running.append(
+                {
+                    "resource_jid": str(match.group(1)),
+                    "task_id": str(match.group(2)),
+                    "function_name": str(match.group(3)),
+                }
+            )
+        return running
 
-
-    # ------------------------------------------------------------------ #
-    # AP (SIGMA) MAPPING FOR FSA STATES
-    # ------------------------------------------------------------------ #
-    def _sigma_for_state(
+    def _running_event_aps_from_state(
         self,
         x: str,
         aps_for_rule: Set[str],
-        ap_defs: Dict[str, str],  # label -> full AP string
+        task_meta_lookup: Dict[str, Dict[str, Any]],
     ) -> FrozenSet[str]:
-        """
-        State-based labeling: return the set of AP labels that are TRUE in global plant state x.
-
-        Assumption: global state encodes running like:
-            "<resource>@...=(...,run=task_id:function_name)"
-        and state APs use:
-            st/<process>/<product>/<resource>/<event>/<context>
-        """
-        # Map (resource, event) -> ap_label for this rule
-        key_to_label: Dict[Tuple[str, str], str] = {}
-        for label, full in ap_defs.items():
-            parts = str(full).split("/")
-            # expected: st/<process>/<product>/<resource>/<event>/<context>
-            if len(parts) >= 6 and parts[0] == "ap":
-                resource = parts[3]
-                event = parts[4]
-                key_to_label[(resource, event)] = label
-
         sigma: Set[str] = set()
+        for item in self._running_tasks_from_state(x):
+            meta = dict(task_meta_lookup.get(item["task_id"]) or {})
+            resource_jid = str(meta.get("resource_jid") or item["resource_jid"] or "").strip()
+            function_name = str(meta.get("function_name") or item["function_name"] or "").strip()
+            params = meta.get("params") or {}
+            if not resource_jid or not function_name:
+                continue
+            sigma.update(self._map_task_to_aps(resource_jid, function_name, params))
+        return frozenset(ap for ap in sigma if ap in aps_for_rule)
 
-        # Extract currently running (resource,event) from the global state string
-        for m in re.finditer(
-            r"([A-Za-z0-9_-]+)@[^=]*=\([^)]*?run=[^:,\)]+:([A-Za-z0-9_-]+)",
-            str(x),
-        ):
-            resource = m.group(1)
-            event = m.group(2)
-            label = key_to_label.get((resource, event))
-            if label and label in aps_for_rule:
-                sigma.add(label)
+    def _state_aps_for_resources(
+        self,
+        resource_states: Dict[str, Dict[str, Any]],
+        aps_for_rule: Set[str],
+    ) -> FrozenSet[str]:
+        sigma: Set[str] = set()
+        for resource_jid, payload in (resource_states or {}).items():
+            current_state = str((payload or {}).get("current_state") or "").strip()
+            if not current_state:
+                continue
+            params = dict((payload or {}).get("params") or {})
+            sigma.update(self._map_state_to_aps(resource_jid, current_state, params))
+        return frozenset(ap for ap in sigma if ap in aps_for_rule)
 
-        return frozenset(sigma)
+    def _initial_resource_states(
+        self,
+        enabled: Dict[str, List[Dict[str, Any]]],
+        x0: str,
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        resource_states: Dict[str, Dict[str, Any]] = {}
 
+        for meta in task_meta_lookup.values():
+            resource_jid = str(meta.get("resource_jid") or "").strip()
+            if resource_jid and resource_jid not in resource_states:
+                resource_states[resource_jid] = {"current_state": "idle", "params": {}}
+
+        for transition in enabled.get(str(x0), []):
+            task_id = str(transition.get("task_id") or "").strip()
+            meta = task_meta_lookup.get(task_id, {})
+            resource_jid = str(meta.get("resource_jid") or transition.get("resource_jid") or "").strip()
+            in_state = str(meta.get("in_state") or transition.get("in_state") or "").strip()
+            if not resource_jid:
+                continue
+            resource_states.setdefault(resource_jid, {"current_state": "idle", "params": {}})
+            if in_state and in_state.lower() != "any":
+                resource_states[resource_jid]["current_state"] = in_state
+
+        for meta in task_meta_lookup.values():
+            resource_jid = str(meta.get("resource_jid") or "").strip()
+            in_state = str(meta.get("in_state") or "").strip()
+            if not resource_jid:
+                continue
+            resource_states.setdefault(resource_jid, {"current_state": "idle", "params": {}})
+            if resource_states[resource_jid].get("current_state") == "idle" and in_state and in_state.lower() != "any":
+                resource_states[resource_jid]["current_state"] = in_state
+
+        return resource_states
+
+    @staticmethod
+    def _resource_state_signature(resource_states: Dict[str, Dict[str, Any]]) -> Tuple[Tuple[str, str, str], ...]:
+        items: List[Tuple[str, str, str]] = []
+        for resource_jid, payload in sorted((resource_states or {}).items()):
+            current_state = str((payload or {}).get("current_state") or "").strip()
+            params = dict((payload or {}).get("params") or {})
+            params_token = json.dumps(params, sort_keys=True, separators=(",", ":"))
+            items.append((str(resource_jid), current_state, params_token))
+        return tuple(items)
+
+    def _transition_successor(
+        self,
+        *,
+        rule_id: str,
+        q: str,
+        x: str,
+        transition: Dict[str, Any],
+        aps_for_rule: Set[str],
+        task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+        resource_states: Dict[str, Dict[str, Any]],
+    ) -> Tuple[str, str, Dict[str, Dict[str, Any]], FrozenSet[str]]:
+        event_name = str(transition.get("event") or "").strip()
+        meta = self._transition_task_meta(transition, task_lookup, task_meta_lookup)
+        resource_jid = str(meta.get("resource_jid") or "").strip()
+        function_name = str(meta.get("function_name") or "").strip()
+        params = dict(meta.get("params") or {})
+
+        running_before = set(self._running_event_aps_from_state(x, aps_for_rule, task_meta_lookup))
+        persistent_before = set(self._state_aps_for_resources(resource_states, aps_for_rule))
+
+        if resource_jid and function_name:
+            candidate_event_aps = set(
+                ap for ap in self._map_task_to_aps(resource_jid, function_name, params)
+                if ap in aps_for_rule
+            )
+            predicted_state_aps = set(
+                ap for ap in self._predict_state_aps(resource_jid, function_name, params)
+                if ap in aps_for_rule
+            )
+        else:
+            candidate_event_aps = set()
+            predicted_state_aps = set()
+
+        if event_name.endswith(".start"):
+            sigma = frozenset(
+                running_before
+                | persistent_before
+                | candidate_event_aps
+                | predicted_state_aps
+            )
+            checked_q = self._delta(rule_id, q, sigma)
+            return checked_q, q, deepcopy(resource_states), sigma
+
+        if event_name.endswith(".done") or event_name.endswith(".finish"):
+            running_after = set(running_before)
+            for ap in candidate_event_aps:
+                running_after.discard(ap)
+
+            next_resource_states = deepcopy(resource_states)
+            if resource_jid:
+                next_payload = next_resource_states.setdefault(
+                    resource_jid,
+                    {"current_state": next_resource_states.get(resource_jid, {}).get("current_state", "idle"), "params": {}},
+                )
+                out_state = str(meta.get("out_state") or "").strip()
+                if out_state and out_state.lower() != "any":
+                    next_payload["current_state"] = out_state
+                    next_payload["params"] = dict(params)
+                elif "params" not in next_payload:
+                    next_payload["params"] = dict(params)
+
+            persistent_after = set(self._state_aps_for_resources(next_resource_states, aps_for_rule))
+            sigma = frozenset(running_after | persistent_after | candidate_event_aps)
+            committed_q = self._delta(rule_id, q, sigma)
+            return committed_q, committed_q, next_resource_states, sigma
+
+        sigma = frozenset(running_before | persistent_before | candidate_event_aps)
+        committed_q = self._delta(rule_id, q, sigma)
+        return committed_q, committed_q, deepcopy(resource_states), sigma
 
     # ------------------------------------------------------------------ #
     # PRODUCT SEARCH PER RULE
@@ -240,6 +391,8 @@ class OfflineSafetyValidator(BaseSafetyChecker):
         enabled: Dict[str, List[Dict[str, Any]]],
         aps_for_rule: Set[str],
         task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+        initial_resource_states: Dict[str, Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
         Explore reachable (x,q) states and detect any violation.
@@ -255,23 +408,30 @@ class OfflineSafetyValidator(BaseSafetyChecker):
             if ap.get("label")
         }
 
-        start = (str(x0), str(q0))
-        parent: Dict[Tuple[str, str], Optional[Tuple[str, str]]] = {start: None}
-        parent_edge: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {start: None}
+        start_state_payload = deepcopy(initial_resource_states)
+        start_sig = self._resource_state_signature(start_state_payload)
+        start = (str(x0), str(q0), start_sig)
+        parent: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Optional[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]]] = {start: None}
+        parent_edge: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Optional[Dict[str, Any]]] = {start: None}
+        state_payloads: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Dict[str, Dict[str, Any]]] = {
+            start: start_state_payload
+        }
 
         stack = deque([start])
-        seen: Set[Tuple[str, str]] = {start}
+        seen: Set[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]] = {start}
 
         violations: List[Dict[str, Any]] = []
 
         while stack:
-            x, q = stack.pop()
+            node = stack.pop()
+            x, q, _ = node
+            resource_states = state_payloads.get(node, {})
 
             # End-of-plan check when plant is in a marked state
             if x in Xm:
                 q_end = self._delta(rule_id, q, frozenset())
                 if violation_state and q_end == violation_state:
-                    trace = self._reconstruct_trace((x, q), parent, parent_edge)
+                    trace = self._reconstruct_trace(node, parent, parent_edge)
                     violations.append(self._build_fsa_violation_entry(
                         rule_id=rule_id,
                         rule=rule_info,
@@ -287,23 +447,31 @@ class OfflineSafetyValidator(BaseSafetyChecker):
                 if not x2:
                     continue
 
-                #sigma = self._sigma_for_transition(t, aps_for_rule, task_lookup)
-                #q2 = self._delta(rule_id, q, sigma)
-                sigma = self._sigma_for_state(x2, aps_for_rule, ap_defs)
-                q2 = self._delta(rule_id, q, sigma)
+                checked_q, committed_q, next_resource_states, sigma = self._transition_successor(
+                    rule_id=rule_id,
+                    q=q,
+                    x=x,
+                    transition=t,
+                    aps_for_rule=aps_for_rule,
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    resource_states=resource_states,
+                )
 
-                if violation_state and q2 == violation_state:
+                if violation_state and checked_q == violation_state:
                     # Found violation witness
                     # record (x2,q2) as the violating product state for trace reconstruction
-                    violating = (x2, q2)
+                    violating = (x2, checked_q, self._resource_state_signature(next_resource_states))
                     if violating not in parent:
-                        parent[violating] = (x, q)
+                        parent[violating] = node
                         
                         t_dbg = dict(t)
                         t_dbg["_sigma"] = sorted(list(sigma))
                         t_dbg["_q_from"] = q
-                        t_dbg["_q_to"] = q2
+                        t_dbg["_q_to"] = checked_q
+                        t_dbg["_resource_states"] = deepcopy(next_resource_states)
                         parent_edge[violating] = t_dbg
+                        state_payloads[violating] = deepcopy(next_resource_states)
                         
                     trace = self._reconstruct_trace(violating, parent, parent_edge)
 
@@ -316,18 +484,20 @@ class OfflineSafetyValidator(BaseSafetyChecker):
                     # Do not expand this violating successor
                     continue
 
-                s2 = (x2, q2)
+                s2 = (x2, committed_q, self._resource_state_signature(next_resource_states))
                 if s2 in seen:
                     continue
 
                 seen.add(s2)
-                parent[s2] = (x, q)
+                parent[s2] = node
                                 
                 t_dbg = dict(t)
                 t_dbg["_sigma"] = sorted(list(sigma))
                 t_dbg["_q_from"] = q
-                t_dbg["_q_to"] = q2
+                t_dbg["_q_to"] = committed_q
+                t_dbg["_resource_states"] = deepcopy(next_resource_states)
                 parent_edge[s2] = t_dbg
+                state_payloads[s2] = deepcopy(next_resource_states)
 
                 stack.append(s2)
 
@@ -344,9 +514,15 @@ class OfflineSafetyValidator(BaseSafetyChecker):
 
     def _reconstruct_trace(
         self,
-        end_state: Tuple[str, str],
-        parent: Dict[Tuple[str, str], Optional[Tuple[str, str]]],
-        parent_edge: Dict[Tuple[str, str], Optional[Dict[str, Any]]],
+        end_state: Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
+        parent: Dict[
+            Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
+            Optional[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]],
+        ],
+        parent_edge: Dict[
+            Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
+            Optional[Dict[str, Any]],
+        ],
     ) -> List[Dict[str, Any]]:
         """
         Reconstruct witness as a list of plant transitions (dicts) along the product path.

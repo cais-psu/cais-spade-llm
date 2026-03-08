@@ -5,7 +5,7 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "any",
-    "out_state": "any",
+    "out_state": "idle",
     "context": [],
     "params": {
       "product_jid": {
@@ -161,7 +161,7 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "positioned",
-    "out_state": "idle",
+    "out_state": "placed",
     "part_in_state": "in_transit",
     "required_context_keys": [
       "destination"
@@ -210,7 +210,7 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "any",
-    "out_state": "any",
+    "out_state": "idle",
     "context": [],
     "params": {
       "product_jid": {
@@ -366,7 +366,7 @@
     "process": "assembly",
     "resource_type": "robot",
     "in_state": "positioned",
-    "out_state": "idle",
+    "out_state": "placed",
     "part_in_state": "in_transit",
     "required_context_keys": [
       "destination"
