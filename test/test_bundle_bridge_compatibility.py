@@ -414,6 +414,73 @@ def test_bridge_safety_preview_flags_placeholder_dfa_and_builds_interpretation_s
     assert rules["SAFE_1"]["dfa_diagnostic"]
 
 
+def test_bridge_preview_failure_payload_exposes_structured_context_guidance(tmp_path, monkeypatch):
+    bridge = SystemBridge()
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text(
+        "[Safety Requirements]\n- both arms should not be at the same station at the same time\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", tmp_path / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_REQUIREMENTS_DIR", tmp_path)
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", tmp_path / "previews")
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", tmp_path / "user_verified_safety")
+
+    safety_hash = bridge_module.sha256_text(safety_file.read_text(encoding="utf-8").strip())
+    bridge._record_safety_preview_failure(
+        str(safety_file.resolve()),
+        (
+            "selector for rule SAFE_1 uses unresolved context keys ['station']; "
+            "candidate canonical context roles are ['origin', 'destination'] "
+            "(match={...}, selector={...})"
+        ),
+        safety_sha256=safety_hash,
+    )
+
+    payload = bridge.get_safety_rule_preview(str(safety_file))
+
+    assert payload["available"] is False
+    assert payload["reason"] == "not_generated"
+    failure = payload["failure"]
+    assert failure["category"] == "unresolved_context_keys"
+    assert failure["title"] == "Context grounding is ambiguous"
+    assert failure["hash_matches_current"] is True
+    assert "station" in "\n".join(failure["details"])
+    assert "origin" in "\n".join(failure["details"])
+    assert failure["suggestions"]
+
+
+def test_bridge_marks_preview_failure_stale_after_safety_file_edit(tmp_path, monkeypatch):
+    bridge = SystemBridge()
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text(
+        "[Safety Requirements]\n- keep the robots separated\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", tmp_path / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_REQUIREMENTS_DIR", tmp_path)
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", tmp_path / "previews")
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", tmp_path / "user_verified_safety")
+
+    original_hash = bridge_module.sha256_text(safety_file.read_text(encoding="utf-8").strip())
+    bridge._record_safety_preview_failure(
+        str(safety_file.resolve()),
+        'selector for rule SAFE_1 could not ground context {"station": "board"} to any tool rows',
+        safety_sha256=original_hash,
+    )
+
+    safety_file.write_text(
+        "[Safety Requirements]\n- keep the robots out of the same shared zone\n",
+        encoding="utf-8",
+    )
+    payload = bridge.get_safety_rule_preview(str(safety_file))
+
+    assert payload["failure"]["category"] == "context_grounding"
+    assert payload["failure"]["hash_matches_current"] is False
+
+
 def test_safety_logic_skips_render_for_placeholder_dfa(tmp_path, monkeypatch, caplog):
     logger = logging.getLogger("test.safety_logic.placeholder")
     controller_agent = SimpleNamespace(logger=logger)

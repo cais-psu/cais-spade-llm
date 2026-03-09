@@ -986,13 +986,64 @@ class Ros2PickPlaceController:
             if self._cartesian_move(self._last_start_pose, "Return home"):
                 return {"success": True, "message": "returned to remembered start pose"}
 
-        # 2) Fallback to named joint-space home if publisher is configured.
         home = self.named_positions.get("home")
-        if isinstance(home, (list, tuple)) and home and self._arm_pub:
+        if not isinstance(home, (list, tuple)) or not home:
+            return {"success": False, "message": "no home pose available"}
+
+        # 2) Fallback to named joint-space home via trajectory publisher.
+        if self._arm_pub:
             if self.move_joints([float(v) for v in home], duration_sec=4):
                 return {"success": True, "message": "sent joint-space home command"}
 
+        # 3) Fallback to MoveIt execute_trajectory action (for robots like
+        #    xarm6 that have no direct arm trajectory publisher).
+        if self._exec_client and self._JointTrajectory:
+            if self._move_joints_via_moveit([float(v) for v in home], duration_sec=4):
+                return {"success": True, "message": "moved home via MoveIt"}
+
         return {"success": False, "message": "no home pose available"}
+
+    def _move_joints_via_moveit(
+        self, positions: list[float], duration_sec: int = 4,
+    ) -> bool:
+        """Move to joint positions using the MoveIt execute_trajectory action."""
+        if len(positions) != len(self.arm_joint_names):
+            self._log().error(
+                "_move_joints_via_moveit expected %d joints, got %d",
+                len(self.arm_joint_names), len(positions),
+            )
+            return False
+        try:
+            from moveit_msgs.msg import RobotTrajectory
+        except ImportError:
+            self._log().error("moveit_msgs not available for joint move")
+            return False
+
+        traj = self._JointTrajectory()
+        traj.joint_names = list(self.arm_joint_names)
+        point = self._JointTrajectoryPoint()
+        point.positions = [float(v) for v in positions]
+        point.time_from_start = self._Duration(sec=max(1, int(duration_sec)))
+        traj.points = [point]
+
+        robot_traj = RobotTrajectory()
+        robot_traj.joint_trajectory = traj
+
+        exec_goal = self._ExecuteTrajectory.Goal()
+        exec_goal.trajectory = robot_traj
+
+        send_future = self._exec_client.send_goal_async(exec_goal)
+        goal_handle = self._wait_future(send_future, timeout_sec=10.0, label="send:move_home")
+        if not goal_handle or not goal_handle.accepted:
+            self._log().error("move_home trajectory goal rejected")
+            return False
+
+        result_future = goal_handle.get_result_async()
+        result = self._wait_future(result_future, timeout_sec=30.0, label="result:move_home")
+        code = result.result.error_code.val if result else None
+        if code != 1:
+            self._log().error("move_home execute_trajectory failed with error_code=%s", code)
+        return code == 1
 
     def detach_model(self, model_name: str, *, quiet: bool = False) -> dict[str, Any]:
         if not self.wait_for_services():

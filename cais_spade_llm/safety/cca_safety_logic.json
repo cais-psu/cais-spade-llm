@@ -1,56 +1,65 @@
 {
+  "preview_interpretation_summary": "",
   "rules": [
     {
-      "id": "SAFE_1",
-      "raw_text": "xarm6 and ur5e should not approach to the assembly board to place at the same time.",
-      "constraint_type": "no_concurrent_place_approach",
+      "id": "SAFE_1-1",
+      "raw_text": "each arm should move back home after placing its part is done.",
+      "constraint_type": "post_place_return_home",
       "process": "assembly",
       "product": [],
       "resources": [
-        "xarm6",
-        "ur5e"
+        "ur5e",
+        "xarm6"
       ],
-      "event": "place_approach",
+      "resource_types": [
+        "robot"
+      ],
+      "event": "move_home",
       "context": {
-        "destination": "assembly_board-v1"
+        "trigger_event": "place_insert",
+        "trigger_phase": "after"
       },
       "aps": [
         {
           "label": "ap002",
-          "full": "ap/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
+          "full": "ap_event/assembly/any/ur5e/place_insert/phase=completed"
         },
         {
           "label": "ap001",
-          "full": "ap/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+          "full": "ap_event/assembly/any/ur5e/move_home/destination=home"
         }
       ],
-      "ltlf": "G !(ap002 & ap001)"
+      "ltlf": "(G ((ap002 -> F (ap001))))"
     },
     {
-      "id": "SAFE_2",
-      "raw_text": "xarm6 and ur5e should move back home after inserting the pins.",
-      "constraint_type": "post_insertion_move_home",
+      "id": "SAFE_1-2",
+      "raw_text": "each arm should move back home after placing its part is done.",
+      "constraint_type": "post_place_return_home",
       "process": "assembly",
-      "product": [
-        "pins"
-      ],
+      "product": [],
       "resources": [
-        "xarm6",
-        "ur5e"
+        "ur5e",
+        "xarm6"
+      ],
+      "resource_types": [
+        "robot"
       ],
       "event": "move_home",
-      "context": null,
+      "context": {
+        "trigger_event": "place_insert",
+        "trigger_phase": "after"
+      },
       "aps": [
         {
           "label": "ap004",
-          "full": "ap/assembly/pins/any/place_insert/destination_any"
+          "full": "ap_event/assembly/any/xarm6/place_insert/phase=completed"
         },
         {
           "label": "ap003",
-          "full": "ap/assembly/pins/any/move_home/any"
+          "full": "ap_event/assembly/any/xarm6/move_home/destination=home"
         }
       ],
-      "ltlf": "G (ap004 -> F ap003)"
+      "ltlf": "(G ((ap004 -> F (ap003))))"
     }
   ]
 }

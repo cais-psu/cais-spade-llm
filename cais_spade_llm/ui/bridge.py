@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -138,6 +139,7 @@ class SystemBridge:
         self._stopping: bool = False
         self.last_error: Optional[str] = None
         self.last_notice: Optional[str] = None
+        self._safety_preview_failures: dict[str, dict[str, Any]] = {}
 
         # Configuration (set from UI before start).
         self.execution_mode: str = "simulation"
@@ -852,6 +854,291 @@ class SystemBridge:
         return [entry for entry in entries if isinstance(entry, dict)]
 
     @staticmethod
+    def _parse_inline_debug_list(raw: str) -> list[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                value = parser(text)
+            except Exception:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                out: list[str] = []
+                for item in value:
+                    token = str(item or "").strip()
+                    if token:
+                        out.append(token)
+                return out
+        if text.startswith("[") and text.endswith("]"):
+            inner = text[1:-1]
+            out = []
+            for part in inner.split(","):
+                token = part.strip().strip("'\"")
+                if token:
+                    out.append(token)
+            return out
+        return [text]
+
+    @classmethod
+    def _extract_debug_list(cls, message: str, pattern: str) -> list[str]:
+        match = re.search(pattern, str(message or ""), flags=re.IGNORECASE)
+        if not match:
+            return []
+        return cls._parse_inline_debug_list(match.group(1))
+
+    @classmethod
+    def _classify_safety_preview_failure(cls, error_message: str) -> dict[str, Any]:
+        message = str(error_message or "").strip() or "unknown error"
+        lower = message.lower()
+        title = "Safety preview generation failed"
+        summary = (
+            "The generated safety logic could not be grounded to the current tool, "
+            "state, and resource catalog."
+        )
+        details = [
+            "The compiler rejected the generated safety rule because at least one selector "
+            "or formula node could not be mapped to supported catalog entries."
+        ]
+        suggestions = [
+            "Reuse exact context keys, function names, and state names that exist in the tool catalog.",
+            "Keep each selector aligned to one consistent context role and one consistent state slice.",
+            "If the rule already names concrete resources, keep those resources explicit in the logic.",
+        ]
+        category = "grounding_failure"
+
+        if "uses unresolved context keys" in lower:
+            bad_keys = cls._extract_debug_list(message, r"unresolved context keys (\[[^\]]*\])")
+            canonical_roles = cls._extract_debug_list(
+                message,
+                r"candidate canonical context roles are (\[[^\]]*\])",
+            )
+            title = "Context grounding is ambiguous"
+            summary = (
+                "The generated selector used context keys that are not canonical in the tool catalog, "
+                "and the compiler could not infer one unique replacement."
+            )
+            details = []
+            if bad_keys:
+                details.append(
+                    "Unsupported selector context keys: " + ", ".join(bad_keys)
+                )
+            if canonical_roles:
+                details.append(
+                    "Matching tool rows still pointed to multiple canonical context roles: "
+                    + ", ".join(canonical_roles)
+                )
+            details.append(
+                "This usually means the selector used generic wording such as station/location or mixed "
+                "different action families in one occupancy condition."
+            )
+            suggestions = [
+                "Refine the requirement or feedback so the condition maps to one canonical context role only.",
+                "Avoid generic context names like station/location and use the tool family's exact role names.",
+                "Do not mix pick-side and place-side states or functions in one selector branch.",
+            ]
+            category = "unresolved_context_keys"
+        elif "mixes incompatible tool families" in lower:
+            families = cls._extract_debug_list(message, r"families=(\[[^\]]*\])")
+            title = "The generated selector mixes incompatible tool families"
+            summary = (
+                "The selector grounded to rows that belong to different context/state families, "
+                "so the compiler refused to merge them into one condition."
+            )
+            details = []
+            if families:
+                details.append("Incompatible grounded families: " + ", ".join(families))
+            details.append(
+                "This usually happens when one selector combines origin-side and destination-side behavior."
+            )
+            suggestions = [
+                "Split the condition so each selector covers only one family of tool rows.",
+                "Keep pick-side functions/states separate from place-side functions/states.",
+                "Use refinement feedback to say that one station/occupancy condition should map to one side only.",
+            ]
+            category = "family_mismatch"
+        elif "uses multiple distinct resource_var names" in lower:
+            resource_vars = cls._extract_debug_list(
+                message,
+                r"resource_var names (\[[^\]]*\])",
+            )
+            title = "Resource binding is inconsistent"
+            summary = (
+                "The generated formula used multiple different resource variables in one rule, "
+                "which this compiler does not support."
+            )
+            details = []
+            if resource_vars:
+                details.append("Distinct resource variables used: " + ", ".join(resource_vars))
+            details.append(
+                "This can collapse or distort multi-resource mutex logic, so the compiler fails early."
+            )
+            suggestions = [
+                "If the rule already names specific resources, keep them as concrete resources in the AST.",
+                "If the pattern should repeat generically, use one shared resource_var instead of several.",
+                "Avoid introducing separate placeholders like $r1 and $r2 in a single mutex rule.",
+            ]
+            category = "resource_binding"
+        elif "references fewer than two concrete resources" in lower:
+            used_resources = cls._extract_debug_list(
+                message,
+                r"used_resources=(\[[^\]]*\])",
+            )
+            expected_resources = cls._extract_debug_list(
+                message,
+                r"expected_resources=(\[[^\]]*\])",
+            )
+            title = "The generated mutex does not cover both resources"
+            summary = (
+                "The rule is a multi-resource mutex, but the compiled formula ended up referring to too few "
+                "concrete resources."
+            )
+            details = []
+            if used_resources:
+                details.append("Resources actually referenced in the compiled formula: " + ", ".join(used_resources))
+            if expected_resources:
+                details.append("Resources expected from the rule: " + ", ".join(expected_resources))
+            suggestions = [
+                "Describe the safety intent as a cross-resource exclusion, not a one-resource condition.",
+                "Keep both named resources explicit when the requirement already names them.",
+                "Use refinement feedback to say that the two resources must not satisfy the condition simultaneously.",
+            ]
+            category = "degenerate_mutex"
+        elif "degenerates into independent single-resource conjuncts" in lower:
+            title = "The generated mutex collapsed into self-constraints"
+            summary = (
+                "The compiled formula split into separate single-resource clauses instead of one real cross-resource mutex."
+            )
+            details = [
+                "This means the generated logic prevented each resource from conflicting with itself, "
+                "rather than preventing the two resources from conflicting with each other."
+            ]
+            suggestions = [
+                "Refine the requirement or feedback to emphasize that the exclusion is between the two resources.",
+                "Avoid logic that expands into one conjunct per resource.",
+                "Keep the two sides of the mutex in one shared conflict condition.",
+            ]
+            category = "degenerate_mutex"
+        elif "requested states" in lower and "before context grounding" in lower:
+            requested_states = cls._extract_debug_list(
+                message,
+                r"requested states (\[[^\]]*\])",
+            )
+            available_states = cls._extract_debug_list(
+                message,
+                r"out_states (\[[^\]]*\])",
+            )
+            title = "The generated state slice does not exist in the matched tools"
+            summary = (
+                "The selector asked for persistent states that are not exposed by the matching tool rows."
+            )
+            details = []
+            if requested_states:
+                details.append("Requested states: " + ", ".join(requested_states))
+            if available_states:
+                details.append("Available persistent states from matching rows: " + ", ".join(available_states))
+            suggestions = [
+                "Use only persistent states that are actually produced by the matching tool family.",
+                "Do not mix generic idle states with action-specific occupancy states unless the catalog supports that slice.",
+                "Refine the requirement so it describes one narrower operational state family.",
+            ]
+            category = "state_mismatch"
+        elif "did not match any tool rows before context grounding" in lower:
+            title = "The generated selector does not match any supported tool rows"
+            summary = (
+                "Even before applying context filters, the selector's process/resource/function constraints did not "
+                "match the current tool catalog."
+            )
+            details = [
+                "This usually means the generated logic used unsupported function names, resource types, or process labels."
+            ]
+            suggestions = [
+                "Reuse exact function names and process names from the tool catalog.",
+                "Avoid invented events or tool families.",
+                "If the requirement is more abstract, use a selector that lets the compiler infer the concrete APs.",
+            ]
+            category = "no_matching_rows"
+        elif "could not ground context" in lower:
+            title = "The selector context could not be grounded"
+            summary = (
+                "The selector matched a tool family, but the context object still did not map to any concrete tool rows."
+            )
+            details = [
+                "This usually means the context value or key does not line up with the matched tool family's required context."
+            ]
+            suggestions = [
+                "Use exact catalog context keys and identifiers.",
+                "Keep the selector narrow enough that one context family is implied.",
+                "Avoid mixing unrelated states/functions that force the selector across multiple families.",
+            ]
+            category = "context_grounding"
+        elif "did not expand to any aps" in lower:
+            title = "The selector over-constrained the safety condition"
+            summary = (
+                "The selector compiled successfully enough to resolve its shape, but no concrete APs survived expansion."
+            )
+            details = [
+                "This usually means the selector combined context, functions, or states too narrowly for any real APs to remain."
+            ]
+            suggestions = [
+                "Remove unsupported or overly narrow function/state filters.",
+                "Check that the rule's context and state slice match the same tool family.",
+                "Use refinement feedback to describe the intended operational condition more directly.",
+            ]
+            category = "empty_selector"
+
+        return {
+            "category": category,
+            "title": title,
+            "summary": summary,
+            "details": details,
+            "suggestions": suggestions,
+            "raw_error": message,
+        }
+
+    def _record_safety_preview_failure(
+        self,
+        safety_key: str,
+        error_message: str,
+        *,
+        safety_sha256: str = "",
+        refinement_feedback: str = "",
+        parent_preview_id: str = "",
+    ) -> None:
+        key = str(safety_key or "").strip()
+        if not key:
+            return
+        payload = self._classify_safety_preview_failure(error_message)
+        payload["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        payload["safety_sha256"] = str(safety_sha256 or "").strip()
+        payload["refinement_feedback"] = str(refinement_feedback or "").strip()
+        payload["parent_preview_id"] = str(parent_preview_id or "").strip()
+        self._safety_preview_failures[key] = payload
+
+    def _clear_safety_preview_failure(self, safety_key: str) -> None:
+        key = str(safety_key or "").strip()
+        if not key:
+            return
+        self._safety_preview_failures.pop(key, None)
+
+    def _get_safety_preview_failure(
+        self,
+        safety_key: str,
+        *,
+        current_hash: str = "",
+    ) -> dict[str, Any]:
+        key = str(safety_key or "").strip()
+        failure = self._safety_preview_failures.get(key)
+        if not isinstance(failure, dict):
+            return {}
+        payload = dict(failure)
+        failure_hash = str(payload.get("safety_sha256", "")).strip()
+        payload["hash_matches_current"] = bool(
+            current_hash and failure_hash and current_hash == failure_hash
+        )
+        return payload
+
+    @staticmethod
     def _find_preview_record(
         entries: list[dict[str, Any]], preview_id: str
     ) -> dict[str, Any]:
@@ -1137,6 +1424,7 @@ class SystemBridge:
                 "available": False,
                 "reason": "safety_file_missing",
                 "safety_file": "",
+                "failure": {},
                 "rules": [],
             }
 
@@ -1145,6 +1433,7 @@ class SystemBridge:
         exists = safety_path.exists()
         safety_text = safety_path.read_text(encoding="utf-8").strip() if exists else ""
         current_hash = sha256_text(safety_text) if safety_text else ""
+        failure = self._get_safety_preview_failure(safety_key, current_hash=current_hash)
 
         payload = self._load_safety_intent_previews()
         previews = payload.get("previews", {})
@@ -1158,6 +1447,7 @@ class SystemBridge:
                 "safety_file": safety_key,
                 "current_hash": current_hash,
                 "hash_matches_current": False,
+                "failure": failure,
                 "rules": [],
             }
 
@@ -1173,6 +1463,7 @@ class SystemBridge:
                 "current_hash": current_hash,
                 "hash_matches_current": False,
                 "record": latest,
+                "failure": failure,
                 "rules": [],
             }
 
@@ -1245,6 +1536,7 @@ class SystemBridge:
             "current_hash": current_hash,
             "hash_matches_current": hash_matches,
             "record": latest,
+            "failure": failure,
             "refinement_feedback": str(latest.get("refinement_feedback", "")).strip(),
             "parent_record": {
                 "preview_id": str(parent_record.get("preview_id", "")).strip(),
@@ -1335,9 +1627,18 @@ class SystemBridge:
                 return await asyncio.to_thread(safety_logic.build_dfas_per_rule, preview_dir)
 
             asyncio.run(_run_preview())
-        except Exception:
+        except Exception as exc:
+            self._record_safety_preview_failure(
+                safety_key,
+                str(exc),
+                safety_sha256=safety_hash,
+                refinement_feedback=str(refinement_feedback or "").strip(),
+                parent_preview_id=str(parent_record.get("preview_id", "")).strip(),
+            )
             shutil.rmtree(preview_dir, ignore_errors=True)
             raise
+
+        self._clear_safety_preview_failure(safety_key)
 
         dot_files = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.dot"))
         png_files = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.png"))
@@ -1369,6 +1670,7 @@ class SystemBridge:
             return
         safety_path = self._abs_project_path(raw).resolve()
         safety_key = self._norm_path(safety_path)
+        self._clear_safety_preview_failure(safety_key)
         payload = self._load_safety_intent_previews()
         previews = payload.get("previews", {}) if isinstance(payload, dict) else {}
         if not isinstance(previews, dict):
@@ -1383,6 +1685,7 @@ class SystemBridge:
             return
         safety_path = self._abs_project_path(raw).resolve()
         safety_key = self._norm_path(safety_path)
+        self._clear_safety_preview_failure(safety_key)
         self.delete_safety_intent_previews(safety_key)
 
         payload = self._load_safety_intent_approvals()
@@ -1810,6 +2113,10 @@ class SystemBridge:
         got_hashes = manifest.get("source_hashes", {}) if isinstance(manifest.get("source_hashes"), dict) else {}
         tools_snapshot_ok = self._bundle_tools_snapshot_matches_manifest(bid, manifest)
         for key, expected in expected_hashes.items():
+            # Prompt text changes affect future offline generation, but a
+            # user-verified bundle should still be reusable at startup.
+            if key == "prompts_sha256":
+                continue
             if key == "tools_sha256":
                 if tools_snapshot_ok is False:
                     reasons.append(key)
@@ -4521,9 +4828,12 @@ class SystemBridge:
         """
         Reset Gazebo to a clean initial scene.
 
-        This keeps the Gazebo window/process alive and restores the authored
-        scene in place: reset the world, send both robots home, and put the
-        loose parts back at their initial poses.
+        Sequence:
+        1. Detach any gripped parts and open grippers.
+        2. Move both robots home via MoveIt (before the world reset so
+           the controllers and MoveIt state are still in sync).
+        3. Call /reset_world to reset Gazebo physics/sim time.
+        4. Restore loose parts to their initial poses.
         """
         if not self._any_running(self._GAZEBO_PROCESS_NAMES):
             return False, "Gazebo is not running."
@@ -4533,6 +4843,7 @@ class SystemBridge:
                 "Stop the agent system before resetting Gazebo to avoid state mismatch.",
             )
 
+        # ── Discover the Gazebo reset service ──────────────────────
         ok, out = self._ros2_command_output(
             "ros2 service list",
             timeout_sec=5.0,
@@ -4564,14 +4875,17 @@ class SystemBridge:
                 "No Gazebo reset service found (expected /reset_world or /reset_simulation).",
             )
 
+        # ── Step 1+2: Detach parts, open grippers, move robots home ──
+        success_messages, warning_messages = self._restore_gazebo_scene_in_place()
+
+        # ── Step 3: Reset the Gazebo world ─────────────────────────
         call_ok, call_msg = self.ros2_exec(
             f'ros2 service call {selected} std_srvs/srv/Empty "{{}}"',
             timeout_sec=10.0,
         )
         if not call_ok:
-            return False, f"Gazebo reset failed via {selected}: {call_msg}"
+            warning_messages.append(f"Gazebo reset failed via {selected}: {call_msg}")
 
-        success_messages, warning_messages = self._restore_gazebo_scene_in_place()
         headline = f"Gazebo environment reset via {selected}."
         if warning_messages:
             detail = " ; ".join([headline] + success_messages + warning_messages)
@@ -5059,6 +5373,24 @@ class SystemBridge:
         if not callable(retry):
             raise RuntimeError("product agent does not support DES runtime recovery retry")
         return self._run_product_agent_coroutine(agent, retry())
+
+    def approve_runtime_bridge_proposal(self, product_jid: str) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        approve = getattr(agent, "approve_runtime_bridge_proposal", None)
+        if not callable(approve):
+            raise RuntimeError("product agent does not support runtime bridge approval")
+        return self._run_product_agent_coroutine(agent, approve())
+
+    def reject_runtime_bridge_proposal(self, product_jid: str, feedback: str) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        reject = getattr(agent, "reject_runtime_bridge_proposal", None)
+        if not callable(reject):
+            raise RuntimeError("product agent does not support runtime bridge rejection")
+        return self._run_product_agent_coroutine(agent, reject(feedback))
 
     def get_plan_safety_alerts(self) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []

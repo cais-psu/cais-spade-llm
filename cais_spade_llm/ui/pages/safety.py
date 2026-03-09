@@ -128,6 +128,26 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 "Generate first, review LTLf and DFA, then verify safety."
             ).classes("text-xs text-slate-600 mb-2")
 
+            preview_failure_card = ui.card().classes("w-full bg-red-50 border border-red-200 mb-2")
+            preview_failure_card.style("display:none;")
+            with preview_failure_card:
+                ui.label("Latest Preview Failure").classes("text-sm font-semibold text-red-800")
+                preview_failure_title = ui.label("").classes("text-sm font-semibold text-red-900")
+                preview_failure_meta = ui.label("").classes("text-xs text-red-700 whitespace-pre-wrap")
+                preview_failure_summary = ui.label("").classes(
+                    "w-full text-sm text-red-900 whitespace-pre-wrap"
+                )
+                ui.label("Why It Failed").classes("text-xs font-semibold text-red-800 mt-1")
+                preview_failure_details = ui.label("").classes(
+                    "w-full text-xs text-red-900 whitespace-pre-wrap"
+                )
+                ui.label("How To Refine It").classes("text-xs font-semibold text-red-800 mt-1")
+                preview_failure_suggestions = ui.label("").classes(
+                    "w-full text-xs text-red-900 whitespace-pre-wrap"
+                )
+                ui.label("Raw Error").classes("text-xs font-semibold text-red-800 mt-1")
+                preview_failure_raw = ui.code("", language="text").classes("w-full")
+
             ui.label("Generated Rule Interpretation").classes("text-sm font-semibold")
             preview_interpretation_summary = ui.label(
                 "Generated rule interpretation will appear after preview generation."
@@ -243,6 +263,53 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_dfa_status.classes(replace="text-sm text-slate-700")
             preview_dfa_transitions.rows = []
             preview_dfa_dot.content = "No DFA DOT generated yet."
+
+        def _bulleted_text(items: object, fallback: str) -> str:
+            if not isinstance(items, list):
+                return fallback
+            lines = [f"- {str(item).strip()}" for item in items if str(item).strip()]
+            return "\n".join(lines) if lines else fallback
+
+        def _clear_preview_failure() -> None:
+            preview_failure_card.style("display:none;")
+            preview_failure_title.text = ""
+            preview_failure_meta.text = ""
+            preview_failure_summary.text = ""
+            preview_failure_details.text = ""
+            preview_failure_suggestions.text = ""
+            preview_failure_raw.content = ""
+
+        def _set_preview_failure(failure: object) -> None:
+            if not isinstance(failure, dict) or not failure:
+                _clear_preview_failure()
+                return
+            generated_at = str(failure.get("generated_at_utc", "")).strip()
+            stale_failure = not bool(failure.get("hash_matches_current", False))
+            meta_lines: list[str] = []
+            if generated_at:
+                meta_lines.append(f"Failed at: {generated_at}")
+            if stale_failure:
+                meta_lines.append(
+                    "This diagnostic is from an older version of the file. Regenerate after edits to refresh it."
+                )
+            preview_failure_title.text = str(
+                failure.get("title", "") or "Safety preview generation failed"
+            )
+            preview_failure_meta.text = "\n".join(meta_lines)
+            preview_failure_summary.text = str(
+                failure.get("summary", "")
+                or "The generated safety rule could not be grounded to the current catalog."
+            )
+            preview_failure_details.text = _bulleted_text(
+                failure.get("details"),
+                "No structured diagnostic details are available for this failure.",
+            )
+            preview_failure_suggestions.text = _bulleted_text(
+                failure.get("suggestions"),
+                "Refine the requirement or feedback, then regenerate the preview.",
+            )
+            preview_failure_raw.content = str(failure.get("raw_error", "") or "(empty)")
+            preview_failure_card.style("display:block;")
 
         def _render_preview_dfa_gallery(rules: list[dict[str, object]]) -> None:
             preview_dfa_gallery.clear()
@@ -405,8 +472,14 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 preview_status_label.text = "Safety rule preview is not generated yet."
                 preview_status_label.classes(replace="text-xs text-slate-600 mt-1")
                 preview_rules_table.rows = []
-                preview_state["payload"] = {"available": False, "reason": "safety_file_missing", "rules": []}
+                preview_state["payload"] = {
+                    "available": False,
+                    "reason": "safety_file_missing",
+                    "failure": {},
+                    "rules": [],
+                }
                 _clear_preview_detail()
+                _clear_preview_failure()
                 _refresh_intent_status()
                 return
 
@@ -416,20 +489,34 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 preview_status_label.text = f"Safety preview unavailable: {exc}"
                 preview_status_label.classes(replace="text-xs text-red-700 mt-1")
                 preview_rules_table.rows = []
-                preview_state["payload"] = {"available": False, "reason": "preview_error", "rules": []}
+                preview_state["payload"] = {
+                    "available": False,
+                    "reason": "preview_error",
+                    "failure": {},
+                    "rules": [],
+                }
                 _clear_preview_detail()
+                _clear_preview_failure()
                 _refresh_intent_status()
                 return
 
             preview_state["payload"] = payload
             available = bool(payload.get("available", False))
+            _set_preview_failure(payload.get("failure"))
             reason_text = _preview_reason_text(str(payload.get("reason", "")))
             if not available:
-                preview_status_label.text = (
-                    "Safety rule preview not ready. "
-                    f"Status: {reason_text}. Click Generate Safety Rule."
-                )
-                preview_status_label.classes(replace="text-xs text-amber-700 mt-1")
+                if isinstance(payload.get("failure"), dict) and payload.get("failure"):
+                    preview_status_label.text = (
+                        "Latest safety preview generation failed. "
+                        "Review the explanation below, refine the requirement or feedback, and regenerate."
+                    )
+                    preview_status_label.classes(replace="text-xs text-red-700 mt-1")
+                else:
+                    preview_status_label.text = (
+                        "Safety rule preview not ready. "
+                        f"Status: {reason_text}. Click Generate Safety Rule."
+                    )
+                    preview_status_label.classes(replace="text-xs text-amber-700 mt-1")
                 preview_rules_table.rows = []
                 _clear_preview_detail()
                 _refresh_intent_status()
@@ -703,7 +790,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     type="positive",
                 )
             except Exception as exc:
-                ui.notify(f"Safety preview generation failed: {exc}", type="negative")
+                ui.notify(
+                    "Safety preview generation failed. Review the explanation box below.",
+                    type="negative",
+                )
             finally:
                 _set_preview_generation_busy(False)
                 _refresh_preview()

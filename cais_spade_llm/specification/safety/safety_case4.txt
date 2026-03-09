@@ -1,3 +1,0 @@
-[Safety Requirements]
-- each arm should move back home after placing its part is done.
-- both arms should not enter and place the parts at the assembly station at the same time to avoid collisions.

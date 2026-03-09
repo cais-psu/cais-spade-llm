@@ -98,6 +98,63 @@ def _tools_catalog() -> list[dict]:
     ]
 
 
+def _pick_and_place_tools_catalog() -> list[dict]:
+    return [
+        {
+            "function": "pick_approach",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "idle",
+            "out_state": "at_pick",
+            "required_context_keys": ["origin"],
+            "context_mapping": {
+                "location_param": "origin_resource_location",
+                "location_type": "part_location",
+            },
+        },
+        {
+            "function": "pick_grasp",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "at_pick",
+            "out_state": "picked",
+            "required_context_keys": ["origin"],
+            "context_mapping": {
+                "location_param": "origin_resource_location",
+                "location_type": "current_location",
+            },
+        },
+        {
+            "function": "place_approach",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "picked",
+            "out_state": "positioned",
+            "required_context_keys": ["destination"],
+            "context_mapping": {
+                "location_param": "destination_location",
+                "location_type": "reachable_location",
+            },
+        },
+        {
+            "function": "place_insert",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "positioned",
+            "out_state": "placed",
+            "required_context_keys": ["destination"],
+            "context_mapping": {
+                "location_param": "destination_location",
+                "location_type": "current_location",
+            },
+        },
+    ]
+
+
 def _board_mutex_rule() -> dict:
     return {
         "id": "SAFE_1",
@@ -357,6 +414,209 @@ def test_ap_selector_expands_destination_selector_to_entry_event_and_state_aps(t
     ]
 
 
+def test_formula_ast_compile_failure_logs_rule_and_selector_details(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    parse_payload = {
+        "rules": [
+            {
+                "id": "SAFE_1",
+                "raw_text": "both arms should not enter into assembly board to place their parts at the same time.",
+                "constraint_type": "no_concurrent_place_in_assembly_board",
+                "process": "assembly",
+                "product": [],
+                "resources": ["ur5e"],
+                "resource_types": None,
+                "event": "place_approach",
+                "context": {"destination": "assembly_board-v1"},
+            }
+        ]
+    }
+    logic_payload = {
+        "rules": [
+            {
+                "id": "SAFE_1",
+                "formula_ast": {
+                    "type": "ap_selector",
+                    "resource": "ur5e",
+                    "match": {
+                        "process": "printing",
+                        "context": {"destination": "assembly_board-v1"},
+                    },
+                    "include_entry_events": True,
+                    "include_state_aps": True,
+                },
+            }
+        ]
+    }
+
+    logic = SafetyLogic(
+        _FakeController(_tools_catalog(), responses=[parse_payload, logic_payload]),
+        tmp_path / "safety.txt",
+    )
+
+    with caplog.at_level(logging.ERROR, logger="test.state_ap_safety"):
+        with pytest.raises(
+            RuntimeError,
+            match="did not match any tool rows before context grounding",
+        ) as excinfo:
+            asyncio.run(logic.build_safety_rules_and_logic("dummy text"))
+
+    message = str(excinfo.value)
+    assert "selector=" in message
+    assert '"process": "printing"' in message
+    assert "before context grounding" in message
+    assert "formula_ast=" in caplog.text
+    assert '"process": "printing"' in caplog.text
+    assert '"id": "SAFE_1"' in caplog.text
+
+
+def test_ap_selector_repairs_generic_location_to_unique_canonical_context_role(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    logic = SafetyLogic(_FakeController(_tools_catalog()), tmp_path / "safety.txt")
+    rule = {
+        "id": "SAFE_CTX_1",
+        "raw_text": "resource should not enter the same workspace slice twice",
+        "process": "assembly",
+        "product": [],
+        "resources": ["ur5e"],
+        "context": {"destination": "assembly_board-v1"},
+    }
+    selector = {
+        "type": "ap_selector",
+        "resource": "ur5e",
+        "match": {
+            "functions": ["place_approach", "place_insert"],
+            "context": {"location": "assembly_board-v1"},
+        },
+        "include_entry_events": True,
+        "include_state_aps": True,
+    }
+
+    compiled = logic._compile_formula_ast_for_rule(rule, selector)
+
+    assert compiled["aps"] == [
+        "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1",
+        "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1",
+        "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1",
+    ]
+
+
+def test_ap_selector_rejects_ambiguous_generic_context_role(tmp_path: Path) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    logic = SafetyLogic(
+        _FakeController(_pick_and_place_tools_catalog()),
+        tmp_path / "safety.txt",
+    )
+    rule = {
+        "id": "SAFE_CTX_2",
+        "raw_text": "robot should not be in the same location slice twice",
+        "process": "assembly",
+        "product": [],
+        "resources": ["ur5e"],
+        "context": None,
+    }
+    selector = {
+        "type": "ap_selector",
+        "resource": "ur5e",
+        "match": {"context": {"location": "assembly_board-v1"}},
+        "include_entry_events": True,
+        "include_state_aps": True,
+    }
+
+    with pytest.raises(RuntimeError, match="unresolved context keys"):
+        logic._compile_formula_ast_for_rule(rule, selector)
+
+
+def test_ap_selector_rejects_mixed_context_families_in_same_branch(tmp_path: Path) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    logic = SafetyLogic(
+        _FakeController(_pick_and_place_tools_catalog()),
+        tmp_path / "safety.txt",
+    )
+    rule = {
+        "id": "SAFE_CTX_3",
+        "raw_text": "robot should not straddle incompatible work slices",
+        "process": "assembly",
+        "product": [],
+        "resources": ["ur5e"],
+        "context": None,
+    }
+    selector = {
+        "type": "ap_selector",
+        "resource": "ur5e",
+        "match": {
+            "functions": ["pick_approach", "place_approach"],
+            "states": ["at_pick", "positioned"],
+        },
+        "include_entry_events": True,
+        "include_state_aps": True,
+    }
+
+    with pytest.raises(RuntimeError, match="incompatible tool families"):
+        logic._compile_formula_ast_for_rule(rule, selector)
+
+
+def test_formula_ast_rejects_multiple_distinct_resource_vars(tmp_path: Path) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    logic = SafetyLogic(_FakeController(_tools_catalog()), tmp_path / "safety.txt")
+    rule = {
+        "id": "SAFE_RV_1",
+        "raw_text": "both arms should not be at the same station at the same time",
+        "process": "assembly",
+        "product": [],
+        "resources": ["ur5e", "xarm6"],
+        "context": {"destination": "assembly_board-v1"},
+    }
+    formula_ast = {
+        "op": "G",
+        "arg": {
+            "op": "!",
+            "arg": {
+                "op": "&",
+                "args": [
+                    {
+                        "type": "ap_selector",
+                        "resource_var": "$r1",
+                        "match": {
+                            "functions": ["place_approach", "place_insert"],
+                            "context": {"destination": "assembly_board-v1"},
+                        },
+                        "include_entry_events": True,
+                        "include_state_aps": True,
+                    },
+                    {
+                        "type": "ap_selector",
+                        "resource_var": "$r2",
+                        "match": {
+                            "functions": ["place_approach", "place_insert"],
+                            "context": {"destination": "assembly_board-v1"},
+                        },
+                        "include_entry_events": True,
+                        "include_state_aps": True,
+                    },
+                ],
+            },
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="multiple distinct resource_var"):
+        logic._compile_formula_ast_for_rule(rule, formula_ast)
+
+
 def test_resource_var_selector_grounds_only_matching_resource_type(tmp_path: Path) -> None:
     pytest.importorskip("ltlf2dfa")
     from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
@@ -515,15 +775,34 @@ def test_parsed_resource_types_survive_and_constrain_resource_var_grounding(tmp_
                 "formula_ast": {
                     "op": "G",
                     "arg": {
-                        "type": "ap_selector",
-                        "resource_var": "$r",
-                        "match": {
-                            "resource_type": "printer",
-                            "process": "printing",
-                            "context": {"machine": "printer_cell_1"},
+                        "op": "!",
+                        "arg": {
+                            "op": "&",
+                            "args": [
+                                {
+                                    "type": "ap_selector",
+                                    "resource": "printer_a",
+                                    "match": {
+                                        "resource_type": "printer",
+                                        "process": "printing",
+                                        "context": {"machine": "printer_cell_1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                                {
+                                    "type": "ap_selector",
+                                    "resource": "printer_b",
+                                    "match": {
+                                        "resource_type": "printer",
+                                        "process": "printing",
+                                        "context": {"machine": "printer_cell_1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                            ],
                         },
-                        "include_entry_events": True,
-                        "include_state_aps": True,
                     },
                 },
             }
@@ -542,6 +821,145 @@ def test_parsed_resource_types_survive_and_constrain_resource_var_grounding(tmp_
     assert rule.get("resource_types") == ["printer"]
     assert all("/printer_a/" in ap or "/printer_b/" in ap for ap in full_aps)
     assert all("/arm_a/" not in ap for ap in full_aps)
+
+
+def test_build_safety_rules_rejects_degenerate_single_resource_mutex_conjuncts(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    parse_payload = {
+        "rules": [
+            {
+                "id": "SAFE_4",
+                "raw_text": "both arms should not enter into assembly board to place their parts at the same time.",
+                "constraint_type": "no_concurrent_place_in_assembly_board",
+                "process": "assembly",
+                "product": [],
+                "resources": ["ur5e", "xarm6"],
+                "resource_types": ["robot"],
+                "event": "place_approach",
+                "context": {"destination": "assembly_board-v1"},
+            }
+        ]
+    }
+    logic_payload = {
+        "rules": [
+            {
+                "id": "SAFE_4",
+                "formula_ast": {
+                    "op": "G",
+                    "arg": {
+                        "op": "!",
+                        "arg": {
+                            "op": "&",
+                            "args": [
+                                {
+                                    "type": "ap_selector",
+                                    "resource_var": "$r",
+                                    "match": {
+                                        "functions": ["place_approach", "place_insert"],
+                                        "context": {"destination": "assembly_board-v1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                                {
+                                    "type": "ap_selector",
+                                    "resource_var": "$r",
+                                    "match": {
+                                        "functions": ["place_approach", "place_insert"],
+                                        "context": {"destination": "assembly_board-v1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                            ],
+                        },
+                    },
+                },
+            }
+        ]
+    }
+
+    logic = SafetyLogic(
+        _FakeController(_tools_catalog(), responses=[parse_payload, logic_payload]),
+        tmp_path / "safety.txt",
+    )
+
+    with pytest.raises(RuntimeError, match="degenerates into independent single-resource conjuncts"):
+        asyncio.run(logic.build_safety_rules_and_logic("dummy text"))
+
+
+def test_build_safety_rules_keeps_cross_resource_mutex_as_one_rule(tmp_path: Path) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    parse_payload = {
+        "rules": [
+            {
+                "id": "SAFE_5",
+                "raw_text": "both arms should not be inside the assembly board station at the same time.",
+                "constraint_type": "no_simultaneous_presence_in_station",
+                "process": "assembly",
+                "product": [],
+                "resources": ["ur5e", "xarm6"],
+                "resource_types": ["robot"],
+                "event": None,
+                "context": {"destination": "assembly_board-v1"},
+            }
+        ]
+    }
+    logic_payload = {
+        "rules": [
+            {
+                "id": "SAFE_5",
+                "formula_ast": {
+                    "op": "G",
+                    "arg": {
+                        "op": "!",
+                        "arg": {
+                            "op": "&",
+                            "args": [
+                                {
+                                    "type": "ap_selector",
+                                    "resource": "ur5e",
+                                    "match": {
+                                        "functions": ["place_approach", "place_insert"],
+                                        "context": {"location": "assembly_board-v1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                                {
+                                    "type": "ap_selector",
+                                    "resource": "xarm6",
+                                    "match": {
+                                        "functions": ["place_approach", "place_insert"],
+                                        "context": {"location": "assembly_board-v1"},
+                                    },
+                                    "include_entry_events": True,
+                                    "include_state_aps": True,
+                                },
+                            ],
+                        },
+                    },
+                },
+            }
+        ]
+    }
+
+    logic = SafetyLogic(
+        _FakeController(_tools_catalog(), responses=[parse_payload, logic_payload]),
+        tmp_path / "safety.txt",
+    )
+    asyncio.run(logic.build_safety_rules_and_logic("dummy text"))
+
+    assert [rule["id"] for rule in logic.rules] == ["SAFE_5"]
+    assert "ur5e" in logic.logic_raw["SAFE_5"]["ltlf"]
+    assert "xarm6" in logic.logic_raw["SAFE_5"]["ltlf"]
+    assert all("/destination=assembly_board-v1" in ap for ap in logic.logic_raw["SAFE_5"]["aps"])
 
 
 def test_online_monitor_blocks_predicted_state_overlap_and_releases_after_move_home() -> None:

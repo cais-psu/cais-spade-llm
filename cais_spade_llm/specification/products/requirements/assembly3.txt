@@ -1,2 +1,0 @@
-[Product Requirements]
-- Assemble the MCP to the assembly station. 

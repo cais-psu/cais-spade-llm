@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ def compute_bid(
     reachability: list[str],
     staging_areas: dict,
     resource_jid: str,
+    goal_resource_state: str | None = None,
+    goal_event_signatures: set[str] | None = None,
 ) -> Bid | None:
     """
     DES forward BFS to find a feasible event sequence for this resource.
@@ -54,8 +57,9 @@ def compute_bid(
         part_states      : {part_name: state}
         part_locations   : {part_name: location}
 
-    Returns a complete Bid (all P_id assembled), a partial Bid
-    (resource reaches a staging area), or None if no path found.
+    Returns a complete Bid (all P_id assembled and/or resource reaches
+    goal_resource_state), a partial Bid (resource reaches a staging area),
+    or None if no path found.
     """
     resource_name = resource_jid.split("@")[0]
     resource_tools = [t for t in tools if t.get("function_owner_agent") == resource_name]
@@ -64,6 +68,7 @@ def compute_bid(
         return None
 
     staging_names = set(staging_areas.keys())
+    goal_event_signatures = set(goal_event_signatures or set())
 
     def _key(rs, cp, cl, ps, pl):
         return (rs, cp, cl, frozenset(ps.items()), frozenset(pl.items()))
@@ -100,7 +105,12 @@ def compute_bid(
         pl = dict(pl_f)
 
         # --- complete goal ---
-        if all(ps.get(p) == goal_state for p in P_id):
+        parts_complete = all(ps.get(p) == goal_state for p in P_id)
+        resource_complete = (
+            goal_resource_state is None
+            or rs == goal_resource_state
+        )
+        if not goal_event_signatures and parts_complete and resource_complete:
             return Bid(
                 request_id="",
                 ra_jid=resource_jid,
@@ -111,7 +121,14 @@ def compute_bid(
             )
 
         # --- partial goal: resource is at a staging area ---
-        if cl in staging_names and events and best_partial is None:
+        if (
+            not goal_event_signatures
+            and
+            goal_resource_state is None
+            and cl in staging_names
+            and events
+            and best_partial is None
+        ):
             best_partial = (events[:], states[:])
 
         # --- expand ---
@@ -121,7 +138,6 @@ def compute_bid(
             new_key = _key(new_rs, new_cp, new_cl, new_ps, new_pl)
             if new_key in visited:
                 continue
-            visited.add(new_key)
             new_state = {
                 "resource_state": new_rs,
                 "current_part": new_cp,
@@ -129,10 +145,21 @@ def compute_bid(
                 "part_states": new_ps,
                 "part_locations": new_pl,
             }
+            if goal_event_signatures and str(event_dict.get("_tool_signature", "")) in goal_event_signatures:
+                clean_event = {k: v for k, v in event_dict.items() if not str(k).startswith("_")}
+                return Bid(
+                    request_id="",
+                    ra_jid=resource_jid,
+                    str_e=events + [clean_event],
+                    str_x=states + [new_state],
+                    prp_p_achieved=[p for p in P_id if new_ps.get(p) == goal_state],
+                    complete=True,
+                )
+            visited.add(new_key)
             queue.append((
                 new_rs, new_cp, new_cl,
                 frozenset(new_ps.items()), frozenset(new_pl.items()),
-                events + [event_dict],
+                events + [{k: v for k, v in event_dict.items() if not str(k).startswith("_")}],
                 states + [new_state],
             ))
 
@@ -151,6 +178,23 @@ def compute_bid(
     return None
 
 
+def _tool_signature(tool: dict) -> str:
+    payload = {
+        "function_owner_agent": str(tool.get("function_owner_agent") or "").strip(),
+        "function": str(tool.get("function") or "").strip(),
+        "in_state": str(tool.get("in_state") or "").strip(),
+        "out_state": str(tool.get("out_state") or "").strip(),
+        "part_in_state": str(tool.get("part_in_state") or "").strip(),
+        "location_type": str(
+            (tool.get("context_mapping") or {}).get("location_type") or ""
+        ).strip(),
+        "location_param": str(
+            (tool.get("context_mapping") or {}).get("location_param") or ""
+        ).strip(),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resource_jid, goal_state):
     """
     Yield (new_rs, new_cp, new_cl, new_ps, new_pl, event_dict)
@@ -158,7 +202,8 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
     Generalized to read preconditions and effects dynamically from tools.json.
     """
     for tool in tools:
-        if tool.get("in_state") != rs:
+        in_state = str(tool.get("in_state") or "").strip().lower()
+        if in_state not in {"", "any"} and in_state != str(rs).strip().lower():
             continue
 
         fn = tool.get("function")
@@ -172,6 +217,15 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
         loc_type = ctx_map.get("location_type")
         loc_template = part_effect.get("location_template") if cp else None
 
+        # Pure robot-state actions such as move_home do not manipulate parts or locations.
+        if cp is None and not part_in and not loc_type:
+            next_cl = None if str(out or "").strip().lower() == "idle" else cl
+            yield (
+                out or rs, None, next_cl, dict(ps), dict(pl),
+                {"function_name": fn, "params": {}, "_tool_signature": _tool_signature(tool)},
+            )
+            continue
+
         # Tools targeting a specific part location (e.g., move_to_pick)
         if loc_type == "part_location" and not part_in:
             for part in P_id:
@@ -181,7 +235,11 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                 if loc and loc in reachability:
                     yield (
                         out, part, loc, dict(ps), dict(pl),
-                        {"function_name": fn, "params": {loc_param: loc, "part_name": part}},
+                        {
+                            "function_name": fn,
+                            "params": {loc_param: loc, "part_name": part},
+                            "_tool_signature": _tool_signature(tool),
+                        },
                     )
             continue
             
@@ -218,7 +276,11 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
 
                 yield (
                     out, next_cp, next_cl, new_ps, new_pl,
-                    {"function_name": fn, "params": params},
+                    {
+                        "function_name": fn,
+                        "params": params,
+                        "_tool_signature": _tool_signature(tool),
+                    },
                 )
                 
             # Tools that traverse to an explicit new destination (e.g. place_approach)
@@ -240,5 +302,9 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                         
                     yield (
                         out, cp, dest, new_ps, p_copy,
-                        {"function_name": fn, "params": event_params},
+                        {
+                            "function_name": fn,
+                            "params": event_params,
+                            "_tool_signature": _tool_signature(tool),
+                        },
                     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Optional, Iterable
+from typing import Any, Optional, Iterable, Dict, List
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
@@ -93,7 +93,7 @@ class CentralControllerAgent(LlmAgent):
         Collect system-level coordination state for replanning context.
 
         This includes:
-        - Robot states from ResourceAgents
+        - Resource states from ResourceAgents
         - Running tasks from safety monitor
         - Plan FSA state
         - Safety DFA states
@@ -103,18 +103,18 @@ class CentralControllerAgent(LlmAgent):
         """
         coord_state: dict[str, Any] = {}
 
-        # 1. Collect robot states from ResourceAgents
-        robots_state = {}
+        # 1. Collect resource states from ResourceAgents.
+        resource_states = {}
         for ra in self.resource_agents:
             if hasattr(ra, '_snapshot_state'):
-                robots_state[str(ra.jid)] = ra._snapshot_state()
+                resource_states[str(ra.jid)] = ra._snapshot_state()
             else:
                 # Fallback for agents without _snapshot_state
-                robots_state[str(ra.jid)] = {
+                resource_states[str(ra.jid)] = {
                     "current_state": "unknown",
                     "held_part": getattr(ra, '_held_part', None),
                 }
-        coord_state["robots"] = robots_state
+        coord_state["resource_states"] = resource_states
 
         # 2. Collect running tasks from safety monitor
         if self.safety_monitor:
@@ -156,6 +156,17 @@ class CentralControllerAgent(LlmAgent):
             coord_state["safety_supervisor"] = None
 
         return coord_state
+
+    @staticmethod
+    def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        if not isinstance(system_coordination_state, dict):
+            return {}
+
+        for key in ("resource_states", "resources", "robot_states", "robots"):
+            payload = system_coordination_state.get(key)
+            if isinstance(payload, dict):
+                return payload
+        return {}
 
     def _classify_replan_reason(
         self,
@@ -216,6 +227,12 @@ class CentralControllerAgent(LlmAgent):
 
         # Collect system coordination state (robot states, running tasks, FSA states)
         system_coordination_state = self._collect_system_coordination_state()
+        if safety_ctx:
+            safety_ctx["obligation_targets"] = self._build_obligation_targets(
+                event=event,
+                safety_info=safety_ctx,
+                system_coordination_state=system_coordination_state,
+            )
 
         # Debug log: capture the full context we are about to send for replanning.
         # Keep logs bounded to avoid flooding if the context grows large.
@@ -241,6 +258,290 @@ class CentralControllerAgent(LlmAgent):
             }
         )
         return msg
+
+    @staticmethod
+    def _normalize_rule_ids(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        elif value is None:
+            items = []
+        else:
+            items = [value]
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    def _resource_jid_by_token(self) -> dict[str, str]:
+        if not self.safety_monitor:
+            return {}
+        mapping: dict[str, str] = {}
+        for ra in self.resource_agents:
+            jid_text = str(getattr(ra, "jid", "")).strip()
+            if not jid_text:
+                continue
+            mapping[self.safety_monitor._resource_short_name(jid_text)] = jid_text
+        return mapping
+
+    def _rule_resource_tokens(
+        self,
+        rule: dict[str, Any],
+        *,
+        fallback_resource: str = "",
+    ) -> list[str]:
+        if not self.safety_monitor:
+            return []
+        concrete: list[str] = []
+        for value in (rule.get("resources") or []):
+            token = self.safety_monitor._resource_short_name(str(value or "").strip())
+            if not token or token in {"any", "robot"}:
+                continue
+            if token not in concrete:
+                concrete.append(token)
+        if concrete:
+            return concrete
+        if fallback_resource:
+            return [fallback_resource]
+        return sorted(self._resource_jid_by_token().keys())
+
+    def _tool_matches_ap_descriptor(
+        self,
+        row: dict[str, Any],
+        descriptor: dict[str, str],
+        *,
+        resource_token: str,
+    ) -> bool:
+        if not self.safety_monitor:
+            return False
+
+        row_owner = self.safety_monitor._resource_short_name(
+            str(row.get("function_owner_agent", "")).strip()
+        )
+        if resource_token and row_owner and row_owner != resource_token:
+            return False
+
+        desc_resource = self.safety_monitor._resource_short_name(
+            str(descriptor.get("resource", "")).strip()
+        )
+        if desc_resource not in {"", "any", "robot"} and desc_resource != row_owner:
+            return False
+
+        desc_process = str(descriptor.get("process", "")).strip().lower()
+        row_process = str(row.get("process", "")).strip().lower()
+        if desc_process not in {"", "any"} and row_process and desc_process != row_process:
+            return False
+
+        prefix = str(descriptor.get("prefix", "")).strip().lower()
+        symbol = str(descriptor.get("symbol", "")).strip()
+        if prefix in {"ap", "ap_event"}:
+            return symbol == str(row.get("function", "")).strip()
+        if prefix in {"ap_state", "sp"}:
+            out_state = str(row.get("out_state", "")).strip()
+            return bool(out_state) and out_state.lower() != "any" and out_state == symbol
+        return False
+
+    def _candidate_tools_for_obligation(
+        self,
+        *,
+        resource_token: str,
+        required_event_aps: list[dict[str, Any]],
+        required_state_aps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not self.safety_monitor:
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        resource_jid = self._resource_jid_by_token().get(resource_token, resource_token)
+
+        for row in getattr(self, "tools_catalog", []) or []:
+            if not isinstance(row, dict):
+                continue
+
+            matched_event_aps = [
+                ap
+                for ap in required_event_aps
+                if self._tool_matches_ap_descriptor(row, ap, resource_token=resource_token)
+            ]
+            matched_state_aps = [
+                ap
+                for ap in required_state_aps
+                if self._tool_matches_ap_descriptor(row, ap, resource_token=resource_token)
+            ]
+
+            if len(matched_event_aps) != len(required_event_aps):
+                continue
+            if len(matched_state_aps) != len(required_state_aps):
+                continue
+
+            candidates.append(
+                {
+                    "function_name": str(row.get("function", "")).strip(),
+                    "resource_jid": resource_jid,
+                    "tool_signature": self.safety_monitor._tool_signature(row),
+                    "in_state": str(row.get("in_state", "")).strip(),
+                    "out_state": str(row.get("out_state", "")).strip(),
+                    "description": str(row.get("description", "")).strip(),
+                    "matched_event_aps": [
+                        {"label": ap.get("label", ""), "full": ap.get("full", "")}
+                        for ap in matched_event_aps
+                    ],
+                    "matched_state_aps": [
+                        {"label": ap.get("label", ""), "full": ap.get("full", "")}
+                        for ap in matched_state_aps
+                    ],
+                }
+            )
+
+        return candidates
+
+    def _build_obligation_targets(
+        self,
+        *,
+        event: dict[str, Any],
+        safety_info: dict[str, Any],
+        system_coordination_state: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.safety_monitor or not self.safety_rules:
+            return []
+
+        rule_ids = self._normalize_rule_ids(
+            safety_info.get("rule_ids")
+            or safety_info.get("violated_rule")
+            or safety_info.get("violated_rule_id")
+        )
+        if not rule_ids:
+            return []
+
+        rule_lookup = {
+            str(rule.get("id", "")).strip(): rule
+            for rule in self.safety_rules
+            if isinstance(rule, dict) and str(rule.get("id", "")).strip()
+        }
+        trigger_event = str((event or {}).get("function_name") or "").strip()
+        trigger_resource = self.safety_monitor._resource_short_name(
+            str((event or {}).get("resource_jid") or "").strip()
+        )
+        resource_states = self._extract_resource_states(system_coordination_state or {})
+        resource_jid_by_token = self._resource_jid_by_token()
+        targets: list[dict[str, Any]] = []
+
+        for rule_id in rule_ids:
+            rule = rule_lookup.get(rule_id)
+            if not isinstance(rule, dict):
+                continue
+
+            rule_context = dict(rule.get("context") or {})
+            trigger_symbol = str(rule_context.get("trigger_event") or "").strip()
+            required_event_aps: list[dict[str, Any]] = []
+            required_state_aps: list[dict[str, Any]] = []
+
+            for ap in rule.get("aps") or []:
+                if not isinstance(ap, dict):
+                    continue
+                full = str(ap.get("full", "")).strip()
+                label = str(ap.get("label", "")).strip()
+                descriptor = self.safety_monitor._parse_ap_descriptor(full)
+                if not descriptor:
+                    continue
+                payload = {**descriptor, "label": label, "full": full}
+                prefix = str(payload.get("prefix", "")).strip().lower()
+                symbol = str(payload.get("symbol", "")).strip()
+                if prefix in {"ap", "ap_event"}:
+                    if trigger_symbol and symbol == trigger_symbol:
+                        continue
+                    required_event_aps.append(payload)
+                elif prefix in {"ap_state", "sp"}:
+                    required_state_aps.append(payload)
+
+            if not required_event_aps and not required_state_aps:
+                fallback_event = str(rule.get("event", "")).strip()
+                if fallback_event:
+                    for resource_token in self._rule_resource_tokens(
+                        rule,
+                        fallback_resource=trigger_resource,
+                    ):
+                        required_event_aps.append(
+                            {
+                                "prefix": "ap_event",
+                                "process": str(rule.get("process", "")).strip().lower() or "any",
+                                "product": "any",
+                                "resource": resource_token,
+                                "symbol": fallback_event,
+                                "context": "",
+                                "label": "",
+                                "full": "",
+                            }
+                        )
+
+            target_resource_tokens = sorted(
+                {
+                    self.safety_monitor._resource_short_name(ap.get("resource", ""))
+                    for ap in required_event_aps + required_state_aps
+                    if self.safety_monitor._resource_short_name(ap.get("resource", ""))
+                    not in {"", "any", "robot"}
+                }
+            )
+            if not target_resource_tokens:
+                target_resource_tokens = self._rule_resource_tokens(
+                    rule,
+                    fallback_resource=trigger_resource,
+                )
+
+            for resource_token in target_resource_tokens:
+                resource_jid = resource_jid_by_token.get(resource_token, resource_token)
+                resource_event_aps = [
+                    ap for ap in required_event_aps
+                    if self.safety_monitor._resource_short_name(ap.get("resource", ""))
+                    in {"", "any", "robot", resource_token}
+                ]
+                resource_state_aps = [
+                    ap for ap in required_state_aps
+                    if self.safety_monitor._resource_short_name(ap.get("resource", ""))
+                    in {"", "any", "robot", resource_token}
+                ]
+                candidate_tools = self._candidate_tools_for_obligation(
+                    resource_token=resource_token,
+                    required_event_aps=resource_event_aps,
+                    required_state_aps=resource_state_aps,
+                )
+                current_snapshot = dict(resource_states.get(resource_jid) or {})
+                targets.append(
+                    {
+                        "rule_id": rule_id,
+                        "resource_jid": resource_jid,
+                        "required_event_aps": [
+                            {"label": ap.get("label", ""), "full": ap.get("full", "")}
+                            for ap in resource_event_aps
+                        ],
+                        "required_state_aps": [
+                            {"label": ap.get("label", ""), "full": ap.get("full", "")}
+                            for ap in resource_state_aps
+                        ],
+                        "trigger_event": trigger_symbol,
+                        "generated_interpretation": str(
+                            rule.get("generated_interpretation", "")
+                        ).strip(),
+                        "candidate_tools": candidate_tools,
+                        "required_in_states": sorted(
+                            {
+                                str(tool.get("in_state", "")).strip()
+                                for tool in candidate_tools
+                                if str(tool.get("in_state", "")).strip()
+                                and str(tool.get("in_state", "")).strip().lower() != "any"
+                            }
+                        ),
+                        "required_out_states": sorted(
+                            {
+                                str(tool.get("out_state", "")).strip()
+                                for tool in candidate_tools
+                                if str(tool.get("out_state", "")).strip()
+                                and str(tool.get("out_state", "")).strip().lower() != "any"
+                            }
+                        ),
+                        "current_resource_state": str(
+                            current_snapshot.get("current_state", "")
+                        ).strip(),
+                    }
+                )
+
+        return targets
 
     # ------------------------------------------------------------------ #
     # Behaviours
@@ -713,6 +1014,7 @@ class CentralControllerAgent(LlmAgent):
                 fsa = data.get("fsa")            # REQUIRED
                 plan = data.get("plan")          # OPTIONAL (semantic AP mapping)
                 product_jid = data.get("product_jid")
+                runtime_context = data.get("runtime_context") or {}
                 skip_revalidation = bool(
                     data.get("skip_revalidation", data.get("skip_offline_validation", False))
                 )
@@ -729,6 +1031,12 @@ class CentralControllerAgent(LlmAgent):
                 plan_fsa_monitor = agent.plan_fsa_monitor
             else:
                 plan_fsa_monitor = OnlineFsaMonitor(fsa)
+                if isinstance(runtime_context, dict):
+                    plan_fsa_monitor.restore_runtime_progress(
+                        completed_task_ids=runtime_context.get("completed_task_ids") or [],
+                        running_task_ids=runtime_context.get("running_task_ids") or [],
+                        failed_task_ids=runtime_context.get("failed_task_ids") or [],
+                    )
             agent.plan_fsa_monitor = plan_fsa_monitor
 
             # Delegate to the plan validator. A verified zero-rule bundle is
@@ -755,12 +1063,34 @@ class CentralControllerAgent(LlmAgent):
                         if isinstance(agent.precomputed_bundle.get("replan_policy"), dict)
                         else {}
                     )
-                    supervisor_mode = str(
-                        policy.get("runtime_supervisor_mode")
-                        or ("reactive" if skip_revalidation else "preventive")
-                    ).strip().lower()
+                    verified_bundle_runtime = (
+                        str(agent.precomputed_bundle.get("status", "")).strip().lower() == "verified"
+                    )
+                    runtime_validation = (
+                        isinstance(runtime_context, dict)
+                        and any(
+                            runtime_context.get(key)
+                            for key in ("completed_task_ids", "running_task_ids", "failed_task_ids")
+                        )
+                    )
+                    prior_mode = str(getattr(agent, "runtime_supervisor_mode", "") or "").strip().lower()
+                    if verified_bundle_runtime:
+                        supervisor_mode = "reactive"
+                    else:
+                        supervisor_mode = str(
+                            policy.get("runtime_supervisor_mode")
+                            or (
+                                prior_mode
+                                if runtime_validation and prior_mode in {"preventive", "reactive"}
+                                else ("reactive" if skip_revalidation else "preventive")
+                            )
+                        ).strip().lower()
                     if supervisor_mode not in {"preventive", "reactive"}:
-                        supervisor_mode = "reactive" if skip_revalidation else "preventive"
+                        supervisor_mode = (
+                            prior_mode
+                            if runtime_validation and prior_mode in {"preventive", "reactive"}
+                            else ("reactive" if skip_revalidation else "preventive")
+                        )
                     agent.runtime_supervisor_mode = supervisor_mode
                     agent.online_supervisor = OnlineSafetySupervisor(
                         winning_set_data=winning_set_data,

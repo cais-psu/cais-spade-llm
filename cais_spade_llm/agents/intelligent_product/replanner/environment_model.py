@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Optional
 
-from .resource_bidding import Bid
+from .resource_bidding import Bid, _tool_signature
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +125,11 @@ async def llm_explore_states_and_events(
     tools_catalog: list[dict],
     resource_infos: list[dict],
     part_tracker: dict | None = None,
-) -> list[dict]:
+    obligation_targets: list[dict] | None = None,
+    operator_feedback: str = "",
+) -> dict[str, Any] | None:
     """
-    Ask the LLM for bridge tool entries when BFS finds no path.
-    part_tracker provides full part info including camera coordinates for lost parts.
-    Returns synthetic event dicts injected into M_e for a second BFS pass.
+    Ask the LLM for a recovery macro proposal when DES finds no modeled path.
     """
     from cais_spade_llm.prompts import build_state_exploration_prompt
 
@@ -141,16 +141,116 @@ async def llm_explore_states_and_events(
         ra_jid=ra_jid,
         tools_catalog=tools_catalog,
         resource_infos=resource_infos,
+        obligation_targets=obligation_targets,
+        operator_feedback=operator_feedback,
     )
 
     raw = await ask_llm(prompt=prompt, with_functions=False)
+    proposal = _normalize_bridge_proposal(
+        raw=raw,
+        ra_jid=ra_jid,
+        tools_catalog=tools_catalog,
+    )
+    if proposal:
+        logger.info(
+            "[EnvironmentModel] LLM bridge proposed macro '%s' with %d step(s).",
+            proposal.get("function_name"),
+            len(proposal.get("macro_steps") or []),
+        )
+        return proposal
 
+    logger.warning("[EnvironmentModel] LLM bridge response was invalid or not compilable.")
+    return None
+
+
+def _normalize_bridge_proposal(
+    *,
+    raw: str,
+    ra_jid: str,
+    tools_catalog: list[dict],
+) -> Optional[dict[str, Any]]:
     try:
-        bridge_tools = json.loads(raw)
-        if isinstance(bridge_tools, list):
-            logger.info("[EnvironmentModel] LLM bridge returned %d tool(s).", len(bridge_tools))
-            return bridge_tools
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         logger.warning("[EnvironmentModel] LLM bridge response was not valid JSON.")
+        return None
 
-    return []
+    if isinstance(parsed, list):
+        parsed = {
+            "function_name": "bridge_recovery_macro",
+            "resource_jid": ra_jid,
+            "description": "LLM-generated recovery macro",
+            "rationale": "",
+            "macro_steps": parsed,
+        }
+    if not isinstance(parsed, dict):
+        return None
+
+    resource_token = str(ra_jid or "").split("@", 1)[0].strip().lower()
+    resource_tools = [
+        row
+        for row in (tools_catalog or [])
+        if isinstance(row, dict)
+        and str(row.get("function_owner_agent", "")).strip().lower() == resource_token
+    ]
+    tools_by_name = {
+        str(row.get("function", "")).strip(): row
+        for row in resource_tools
+        if str(row.get("function", "")).strip()
+    }
+    macro_steps = parsed.get("macro_steps") or parsed.get("steps") or []
+    if not isinstance(macro_steps, list) or not macro_steps:
+        return None
+
+    compiled_macro: list[dict[str, Any]] = []
+    for index, step in enumerate(macro_steps, start=1):
+        if not isinstance(step, dict):
+            return None
+        function_name = str(step.get("function_name", "")).strip()
+        if not function_name or function_name not in tools_by_name:
+            logger.warning(
+                "[EnvironmentModel] Bridge macro step %d used non-catalog function '%s'.",
+                index,
+                function_name,
+            )
+            return None
+        params = step.get("params") or {}
+        if not isinstance(params, dict):
+            return None
+        tool_row = tools_by_name[function_name]
+        compiled_macro.append(
+            {
+                "resource_jid": ra_jid,
+                "function_name": function_name,
+                "params": dict(params),
+                "description": str(tool_row.get("description", "")).strip(),
+                "tool_signature": _tool_signature(tool_row),
+                "in_state": str(tool_row.get("in_state", "")).strip(),
+                "out_state": str(tool_row.get("out_state", "")).strip(),
+            }
+        )
+
+    function_name = str(parsed.get("function_name", "")).strip()
+    if not function_name:
+        return None
+
+    proposal_resource_jid = str(parsed.get("resource_jid") or ra_jid).strip() or ra_jid
+    if proposal_resource_jid != ra_jid:
+        logger.warning(
+            "[EnvironmentModel] Bridge proposal targeted unexpected resource '%s' (expected '%s').",
+            proposal_resource_jid,
+            ra_jid,
+        )
+        return None
+
+    return {
+        "function_name": function_name,
+        "resource_jid": proposal_resource_jid,
+        "description": str(parsed.get("description", "")).strip(),
+        "rationale": str(parsed.get("rationale", "")).strip(),
+        "macro_steps": compiled_macro,
+        "summary": [
+            function_name,
+            *[str(step.get("function_name", "")).strip() for step in compiled_macro],
+        ],
+    }

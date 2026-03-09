@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import re
+import json
 from typing import Any, Dict, List, Tuple, Optional, FrozenSet
 from urllib.parse import parse_qsl
 
@@ -56,6 +57,39 @@ class BaseSafetyChecker:
             or "any"
         )
         return str(product).lower()
+
+    @staticmethod
+    def _parse_ap_descriptor(full: str) -> Optional[Dict[str, str]]:
+        token = str(full or "").strip()
+        parts = token.split("/")
+        if len(parts) < 6:
+            return None
+        prefix, process, product, resource, symbol, context = parts[:6]
+        return {
+            "prefix": str(prefix or "").strip(),
+            "process": str(process or "").strip(),
+            "product": str(product or "").strip(),
+            "resource": str(resource or "").strip(),
+            "symbol": str(symbol or "").strip(),
+            "context": str(context or "").strip(),
+        }
+
+    @staticmethod
+    def _tool_signature(row: dict[str, Any]) -> str:
+        payload = {
+            "function_owner_agent": str(row.get("function_owner_agent") or "").strip(),
+            "function": str(row.get("function") or "").strip(),
+            "in_state": str(row.get("in_state") or "").strip(),
+            "out_state": str(row.get("out_state") or "").strip(),
+            "part_in_state": str(row.get("part_in_state") or "").strip(),
+            "location_type": str(
+                (row.get("context_mapping") or {}).get("location_type") or ""
+            ).strip(),
+            "location_param": str(
+                (row.get("context_mapping") or {}).get("location_param") or ""
+            ).strip(),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     # ------------------------------------------------------------------ #
     # Shared: Task -> AP Mapping

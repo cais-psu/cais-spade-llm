@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import logging
 import os
+import signal
+import subprocess
 import sys
 import warnings
 
@@ -53,7 +56,7 @@ def _run_headless() -> None:
         )
         cca = agent_creator.create_central_controller(
             "cais_spade_llm/initialization/cca.json", resources
-        )
+        ) 
 
         FunctionAnalyzer.build_tools_catalogue(
             agents=products + resources,
@@ -87,8 +90,80 @@ def _run_headless() -> None:
     spade_run(_main(), embedded_xmpp_server=True)
 
 
+_KILL_CMDS: list[str] = [
+    "killall -9 gzserver gzclient 2>/dev/null",
+    (
+        "killall -9 move_group rviz2 robot_state_publisher "
+        "joint_state_publisher static_transform_publisher "
+        "ros2_control_node 2>/dev/null"
+    ),
+    "pkill -9 -f gazebo 2>/dev/null",
+    "pkill -9 -f keyboard_teleop.py 2>/dev/null",
+    "pkill -9 -f 'spawner' 2>/dev/null",
+    "pkill -9 -f xarm_driver_node 2>/dev/null",
+    "pkill -9 -f controller_manager 2>/dev/null",
+    "pkill -9 -f ur_robot_driver 2>/dev/null",
+]
+
+
+def _kill_stale_ros2_processes(*, quiet: bool = False) -> None:
+    """Kill orphan Gazebo/ROS2/MoveIt processes.
+
+    Called both at startup (to clear leftovers from a previous bad exit)
+    and at shutdown (via atexit / signal handler) so stale processes never
+    survive across sessions.
+    """
+    log = logging.getLogger("ui_main")
+    killed_any = False
+    for cmd in _KILL_CMDS:
+        try:
+            result = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, timeout=5,
+            )
+            if result.returncode == 0:
+                killed_any = True
+        except Exception:
+            pass
+    if killed_any and not quiet:
+        log.info("Startup cleanup: killed stale ROS2/Gazebo processes from previous session.")
+
+
+def _cleanup_ros2_shm() -> None:
+    """Remove stale ROS2 shared-memory segments that accumulate in WSL."""
+    log = logging.getLogger("ui_main")
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "ls /dev/shm/fastrtps_* 2>/dev/null"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            subprocess.run(
+                ["bash", "-c", "rm -f /dev/shm/fastrtps_* 2>/dev/null"],
+                capture_output=True, timeout=5,
+            )
+            log.info("Startup cleanup: removed stale ROS2 shared-memory files.")
+    except Exception:
+        pass
+
+
+def _install_exit_cleanup() -> None:
+    """Register atexit + SIGTERM handler to guarantee process cleanup."""
+    atexit.register(_kill_stale_ros2_processes, quiet=True)
+
+    def _signal_handler(signum: int, _frame: object) -> None:
+        _kill_stale_ros2_processes(quiet=True)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+
 def _run_ui() -> None:
     """Run the NiceGUI operator console (default mode)."""
+    # Clean slate: kill any leftover processes from a previous session.
+    _kill_stale_ros2_processes()
+    _cleanup_ros2_shm()
+    # Register cleanup for when this session exits.
+    _install_exit_cleanup()
     print(
         "UI started. Use Control to launch Gazebo + MoveIt, then Dashboard > Start System to start agents.",
         flush=True,
@@ -99,7 +174,7 @@ def _run_ui() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CAIS-SPADE-LLM: multi-agent manufacturing system",
+        description="CAIS-SP ADE-LLM: multi-agent manufacturing system",
     )
     parser.add_argument(
         "--headless",

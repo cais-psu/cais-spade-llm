@@ -350,6 +350,8 @@ FIELD RULES
   - Represent contextual information as an OBJECT (dictionary).
   - Keys correspond to ontology-aligned contextual roles implied by the tools or the text.
   - Use concise canonical role names, not prose fragments or sentence snippets.
+  - Reuse the exact context keys exposed by matching tools via `required_context_keys`
+    whenever a tool family clearly applies.
   - Values should be canonical identifiers whenever possible, drawn from
     TOOLS_CATALOGUE or CAPABILITY_OVERVIEW, or normalized from the
     natural language when no direct canonical match exists.
@@ -360,6 +362,10 @@ FIELD RULES
   - If no meaningful contextual information applies, set context to null.
   - Do NOT invent a synthetic "ordering" or "before/after" context; for ordering-only rules,
     leave context null unless the text explicitly specifies a concrete location/zone/tool context.
+  - Do NOT invent generic stand-ins like "location" when the tools expose a canonical
+    role such as `origin`, `destination`, or `machine`.
+  - Do NOT encode temporal semantics as boolean context such as `simultaneous`,
+    `overlap`, `before`, or `after`.
 
 • product
   - List ALL specific referenced products/parts (e.g. ["pin", "gear"]).
@@ -590,6 +596,13 @@ General grounding rules:
 - Prefer `resource_var` when the same rule pattern should be expanded over all matching resources.
 - `resource_var` is grounded by the compiler from matching tool rows, not by a fixed resource list.
 - `states` is optional; omit it when the compiler should infer the relevant persistent states.
+- If the structured rule already names concrete resources, prefer concrete `resource`
+  fields over `resource_var`.
+- Do NOT emit multiple distinct `resource_var` names in one `formula_ast`.
+- Reuse canonical context keys from INPUT RULES / TOOLS_CATALOGUE; do not replace them
+  with generic stand-ins like `location`.
+- Keep one selector branch aligned to one context-role family and state slice.
+  Do NOT mix rows that require different context keys inside the same selector.
 
 Allowed temporal operator nodes:
 - {"op": "G", "arg": ...}
@@ -697,6 +710,13 @@ MANDATORY GROUNDING:
 - Use `ap_selector` instead of inventing many explicit atoms when the rule refers
   to a condition like being at a location, being inside a machine/station area,
   or being in a state slice.
+- Reuse exact context keys from INPUT RULES or tool `required_context_keys`.
+  Do not replace a canonical key with a generic key like `location`.
+- Do not invent synthetic boolean context such as `simultaneous=true/false`.
+- Inside one `ap_selector`, keep functions/states aligned to one context-role family.
+  Do not mix rows that require different context keys.
+- If a rule already names specific resources, use concrete `resource` fields rather
+  than multiple distinct `resource_var` names.
 
 === TOOLS_CATALOGUE ===
 {tools_json}
@@ -1107,7 +1127,7 @@ def build_replan_prompt(
     resource_infos: list,
     source: str = "offline",  # "offline" or "online"
     safety_text: str = "",   # Assembly constraints and safety rules
-    system_state: dict | None = None,  # Runtime state (robots, parts, timeline, requirements)
+    system_state: dict | None = None,  # Runtime state (resources, parts, timeline, requirements)
 ) -> str:
     """
     Create the LLM prompt for RE-PLANNING based on safety feedback.
@@ -1115,7 +1135,7 @@ def build_replan_prompt(
     Args:
         source: "offline" (pre-execution FSA violations) or "online" (runtime failures)
         safety_text: Natural language safety constraints (e.g., assembly ordering)
-        system_state: Runtime system state including robot states, part locations, timeline
+        system_state: Runtime system state including resource states, part locations, timeline
     """
 
     # Select appropriate instructions based on context
@@ -1205,19 +1225,33 @@ SAFETY CONSTRAINTS (MUST PRESERVE):
 {safety_text.strip()}
 """
 
-    # Format system state: surface robot availability and part positions prominently,
+    # Format system state: surface resource availability and part positions prominently,
     # then append the full state for completeness.
     state_section = ""
     if system_state:
-        robots = system_state.get("robots") or {}
-        parts  = system_state.get("parts") or {}
+        resource_states = (
+            system_state.get("resource_states")
+            or system_state.get("resources")
+            or system_state.get("robot_states")
+            or system_state.get("robots")
+            or {}
+        )
+        parts = system_state.get("parts") or {}
 
-        robot_lines = []
-        for jid, rs in robots.items():
-            held    = rs.get("held_part") or "nothing"
-            state   = rs.get("current_state", "unknown")
-            gripper = rs.get("gripper_state", "unknown")
-            robot_lines.append(f"  {jid}: holding={held}, state={state}, gripper={gripper}")
+        resource_lines = []
+        for jid, rs in resource_states.items():
+            resource_type = rs.get("resource_type") or "resource"
+            held = rs.get("held_part") or "nothing"
+            state = rs.get("current_state", "unknown")
+            extras = []
+            if rs.get("gripper_state") is not None:
+                extras.append(f"gripper={rs.get('gripper_state')}")
+            if rs.get("active_job") is not None:
+                extras.append(f"active_job={rs.get('active_job')}")
+            extra_text = f", {', '.join(extras)}" if extras else ""
+            resource_lines.append(
+                f"  {jid}: type={resource_type}, holding={held}, state={state}{extra_text}"
+            )
 
         part_lines = []
         for pname, ps in parts.items():
@@ -1228,14 +1262,14 @@ SAFETY CONSTRAINTS (MUST PRESERVE):
             part_lines.append(f"  {pname}: state={pstate}, {pos_str}")
 
         state_section = f"""
-CURRENT ROBOT AVAILABILITY:
-{chr(10).join(robot_lines) if robot_lines else "  (none)"}
+CURRENT RESOURCE AVAILABILITY:
+{chr(10).join(resource_lines) if resource_lines else "  (none)"}
 
 CURRENT PART LOCATIONS:
 {chr(10).join(part_lines) if part_lines else "  (none)"}
 
 FULL RUNTIME STATE:
-{json.dumps({k: v for k, v in system_state.items() if k not in ("robots", "parts")}, indent=2)}
+{json.dumps({k: v for k, v in system_state.items() if k not in ("resource_states", "resources", "robot_states", "robots", "parts")}, indent=2)}
 """
 
     return dedent(f"""\
@@ -1268,33 +1302,45 @@ def build_state_exploration_prompt(
     ra_jid: str,
     tools_catalog: list[dict],
     resource_infos: list[dict],
+    obligation_targets: list[dict] | None = None,
+    operator_feedback: str = "",
 ) -> str:
     """
-    Prompt to generate recovery steps when the DES BFS finds no path.
+    Prompt to generate a bridge recovery macro proposal when DES finds no modeled path.
     """
     part_info = json.dumps(part_tracker, indent=2) if part_tracker else "unavailable"
     tools_info = json.dumps(tools_catalog, indent=2)
     resource_info = json.dumps(resource_infos, indent=2)
+    obligation_info = json.dumps(obligation_targets or [], indent=2)
+    feedback_text = str(operator_feedback or "").strip() or "(none)"
 
     return (
         f"A resource ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
         f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"
         f"Parts that still need to reach {goal_state}: {P_id}\n\n"
+        f"ACTIVE SAFETY OBLIGATION TARGETS:\n{obligation_info}\n\n"
+        f"OPERATOR REFINEMENT FEEDBACK:\n{feedback_text}\n\n"
         f"TOOLS CATALOG: (Reference this for available capabilities)\n{tools_info}\n\n"
         f"RESOURCE CAPABILITIES: (Check reachability and staging areas before assigning coordinates)\n{resource_info}\n\n"
-        "The resource has no available tool sequence to make progress natively. "
-        "Generate 1-3 recovery tool steps as a JSON array to explore new physical states.\n"
-        "You do NOT need to strictly use exact function_names or parameters from the catalog; "
-        "you may invent parameter names (like XYZ coordinates) or function names that clearly "
-        "indicate the recovery action required to map the physical state to an un-stuck state.\n"
-        "[\n"
-        "  {\n"
-        '    "function_name": "<tool name>",\n'
-        '    "in_state": "<resource state before>",\n'
-        '    "out_state": "<resource state after>",\n'
-        '    "part_effect": {"<part_name>": {"state": "<new_state>", "location": "<new_location>"}},\n'
-        '    "params": {"<param_name>": "<value>"}\n'
-        "  }\n"
-        "]\n\n"
-        "Return ONLY the JSON array, no explanation."
+        "The resource has no catalog-valid modeled path to satisfy the active recovery target. "
+        "Propose exactly one HIGH-LEVEL recovery macro as JSON.\n"
+        "Rules:\n"
+        "1. The outer proposal function_name MAY be new.\n"
+        "2. macro_steps MUST compile to EXISTING exact catalog function names for the same resource.\n"
+        "3. Do NOT invent low-level controller capabilities.\n"
+        "4. Prefer the smallest macro that satisfies the active safety obligation target.\n"
+        "5. Every macro_steps entry must include exact params needed for execution.\n"
+        "{\n"
+        '  "function_name": "<new high-level recovery macro name>",\n'
+        f'  "resource_jid": "{ra_jid}",\n'
+        '  "description": "<what this recovery macro accomplishes>",\n'
+        '  "rationale": "<why this satisfies the obligation or unsticks the resource>",\n'
+        '  "macro_steps": [\n'
+        "    {\n"
+        '      "function_name": "<EXISTING catalog function name>",\n'
+        '      "params": {"<param_name>": "<value>"}\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Return ONLY the JSON object, no explanation."
     )

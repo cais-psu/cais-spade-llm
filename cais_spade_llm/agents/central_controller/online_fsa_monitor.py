@@ -52,6 +52,68 @@ class OnlineFsaMonitor:
         """Return True when the provided FSA is structurally identical."""
         return (self.fsa or {}) == (fsa or {})
 
+    def _apply_event_label(self, event_label: str, *, task_id: str, outcome: str | None = None) -> bool:
+        if not self.current_state:
+            return False
+
+        tr = self._tr_map.get((self.current_state, event_label))
+        if not tr:
+            return False
+
+        self.current_state = tr.get("to") or self.current_state
+        if outcome == "done":
+            self.completed_task_ids.add(str(task_id))
+            self.failed_task_ids.discard(str(task_id))
+        elif outcome == "fail":
+            self.failed_task_ids.add(str(task_id))
+        return True
+
+    def restore_runtime_progress(
+        self,
+        *,
+        completed_task_ids: List[str] | None = None,
+        running_task_ids: List[str] | None = None,
+        failed_task_ids: List[str] | None = None,
+    ) -> None:
+        """Replay the executed runtime prefix into a fresh monitor for a repaired FSA."""
+        A = (self.fsa or {}).get("A") or {}
+        self.current_state = A.get("x0")
+        self.completed_task_ids = set()
+        self.failed_task_ids = set()
+
+        completed = [str(task_id).strip() for task_id in (completed_task_ids or []) if str(task_id).strip()]
+        running = [str(task_id).strip() for task_id in (running_task_ids or []) if str(task_id).strip()]
+        failed = [str(task_id).strip() for task_id in (failed_task_ids or []) if str(task_id).strip()]
+
+        for task_id in completed:
+            started = self._apply_event_label(f"{task_id}.start", task_id=task_id)
+            finished = self._apply_event_label(f"{task_id}.done", task_id=task_id, outcome="done")
+            if not (started and finished):
+                self.logger.warning(
+                    "[OnlineFSA] Could not fully restore completed task %s into repaired FSA.",
+                    task_id,
+                )
+
+        for task_id in running:
+            if task_id in self.completed_task_ids:
+                continue
+            if not self._apply_event_label(f"{task_id}.start", task_id=task_id):
+                self.logger.warning(
+                    "[OnlineFSA] Could not restore running task %s into repaired FSA.",
+                    task_id,
+                )
+
+        for task_id in failed:
+            if task_id in self.completed_task_ids:
+                continue
+            started = self._apply_event_label(f"{task_id}.start", task_id=task_id)
+            failed_ok = self._apply_event_label(f"{task_id}.fail", task_id=task_id, outcome="fail")
+            if not (started and failed_ok):
+                self.logger.warning(
+                    "[OnlineFSA] Could not restore failed task %s into repaired FSA.",
+                    task_id,
+                )
+
     def _log_event(self, record: Dict[str, Any]) -> None:
         try:
             with self.history_path.open("a", encoding="utf-8") as f:

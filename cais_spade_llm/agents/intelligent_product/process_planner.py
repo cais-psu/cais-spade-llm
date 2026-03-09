@@ -275,16 +275,283 @@ class ProcessPlanner:
         plan_changed: bool = False,
         used_llm_bridge: bool = False,
         human_required: bool = False,
+        awaiting_bridge_approval: bool = False,
         message: str = "",
         bridge_summary: list[str] | None = None,
+        bridge_proposal: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "plan_changed": bool(plan_changed),
             "used_llm_bridge": bool(used_llm_bridge),
             "human_required": bool(human_required),
+            "awaiting_bridge_approval": bool(awaiting_bridge_approval),
             "message": str(message).strip(),
             "bridge_summary": list(bridge_summary or []),
+            "bridge_proposal": deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None,
         }
+
+    @staticmethod
+    def _tool_signature(row: dict[str, Any]) -> str:
+        payload = {
+            "function_owner_agent": str(row.get("function_owner_agent") or "").strip(),
+            "function": str(row.get("function") or "").strip(),
+            "in_state": str(row.get("in_state") or "").strip(),
+            "out_state": str(row.get("out_state") or "").strip(),
+            "part_in_state": str(row.get("part_in_state") or "").strip(),
+            "location_type": str(
+                (row.get("context_mapping") or {}).get("location_type") or ""
+            ).strip(),
+            "location_param": str(
+                (row.get("context_mapping") or {}).get("location_param") or ""
+            ).strip(),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _resource_infos(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "jid": str(getattr(ra, "jid", "")),
+                "static_capabilities": getattr(ra, "static_capabilities", {}),
+            }
+            for ra in self.resource_agents
+        ]
+
+    def _resource_by_jid(self, target_jid: str) -> Any | None:
+        for ra in self.resource_agents:
+            if str(getattr(ra, "jid", "")) == str(target_jid):
+                return ra
+        return None
+
+    def _identify_stuck_resource(
+        self,
+        violations: list[dict[str, Any]],
+        resource_states: dict[str, dict[str, Any]],
+    ) -> str:
+        for violation in violations:
+            if not isinstance(violation, dict):
+                continue
+            candidate = violation.get("resource_jid") or violation.get("failed_resource_jid")
+            if candidate:
+                return str(candidate)
+            safety_ctx = violation.get("safety_ctx") or {}
+            targets = safety_ctx.get("obligation_targets") or []
+            if isinstance(targets, list):
+                for target in targets:
+                    if not isinstance(target, dict):
+                        continue
+                    target_jid = str(target.get("resource_jid", "")).strip()
+                    if target_jid:
+                        return target_jid
+        for ra in self.resource_agents:
+            ra_jid_candidate = str(ra.jid)
+            rs = resource_states.get(ra_jid_candidate, {})
+            if rs.get("current_state", "idle") != "idle":
+                return ra_jid_candidate
+        return str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
+
+    @staticmethod
+    def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        if not isinstance(system_coordination_state, dict):
+            return {}
+
+        for key in ("resource_states", "resources", "robot_states", "robots"):
+            payload = system_coordination_state.get(key)
+            if isinstance(payload, dict):
+                return payload
+        return {}
+
+    @staticmethod
+    def _default_resource_state(tools_catalog: list[dict[str, Any]]) -> str:
+        all_out_states = {t.get("out_state") for t in tools_catalog if t.get("out_state")}
+        root_states = [
+            t.get("in_state") for t in tools_catalog
+            if t.get("in_state") and t.get("in_state") not in all_out_states
+        ]
+        return str(root_states[0] or "idle") if root_states else "idle"
+
+    def _build_resource_search_state(
+        self,
+        *,
+        resource_jid: str,
+        resource_states: dict[str, dict[str, Any]],
+        default_resource_state: str,
+        part_states: dict[str, Any],
+        part_locations: dict[str, Any],
+    ) -> dict[str, Any]:
+        rs = resource_states.get(resource_jid, {})
+        return {
+            "resource_state": rs.get("current_state", default_resource_state),
+            "current_part": rs.get("held_part"),
+            "current_location": None,
+            "part_states": part_states,
+            "part_locations": part_locations,
+        }
+
+    def _collect_obligation_targets(
+        self,
+        violations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, tuple[str, ...]]] = set()
+
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            safety_ctx = violation.get("safety_ctx") or {}
+            raw_targets = safety_ctx.get("obligation_targets") or []
+            if not isinstance(raw_targets, list):
+                continue
+            for target in raw_targets:
+                if not isinstance(target, dict):
+                    continue
+                rule_id = str(target.get("rule_id", "")).strip()
+                resource_jid = str(target.get("resource_jid", "")).strip()
+                candidate_tools = target.get("candidate_tools") or []
+                signatures = tuple(
+                    sorted(
+                        str(tool.get("tool_signature", "")).strip()
+                        for tool in candidate_tools
+                        if isinstance(tool, dict) and str(tool.get("tool_signature", "")).strip()
+                    )
+                )
+                key = (rule_id, resource_jid, signatures)
+                if key in seen:
+                    continue
+                seen.add(key)
+                targets.append(deepcopy(target))
+
+        return targets
+
+    async def _request_bridge_proposal(
+        self,
+        *,
+        stuck_state: dict[str, Any],
+        P_id: list[str],
+        ra_jid: str,
+        goal_state: str,
+        tools_catalog: list[dict[str, Any]],
+        part_tracker: dict[str, Any],
+        obligation_targets: list[dict[str, Any]],
+        bridge_feedback: str,
+    ) -> dict[str, Any] | None:
+        from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
+            llm_explore_states_and_events,
+        )
+
+        return await llm_explore_states_and_events(
+            stuck_state=stuck_state,
+            P_id=P_id,
+            ra_jid=ra_jid,
+            ask_llm=self.product_agent.ask_llm,
+            goal_state=goal_state or "unknown",
+            tools_catalog=tools_catalog,
+            resource_infos=self._resource_infos(),
+            part_tracker=part_tracker,
+            obligation_targets=obligation_targets,
+            operator_feedback=bridge_feedback,
+        )
+
+    def _bridge_summary(self, proposal: dict[str, Any] | None) -> list[str]:
+        if not isinstance(proposal, dict):
+            return []
+        summary: list[str] = []
+        function_name = str(proposal.get("function_name", "")).strip()
+        if function_name:
+            summary.append(function_name)
+        for step in proposal.get("macro_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            fn = str(step.get("function_name", "")).strip()
+            if fn:
+                summary.append(fn)
+        return summary
+
+    def _node_exists(self, task_id: str) -> bool:
+        return any(
+            isinstance(node, dict) and str(node.get("id", "")).strip() == str(task_id).strip()
+            for node in self.nodes
+        )
+
+    def _path_to_recovery_tasks(
+        self,
+        path: list[dict[str, Any]],
+        *,
+        anchor_task_id: str = "",
+        task_prefix: str = "RECOVERY_DES",
+        change_prefix: str = "DES recovery",
+        macro_name: str = "",
+    ) -> list[dict[str, Any]]:
+        from uuid import uuid4
+
+        tasks: list[dict[str, Any]] = []
+        predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
+        total_steps = len(path)
+        for index, event in enumerate(path, start=1):
+            task_id = f"{task_prefix}_{uuid4().hex[:6].upper()}"
+            params = {
+                **dict(event.get("params") or {}),
+                "product_jid": str(self.product_agent.jid),
+                "task_id": task_id,
+            }
+            reason = (
+                f"INSERTION: {change_prefix} — {event['function_name']} on {event.get('ra_jid', 'unknown')}"
+            )
+            if macro_name:
+                reason = (
+                    f"INSERTION: {change_prefix} '{macro_name}' step {index}/{total_steps} — "
+                    f"{event['function_name']} on {event.get('ra_jid', 'unknown')}"
+                )
+            tasks.append(
+                {
+                    "id": task_id,
+                    "function_name": event["function_name"],
+                    "params": params,
+                    "resource_jid": event.get("ra_jid"),
+                    "predecessors": [predecessor] if predecessor else [],
+                    "successors": [],
+                    "change_reason": reason,
+                }
+            )
+            predecessor = task_id
+        return tasks
+
+    def apply_bridge_macro_proposal(
+        self,
+        proposal: dict[str, Any],
+        *,
+        anchor_task_id: str = "",
+    ) -> list[dict[str, Any]]:
+        if not isinstance(proposal, dict):
+            raise ValueError("bridge proposal is missing")
+
+        path: list[dict[str, Any]] = []
+        proposal_name = str(proposal.get("function_name", "")).strip()
+        for step in proposal.get("macro_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            function_name = str(step.get("function_name", "")).strip()
+            if not function_name:
+                continue
+            path.append(
+                {
+                    "function_name": function_name,
+                    "params": dict(step.get("params") or {}),
+                    "ra_jid": str(step.get("resource_jid") or proposal.get("resource_jid") or "").strip(),
+                }
+            )
+
+        if not path:
+            raise ValueError("bridge proposal has no executable macro_steps")
+
+        tasks = self._path_to_recovery_tasks(
+            path,
+            anchor_task_id=anchor_task_id,
+            task_prefix="RECOVERY_BRIDGE",
+            change_prefix="Approved bridge recovery",
+            macro_name=proposal_name,
+        )
+        self._apply_replan_patch(tasks)
+        return tasks
 
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
@@ -332,7 +599,8 @@ class ProcessPlanner:
     async def replan_with_feedback_online(
         self,
         violations: list[dict],
-        system_coordination_state: dict | None = None
+        system_coordination_state: dict | None = None,
+        bridge_feedback: str = "",
     ) -> dict[str, Any] | None:
         """Online replan — routes to DES or LLM based on replan_mode."""
         replan_mode = str(getattr(self.product_agent, "replan_mode", "llm") or "llm").strip().lower()
@@ -343,6 +611,7 @@ class ProcessPlanner:
             return await self.replan_with_feedback_des(
                 violations,
                 system_coordination_state=system_coordination_state,
+                bridge_feedback=bridge_feedback,
             )
         await self.replan_with_feedback_llm(
             violations,
@@ -404,6 +673,7 @@ class ProcessPlanner:
         self,
         violations: list[dict],
         system_coordination_state: dict | None = None,
+        bridge_feedback: str = "",
     ) -> dict[str, Any]:
         """
         DES replanning: PA computes bids per resource, compiles M_e, runs BFS.
@@ -412,37 +682,11 @@ class ProcessPlanner:
         from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
             compile_environment_model,
             plan_on_environment_model,
-            llm_explore_states_and_events,
         )
         from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import Bid
         from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
 
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
-
-        def _identify_stuck_resource(
-            resource_states: dict[str, dict[str, Any]],
-        ) -> str:
-            for violation in violations:
-                if not isinstance(violation, dict):
-                    continue
-                candidate = violation.get("resource_jid") or violation.get("failed_resource_jid")
-                if candidate:
-                    return str(candidate)
-            for ra in self.resource_agents:
-                ra_jid_candidate = str(ra.jid)
-                rs = resource_states.get(ra_jid_candidate, {})
-                if rs.get("current_state", "idle") != "idle":
-                    return ra_jid_candidate
-            return str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
-
-        def _resource_infos() -> list[dict[str, Any]]:
-            return [
-                {
-                    "jid": str(ra.jid),
-                    "static_capabilities": getattr(ra, "static_capabilities", {}),
-                }
-                for ra in self.resource_agents
-            ]
 
         # 1. Build P_id: parts not yet at goal state
         product_state = self.product_agent._build_product_state()
@@ -462,86 +706,82 @@ class ProcessPlanner:
 
         # 2. Build x_c per resource from coordination state and part tracker
         scs = system_coordination_state or {}
-        # Gracefully handle older coordination formats that still use robot_states
-        resource_states = scs.get("resource_states", scs.get("robot_states", {}))
+        resource_states = self._extract_resource_states(scs)
         part_states = {name: info.get("state") for name, info in part_tracker.items()}
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
-
-        # Derive the default resting state from the tools catalog
-        # (the in_state that is never any tool's out_state is the root state)
-        all_out_states = {t.get("out_state") for t in tools_catalog if t.get("out_state")}
-        root_states = [
-            t.get("in_state") for t in tools_catalog
-            if t.get("in_state") and t.get("in_state") not in all_out_states
-        ]
-        default_resource_state = root_states[0] if root_states else "idle"
+        default_resource_state = self._default_resource_state(tools_catalog)
+        obligation_targets = self._collect_obligation_targets(violations)
         used_llm_bridge = False
         bridge_summary: list[str] = []
         path: list[dict[str, Any]] | None = None
         x_c: dict[str, Any] | None = None
+        stuck_ra_jid = self._identify_stuck_resource(violations, resource_states)
 
-        if not P_id:
-            stuck_ra_jid = _identify_stuck_resource(resource_states)
-            rs = resource_states.get(stuck_ra_jid, {})
-            x_c = {
-                "resource_state": rs.get("current_state", default_resource_state),
-                "current_part": rs.get("held_part"),
-                "current_location": None,
-                "part_states": part_states,
-                "part_locations": part_locations,
-            }
+        if obligation_targets:
+            best_target: dict[str, Any] | None = None
+            best_path: list[dict[str, Any]] | None = None
+            for target in obligation_targets:
+                if not isinstance(target, dict):
+                    continue
+                target_ra_jid = str(target.get("resource_jid", "")).strip()
+                if not target_ra_jid:
+                    continue
+                candidate_signatures = {
+                    str(tool.get("tool_signature", "")).strip()
+                    for tool in (target.get("candidate_tools") or [])
+                    if isinstance(tool, dict) and str(tool.get("tool_signature", "")).strip()
+                }
+                if not candidate_signatures:
+                    continue
+                ra = self._resource_by_jid(target_ra_jid)
+                if ra is None:
+                    continue
+                candidate_state = self._build_resource_search_state(
+                    resource_jid=target_ra_jid,
+                    resource_states=resource_states,
+                    default_resource_state=default_resource_state,
+                    part_states=part_states,
+                    part_locations=part_locations,
+                )
+                bid = compute_bid(
+                    x_c=candidate_state,
+                    P_id=[],
+                    goal_state=goal_state or "",
+                    tools=tools_catalog,
+                    reachability=getattr(ra, "static_capabilities", {}).get("reachability", []),
+                    staging_areas=getattr(ra, "static_capabilities", {}).get("staging_areas", {}),
+                    resource_jid=target_ra_jid,
+                    goal_event_signatures=candidate_signatures,
+                )
+                if not bid or not bid.str_e:
+                    continue
+                candidate_path = [{**event, "ra_jid": target_ra_jid} for event in bid.str_e]
+                if best_path is None or len(candidate_path) < len(best_path):
+                    best_target = target
+                    best_path = candidate_path
+                    stuck_ra_jid = target_ra_jid
+                    x_c = candidate_state
 
-            if part_tracker:
+            if best_path:
+                path = best_path
                 self.logger.info(
-                    "[Planner] All tracked parts already at goal state (%s) — attempting suffix recovery via model bridge.",
-                    goal_state or "unknown",
+                    "[Planner] Modeled obligation recovery matched rule %s with %d step(s).",
+                    best_target.get("rule_id") if isinstance(best_target, dict) else "unknown",
+                    len(best_path),
                 )
-            else:
-                self.logger.warning(
-                    "[Planner] No tracked parts available for DES replanning; attempting suffix recovery via model bridge."
-                )
-
-            bridge_tools = await llm_explore_states_and_events(
-                stuck_state=x_c,
-                P_id=[],
-                ra_jid=stuck_ra_jid,
-                ask_llm=self.product_agent.ask_llm,
-                goal_state=goal_state or "unknown",
-                tools_catalog=tools_catalog,
-                resource_infos=_resource_infos(),
-                part_tracker=part_tracker,
-            )
-            if not bridge_tools:
-                message = (
-                    "DES recovery could not find a modeled suffix and the LLM bridge returned no recovery events."
-                )
-                self.logger.error("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    human_required=True,
-                    message=message,
-                )
-
-            used_llm_bridge = True
-            bridge_summary = [
-                str(tool.get("function_name", "")).strip()
-                for tool in bridge_tools
-                if isinstance(tool, dict) and str(tool.get("function_name", "")).strip()
-            ]
-            path = [{**tool, "ra_jid": stuck_ra_jid} for tool in bridge_tools if isinstance(tool, dict)]
 
         # 3. Compute a bid for each resource agent
-        if P_id:
+        if path is None and P_id and not obligation_targets:
             bids: list[Bid] = []
             for ra in self.resource_agents:
                 ra_jid = str(ra.jid)
-                ra_resource_state = resource_states.get(ra_jid, {})
-                x_c = {
-                    "resource_state": ra_resource_state.get("current_state", default_resource_state),
-                    "current_part": ra_resource_state.get("held_part"),
-                    "current_location": None,
-                    "part_states": part_states,
-                    "part_locations": part_locations,
-                }
+                x_c = self._build_resource_search_state(
+                    resource_jid=ra_jid,
+                    resource_states=resource_states,
+                    default_resource_state=default_resource_state,
+                    part_states=part_states,
+                    part_locations=part_locations,
+                )
                 reachability = getattr(ra, "static_capabilities", {}).get("reachability", [])
                 staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {})
                 bid = compute_bid(
@@ -571,56 +811,72 @@ class ProcessPlanner:
                 }
 
             path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
-
-            if path is None:
-                self.logger.info("[Planner] BFS found no path — requesting LLM bridge.")
-                stuck_state = x_c
-                stuck_ra_jid = _identify_stuck_resource(resource_states)
-                self.logger.info("[Planner] Identified stuck resource: %s", stuck_ra_jid)
-
-                bridge_tools = await llm_explore_states_and_events(
-                    stuck_state=stuck_state,
-                    P_id=P_id,
-                    ra_jid=stuck_ra_jid,
-                    ask_llm=self.product_agent.ask_llm,
-                    goal_state=goal_state,
-                    tools_catalog=tools_catalog,
-                    resource_infos=_resource_infos(),
-                    part_tracker=part_tracker,
+        elif path is None and not P_id and not obligation_targets:
+            x_c = self._build_resource_search_state(
+                resource_jid=stuck_ra_jid,
+                resource_states=resource_states,
+                default_resource_state=default_resource_state,
+                part_states=part_states,
+                part_locations=part_locations,
+            )
+            ra = self._resource_by_jid(stuck_ra_jid)
+            modeled_bid = None
+            if ra is not None:
+                modeled_bid = compute_bid(
+                    x_c=x_c,
+                    P_id=[],
+                    goal_state=goal_state or "",
+                    goal_resource_state=default_resource_state,
+                    tools=tools_catalog,
+                    reachability=getattr(ra, "static_capabilities", {}).get("reachability", []),
+                    staging_areas=getattr(ra, "static_capabilities", {}).get("staging_areas", {}),
+                    resource_jid=stuck_ra_jid,
                 )
-                if bridge_tools:
-                    used_llm_bridge = True
-                    bridge_summary = [
-                        str(tool.get("function_name", "")).strip()
-                        for tool in bridge_tools
-                        if isinstance(tool, dict) and str(tool.get("function_name", "")).strip()
-                    ]
-                    bridge_bid = Bid(
-                        request_id="bridge",
-                        ra_jid=stuck_ra_jid,
-                        str_e=bridge_tools,
-                        str_x=[stuck_state] + [
-                            {
-                                "resource_state": t.get("out_state", stuck_state.get("resource_state")),
-                                "part_states": {
-                                    **stuck_state.get("part_states", {}),
-                                    **{k: v.get("state") for k, v in t.get("part_effect", {}).items()},
-                                },
-                                "part_locations": {
-                                    **stuck_state.get("part_locations", {}),
-                                    **{k: v.get("location") for k, v in t.get("part_effect", {}).items()},
-                                },
-                            }
-                            for t in bridge_tools
-                        ],
-                        prp_p_achieved=[],
-                        complete=False,
-                    )
-                    M_e = compile_environment_model(bids + [bridge_bid])
-                    path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
+            if modeled_bid and modeled_bid.str_e:
+                self.logger.info(
+                    "[Planner] Modeled DES suffix recovery found %d step(s) for %s.",
+                    len(modeled_bid.str_e),
+                    stuck_ra_jid,
+                )
+                path = [{**event, "ra_jid": stuck_ra_jid} for event in modeled_bid.str_e]
 
         if path is None:
-            message = "DES recovery could not find or bridge a valid continuation."
+            if x_c is None:
+                x_c = self._build_resource_search_state(
+                    resource_jid=stuck_ra_jid,
+                    resource_states=resource_states,
+                    default_resource_state=default_resource_state,
+                    part_states=part_states,
+                    part_locations=part_locations,
+                )
+            self.logger.info("[Planner] DES found no modeled continuation; requesting bridge proposal.")
+            bridge_proposal = await self._request_bridge_proposal(
+                stuck_state=x_c,
+                P_id=P_id,
+                ra_jid=stuck_ra_jid,
+                goal_state=goal_state or "unknown",
+                tools_catalog=tools_catalog,
+                part_tracker=part_tracker,
+                obligation_targets=obligation_targets,
+                bridge_feedback=bridge_feedback,
+            )
+            if bridge_proposal:
+                used_llm_bridge = True
+                bridge_summary = self._bridge_summary(bridge_proposal)
+                message = (
+                    "DES found no catalog-valid continuation. A bridge macro proposal is ready for approval."
+                )
+                self.logger.info("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    plan_changed=False,
+                    used_llm_bridge=True,
+                    human_required=False,
+                    awaiting_bridge_approval=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_proposal=bridge_proposal,
+                )
+            message = "DES recovery could not find a modeled path and the LLM bridge produced no compilable proposal."
             self.logger.error("[Planner] %s", message)
             return self._build_des_replan_result(
                 human_required=True,
@@ -629,36 +885,24 @@ class ProcessPlanner:
                 bridge_summary=bridge_summary,
             )
 
-        # 4/8. Translate path to task patch
-        from uuid import uuid4
-        tasks = []
-        prev_id = None
-        for event in path:
-            task_id = f"RECOVERY_DES_{uuid4().hex[:6].upper()}"
-            params = {**event.get("params", {}), "product_jid": str(self.product_agent.jid), "task_id": task_id}
-            tasks.append({
-                "id": task_id,
-                "function_name": event["function_name"],
-                "params": params,
-                "resource_jid": event.get("ra_jid"),
-                "predecessors": [prev_id] if prev_id else [],
-                "successors": [],
-                "change_reason": (
-                    f"INSERTION: DES recovery — {event['function_name']} on {event.get('ra_jid', 'unknown')}"
-                ),
-            })
-            prev_id = task_id
-
+        failed_task_id = ""
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            candidate_task_id = str(violation.get("failed_task_id", "")).strip()
+            if candidate_task_id:
+                failed_task_id = candidate_task_id
+                break
+        tasks = self._path_to_recovery_tasks(
+            path,
+            anchor_task_id=failed_task_id,
+        )
         self.logger.info("[Planner] DES recovery path: %d tasks.", len(tasks))
         self._apply_replan_patch(tasks)
-        message = (
-            f"DES recovery produced {len(tasks)} task(s)."
-            if not used_llm_bridge
-            else f"DES recovery used the LLM bridge and produced {len(tasks)} task(s)."
-        )
+        message = f"DES recovery produced {len(tasks)} task(s)."
         return self._build_des_replan_result(
             plan_changed=bool(tasks),
-            used_llm_bridge=used_llm_bridge,
+            used_llm_bridge=False,
             human_required=False,
             message=message,
             bridge_summary=bridge_summary,

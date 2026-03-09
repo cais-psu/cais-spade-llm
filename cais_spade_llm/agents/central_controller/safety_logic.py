@@ -173,6 +173,18 @@ class SafetyLogic:
         return ordered
 
     @staticmethod
+    def _debug_json(value: Any) -> str:
+        def _default(obj: Any) -> Any:
+            if isinstance(obj, set):
+                return sorted(obj)
+            return repr(obj)
+
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=_default)
+        except TypeError:
+            return repr(value)
+
+    @staticmethod
     def _normalize_context_scalar(value: Any) -> str:
         if isinstance(value, bool):
             return "true" if value else "false"
@@ -690,6 +702,64 @@ class SafetyLogic:
                 out.append(token)
         return out
 
+    @staticmethod
+    def _collect_resource_var_names(node: Any) -> set[str]:
+        names: set[str] = set()
+        if isinstance(node, dict):
+            token = str(node.get("resource_var", "") or "").strip()
+            if token:
+                names.add(token)
+            for value in node.values():
+                names |= SafetyLogic._collect_resource_var_names(value)
+            return names
+        if isinstance(node, list):
+            for value in node:
+                names |= SafetyLogic._collect_resource_var_names(value)
+        return names
+
+    @staticmethod
+    def _row_required_context_keys(row: dict[str, Any]) -> tuple[str, ...]:
+        keys = [
+            str(key).strip()
+            for key in (row.get("required_context_keys") or [])
+            if str(key).strip()
+        ]
+        return tuple(SafetyLogic._dedupe_keep_order(keys))
+
+    @staticmethod
+    def _row_location_type(row: dict[str, Any]) -> str:
+        mapping = row.get("context_mapping") or {}
+        if not isinstance(mapping, dict):
+            return ""
+        return str(mapping.get("location_type") or "").strip().lower()
+
+    @staticmethod
+    def _row_persistent_state_name(row: dict[str, Any]) -> str:
+        state = str(row.get("out_state", "") or "").strip()
+        if not state or state.lower() == "any":
+            return ""
+        return state
+
+    @classmethod
+    def _row_family_signature(cls, row: dict[str, Any]) -> tuple[str, ...]:
+        roles = cls._row_required_context_keys(row)
+        if roles:
+            return roles
+        location_type = cls._row_location_type(row)
+        if location_type:
+            return (f"location_type={location_type}",)
+        return ("<none>",)
+
+    @classmethod
+    def _row_family_payload(cls, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "function": str(row.get("function", "")).strip(),
+            "required_context_keys": list(cls._row_required_context_keys(row)),
+            "location_type": cls._row_location_type(row),
+            "in_state": cls._normalize_state_name(row.get("in_state")),
+            "out_state": cls._normalize_state_name(row.get("out_state")),
+        }
+
     def _resolve_rule_resources(self, rule: dict[str, Any]) -> list[str]:
         _, _, allowed_resources, _ = self._tool_grounding()
         allowed_resource_types = {
@@ -815,10 +885,12 @@ class SafetyLogic:
         selector_process: str = "",
         selector_resource_type: str = "",
         selector_functions: Optional[set[str]] = None,
+        selector_states: Optional[set[str]] = None,
     ) -> bool:
         row_process = self._normalize_process_token(row.get("process"))
         row_resource_type = self._normalize_resource_type_token(row.get("resource_type"))
         row_function = str(row.get("function", "")).strip()
+        row_out_state = self._row_persistent_state_name(row)
 
         if selector_process and row_process != selector_process:
             return False
@@ -826,28 +898,136 @@ class SafetyLogic:
             return False
         if selector_functions and row_function not in selector_functions:
             return False
+        if selector_states and row_out_state not in selector_states:
+            return False
 
         if not selector_context:
             return True
-        required_context_keys = [
-            str(key).strip()
-            for key in (row.get("required_context_keys") or [])
-            if str(key).strip()
-        ]
+        required_context_keys = list(self._row_required_context_keys(row))
         if not required_context_keys:
             return False
         required = set(required_context_keys)
         return set(selector_context.keys()).issubset(required)
 
+    def _resolved_selector_match_spec_and_rows(
+        self,
+        rule: dict[str, Any],
+        selector_node: dict[str, Any],
+        *,
+        resource: str = "",
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        match_spec = self._selector_match_spec(rule, selector_node)
+        rows = self._tool_rows_for_resource(resource) if resource else self._tool_rows()
+
+        base_rows = [
+            row
+            for row in rows
+            if self._match_selector_row(
+                row,
+                None,
+                selector_process=match_spec["process"],
+                selector_resource_type=match_spec["resource_type"],
+                selector_functions=match_spec["functions"] or None,
+            )
+        ]
+        if not base_rows:
+            raise RuntimeError(
+                f"selector for rule {rule.get('id')} did not match any tool rows before context grounding "
+                f"(match={self._debug_json(match_spec)}, selector={self._debug_json(selector_node)})"
+            )
+
+        explicit_states = match_spec["states"]
+        candidate_rows = base_rows
+        if explicit_states:
+            candidate_rows = [
+                row
+                for row in base_rows
+                if self._row_persistent_state_name(row) in explicit_states
+            ]
+            if not candidate_rows:
+                available_states = sorted(
+                    {
+                        state
+                        for row in base_rows
+                        if (state := self._row_persistent_state_name(row))
+                    }
+                )
+                raise RuntimeError(
+                    f"selector for rule {rule.get('id')} requested states {sorted(explicit_states)} "
+                    f"but matching tool rows expose out_states {available_states or ['<none>']} "
+                    f"before context grounding"
+                )
+
+        selector_context = match_spec["context"]
+        if selector_context:
+            supported_keys = self._dedupe_keep_order(
+                [
+                    key
+                    for row in candidate_rows
+                    for key in self._row_required_context_keys(row)
+                ]
+            )
+            selector_keys = list(selector_context.keys())
+            unsupported_keys = [key for key in selector_keys if key not in supported_keys]
+            if unsupported_keys:
+                if (
+                    len(selector_keys) == 1
+                    and len(unsupported_keys) == 1
+                    and len(supported_keys) == 1
+                ):
+                    selector_context = {
+                        supported_keys[0]: selector_context[selector_keys[0]]
+                    }
+                else:
+                    raise RuntimeError(
+                        f"selector for rule {rule.get('id')} uses unresolved context keys {unsupported_keys}; "
+                        f"candidate canonical context roles are {supported_keys or ['<none>']} "
+                        f"(match={self._debug_json(match_spec)}, selector={self._debug_json(selector_node)})"
+                    )
+
+        filtered_rows = [
+            row
+            for row in candidate_rows
+            if self._match_selector_row(
+                row,
+                selector_context,
+                selector_process=match_spec["process"],
+                selector_resource_type=match_spec["resource_type"],
+                selector_functions=match_spec["functions"] or None,
+                selector_states=explicit_states or None,
+            )
+        ]
+        if not filtered_rows:
+            raise RuntimeError(
+                f"selector for rule {rule.get('id')} could not ground context "
+                f"{self._debug_json(selector_context)} to any tool rows"
+            )
+
+        family_signatures = {self._row_family_signature(row) for row in filtered_rows}
+        if len(family_signatures) > 1:
+            raise RuntimeError(
+                f"selector for rule {rule.get('id')} mixes incompatible tool families "
+                f"(families={self._debug_json(sorted(family_signatures))}, "
+                f"rows={self._debug_json([self._row_family_payload(row) for row in filtered_rows])})"
+            )
+
+        resolved_match = dict(match_spec)
+        resolved_match["context"] = selector_context
+        return resolved_match, filtered_rows
+
     def _selector_context_token(
         self,
         rule: dict[str, Any],
         selector_node: dict[str, Any],
+        *,
+        resource: str = "",
     ) -> str:
-        match = selector_node.get("match") or {}
-        if not isinstance(match, dict):
-            match = {}
-        selector_context = self._normalize_context_object(match.get("context"))
+        resolved_match, _ = self._resolved_selector_match_spec_and_rows(
+            rule,
+            selector_node,
+            resource=resource,
+        )
+        selector_context = self._normalize_context_object(resolved_match.get("context"))
         if selector_context:
             return self._serialize_context_object(selector_context)
         rule_context = self._normalize_context_object(rule.get("context"))
@@ -860,19 +1040,12 @@ class SafetyLogic:
         *,
         resource: str = "",
     ) -> list[dict[str, Any]]:
-        match_spec = self._selector_match_spec(rule, selector_node)
-        rows = self._tool_rows_for_resource(resource) if resource else self._tool_rows()
-        return [
-            row
-            for row in rows
-            if self._match_selector_row(
-                row,
-                match_spec["context"],
-                selector_process=match_spec["process"],
-                selector_resource_type=match_spec["resource_type"],
-                selector_functions=match_spec["functions"] or None,
-            )
-        ]
+        _, rows = self._resolved_selector_match_spec_and_rows(
+            rule,
+            selector_node,
+            resource=resource,
+        )
+        return rows
 
     def _candidate_resources_from_rows(
         self,
@@ -979,14 +1152,16 @@ class SafetyLogic:
 
     def _expand_selector(self, rule: dict[str, Any], selector_node: dict[str, Any]) -> list[str]:
         resource = self._normalize_atom_resource(rule, selector_node)
-        match_spec = self._selector_match_spec(rule, selector_node)
+        match_spec, matching_rows = self._resolved_selector_match_spec_and_rows(
+            rule,
+            selector_node,
+            resource=resource,
+        )
         explicit_states = match_spec["states"]
         include_entry_events = bool(selector_node.get("include_entry_events", True))
         include_state_aps = bool(selector_node.get("include_state_aps", True))
-        context_token = self._selector_context_token(rule, selector_node)
+        context_token = self._selector_context_token(rule, selector_node, resource=resource)
         product_token = self._normalize_atom_product(rule, selector_node)
-
-        matching_rows = self._matching_rows_for_selector(rule, selector_node, resource=resource)
 
         persistent_states: list[str] = []
         state_process: dict[str, str] = {}
@@ -1108,8 +1283,12 @@ class SafetyLogic:
         if node_type == "ap_selector":
             aps = self._expand_selector(rule, node)
             if not aps:
+                resource = self._normalize_atom_resource(rule, node)
+                match_spec = self._selector_match_spec(rule, node)
                 raise RuntimeError(
-                    f"ap_selector for rule {rule.get('id')} did not expand to any APs"
+                    f"ap_selector for rule {rule.get('id')} did not expand to any APs "
+                    f"(resource={resource}, rule_resources={self._resolve_rule_resources(rule)}, "
+                    f"match={self._debug_json(match_spec)}, selector={self._debug_json(node)})"
                 )
             if len(aps) == 1:
                 return aps[0], aps
@@ -1158,7 +1337,13 @@ class SafetyLogic:
         formula_ast: dict[str, Any],
     ) -> Dict[str, Any]:
         ast = deepcopy(formula_ast)
-        if self._ast_contains_resource_var(ast):
+        resource_vars = self._collect_resource_var_names(ast)
+        if len(resource_vars) > 1:
+            raise RuntimeError(
+                f"formula_ast for rule {rule.get('id')} uses multiple distinct resource_var names "
+                f"{sorted(resource_vars)}; use concrete resources or a single shared resource_var"
+            )
+        if resource_vars:
             resources = self._resolve_ast_resource_bindings(rule, ast)
             compiled_terms: list[str] = []
             aps: list[str] = []
@@ -1183,6 +1368,73 @@ class SafetyLogic:
             "aps": self._dedupe_keep_order(aps),
             "ltlf": formula,
         }
+
+    @classmethod
+    def _resources_for_formula(cls, formula: str, aps: list[str]) -> list[str]:
+        resources: list[str] = []
+        for ap in aps:
+            if ap and ap not in formula:
+                continue
+            segments = cls._ap_segments(ap)
+            if not segments:
+                continue
+            resource = str(segments.get("resource", "")).strip().lower()
+            if resource and resource not in {"any", "robot"}:
+                resources.append(resource)
+        return cls._dedupe_keep_order(resources)
+
+    def _validate_compiled_rule_logic(
+        self,
+        rule: dict[str, Any],
+        compiled: dict[str, Any],
+        *,
+        refinement_feedback: str = "",
+    ) -> None:
+        aps = [
+            str(ap).strip()
+            for ap in (compiled.get("aps") or [])
+            if str(ap or "").strip()
+        ]
+        ltlf = str(compiled.get("ltlf", "") or "").strip()
+        if not aps or not ltlf:
+            return
+
+        family = self._infer_ltlf_family(
+            rule,
+            aps,
+            refinement_feedback=refinement_feedback,
+        )
+        if family != "mutex":
+            return
+
+        concrete_rule_resources = [
+            resource
+            for resource in self._resolve_rule_resources(rule)
+            if resource not in {"any", "robot"}
+        ]
+        if len(concrete_rule_resources) < 2:
+            return
+
+        used_resources = self._resources_for_formula(ltlf, aps)
+        if len(used_resources) < 2:
+            raise RuntimeError(
+                f"compiled mutex rule {rule.get('id')} references fewer than two concrete resources "
+                f"(used_resources={used_resources}, expected_resources={concrete_rule_resources}, ltlf={ltlf})"
+            )
+
+        conjuncts = self._split_ltlf_formula_by_top_level_and(ltlf)
+        conjunct_resource_sets: list[set[str]] = []
+        for conjunct in conjuncts:
+            resources = set(self._resources_for_formula(conjunct, aps))
+            if resources:
+                conjunct_resource_sets.append(resources)
+
+        if conjunct_resource_sets and all(len(resources) <= 1 for resources in conjunct_resource_sets):
+            raise RuntimeError(
+                f"compiled mutex rule {rule.get('id')} degenerates into independent single-resource conjuncts "
+                f"(conjunct_resources={self._debug_json([sorted(resources) for resources in conjunct_resource_sets])}, "
+                f"ltlf={ltlf})"
+            )
 
 
     # ------------------------------------------------------------------ #
@@ -1651,7 +1903,19 @@ class SafetyLogic:
             rule = rules_by_id.get(rid, {})
             formula_ast = item.get("formula_ast")
             if isinstance(formula_ast, dict):
-                compiled = self._compile_formula_ast_for_rule(rule, formula_ast)
+                try:
+                    compiled = self._compile_formula_ast_for_rule(rule, formula_ast)
+                except Exception:
+                    if self.logger:
+                        self.logger.error(
+                            "[SafetyLogic] Failed to compile formula_ast for rule %s. "
+                            "rule=%s formula_ast=%s raw_item=%s",
+                            rid,
+                            self._debug_json(rule),
+                            self._debug_json(formula_ast),
+                            self._debug_json(item),
+                        )
+                    raise
                 result[str(rid)] = compiled
                 continue
 
@@ -1819,6 +2083,16 @@ class SafetyLogic:
             raise RuntimeError(
                 "Safety logic references unsupported events that cannot be grounded to catalog actions: "
                 f"{detail}. Supported functions: {sorted(allowed_functions)}"
+            )
+
+        for rid, compiled in result.items():
+            rule = rules_by_id.get(rid, {})
+            if not rule or not isinstance(compiled, dict):
+                continue
+            self._validate_compiled_rule_logic(
+                rule,
+                compiled,
+                refinement_feedback=refinement_feedback,
             )
 
         return result

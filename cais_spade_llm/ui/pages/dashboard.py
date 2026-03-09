@@ -773,6 +773,7 @@ def render(bridge: SystemBridge) -> None:
             runtime_recovery_container = ui.column().classes("w-full gap-3")
 
             guidance_buffers: dict[str, str] = {}
+            bridge_feedback_buffers: dict[str, str] = {}
 
             def _status_color(status: str) -> str:
                 key = str(status or "").strip().lower()
@@ -869,6 +870,31 @@ def render(bridge: SystemBridge) -> None:
                 except Exception as exc:
                     ui.notify(f"Failed to retry DES recovery: {exc}", type="negative")
 
+            async def _approve_runtime_bridge(product_jid: str) -> None:
+                try:
+                    await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
+                    ui.notify("Bridge proposal approved. Runtime recovery resumed.", type="positive")
+                    _refresh_runtime_recovery_panel()
+                except Exception as exc:
+                    ui.notify(f"Failed to approve bridge proposal: {exc}", type="negative")
+
+            async def _reject_runtime_bridge(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "")).strip()
+                if not feedback:
+                    ui.notify("Bridge rejection feedback is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.reject_runtime_bridge_proposal,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
+                    ui.notify("Bridge proposal rejected. Regenerating with feedback.", type="positive")
+                    _refresh_runtime_recovery_panel()
+                except Exception as exc:
+                    ui.notify(f"Failed to reject bridge proposal: {exc}", type="negative")
+
             def _refresh_runtime_recovery_panel() -> None:
                 runtime_recovery_container.clear()
                 recoveries = bridge.get_runtime_recoveries()
@@ -897,7 +923,16 @@ def render(bridge: SystemBridge) -> None:
                             )
                             or ""
                         )
+                        bridge_feedback = str(
+                            bridge_feedback_buffers.get(product_jid, "")
+                            or ""
+                        )
                         guidance_buffers[product_jid] = operator_guidance
+                        bridge_feedback_buffers[product_jid] = bridge_feedback
+                        bridge_proposal = recovery.get("bridge_proposal")
+                        bridge_approval_state = str(
+                            recovery.get("bridge_approval_state", "none") or "none"
+                        ).strip()
 
                         with ui.card().classes("w-full bg-slate-50"):
                             with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
@@ -907,6 +942,10 @@ def render(bridge: SystemBridge) -> None:
                                     ui.badge(_resolution_label(resolution)).props(
                                         f"color={_resolution_color(resolution)}"
                                     )
+                                    if bridge_approval_state not in {"", "none"}:
+                                        ui.badge(
+                                            f"Bridge {bridge_approval_state.replace('_', ' ')}"
+                                        ).props("color=teal")
 
                             with ui.row().classes("items-center gap-2 flex-wrap text-xs text-slate-600"):
                                 ui.label(f"Trigger: {str(recovery.get('trigger', '') or 'n/a')}")
@@ -924,6 +963,53 @@ def render(bridge: SystemBridge) -> None:
                                 f"Witnesses: {witness_count} | "
                                 f"Violated rules: {', '.join(violated_rules) if violated_rules else 'none'}"
                             ).classes("text-xs text-slate-600")
+
+                            if status == "llm_bridge" and isinstance(bridge_proposal, dict):
+                                with ui.expansion("Bridge proposal", icon="alt_route", value=True).classes("w-full mt-2"):
+                                    ui.label(
+                                        f"Macro: {str(bridge_proposal.get('function_name', '') or 'unnamed')}"
+                                    ).classes("text-sm font-medium")
+                                    ui.label(
+                                        f"Resource: {str(bridge_proposal.get('resource_jid', '') or 'n/a')}"
+                                    ).classes("text-xs text-slate-600")
+                                    description = str(bridge_proposal.get("description", "")).strip()
+                                    rationale = str(bridge_proposal.get("rationale", "")).strip()
+                                    if description:
+                                        ui.label(description).classes("text-sm")
+                                    if rationale:
+                                        ui.label(f"Rationale: {rationale}").classes("text-xs text-slate-600")
+                                    for idx, step in enumerate(bridge_proposal.get("macro_steps") or [], start=1):
+                                        if not isinstance(step, dict):
+                                            continue
+                                        params_text = json.dumps(step.get("params") or {}, default=str)
+                                        ui.label(
+                                            f"{idx}. {step.get('function_name', '')}({params_text})"
+                                        ).classes("text-xs font-mono text-slate-700")
+                                bridge_feedback_box = ui.textarea(
+                                    label="Rejection feedback",
+                                    value=bridge_feedback,
+                                ).props("outlined autogrow").classes("w-full mt-2")
+                                bridge_feedback_box.on_value_change(
+                                    lambda e, jid=product_jid: bridge_feedback_buffers.__setitem__(
+                                        jid,
+                                        str(e.value or ""),
+                                    )
+                                )
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    ui.button(
+                                        "Approve and Resume",
+                                        on_click=lambda jid=product_jid: asyncio.create_task(
+                                            _approve_runtime_bridge(jid)
+                                        ),
+                                        icon="play_arrow",
+                                    ).props("color=green")
+                                    ui.button(
+                                        "Reject and Regenerate",
+                                        on_click=lambda jid=product_jid: asyncio.create_task(
+                                            _reject_runtime_bridge(jid)
+                                        ),
+                                        icon="refresh",
+                                    ).props("color=orange")
 
                             history = list(recovery.get("history") or [])
                             if history:

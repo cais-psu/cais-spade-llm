@@ -85,9 +85,13 @@ def test_build_safety_prompts_include_refinement_feedback_and_previous_preview()
     assert "HUMAN-IN-THE-LOOP REFINEMENT CONTEXT" in parse_prompt
     assert feedback in parse_prompt
     assert '"constraint_type": "old_mutex"' in parse_prompt
+    assert 'Do NOT invent generic stand-ins like "location"' in parse_prompt
+    assert "Do NOT encode temporal semantics as boolean context" in parse_prompt
     assert "HUMAN-IN-THE-LOOP REFINEMENT CONTEXT" in logic_prompt
     assert feedback in logic_prompt
     assert '"constraint_type": "old_mutex"' in logic_prompt
+    assert "Do NOT emit multiple distinct `resource_var` names" in logic_prompt
+    assert "Do not replace a canonical key with a generic key like `location`." in logic_prompt
 
 
 def test_safety_logic_passes_refinement_context_into_both_llm_calls(tmp_path: Path) -> None:

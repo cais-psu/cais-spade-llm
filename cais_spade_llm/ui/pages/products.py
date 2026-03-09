@@ -879,9 +879,17 @@ def render(bridge: SystemBridge) -> None:
                 name = path.name
                 if path.exists():
                     path.unlink()
+                # Clear the product meta reference so the file is fully unlinked.
+                _product_state.setdefault("meta", {})
+                _product_state["meta"]["product_specification_file"] = ""
+                _persist_selected_product_meta()
+                # Reset the UI.
+                req_select.options = {}
+                req_select.value = None
+                req_select.update()
+                req_editor.value = ""
                 status_label.text = f"Deleted {name}"
                 status_label.classes(replace="text-sm text-red-600")
-                _refresh_requirement_file_list(str(path))
 
             _REQ_FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\.txt$")
 
