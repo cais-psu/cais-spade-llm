@@ -569,19 +569,12 @@ def render(bridge: SystemBridge) -> None:
                         manifest.get("status", row.get("status", ""))
                     ).strip().lower()
                     matches_scope = _bundle_scope_matches_selection(manifest, req_file, safety_file)
-                    delete_policy = bridge.get_bundle_delete_policy(bid)
-                    missing_links = delete_policy.get("missing_links", [])
-                    has_missing_links = isinstance(missing_links, list) and bool(missing_links)
-
                     bundle_cache[bid] = evaluation
+                    if not matches_scope:
+                        continue
                     created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
                     status = str(manifest_status or evaluation.get("status", row.get("status", ""))).upper()
-                    if matches_scope:
-                        options[bid] = f"{created} | {status} | SELECTED SCOPE | {bid}"
-                    elif has_missing_links:
-                        options[bid] = f"{created} | {status} | UNLINKED | {bid}"
-                    else:
-                        options[bid] = f"{created} | {status} | OTHER SCOPE | {bid}"
+                    options[bid] = f"{created} | {status} | {bid}"
 
                 bundle_select.options = options
                 bundle_select.update()

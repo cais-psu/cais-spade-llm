@@ -7,6 +7,7 @@ import hashlib
 import json
 import os, uuid
 import shutil
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -110,6 +111,8 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_max_attempts = 3
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
+        self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
+        self._runtime_recovery_context: dict[str, Any] = {}
         self.kickoff_result: dict[str, Any] = {
             "success": False,
             "message": "kickoff pending",
@@ -143,18 +146,27 @@ class ProductAgent(LlmAgent):
     # ------------------------------------------------------------------ #
     # Persistence helper
     # ------------------------------------------------------------------ #
-    def _build_plan_validation_payload(self):
-        """Package plan + FSA for offline safety validation by the CCA."""
+    def _build_plan_validation_payload(
+        self,
+        *,
+        skip_revalidation: bool = False,
+        skip_offline_validation: bool | None = None,
+    ):
+        """Package plan + FSA for plan validation by the CCA."""
         fsa = self.process_planner.global_fsa
         nodes = self.process_planner.nodes
 
         if fsa is None:
             raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
 
+        if skip_offline_validation is not None:
+            skip_revalidation = bool(skip_offline_validation)
+
         return {
             "fsa": fsa,                      # <-- upload FSA here
             "product_jid": str(self.jid),
             "plan": {"nodes": nodes},
+            "skip_revalidation": bool(skip_revalidation),
         }
 
     @staticmethod
@@ -232,6 +244,110 @@ class ProductAgent(LlmAgent):
 
     def get_plan_safety_alert(self) -> dict[str, Any] | None:
         return dict(self.plan_safety_alert) if isinstance(self.plan_safety_alert, dict) else None
+
+    def _empty_runtime_recovery(self) -> dict[str, Any]:
+        return {
+            "product_name": self.agent_name,
+            "product_jid": str(self.jid),
+            "replan_mode": str(self.replan_mode or "llm").strip().lower() or "llm",
+            "status": "idle",
+            "resolution_class": "none",
+            "trigger": "",
+            "failed_task_id": "",
+            "message": "No active runtime recovery session.",
+            "violated_rules": [],
+            "witness_count": 0,
+            "attempts_used": 0,
+            "attempts_max": int(self._runtime_repair_max_attempts),
+            "used_llm_bridge": False,
+            "operator_guidance": "",
+            "history": [],
+            "updated_at_utc": self._utc_now_iso(),
+        }
+
+    def _sync_runtime_repair_state(self) -> None:
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if status in {"des_search", "llm_bridge", "validating"}:
+            self.runtime_repair_state = "repairing"
+        elif status == "human_required":
+            self.runtime_repair_state = "paused_after_failure"
+        else:
+            self.runtime_repair_state = "idle"
+
+    def _set_runtime_recovery(
+        self,
+        *,
+        reset: bool = False,
+        status: str | None = None,
+        resolution_class: str | None = None,
+        trigger: str | None = None,
+        failed_task_id: str | None = None,
+        message: str | None = None,
+        attempts_used: int | None = None,
+        attempts_max: int | None = None,
+        used_llm_bridge: bool | None = None,
+        operator_guidance: str | None = None,
+        violations: list[dict[str, Any]] | None = None,
+        append_history: bool = False,
+        history_message: str | None = None,
+    ) -> dict[str, Any]:
+        current = self._empty_runtime_recovery() if reset else deepcopy(self.runtime_recovery)
+        current["product_name"] = self.agent_name
+        current["product_jid"] = str(self.jid)
+        current["replan_mode"] = str(self.replan_mode or "llm").strip().lower() or "llm"
+        current["attempts_max"] = int(self._runtime_repair_max_attempts)
+
+        if status is not None:
+            current["status"] = str(status or "idle").strip() or "idle"
+        if resolution_class is not None:
+            current["resolution_class"] = str(resolution_class or "none").strip() or "none"
+        if trigger is not None:
+            current["trigger"] = str(trigger).strip()
+        if failed_task_id is not None:
+            current["failed_task_id"] = str(failed_task_id).strip()
+        if message is not None:
+            current["message"] = str(message).strip() or current.get("message", "")
+        if attempts_used is not None:
+            current["attempts_used"] = max(0, int(attempts_used))
+        if attempts_max is not None:
+            current["attempts_max"] = max(0, int(attempts_max))
+        if used_llm_bridge is not None:
+            current["used_llm_bridge"] = bool(used_llm_bridge)
+        if operator_guidance is not None:
+            current["operator_guidance"] = str(operator_guidance).strip()
+        if violations is not None:
+            violated_rules, witness_count = self._violation_summary(violations)
+            current["violated_rules"] = violated_rules
+            current["witness_count"] = witness_count
+
+        event_message = str(history_message if history_message is not None else message or "").strip()
+        if append_history and event_message:
+            history = list(current.get("history") or [])
+            history.append(
+                {
+                    "timestamp": self._utc_now_iso(),
+                    "status": current.get("status", ""),
+                    "message": event_message,
+                }
+            )
+            current["history"] = history[-12:]
+
+        current["updated_at_utc"] = self._utc_now_iso()
+        self.runtime_recovery = current
+        self._sync_runtime_repair_state()
+        return deepcopy(current)
+
+    def _clear_runtime_recovery(self) -> None:
+        self.runtime_recovery = self._empty_runtime_recovery()
+        self._runtime_recovery_context = {}
+        self._sync_runtime_repair_state()
+
+    def _runtime_recovery_blocks_execution(self) -> bool:
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        return status not in {"", "idle", "resolved"}
+
+    def get_runtime_recovery(self) -> dict[str, Any]:
+        return deepcopy(self.runtime_recovery) if isinstance(self.runtime_recovery, dict) else self._empty_runtime_recovery()
 
     def _set_kickoff_result(
         self,
@@ -323,6 +439,7 @@ class ProductAgent(LlmAgent):
                 "part_tracker": self.part_tracker,
                 "execution_timeline": self.execution_timeline,
                 "runtime_repair_state": self.runtime_repair_state,
+                "runtime_recovery": self.runtime_recovery,
                 "plan_safety_alert": self.plan_safety_alert,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
@@ -485,6 +602,10 @@ class ProductAgent(LlmAgent):
             runtime_repair_state = str(product_state.get("runtime_repair_state", "")).strip()
             if runtime_repair_state:
                 self.runtime_repair_state = runtime_repair_state
+            runtime_recovery = product_state.get("runtime_recovery")
+            if isinstance(runtime_recovery, dict):
+                self.runtime_recovery = deepcopy(runtime_recovery)
+                self._sync_runtime_repair_state()
             alert = product_state.get("plan_safety_alert")
             self.plan_safety_alert = dict(alert) if isinstance(alert, dict) else None
             self.logger.info(
@@ -774,6 +895,383 @@ class ProductAgent(LlmAgent):
 
         return reactivated
 
+    def _candidate_task_ids_from_violations(
+        self,
+        violations: list[dict[str, Any]] | None,
+    ) -> set[str]:
+        candidate_ids: set[str] = set()
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            for key in ("failed_task_id", "task_id"):
+                task_id = violation.get(key)
+                if task_id:
+                    candidate_ids.add(str(task_id))
+            for key in ("affected_task_ids", "blocked_task_ids", "unreachable_task_ids"):
+                values = violation.get(key)
+                if isinstance(values, (list, tuple, set)):
+                    candidate_ids.update(str(value) for value in values if value)
+        return candidate_ids
+
+    async def _send_runtime_plan_validation_check(self) -> None:
+        self.process_planner.compile_global_fsa()
+        self.process_planner.save_global_fsa(self.global_fsa_path)
+
+        payload = self._build_plan_validation_payload()
+        self._ensure_plan_result_inbox()
+        msg_check = Message(to=self.cca_jid)
+        msg_check.set_metadata("type", "plan_safety_check")
+        msg_check.body = json.dumps(payload)
+        await self.send(msg_check)
+
+        self.logger.info(
+            "[Product] Recompiled plan FSA after runtime recovery and sent plan_safety_check to CCA."
+        )
+
+    async def _run_des_runtime_recovery_attempt(
+        self,
+        *,
+        violations: list[dict[str, Any]],
+        trigger: str,
+        failed_task_id: str,
+        system_coordination_state: dict | None = None,
+        reset_attempts: bool = False,
+        history_message: str | None = None,
+    ) -> dict[str, Any]:
+        if reset_attempts:
+            self._runtime_repair_fail_streak = 0
+
+        attempt_number = self._runtime_repair_fail_streak + 1
+        self._runtime_repair_fail_streak = attempt_number
+        self._runtime_recovery_context = {
+            "trigger": str(trigger or "").strip(),
+            "failed_task_id": str(failed_task_id or "").strip(),
+            "violations": deepcopy(list(violations or [])),
+            "system_coordination_state": deepcopy(system_coordination_state or {}),
+        }
+        self._set_runtime_recovery(
+            status="des_search",
+            resolution_class="none",
+            trigger=trigger,
+            failed_task_id=failed_task_id,
+            message=(
+                f"Running DES runtime recovery attempt "
+                f"{attempt_number}/{self._runtime_repair_max_attempts}."
+            ),
+            attempts_used=attempt_number,
+            attempts_max=self._runtime_repair_max_attempts,
+            used_llm_bridge=False,
+            violations=violations,
+            append_history=True,
+            history_message=history_message or (
+                f"DES runtime recovery attempt {attempt_number}/{self._runtime_repair_max_attempts} started."
+            ),
+        )
+
+        self._runtime_repair_inflight = True
+        try:
+            result = await self.process_planner.replan_with_feedback_online(
+                violations,
+                system_coordination_state=system_coordination_state,
+            )
+            if not isinstance(result, dict):
+                result = {}
+
+            plan_changed = bool(result.get("plan_changed", False))
+            used_llm_bridge = bool(result.get("used_llm_bridge", False))
+            human_required = bool(result.get("human_required", False))
+            base_message = str(result.get("message", "")).strip()
+            bridge_summary = result.get("bridge_summary") or []
+            if used_llm_bridge:
+                bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                self._set_runtime_recovery(
+                    status="llm_bridge",
+                    trigger=trigger,
+                    failed_task_id=failed_task_id,
+                    message=base_message or "DES recovery used the LLM bridge to extend the model.",
+                    attempts_used=attempt_number,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    violations=violations,
+                    append_history=True,
+                    history_message=f"LLM bridge added {bridge_text}.",
+                )
+
+            if human_required or not plan_changed:
+                message = (
+                    base_message
+                    or "DES recovery could not produce a valid continuation. Human intervention required."
+                )
+                recovery = self._set_runtime_recovery(
+                    status="human_required",
+                    resolution_class="human_required",
+                    trigger=trigger,
+                    failed_task_id=failed_task_id,
+                    message=message,
+                    attempts_used=attempt_number,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=used_llm_bridge,
+                    violations=violations,
+                    append_history=True,
+                    history_message=message,
+                )
+                self._set_plan_safety_alert(
+                    stage="runtime",
+                    message=message,
+                    retries_used=attempt_number,
+                    retries_max=self._runtime_repair_max_attempts,
+                    violations=violations,
+                    paused=True,
+                )
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
+
+            reactivated = self._reactivate_blocked_tasks(
+                candidate_task_ids=self._candidate_task_ids_from_violations(violations) or None
+            )
+            if reactivated:
+                self.logger.info(
+                    "[Product] Reactivated %d blocked task(s) to pending after DES recovery.",
+                    reactivated,
+                )
+
+            validation_message = (
+                "DES recovery candidate generated; validating updated plan."
+                if not used_llm_bridge
+                else "DES + LLM bridge candidate generated; validating updated plan."
+            )
+            recovery = self._set_runtime_recovery(
+                status="validating",
+                resolution_class="none",
+                trigger=trigger,
+                failed_task_id=failed_task_id,
+                message=validation_message,
+                attempts_used=attempt_number,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=used_llm_bridge,
+                violations=violations,
+                append_history=True,
+                history_message=validation_message,
+            )
+            self._clear_plan_safety_alert()
+            await self._send_runtime_plan_validation_check()
+            await asyncio.to_thread(self._persist_plan_snapshot)
+            await asyncio.to_thread(self._persist_product_state)
+            await asyncio.to_thread(self._persist_resource_state)
+            return recovery
+        except Exception as exc:
+            self.logger.exception("[Product] DES runtime recovery attempt failed.")
+            message = (
+                f"{self.agent_name}: DES runtime recovery attempt "
+                f"{attempt_number}/{self._runtime_repair_max_attempts} failed ({exc})."
+            )
+            recovery = self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                trigger=trigger,
+                failed_task_id=failed_task_id,
+                message=message,
+                attempts_used=attempt_number,
+                attempts_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=attempt_number,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            await asyncio.to_thread(self._persist_product_state)
+            return recovery
+        finally:
+            self._runtime_repair_inflight = False
+
+    async def _handle_runtime_des_replan_request(
+        self,
+        *,
+        reason: str,
+        failed_task_id: str,
+        violations: list[dict[str, Any]],
+        system_coordination_state: dict | None = None,
+    ) -> dict[str, Any]:
+        current_status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if current_status in {"des_search", "llm_bridge", "validating", "human_required"}:
+            self.logger.warning(
+                "[Product] Runtime recovery already active for %s; ignoring duplicate replan request.",
+                self.runtime_recovery.get("failed_task_id") or failed_task_id,
+            )
+            return self.get_runtime_recovery()
+
+        self._clear_plan_safety_alert()
+        self._set_runtime_recovery(
+            reset=True,
+            status="des_search",
+            resolution_class="none",
+            trigger=reason,
+            failed_task_id=failed_task_id,
+            message=f"Runtime DES recovery triggered by {reason}.",
+            attempts_used=0,
+            attempts_max=self._runtime_repair_max_attempts,
+            violations=violations,
+            append_history=True,
+            history_message=f"Runtime DES recovery triggered by {reason}.",
+        )
+        return await self._run_des_runtime_recovery_attempt(
+            violations=violations,
+            trigger=reason,
+            failed_task_id=failed_task_id,
+            system_coordination_state=system_coordination_state,
+            reset_attempts=True,
+        )
+
+    async def _handle_runtime_plan_validation_result(
+        self,
+        *,
+        ok: bool,
+        violations: list[dict[str, Any]],
+    ) -> bool:
+        if str(self.replan_mode or "llm").strip().lower() != "des":
+            return False
+
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if not self._runtime_recovery_context and status in {"", "idle", "resolved"}:
+            return False
+
+        if ok:
+            resolution_class = (
+                "des_with_llm_bridge"
+                if bool(self.runtime_recovery.get("used_llm_bridge", False))
+                else "des_only"
+            )
+            attempts_used = self._runtime_repair_fail_streak
+            self._runtime_repair_fail_streak = 0
+            self._set_runtime_recovery(
+                status="resolved",
+                resolution_class=resolution_class,
+                message="Plan validation passed; runtime recovery resolved.",
+                attempts_used=attempts_used,
+                used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
+                violations=[],
+                append_history=True,
+                history_message="Plan validation passed; runtime recovery resolved.",
+            )
+            self._runtime_recovery_context = {}
+            self._clear_plan_safety_alert()
+            await asyncio.to_thread(self._persist_product_state)
+            return True
+
+        if self._runtime_repair_inflight:
+            self.logger.warning(
+                "[Product] Runtime plan validation failed while DES recovery is already running; ignoring duplicate result."
+            )
+            return True
+
+        if not self._runtime_recovery_context:
+            message = (
+                f"{self.agent_name}: plan validation failed without an active DES recovery context; "
+                "execution paused for human intervention."
+            )
+            self._set_runtime_recovery(
+                reset=True,
+                status="human_required",
+                resolution_class="human_required",
+                message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            await asyncio.to_thread(self._persist_product_state)
+            return True
+
+        if self._runtime_repair_fail_streak >= self._runtime_repair_max_attempts:
+            message = (
+                f"{self.agent_name}: runtime plan validation still fails after "
+                f"{self._runtime_repair_fail_streak}/{self._runtime_repair_max_attempts} "
+                "DES recovery attempt(s); execution paused."
+            )
+            self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
+                message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            await asyncio.to_thread(self._persist_product_state)
+            return True
+
+        self._runtime_recovery_context["violations"] = deepcopy(list(violations or []))
+        await self._run_des_runtime_recovery_attempt(
+            violations=violations,
+            trigger=str(self._runtime_recovery_context.get("trigger", "")),
+            failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
+            system_coordination_state=dict(self._runtime_recovery_context.get("system_coordination_state") or {}),
+            reset_attempts=False,
+            history_message=(
+                f"Plan validation failed; rerunning DES recovery attempt "
+                f"{self._runtime_repair_fail_streak + 1}/{self._runtime_repair_max_attempts}."
+            ),
+        )
+        return True
+
+    async def submit_runtime_recovery_guidance(self, message: str) -> dict[str, Any]:
+        guidance = str(message or "").strip()
+        if not guidance:
+            raise ValueError("operator guidance is empty")
+        recovery = self._set_runtime_recovery(
+            operator_guidance=guidance,
+            append_history=True,
+            history_message=f"Operator guidance recorded: {guidance}",
+        )
+        await asyncio.to_thread(self._persist_product_state)
+        return recovery
+
+    async def retry_runtime_recovery_des(self) -> dict[str, Any]:
+        if str(self.replan_mode or "llm").strip().lower() != "des":
+            raise RuntimeError("runtime DES retry is only available when replan_mode=des")
+        if not self._runtime_recovery_context:
+            raise RuntimeError("no active runtime DES recovery context is available")
+        trigger = str(self._runtime_recovery_context.get("trigger", "") or "operator_retry")
+        failed_task_id = str(self._runtime_recovery_context.get("failed_task_id", "")).strip()
+        violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
+        system_coordination_state = dict(self._runtime_recovery_context.get("system_coordination_state") or {})
+        self._clear_plan_safety_alert()
+        return await self._run_des_runtime_recovery_attempt(
+            violations=violations,
+            trigger=trigger,
+            failed_task_id=failed_task_id,
+            system_coordination_state=system_coordination_state,
+            reset_attempts=True,
+            history_message="Operator requested a DES retry for the active runtime recovery session.",
+        )
+
     async def _build_plan(self, requirement_text: str, safety_text: str = ""):
         """Build requirements, expand to tasks, and compile the global FSA."""
         # 1) NL → structured requirements
@@ -854,6 +1352,7 @@ class ProductAgent(LlmAgent):
                 agent.runtime_repair_state = "idle"
                 agent._runtime_repair_fail_streak = 0
                 agent._clear_plan_safety_alert()
+                agent._clear_runtime_recovery()
 
                 used_precomputed = agent._load_precomputed_plan_bundle()
                 max_retries = 0 if used_precomputed else 3
@@ -869,7 +1368,9 @@ class ProductAgent(LlmAgent):
                         max_retries,
                     )
 
-                    payload = agent._build_plan_validation_payload()
+                    payload = agent._build_plan_validation_payload(
+                        skip_revalidation=used_precomputed,
+                    )
                     msg = Message(to=agent.cca_jid)
                     msg.set_metadata("type", "plan_safety_check")
                     msg.body = json.dumps(payload)
@@ -1150,6 +1651,16 @@ class ProductAgent(LlmAgent):
                 reason,
                 failed_task_id,
             )
+            if str(agent.replan_mode or "llm").strip().lower() == "des":
+                await agent._handle_runtime_des_replan_request(
+                    reason=str(reason),
+                    failed_task_id=str(failed_task_id),
+                    violations=violations,
+                    system_coordination_state=system_coordination_state,
+                )
+                await asyncio.to_thread(agent._persist_product_state)
+                return
+
             await agent.process_planner.replan_with_feedback_online(
                 violations,
                 system_coordination_state=system_coordination_state,
@@ -1223,6 +1734,12 @@ class ProductAgent(LlmAgent):
             violations = payload.get("violations")
             if not isinstance(violations, list):
                 violations = []
+
+            if await agent._handle_runtime_plan_validation_result(
+                ok=ok,
+                violations=violations,
+            ):
+                return
 
             if ok:
                 if agent._runtime_repair_fail_streak:
@@ -1339,7 +1856,7 @@ class ProductAgent(LlmAgent):
             if not agent.resource_jids:
                 return
 
-            if agent.runtime_repair_state != "idle":
+            if agent._runtime_recovery_blocks_execution():
                 await asyncio.sleep(0.5)
                 return
 

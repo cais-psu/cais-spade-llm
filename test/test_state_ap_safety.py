@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import sys
@@ -14,21 +16,28 @@ PKG_ROOT = REPO_ROOT / "cais_spade_llm"
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
-from cais_spade_llm.agents.central_controller.offline_safety_validator import (
-    OfflineSafetyValidator,
+from cais_spade_llm.agents.central_controller.plan_safety_validator import (
+    PlanSafetyValidator,
 )
+from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
 from cais_spade_llm.agents.central_controller.online_safety_monitor import (
     OnlineSafetyMonitor,
+)
+from cais_spade_llm.agents.central_controller.online_safety_supervisor import (
+    OnlineSafetySupervisor,
 )
 
 
 class _FakeController:
-    def __init__(self, tools_catalog: list[dict]) -> None:
+    def __init__(self, tools_catalog: list[dict], responses: list[dict] | None = None) -> None:
         self.logger = logging.getLogger("test.state_ap_safety")
         self.tools_catalog = tools_catalog
+        self._responses = [json.dumps(r) for r in (responses or [])]
 
     async def ask_llm(self, **_: object) -> str:
-        raise RuntimeError("ask_llm should not be called in this unit test")
+        if not self._responses:
+            raise RuntimeError("no mock response left")
+        return self._responses.pop(0)
 
     def _static_caps_overview(self) -> str:
         return "resource: ur5e, xarm6"
@@ -131,6 +140,8 @@ def _board_mutex_dot() -> str:
     return "\n".join(
         [
             "digraph MONA_DFA {",
+            "  node [shape = doublecircle]; 1;",
+            "  node [shape = circle]; 2;",
             "  init -> 1;",
             '  1 -> 2 [label="((ap001 | ap002 | ap003) & (ap004 | ap005 | ap006))"];',
             '  1 -> 1 [label="true"];',
@@ -138,6 +149,182 @@ def _board_mutex_dot() -> str:
             "}",
         ]
     )
+
+
+def _return_home_rule() -> dict:
+    return {
+        "id": "SAFE_R",
+        "raw_text": "resource should move home after place_insert",
+        "process": "assembly",
+        "product": [],
+        "resources": ["ur5e"],
+        "context": None,
+        "aps": [
+            {
+                "label": "ap001",
+                "full": "ap_event/assembly/any/ur5e/move_home/any",
+            },
+            {
+                "label": "ap002",
+                "full": "ap_event/assembly/any/ur5e/place_insert/any",
+            },
+        ],
+        "ltlf": "G (ap002 -> F ap001)",
+    }
+
+
+def _return_home_dot() -> str:
+    return "\n".join(
+        [
+            "digraph MONA_DFA {",
+            "  node [shape = doublecircle]; 1;",
+            "  node [shape = circle]; 2;",
+            "  init -> 1;",
+            '  1 -> 2 [label="ap002 & ~ap001"];',
+            '  1 -> 1 [label="ap001 | ~ap002"];',
+            '  2 -> 1 [label="ap001"];',
+            '  2 -> 2 [label="~ap001"];',
+            "}",
+        ]
+    )
+
+
+def _response_plan_fsa_with_move_home() -> dict:
+    return {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,idle))",
+                "(ur5e@localhost=(k=1,run=H1:move_home))",
+                "(ur5e@localhost=(k=2,idle))",
+            ],
+            "E": ["I1.done", "H1.start", "H1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle))",
+                    "event": "H1.start",
+                    "to": "(ur5e@localhost=(k=1,run=H1:move_home))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "idle",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,run=H1:move_home))",
+                    "event": "H1.done",
+                    "to": "(ur5e@localhost=(k=2,idle))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "idle",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=2,idle))"],
+        }
+    }
+
+
+def _response_plan_fsa_missing_move_home() -> dict:
+    return {
+        "A": {
+            "X": ["(ur5e@localhost=(k=0,idle))", "(ur5e@localhost=(k=1,idle))"],
+            "E": ["I1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=1,idle))"],
+        }
+    }
+
+
+def _mutex_waiting_plan_fsa() -> dict:
+    return {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,run=H1:move_home),xarm6@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=X1:place_approach))",
+            ],
+            "E": ["U1.done", "H1.start", "H1.done", "X1.start"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+                    "event": "U1.done",
+                    "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+                    "task_id": "U1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_approach",
+                    "params": {"destination_location": "assembly_board-v1"},
+                    "in_state": "picked",
+                    "out_state": "positioned",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+                    "event": "H1.start",
+                    "to": "(ur5e@localhost=(k=1,run=H1:move_home),xarm6@localhost=(k=0,idle))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "idle",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,run=H1:move_home),xarm6@localhost=(k=0,idle))",
+                    "event": "H1.done",
+                    "to": "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "idle",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,idle))",
+                    "event": "X1.start",
+                    "to": "(ur5e@localhost=(k=1,idle),xarm6@localhost=(k=0,run=X1:place_approach))",
+                    "task_id": "X1",
+                    "resource_jid": "xarm6@localhost",
+                    "function_name": "place_approach",
+                    "params": {"destination_location": "assembly_board-v1"},
+                    "in_state": "picked",
+                    "out_state": "positioned",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle),xarm6@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=0,idle))"],
+        }
+    }
 
 
 def test_ap_selector_expands_destination_selector_to_entry_event_and_state_aps(tmp_path: Path) -> None:
@@ -254,6 +441,109 @@ def test_resource_var_selector_grounds_only_matching_resource_type(tmp_path: Pat
     assert "printer_b" in compiled["ltlf"]
 
 
+def test_parsed_resource_types_survive_and_constrain_resource_var_grounding(tmp_path: Path) -> None:
+    pytest.importorskip("ltlf2dfa")
+    from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+
+    tools_catalog = [
+        {
+            "function": "stage_part",
+            "function_owner_agent": "arm_a",
+            "process": "transfer",
+            "resource_type": "robot",
+            "in_state": "idle",
+            "out_state": "staged",
+            "required_context_keys": ["machine"],
+        },
+        {
+            "function": "start_print",
+            "function_owner_agent": "printer_a",
+            "process": "printing",
+            "resource_type": "printer",
+            "in_state": "loaded",
+            "out_state": "printing",
+            "required_context_keys": ["machine"],
+        },
+        {
+            "function": "finish_print",
+            "function_owner_agent": "printer_a",
+            "process": "printing",
+            "resource_type": "printer",
+            "in_state": "printing",
+            "out_state": "printed",
+            "required_context_keys": ["machine"],
+        },
+        {
+            "function": "start_print",
+            "function_owner_agent": "printer_b",
+            "process": "printing",
+            "resource_type": "printer",
+            "in_state": "loaded",
+            "out_state": "printing",
+            "required_context_keys": ["machine"],
+        },
+        {
+            "function": "finish_print",
+            "function_owner_agent": "printer_b",
+            "process": "printing",
+            "resource_type": "printer",
+            "in_state": "printing",
+            "out_state": "printed",
+            "required_context_keys": ["machine"],
+        },
+    ]
+
+    parse_payload = {
+        "rules": [
+            {
+                "id": "SAFE_3",
+                "raw_text": "printers should not be in the same machine area while printing",
+                "constraint_type": "printer_mutex",
+                "process": "printing",
+                "product": [],
+                "resources": ["any"],
+                "resource_types": ["printer"],
+                "event": None,
+                "context": {"machine": "printer_cell_1"},
+            }
+        ]
+    }
+    logic_payload = {
+        "rules": [
+            {
+                "id": "SAFE_3",
+                "formula_ast": {
+                    "op": "G",
+                    "arg": {
+                        "type": "ap_selector",
+                        "resource_var": "$r",
+                        "match": {
+                            "resource_type": "printer",
+                            "process": "printing",
+                            "context": {"machine": "printer_cell_1"},
+                        },
+                        "include_entry_events": True,
+                        "include_state_aps": True,
+                    },
+                },
+            }
+        ]
+    }
+
+    logic = SafetyLogic(
+        _FakeController(tools_catalog, responses=[parse_payload, logic_payload]),
+        tmp_path / "safety.txt",
+    )
+    asyncio.run(logic.build_safety_rules_and_logic("dummy text"))
+
+    rule = logic.rules[0]
+    full_aps = [str(ap.get("full", "")) for ap in rule.get("aps", [])]
+
+    assert rule.get("resource_types") == ["printer"]
+    assert all("/printer_a/" in ap or "/printer_b/" in ap for ap in full_aps)
+    assert all("/arm_a/" not in ap for ap in full_aps)
+
+
 def test_online_monitor_blocks_predicted_state_overlap_and_releases_after_move_home() -> None:
     rule = _board_mutex_rule()
     monitor = OnlineSafetyMonitor(
@@ -303,7 +593,7 @@ def test_online_monitor_blocks_predicted_state_overlap_and_releases_after_move_h
 
 def test_offline_validator_blocks_plan_branch_on_predicted_state_overlap() -> None:
     rule = _board_mutex_rule()
-    validator = OfflineSafetyValidator(
+    validator = PlanSafetyValidator(
         rules=[rule],
         dfa_map={"SAFE_1": _board_mutex_dot()},
         tools_catalog=_tools_catalog(),
@@ -358,9 +648,604 @@ def test_offline_validator_blocks_plan_branch_on_predicted_state_overlap() -> No
         }
     }
 
-    ok, violations = validator.validate_fsa_offline(fsa=fsa, plan=None, product_jid="assembly_board-v1")
+    ok, violations = validator.validate_plan_fsa(fsa=fsa, plan=None, product_jid="assembly_board-v1")
 
     assert ok is False
     assert violations
     assert violations[0]["violated_rule_id"] == "SAFE_1"
     assert violations[0]["witness_events"] == ["U1.start", "U1.done", "X1.start"]
+
+
+def test_offline_validator_rejects_missing_eventual_successor_at_marked_state() -> None:
+    rule = _return_home_rule()
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map={"SAFE_R": _return_home_dot()},
+        tools_catalog=_tools_catalog(),
+    )
+
+    ok, violations = validator.validate_plan_fsa(
+        fsa=_response_plan_fsa_missing_move_home(),
+        plan=None,
+        product_jid="assembly_board-v1@localhost",
+    )
+
+    assert ok is False
+    assert violations
+    assert violations[0]["violated_rule_id"] == "SAFE_R"
+    assert violations[0]["witness_events"] == ["I1.done"]
+
+
+def test_winning_set_reports_pending_obligation_and_safe_suffix() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = _response_plan_fsa_with_move_home()
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map=dfa_map,
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    assert supervisor.classify()["status"] == "safe"
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify()
+    assert diagnosis["status"] == "pending_obligation"
+    assert diagnosis["rule_ids"] == ["SAFE_R"]
+    assert diagnosis["safe_next_task_ids"] == ["H1"]
+    assert diagnosis["safe_suffix_hint"]
+    assert diagnosis["safe_suffix_hint"][0]["task_id"] == "H1"
+
+
+def test_supervisor_detects_inevitable_violation_when_required_successor_missing() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = _response_plan_fsa_missing_move_home()
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map=dfa_map,
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify()
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["rule_ids"] == ["SAFE_R"]
+    assert diagnosis["safe_next_task_ids"] == []
+
+
+def test_supervisor_blocks_start_when_required_successor_is_absent_from_suffix() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                "(ur5e@localhost=(k=1,idle))",
+            ],
+            "E": ["I1.start", "I1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.start",
+                    "to": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=1,idle))"],
+        }
+    }
+
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map=dfa_map,
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    allowed, diagnosis = supervisor.check_candidate(
+        {
+            "task_id": "I1",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+        }
+    )
+
+    assert allowed is False
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["safe_next_task_ids"] == []
+
+
+def test_reactive_supervisor_allows_start_until_missing_successor_obligation_triggers() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                "(ur5e@localhost=(k=1,idle))",
+            ],
+            "E": ["I1.start", "I1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.start",
+                    "to": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=1,idle))"],
+        }
+    }
+
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map=dfa_map,
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="reactive",
+    )
+
+    assert supervisor.classify()["status"] == "safe"
+
+    start_event = {
+        "task_id": "I1",
+        "resource_jid": "ur5e@localhost",
+        "function_name": "place_insert",
+        "params": {},
+    }
+    allowed, diagnosis = supervisor.check_candidate(start_event)
+    assert allowed is True
+    assert diagnosis["status"] == "deferred_monitoring"
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(start_event)
+    assert allowed is True
+
+    assert supervisor.classify()["status"] == "safe"
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "task_id": "I1",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["rule_ids"] == ["SAFE_R"]
+
+
+def test_supervisor_blocks_candidate_outside_winning_set_but_current_state_remains_safe() -> None:
+    rule = _board_mutex_rule()
+    dfa_map = {"SAFE_1": _board_mutex_dot()}
+    fsa = _mutex_waiting_plan_fsa()
+    validator = PlanSafetyValidator(
+        rules=[rule],
+        dfa_map=dfa_map,
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="U1",
+        function_name="place_approach",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_approach",
+            "params": {"destination_location": "assembly_board-v1"},
+            "current_state": "positioned",
+        }
+    )
+
+    current = supervisor.classify()
+    assert current["status"] == "safe"
+    assert current["safe_next_task_ids"] == ["H1"]
+
+    allowed, diagnosis = supervisor.check_candidate(
+        {
+            "task_id": "X1",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "place_approach",
+            "params": {"destination_location": "assembly_board-v1"},
+        }
+    )
+    assert allowed is False
+    assert diagnosis["status"] == "blocked_candidate"
+    assert diagnosis["safe_next_task_ids"] == ["H1"]
+
+
+def test_supervisor_detects_inevitable_violation_after_unmodeled_drop_failure() -> None:
+    dfa_map: dict[str, str] = {}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                "(ur5e@localhost=(k=1,idle))",
+            ],
+            "E": ["I1.start", "I1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.start",
+                    "to": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=1,idle))"],
+        }
+    }
+
+    validator = PlanSafetyValidator(rules=[], dfa_map=dfa_map, tools_catalog=_tools_catalog())
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    start_event = {
+        "task_id": "I1",
+        "resource_jid": "ur5e@localhost",
+        "function_name": "place_insert",
+        "params": {},
+    }
+    allowed, _ = supervisor.check_candidate(start_event)
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(start_event)
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="fail",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="failed:slippage",
+    )
+    safety_monitor.process_fail_event(
+        {
+            "task_id": "I1",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "status": "failed:slippage",
+            "current_state": "recovery_required",
+        }
+    )
+
+    diagnosis = supervisor.classify()
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["rule_ids"] == []
+    assert diagnosis["safe_next_task_ids"] == []
+
+
+def test_reactive_supervisor_replans_after_unmodeled_drop_failure() -> None:
+    dfa_map: dict[str, str] = {}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                "(ur5e@localhost=(k=1,idle))",
+            ],
+            "E": ["I1.start", "I1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.start",
+                    "to": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=0,run=I1:place_insert))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=1,idle))"],
+        }
+    }
+
+    validator = PlanSafetyValidator(rules=[], dfa_map=dfa_map, tools_catalog=_tools_catalog())
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="reactive",
+    )
+
+    start_event = {
+        "task_id": "I1",
+        "resource_jid": "ur5e@localhost",
+        "function_name": "place_insert",
+        "params": {},
+    }
+    allowed, diagnosis = supervisor.check_candidate(start_event)
+    assert allowed is True
+    assert diagnosis["status"] == "safe"
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(start_event)
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="fail",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="failed:slippage",
+    )
+    safety_monitor.process_fail_event(
+        {
+            "task_id": "I1",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "status": "failed:slippage",
+            "current_state": "recovery_required",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="fail")
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["rule_ids"] == []
+
+
+def test_winning_set_initial_state_includes_idle_catalog_resources() -> None:
+    fsa = {
+        "A": {
+            "X": [
+                "(xarm6@localhost=(k=0,idle))",
+                "(xarm6@localhost=(k=0,run=I1:pick_approach))",
+                "(xarm6@localhost=(k=1,idle))",
+            ],
+            "E": ["I1.start", "I1.done"],
+            "Tr": [
+                {
+                    "from": "(xarm6@localhost=(k=0,idle))",
+                    "event": "I1.start",
+                    "to": "(xarm6@localhost=(k=0,run=I1:pick_approach))",
+                    "task_id": "I1",
+                    "resource_jid": "xarm6@localhost",
+                    "function_name": "pick_approach",
+                    "params": {"part_name": "MCP"},
+                    "in_state": "idle",
+                    "out_state": "at_pick",
+                },
+                {
+                    "from": "(xarm6@localhost=(k=0,run=I1:pick_approach))",
+                    "event": "I1.done",
+                    "to": "(xarm6@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "xarm6@localhost",
+                    "function_name": "pick_approach",
+                    "params": {"part_name": "MCP"},
+                    "in_state": "idle",
+                    "out_state": "at_pick",
+                },
+            ],
+            "x0": "(xarm6@localhost=(k=0,idle))",
+            "Xm": ["(xarm6@localhost=(k=1,idle))"],
+        }
+    }
+
+    validator = PlanSafetyValidator(
+        rules=[],
+        dfa_map={},
+        tools_catalog=_tools_catalog(),
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=None)
+
+    assert winning["initial_resource_states"] == {
+        "ur5e@localhost": {"current_state": "idle", "params": {}},
+        "xarm6@localhost": {"current_state": "idle", "params": {}},
+    }
+
+    safety_monitor = OnlineSafetyMonitor({}, [], tools_catalog=_tools_catalog())
+    safety_monitor.seed_resource_states(
+        {
+            "xarm6@localhost": {"current_state": "idle"},
+            "ur5e@localhost": {"current_state": "idle"},
+        }
+    )
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+    )
+
+    diagnosis = supervisor.classify()
+    assert diagnosis["status"] == "safe"
+
+    allowed, diagnosis = supervisor.check_candidate(
+        {
+            "task_id": "I1",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "pick_approach",
+            "params": {"part_name": "MCP"},
+        }
+    )
+    assert allowed is True
+    assert diagnosis["status"] == "safe"

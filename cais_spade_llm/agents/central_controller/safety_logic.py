@@ -625,6 +625,14 @@ class SafetyLogic:
         allowed_processes = set(function_process.values())
         return allowed_functions, function_process, allowed_resources, allowed_processes
 
+    def _allowed_resource_types(self) -> set[str]:
+        allowed: set[str] = set()
+        for row in self._tool_rows():
+            token = self._normalize_resource_type_token(row.get("resource_type"))
+            if token:
+                allowed.add(token)
+        return allowed
+
     def _tool_rows(self) -> list[dict[str, Any]]:
         return [
             row for row in (getattr(self.controller_agent, "tools_catalog", []) or [])
@@ -684,15 +692,29 @@ class SafetyLogic:
 
     def _resolve_rule_resources(self, rule: dict[str, Any]) -> list[str]:
         _, _, allowed_resources, _ = self._tool_grounding()
+        allowed_resource_types = {
+            self._normalize_resource_type_token(resource_type)
+            for resource_type in (rule.get("resource_types") or [])
+            if self._normalize_resource_type_token(resource_type)
+        }
         resources = [
             self._normalize_resource_token(resource)
             for resource in (rule.get("resources") or [])
             if self._normalize_resource_token(resource)
         ]
         concrete = [resource for resource in resources if resource != "any"]
+        if allowed_resource_types:
+            typed_resources = {
+                self._normalize_resource_token(row.get("function_owner_agent"))
+                for row in self._tool_rows()
+                if self._normalize_resource_token(row.get("function_owner_agent"))
+                and self._normalize_resource_type_token(row.get("resource_type")) in allowed_resource_types
+            }
+        else:
+            typed_resources = set(allowed_resources)
         if concrete:
-            return self._dedupe_keep_order(concrete)
-        return sorted(allowed_resources)
+            return [resource for resource in self._dedupe_keep_order(concrete) if resource in typed_resources]
+        return sorted(typed_resources)
 
     @staticmethod
     def _ast_contains_resource_var(node: Any) -> bool:
@@ -1218,6 +1240,7 @@ class SafetyLogic:
         - process
         - product
         - resources
+        - resource_types
         - event
         - context  (dict or None)
         """
@@ -1241,6 +1264,7 @@ class SafetyLogic:
         allowed_functions, function_process, allowed_resources, allowed_processes = (
             self._tool_grounding()
         )
+        allowed_resource_types = self._allowed_resource_types()
 
         for idx, r in enumerate(structured, start=1):
             rule_id = r.get("id") or f"SAFE_{idx}"
@@ -1256,6 +1280,7 @@ class SafetyLogic:
                 products = [str(p).strip() for p in product_raw if p]
 
             resources       = r.get("resources") or []
+            resource_types_raw = r.get("resource_types")
             event_raw       = str(r.get("event", "") or "").strip()
             context         = r.get("context")       # expected to be dict or None
 
@@ -1297,6 +1322,25 @@ class SafetyLogic:
                     )
             resources = self._dedupe_keep_order(normalized_resources)
 
+            resource_types = self._normalize_string_list(resource_types_raw)
+            normalized_resource_types: list[str] = []
+            for resource_type in resource_types:
+                token = self._normalize_resource_type_token(resource_type)
+                if not token:
+                    continue
+                if token == "any":
+                    normalized_resource_types = []
+                    break
+                if token in allowed_resource_types:
+                    normalized_resource_types.append(token)
+                elif self.logger:
+                    self.logger.warning(
+                        "[SafetyLogic] Rule %s references unsupported resource_type '%s'; dropped.",
+                        rule_id,
+                        token,
+                    )
+            resource_types = self._dedupe_keep_order(normalized_resource_types)
+
             # Normalize context (the LLM should return dict or None)
             context = self._normalize_context_object(context)
 
@@ -1307,6 +1351,7 @@ class SafetyLogic:
                 "process": process,
                 "product": products,
                 "resources": resources,
+                "resource_types": resource_types,
                 "event": event,
                 "context": context,   # dict or None
             }
@@ -1506,6 +1551,9 @@ class SafetyLogic:
             resources = r.get("resources") or []
             if not isinstance(resources, list):
                 resources = []
+            resource_types = r.get("resource_types")
+            if not isinstance(resource_types, list):
+                resource_types = []
 
             # context is now expected to be an object (dict) or null
             context = self._normalize_context_object(r.get("context"))
@@ -1518,6 +1566,7 @@ class SafetyLogic:
                     "process":         r.get("process"),
                     "product":         r.get("product"),
                     "resources":       resources,
+                    "resource_types":  resource_types,
                     "event":           r.get("event"),
                     "context":         context,
                 }
@@ -1768,7 +1817,7 @@ class SafetyLogic:
                 f"{rid}={events}" for rid, events in sorted(blocking.items())
             )
             raise RuntimeError(
-                "Safety logic references unsupported events that cannot be grounded to robot actions: "
+                "Safety logic references unsupported events that cannot be grounded to catalog actions: "
                 f"{detail}. Supported functions: {sorted(allowed_functions)}"
             )
 

@@ -153,7 +153,7 @@ class BundleCompiler:
     def _import_runtime_classes():
         try:
             from agents.central_controller.central_controller_agent import CentralControllerAgent
-            from agents.central_controller.offline_safety_validator import OfflineSafetyValidator
+            from agents.central_controller.plan_safety_validator import PlanSafetyValidator
             from agents.intelligent_product.product_agent import ProductAgent
             from agents.shared_information.llm_agent import LlmAgent
             from resources.sensor.camera_module import CameraModule
@@ -161,13 +161,13 @@ class BundleCompiler:
             from cais_spade_llm.agents.central_controller.central_controller_agent import (
                 CentralControllerAgent,
             )
-            from cais_spade_llm.agents.central_controller.offline_safety_validator import (
-                OfflineSafetyValidator,
+            from cais_spade_llm.agents.central_controller.plan_safety_validator import (
+                PlanSafetyValidator,
             )
             from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
             from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
             from cais_spade_llm.resources.sensor.camera_module import CameraModule
-        return ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule, LlmAgent
+        return ProductAgent, CentralControllerAgent, PlanSafetyValidator, CameraModule, LlmAgent
 
     @staticmethod
     def _task_nodes_hash(nodes: list[dict[str, Any]]) -> str:
@@ -221,7 +221,7 @@ class BundleCompiler:
 
         auto_replans_used = 0
         while True:
-            ok, violations = validator.validate_fsa_offline(
+            ok, violations = validator.validate_plan_fsa(
                 fsa=planner.global_fsa or {},
                 plan={"nodes": planner.nodes},
                 product_jid=product_jid,
@@ -339,7 +339,7 @@ class BundleCompiler:
         stamp = utc_now_compact()
         bundle_id = f"{stamp}__{product_stem}__{execution_mode}__{robot_env}__{short_hash}"
 
-        ProductAgent, CentralControllerAgent, OfflineSafetyValidator, CameraModule, LlmAgent = (
+        ProductAgent, CentralControllerAgent, PlanSafetyValidator, CameraModule, LlmAgent = (
             self._import_runtime_classes()
         )
         LlmAgent.configure_shared_tools_catalogue(self.tools_path)
@@ -405,6 +405,7 @@ class BundleCompiler:
 
             try:
                 await safety_logic.build_safety_rules_and_logic(safety_text)
+                await safety_logic.build_preview_interpretations()
                 safety_logic_path = safety_dir / "cca_safety_logic.json"
                 await asyncio.to_thread(safety_logic.save, safety_logic_path)
                 dfa_map = await asyncio.to_thread(
@@ -435,7 +436,7 @@ class BundleCompiler:
                     global_fsa_path,
                 )
 
-                validator = OfflineSafetyValidator(
+                validator = PlanSafetyValidator(
                     rules=safety_logic.rules,
                     dfa_map=dfa_map,
                     tools_catalog=getattr(product_agent, "tools_catalog", []),
@@ -451,7 +452,7 @@ class BundleCompiler:
                     product_agent.process_planner.save_global_fsa,
                     global_fsa_path,
                 )
-                validation_path = validation_dir / "offline_validation.json"
+                validation_path = validation_dir / "plan_validation.json"
                 with validation_path.open("w", encoding="utf-8") as f:
                     json.dump(validation_payload, f, indent=2)
 
@@ -495,6 +496,7 @@ class BundleCompiler:
                         "safety_logic_json": str(safety_logic_path.relative_to(tmp_dir)),
                         "safety_dfa_dot_files": [f"safety/{name}" for name in dot_files],
                         "safety_dfa_png_files": [f"safety/{name}" for name in png_files],
+                        "plan_validation_json": str(validation_path.relative_to(tmp_dir)),
                         "offline_validation_json": str(validation_path.relative_to(tmp_dir)),
                     },
                     "validation_summary": {

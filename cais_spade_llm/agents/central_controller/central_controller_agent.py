@@ -16,7 +16,8 @@ from agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
 from agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 from agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
-from cais_spade_llm.agents.central_controller.offline_safety_validator import OfflineSafetyValidator
+from agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
+from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
 
 class CentralControllerAgent(LlmAgent):
     """
@@ -59,6 +60,8 @@ class CentralControllerAgent(LlmAgent):
 
         # Runtime Plan FSA monitor
         self.plan_fsa_monitor: Optional[OnlineFsaMonitor] = None
+        self.online_supervisor: Optional[OnlineSafetySupervisor] = None
+        self.runtime_supervisor_mode: str = "preventive"
         
         # NOTE: self.running_aps is removed; the monitor tracks it now.
         
@@ -73,7 +76,7 @@ class CentralControllerAgent(LlmAgent):
         )
 
     async def setup(self) -> None:
-        """Attach startup, runtime monitor, and offline plan validation behaviours."""
+        """Attach startup, runtime monitor, and plan validation behaviours."""
         await super().setup()
         self.logger.info("[CCA] setup completed.")
         self.add_behaviour(self._InitCCA())
@@ -142,6 +145,15 @@ class CentralControllerAgent(LlmAgent):
                     if hasattr(dfa_obj, "current_state"):
                         safety_dfa_states[rule_id] = dfa_obj.current_state
         coord_state["safety_dfa_states"] = safety_dfa_states
+
+        if self.online_supervisor:
+            try:
+                coord_state["safety_supervisor"] = self.online_supervisor.classify()
+            except Exception:
+                self.logger.exception("[CCA] Failed to classify online supervisor state.")
+                coord_state["safety_supervisor"] = {"status": "error"}
+        else:
+            coord_state["safety_supervisor"] = None
 
         return coord_state
 
@@ -321,7 +333,20 @@ class CentralControllerAgent(LlmAgent):
                         await self.send(replan_msg)
                     return
 
-            allowed, info = agent.safety_monitor.process_start_event(event)
+            candidate_aps = agent.safety_monitor._map_task_to_aps(
+                event["resource_jid"],
+                event["function_name"],
+                event.get("params") or {},
+            )
+            predicted_state_aps = agent.safety_monitor._predict_state_aps(
+                event["resource_jid"],
+                event["function_name"],
+                event.get("params") or {},
+            )
+            allowed, info = agent.safety_monitor.online_safety_validation(
+                candidate_aps,
+                predicted_state_aps=predicted_state_aps,
+            )
 
             if not allowed:
                 violated_rule = info.get("violated_rule")
@@ -352,6 +377,51 @@ class CentralControllerAgent(LlmAgent):
                         safety_info=info,
                     )
                     await self.send(replan_msg)
+                return
+
+            if agent.online_supervisor:
+                allowed_by_supervisor, diagnosis = agent.online_supervisor.check_candidate(event)
+                if not allowed_by_supervisor:
+                    agent.logger.warning(
+                        "[CCA] SUPERVISOR BLOCK: task=%s status=%s safe_next=%s reason=%s",
+                        task_id,
+                        diagnosis.get("status"),
+                        diagnosis.get("safe_next_task_ids"),
+                        diagnosis.get("reason"),
+                    )
+
+                    if diagnosis.get("status") == "blocked_candidate":
+                        agent.blocked_tasks[task_id] = {
+                            "event": event,
+                            "violated_rule": diagnosis.get("rule_ids"),
+                        }
+
+                    await self._send_decision(resource_jid, task_id, "block")
+
+                    if product_jid and diagnosis.get("status") in {"inevitable_violation", "violated"}:
+                        replan_msg = agent._build_replan_message(
+                            product_jid=product_jid,
+                            reason=str(diagnosis.get("status")),
+                            event=event,
+                            safety_info=diagnosis,
+                        )
+                        await self.send(replan_msg)
+                    return
+                if diagnosis.get("status") == "deferred_monitoring":
+                    agent.logger.info(
+                        "[CCA] SUPERVISOR DEFERRED: task=%s mode=%s reason=%s",
+                        task_id,
+                        diagnosis.get("enforcement_mode"),
+                        diagnosis.get("reason"),
+                    )
+
+            allowed, info = agent.safety_monitor.process_start_event(event)
+            if not allowed:
+                agent.logger.warning(
+                    "[CCA] Safety state changed before task=%s could be committed; blocking start.",
+                    task_id,
+                )
+                await self._send_decision(resource_jid, task_id, "block")
                 return
 
             # If allowed
@@ -404,6 +474,32 @@ class CentralControllerAgent(LlmAgent):
 
                 # Retry any blocked tasks now that state has changed
                 await self._retry_blocked_tasks()
+
+                if agent.online_supervisor and product_jid:
+                    diagnosis = agent.online_supervisor.classify(
+                        event_kind=("fail" if is_failed else "done")
+                    )
+                    status_token = str(diagnosis.get("status") or "")
+                    if status_token in {"inevitable_violation", "violated"}:
+                        agent.logger.warning(
+                            "[CCA] Supervisor detected %s after task=%s. Triggering replanning.",
+                            status_token,
+                            task_id,
+                        )
+                        replan_msg = agent._build_replan_message(
+                            product_jid=product_jid,
+                            reason=status_token,
+                            event=event,
+                            safety_info=diagnosis,
+                        )
+                        await self.send(replan_msg)
+                    elif status_token == "pending_obligation":
+                        agent.logger.info(
+                            "[CCA] Supervisor pending obligation after task=%s: rules=%s safe_next=%s",
+                            task_id,
+                            diagnosis.get("rule_ids"),
+                            diagnosis.get("safe_next_task_ids"),
+                        )
 
                 # Progress detection for completions: check if plan can continue
                 if is_completed and agent.plan_fsa_monitor and product_jid:
@@ -470,6 +566,8 @@ class CentralControllerAgent(LlmAgent):
                         candidate_aps,
                         predicted_state_aps=predicted_state_aps,
                     )
+                    if allowed and agent.online_supervisor:
+                        allowed, _ = agent.online_supervisor.check_candidate(event)
                 except Exception:
                     agent.logger.exception(
                         "[CCA] Failed to non-mutating re-check for blocked task=%s; keeping queued.",
@@ -599,8 +697,8 @@ class CentralControllerAgent(LlmAgent):
 
     class _PlanValidation(CyclicBehaviour):
         """
-        Behaviour that listens for 'plan_safety_check', uses OfflineFsaSafetyValidator
-        to validate a compiled FSA plan offline, and replies with the result.
+        Behaviour that listens for 'plan_safety_check', validates a compiled
+        plan FSA, and replies with the result.
         """
 
         async def run(self) -> None:
@@ -615,12 +713,15 @@ class CentralControllerAgent(LlmAgent):
                 fsa = data.get("fsa")            # REQUIRED
                 plan = data.get("plan")          # OPTIONAL (semantic AP mapping)
                 product_jid = data.get("product_jid")
+                skip_revalidation = bool(
+                    data.get("skip_revalidation", data.get("skip_offline_validation", False))
+                )
             except Exception:
                 agent.logger.exception("[CCA] Malformed plan_safety_check.")
                 return
 
             if not fsa:
-                agent.logger.warning("[CCA] No FSA provided for offline validation.")
+                agent.logger.warning("[CCA] No FSA provided for plan validation.")
                 return
 
             # Reuse the live runtime monitor when the validated FSA is unchanged.
@@ -630,32 +731,70 @@ class CentralControllerAgent(LlmAgent):
                 plan_fsa_monitor = OnlineFsaMonitor(fsa)
             agent.plan_fsa_monitor = plan_fsa_monitor
 
-            # Delegate to Offline FSA Validator
-            if agent.safety_logic and agent.safety_logic.rule_dfas:
-                validator = OfflineSafetyValidator(
+            # Delegate to the plan validator. A verified zero-rule bundle is
+            # still "ready" even though its DFA map is empty.
+            if agent.safety_logic is not None and agent.safety_monitor is not None:
+                validator = PlanSafetyValidator(
                     rules=agent.safety_rules,
-                    dfa_map=agent.safety_logic.rule_dfas,
+                    dfa_map=dict(agent.safety_logic.rule_dfas),
                     tools_catalog=getattr(agent, "tools_catalog", []),
                 )
 
-                ok, violations = validator.validate_fsa_offline(
-                    fsa=fsa,
-                    plan=plan,
-                    product_jid=product_jid
-                )
+                if skip_revalidation:
+                    ok, violations = True, []
+                else:
+                    ok, violations = validator.validate_plan_fsa(
+                        fsa=fsa,
+                        plan=plan,
+                        product_jid=product_jid
+                    )
+                try:
+                    winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
+                    policy = (
+                        dict(agent.precomputed_bundle.get("replan_policy", {}))
+                        if isinstance(agent.precomputed_bundle.get("replan_policy"), dict)
+                        else {}
+                    )
+                    supervisor_mode = str(
+                        policy.get("runtime_supervisor_mode")
+                        or ("reactive" if skip_revalidation else "preventive")
+                    ).strip().lower()
+                    if supervisor_mode not in {"preventive", "reactive"}:
+                        supervisor_mode = "reactive" if skip_revalidation else "preventive"
+                    agent.runtime_supervisor_mode = supervisor_mode
+                    agent.online_supervisor = OnlineSafetySupervisor(
+                        winning_set_data=winning_set_data,
+                        fsa_monitor=plan_fsa_monitor,
+                        safety_monitor=agent.safety_monitor,
+                        enforcement_mode=supervisor_mode,
+                    ) if agent.safety_monitor else None
+                except Exception:
+                    agent.online_supervisor = None
+                    agent.logger.exception(
+                        "[CCA] Failed to initialize online safety supervisor."
+                    )
             else:
                 agent.logger.warning("[CCA] Safety logic not ready; skipping validation.")
                 ok, violations = True, []
+                agent.online_supervisor = None
 
             # ---- NEW: log summary + details ----
             violated_rules = sorted({v.get("violated_rule_id") for v in violations if v.get("violated_rule_id")})
-            agent.logger.info(
-                "[CCA] Offline FSA Validation: %s (Violated rules: %d, Witnesses: %d) product=%s",
-                "OK" if ok else "FAIL",
-                len(violated_rules),
-                len(violations),
-                product_jid,
-            )
+            if skip_revalidation:
+                agent.logger.info(
+                    "[CCA] Verified bundle startup: skipped plan revalidation and initialized runtime monitors product=%s supervisor_mode=%s",
+                    product_jid,
+                    agent.runtime_supervisor_mode,
+                )
+            else:
+                agent.logger.info(
+                    "[CCA] Plan FSA Validation: %s (Violated rules: %d, Witnesses: %d) product=%s supervisor_mode=%s",
+                    "OK" if ok else "FAIL",
+                    len(violated_rules),
+                    len(violations),
+                    product_jid,
+                    agent.runtime_supervisor_mode,
+                )
 
             if not ok and violations:
                 # Cap to avoid log spam

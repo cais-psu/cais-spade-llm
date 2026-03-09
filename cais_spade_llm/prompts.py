@@ -309,6 +309,7 @@ For each safety sentence, produce:
   "process": string | null,
   "product": [string] | null,
   "resources": [string],
+  "resource_types": [string] | null,
   "event": string | null,
   "context": object | null
 }
@@ -337,6 +338,13 @@ FIELD RULES
   - If the rule does NOT care which specific resource executes the action, either:
     - use ["any"].
   - Avoid over-specifying resources just because they exist in the tools catalogue.
+
+• resource_types
+  - Use this when the rule is about a class of resources rather than named resources
+    (for example: printers, robots, conveyors).
+  - Ground values from `tool.resource_type` when available.
+  - If the rule explicitly names concrete resources, `resource_types` may be null or omitted.
+  - If no resource-type constraint applies, set it to null.
 
 • context
   - Represent contextual information as an OBJECT (dictionary).
@@ -580,7 +588,7 @@ Leaf node types:
 
 General grounding rules:
 - Prefer `resource_var` when the same rule pattern should be expanded over all matching resources.
-- `resource_var` is grounded by the compiler from matching tool rows, not by a fixed robot list.
+- `resource_var` is grounded by the compiler from matching tool rows, not by a fixed resource list.
 - `states` is optional; omit it when the compiler should infer the relevant persistent states.
 
 Allowed temporal operator nodes:
@@ -654,7 +662,7 @@ For each structured safety rule in INPUT RULES you receive fields such as:
   - id
   - raw_text
   - constraint_type
-  - process, product, resources, event, context
+  - process, product, resources, resource_types, event, context
 
 Your task for each rule:
   1) Build a typed `formula_ast` over event/state atoms.
@@ -944,27 +952,27 @@ STRICT RULES FOR MODIFICATION:
        -> INSERT a new task to satisfy the requirement.
 
 2. COMPOSITIONAL RECOVERY WITH SPATIAL REASONING:
-   When a robot fails and leaves a part in an unreachable location, use EXISTING capabilities:
+   When a manipulation resource fails and leaves a part in an unreachable location, use EXISTING capabilities:
 
    a) STATE-BASED FUNCTION CHAINING:
       - Each function in tools_catalog has `in_state` and `out_state` fields
       - CHAIN functions by matching output state to input state
-      - State transition examples:
-        * pick_grasp: in_state="ready" → out_state="picked"
-        * place_approach: in_state="picked" → out_state="positioned"
-        * place_insert: in_state="positioned" → out_state="placed"
-        * move_home: in_state="any" → out_state="idle"
+      - Illustrative examples only:
+        * function_a: in_state="state_a" → out_state="state_b"
+        * function_b: in_state="state_b" → out_state="state_c"
+        * function_c: in_state="state_c" → out_state="state_d"
+        * function_d: in_state="any" → out_state="state_idle"
+      - Do NOT assume these exact function or state names exist in every deployment; use the actual catalog entries.
       - Build multi-step sequences by connecting compatible states
-      - Example: To assemble a part: pick_grasp (→picked) → move_loaded (→positioned) → place_insert (→placed) → move_home (→idle)
+      - Example pattern only: acquire part → move to placement-ready state → place/release part → return to resting state
 
    b) CHECK WORKSPACE BOUNDARIES:
-      - Each robot has `workspace_boundaries` in static_capabilities defining reachable Cartesian space
-      - Use these to determine which robot can reach the failed part location
-      - SELECT the robot whose workspace_boundaries.x_range/y_range/z_range contains the part coordinates
+      - If a resource exposes `workspace_boundaries` in static_capabilities, use them to determine reachability
+      - SELECT a resource whose workspace_boundaries.x_range/y_range/z_range contains the part coordinates
 
    c) USE STAGING AREAS FOR HANDOFF:
-      - Each robot has `staging_areas` in static_capabilities with coordinates and `accessible_by` list
-      - When a part must transfer between robots, generate a new staging action (NOT in catalog) targeting a shared staging area
+      - If resources expose `staging_areas` in static_capabilities, use them for handoff
+      - When a part must transfer between resources, generate a new staging action (NOT in catalog) targeting a shared staging area
       - Example recovery pattern (staging action is LLM-generated, not a catalog function):
         ```json
         {{
@@ -987,8 +995,8 @@ STRICT RULES FOR MODIFICATION:
    d) COMPOSITIONAL REASONING PRINCIPLES:
       - Use `place_insert` only for final placement at the assembly destination
       - For intermediate placement (staging, handoff), GENERATE a new recovery action not present in tools_catalog
-      - Staging enables coordination between robots without collision
-      - CONSULT function_owner_agent field to verify which robot has which capability
+      - Staging enables coordination between resources without collision
+      - CONSULT function_owner_agent field to verify which resource has which capability
 
 3. {_REPLAN_DATA_CONSISTENCY}
 

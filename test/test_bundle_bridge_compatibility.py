@@ -84,7 +84,7 @@ def test_bridge_bundle_compatibility_and_active_context(tmp_path):
         {"rules": [{"id": "SAFE_1", "ltlf": "G(true)", "aps": []}]},
     )
     (bdir / "safety" / "SAFE_1_dfa.dot").write_text("digraph {}", encoding="utf-8")
-    _write_json(bdir / "validation" / "offline_validation.json", {"ok": True, "violations": []})
+    _write_json(bdir / "validation" / "plan_validation.json", {"ok": True, "violations": []})
     _write_json(bdir / "catalog" / "tools.json", {"tools": ["snapshot"]})
 
     manifest = {
@@ -111,7 +111,7 @@ def test_bridge_bundle_compatibility_and_active_context(tmp_path):
             "safety_logic_json": "safety/cca_safety_logic.json",
             "safety_dfa_dot_files": ["safety/SAFE_1_dfa.dot"],
             "safety_dfa_png_files": [],
-            "offline_validation_json": "validation/offline_validation.json",
+            "plan_validation_json": "validation/plan_validation.json",
         },
         "validation_summary": {"ok": True, "violated_rules": [], "witness_count": 0},
     }
@@ -150,6 +150,13 @@ def test_bridge_bundle_compatibility_and_active_context(tmp_path):
     assert bundle_ctx["bundle_id"] == bundle_id
     assert Path(bundle_ctx["artifacts"]["plan_json"]).exists()
     assert Path(bundle_ctx["artifacts"]["tools_json"]).exists()
+    artifacts = bridge.get_bundle_artifacts(bundle_id)
+    assert artifacts["paths"]["plan_validation_json"].endswith("validation/plan_validation.json")
+    assert artifacts["paths"]["offline_validation_json"].endswith("validation/plan_validation.json")
+    assert [rule["id"] for rule in bridge.get_bundle_safety_rules(bundle_id)] == ["SAFE_1"]
+    assert bridge.get_bundle_safety_rules(bundle_id)[0]["generated_interpretation"]
+    assert [rule["id"] for rule in bridge.get_safety_rules()] == ["SAFE_1"]
+    assert [rule["id"] for rule in bridge.get_safety_rules(bundle_id)] == ["SAFE_1"]
 
     bad_safe_path = tmp_path / "safety_other.txt"
     bad_safe_path.write_text("always keep robots separated", encoding="utf-8")
@@ -495,6 +502,28 @@ def test_bridge_probe_sim_services_blocks_until_core_services_are_ready():
     assert ready is False
     assert "/ATTACHLINK" in reason
     assert "/DETACHLINK" in reason
+
+
+def test_bridge_simulation_start_ready_force_trusts_completed_prewarm(monkeypatch):
+    bridge = SystemBridge()
+    bridge._gazebo_prewarm_done.set()
+    bridge._sim_ready_cache = (False, "stale pending")
+    bridge._sim_ready_cache_ts = 0.0
+
+    monkeypatch.setattr(bridge, "_any_running", lambda names: True)
+    monkeypatch.setattr(
+        bridge,
+        "_probe_sim_services",
+        lambda timeout_sec=6.0: (
+            False,
+            "Simulation startup is still initializing ROS services. Please wait a few seconds and try Start again.",
+        ),
+    )
+
+    ready, reason = bridge.simulation_start_ready(force=True)
+
+    assert ready is True
+    assert "Perception is still warming up" in reason
 
 
 def test_bridge_save_safety_previews_prunes_old_history_and_orphans(tmp_path):

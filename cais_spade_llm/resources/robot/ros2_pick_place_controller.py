@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -266,6 +267,10 @@ class Ros2PickPlaceController:
         self.trajectory_time_scale = need_float(
             motion, "trajectory_time_scale", "controller.motion.trajectory_time_scale"
         )
+        self.xy_axis_step_m = max(
+            0.01,
+            opt_float(motion, "xy_axis_step_m", 1.0),
+        )
 
         self.insertion_depth_m = need_float(
             parts_tuning, "insertion_depth_m", "controller.parts_tuning.insertion_depth_m"
@@ -335,12 +340,10 @@ class Ros2PickPlaceController:
                 or exc.__class__.__name__ == "RCLError"
             )
             if self._shutdown_requested and is_context_invalid:
-                self._log().debug("Executor stopped during shutdown: %s", msg)
+                self._log().debug(f"Executor stopped during shutdown: {msg}")
                 return
             self._log().warning(
-                "Executor spin terminated unexpectedly for %s: %s",
-                self.node_name,
-                msg,
+                f"Executor spin terminated unexpectedly for {self.node_name}: {msg}"
             )
 
     def init(self) -> bool:
@@ -691,6 +694,14 @@ class Ros2PickPlaceController:
             tz + self.approach_height_m,
             board_center_z + self.approach_height_m,
             pick_z + 0.05,
+        )
+
+        self._log().info(
+            "[PickApproach] "
+            f"part={target_part_name or str(target.get('part_name') or '')} "
+            f"current=({ee.position.x:.3f}, {ee.position.y:.3f}, {ee.position.z:.3f}) "
+            f"target=({tx:.3f}, {ty:.3f}, {tz:.3f}) "
+            f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
         )
 
         if not self._gripper_command(self.gripper_open, "OPEN"):
@@ -1431,41 +1442,109 @@ class Ros2PickPlaceController:
         ):
             return True
 
-        current = self._get_ee_pose()
-        if current is None:
-            return False
-
-        if not self._cartesian_move(
-            self._make_pose(target_x, current.position.y, z, orientation),
-            f"{label_prefix} (leg X)",
-            min_fraction=0.85,
-            allow_partial=False,
-        ):
-            if not self._cartesian_move(
-                self._make_pose(target_x, current.position.y, z, orientation),
-                f"{label_prefix} (leg X, no-collision)",
-                avoid_collisions=False,
-                min_fraction=0.70,
-                allow_partial=True,
-            ):
+        self._log().warn(
+            f"[{label_prefix}] direct Cartesian move failed; retrying staged XY fallback"
+        )
+        for axis_order in (("x", "y"), ("y", "x")):
+            current = self._get_ee_pose()
+            if current is None:
+                self._log().error(
+                    f"[{label_prefix}] cannot read current EE pose for staged fallback"
+                )
                 return False
-
-        if not self._cartesian_move(
-            self._make_pose(target_x, target_y, z, orientation),
-            f"{label_prefix} (leg Y)",
-            min_fraction=0.85,
-            allow_partial=False,
-        ):
-            if not self._cartesian_move(
-                self._make_pose(target_x, target_y, z, orientation),
-                f"{label_prefix} (leg Y, no-collision)",
-                avoid_collisions=False,
-                min_fraction=0.70,
-                allow_partial=True,
+            if self._move_xy_axis_order(
+                current=current,
+                target_x=target_x,
+                target_y=target_y,
+                z=z,
+                orientation=orientation,
+                label_prefix=label_prefix,
+                axis_order=axis_order,
             ):
-                return False
+                if axis_order == ("y", "x"):
+                    self._log().info(
+                        f"[{label_prefix}] staged XY fallback succeeded with axis order Y->X"
+                    )
+                return True
+        return False
 
+    def _move_xy_axis_order(
+        self,
+        *,
+        current,
+        target_x: float,
+        target_y: float,
+        z: float,
+        orientation,
+        label_prefix: str,
+        axis_order: tuple[str, str],
+    ) -> bool:
+        start_x = float(current.position.x)
+        start_y = float(current.position.y)
+        order_suffix = "" if axis_order == ("x", "y") else ", alt-order"
+        first_axis = axis_order[0]
+        first_target_x = target_x if first_axis == "x" else start_x
+        first_target_y = target_y if first_axis == "y" else start_y
+        leg_targets = [
+            (first_axis, first_target_x, first_target_y),
+            (axis_order[1], target_x, target_y),
+        ]
+
+        current_x = start_x
+        current_y = start_y
+        for axis_name, leg_x, leg_y in leg_targets:
+            label_base = f"{label_prefix} (leg {axis_name.upper()}{order_suffix}"
+            step_targets = self._split_xy_leg_targets(
+                start_x=current_x,
+                start_y=current_y,
+                target_x=leg_x,
+                target_y=leg_y,
+            )
+            for step_index, (step_x, step_y) in enumerate(step_targets, start=1):
+                step_suffix = (
+                    f", step {step_index}/{len(step_targets)}"
+                    if len(step_targets) > 1
+                    else ""
+                )
+                if not self._cartesian_move(
+                    self._make_pose(step_x, step_y, z, orientation),
+                    f"{label_base}{step_suffix})",
+                    min_fraction=0.85,
+                    allow_partial=False,
+                ):
+                    if not self._cartesian_move(
+                        self._make_pose(step_x, step_y, z, orientation),
+                        f"{label_base}{step_suffix}, no-collision)",
+                        avoid_collisions=False,
+                        min_fraction=0.70,
+                        allow_partial=True,
+                    ):
+                        return False
+            current_x = leg_x
+            current_y = leg_y
         return True
+
+    def _split_xy_leg_targets(
+        self,
+        *,
+        start_x: float,
+        start_y: float,
+        target_x: float,
+        target_y: float,
+    ) -> list[tuple[float, float]]:
+        delta_x = float(target_x) - float(start_x)
+        delta_y = float(target_y) - float(start_y)
+        span = max(abs(delta_x), abs(delta_y))
+        if span <= 1e-9:
+            return []
+        segments = max(1, int(math.ceil(span / self.xy_axis_step_m)))
+        return [
+            (
+                float(start_x) + (delta_x * idx / segments),
+                float(start_y) + (delta_y * idx / segments),
+            )
+            for idx in range(1, segments + 1)
+        ]
 
     def _make_pose(self, x: float, y: float, z: float, orientation):
         pose = self._Pose()

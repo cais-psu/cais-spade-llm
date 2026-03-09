@@ -49,6 +49,7 @@ _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
+_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
@@ -1655,6 +1656,16 @@ class SystemBridge:
             "manifest": manifest,
         }
 
+    @staticmethod
+    def _plan_validation_artifact_rel(artifacts: dict[str, Any] | None) -> str:
+        if not isinstance(artifacts, dict):
+            return ""
+        for key in ("plan_validation_json", "offline_validation_json"):
+            value = str(artifacts.get(key, "")).strip()
+            if value:
+                return value
+        return ""
+
     def set_active_bundle(self, bundle_id: str | None) -> None:
         if bundle_id is None:
             self.bundle_store.set_active_bundle_id(None)
@@ -2070,7 +2081,7 @@ class SystemBridge:
         validation = manifest.get("validation_summary", {})
         ok = bool(validation.get("ok", False))
         if not ok:
-            raise ValueError("plan set cannot be verified because offline validation did not pass")
+            raise ValueError("plan set cannot be verified because plan validation did not pass")
 
         manifest["status"] = BUNDLE_STATUS_VERIFIED
         manifest["verified"] = True
@@ -2166,7 +2177,8 @@ class SystemBridge:
 
         plan_path = _artifact_path("plan_json")
         fsa_path = _artifact_path("global_fsa_json")
-        validation_path = _artifact_path("offline_validation_json")
+        validation_rel = self._plan_validation_artifact_rel(artifacts)
+        validation_path = (root / validation_rel).resolve() if validation_rel else None
 
         plan_payload = self._read_json_dict(plan_path) if plan_path else {}
         fsa_payload = self._read_json_dict(fsa_path) if fsa_path else {}
@@ -2183,9 +2195,39 @@ class SystemBridge:
                 "root": str(root),
                 "plan_json": str(plan_path) if plan_path else "",
                 "global_fsa_json": str(fsa_path) if fsa_path else "",
+                "plan_validation_json": str(validation_path) if validation_path else "",
                 "offline_validation_json": str(validation_path) if validation_path else "",
             },
         }
+
+    def get_bundle_safety_rules(self, bundle_id: str) -> list[dict[str, Any]]:
+        """Load compiled safety rules from a stored plan set without starting the system."""
+        bid = str(bundle_id or "").strip()
+        if not bid:
+            return []
+        manifest = self.bundle_store.load_manifest(bid)
+        if not manifest:
+            return []
+        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
+        if not logic_rel:
+            return []
+        logic_path = (self.bundle_store.bundle_dir(bid) / logic_rel).resolve()
+        logic_payload = self._read_json_dict(logic_path)
+        rules = logic_payload.get("rules", [])
+        if not isinstance(rules, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            item = dict(rule)
+            interpretation = str(item.get("generated_interpretation", "")).strip()
+            if not interpretation:
+                interpretation = self._ltlf_plain_feedback(item)
+            item["generated_interpretation"] = interpretation
+            normalized.append(item)
+        return normalized
 
     def get_bundle_plan_nodes(self, bundle_id: str) -> list[dict[str, Any]]:
         """Load DAG nodes from a stored plan set without starting the system."""
@@ -2228,7 +2270,7 @@ class SystemBridge:
         plan_rel = str(artifacts.get("plan_json", "")).strip()
         fsa_rel = str(artifacts.get("global_fsa_json", "")).strip()
         safety_logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
-        validation_rel = str(artifacts.get("offline_validation_json", "")).strip()
+        validation_rel = self._plan_validation_artifact_rel(artifacts)
         if not plan_rel or not fsa_rel or not safety_logic_rel or not validation_rel:
             raise ValueError("plan set is missing required plan/safety artifacts")
 
@@ -2275,7 +2317,7 @@ class SystemBridge:
         if not dfa_map:
             raise ValueError("plan set has no DFA DOT artifacts for safety validation")
 
-        ProductAgent, _, OfflineSafetyValidator, CameraModule = (
+        ProductAgent, _, PlanSafetyValidator, CameraModule, _ = (
             self.bundle_compiler._import_runtime_classes()
         )
         resources = self.bundle_compiler._collect_resource_refs(
@@ -2326,7 +2368,7 @@ class SystemBridge:
                     "relevant_pred_map": pred_map,
                 }
             ]
-            validator = OfflineSafetyValidator(
+            validator = PlanSafetyValidator(
                 rules=rules,
                 dfa_map=dfa_map,
                 tools_catalog=getattr(product_agent, "tools_catalog", []),
@@ -2733,20 +2775,30 @@ class SystemBridge:
                 f"products={len(self.product_agents)} in {time.monotonic() - startup_t0:.2f}s"
             )
 
-            # Build tools catalogue.
+            # Build tools catalogue unless a verified bundle already provides
+            # an exact snapshot for this startup context.
             self._set_startup_phase("build_tools_catalogue")
-            await asyncio.to_thread(
-                FunctionAnalyzer.build_tools_catalogue,
-                self.product_agents + self.resource_agents,
-                ac.ALLOWED_FUNCS,
-                str(_TOOLS_OUT),
+            resolved_tools_path, using_bundle_tools = await asyncio.to_thread(
+                self._resolve_llm_tools_catalogue_path,
+                bundle_context,
             )
+            if using_bundle_tools:
+                self._diag_emit(
+                    f"startup#{startup_id} skipping tools rebuild; using bundled catalogue {resolved_tools_path}"
+                )
+            else:
+                await asyncio.to_thread(
+                    FunctionAnalyzer.build_tools_catalogue,
+                    self.product_agents + self.resource_agents,
+                    ac.ALLOWED_FUNCS,
+                    str(_TOOLS_OUT),
+                )
             tools_catalogue_path = await asyncio.to_thread(
                 self._configure_llm_tools_catalogue,
                 bundle_context,
             )
             self._diag_emit(
-                f"startup#{startup_id} tools catalogue done in {time.monotonic() - startup_t0:.2f}s"
+                f"startup#{startup_id} tools catalogue ready in {time.monotonic() - startup_t0:.2f}s"
             )
             self._diag_emit(
                 f"startup#{startup_id} llm tools catalogue source={tools_catalogue_path}"
@@ -2991,21 +3043,27 @@ class SystemBridge:
         return user_agent, resource_agents, product_agents, cca
 
     @staticmethod
-    def _configure_llm_tools_catalogue(bundle_context: dict[str, Any] | None = None) -> str:
-        try:
-            from agents.shared_information.llm_agent import LlmAgent
-        except ImportError:
-            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-
-        tools_path: Path = _TOOLS_OUT
+    def _resolve_llm_tools_catalogue_path(
+        bundle_context: dict[str, Any] | None = None,
+    ) -> tuple[Path, bool]:
+        tools_path: Path = _TOOLS_OUT.resolve()
         artifacts = bundle_context.get("artifacts", {}) if isinstance(bundle_context, dict) else {}
         if isinstance(artifacts, dict):
             bundled_tools = str(artifacts.get("tools_json", "")).strip()
             if bundled_tools:
                 candidate = Path(bundled_tools)
                 if candidate.exists():
-                    tools_path = candidate
+                    return candidate.resolve(), True
+        return tools_path, False
 
+    @staticmethod
+    def _configure_llm_tools_catalogue(bundle_context: dict[str, Any] | None = None) -> str:
+        try:
+            from agents.shared_information.llm_agent import LlmAgent
+        except ImportError:
+            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+
+        tools_path, _ = SystemBridge._resolve_llm_tools_catalogue_path(bundle_context)
         return LlmAgent.configure_shared_tools_catalogue(tools_path)
 
     # ------------------------------------------------------------------
@@ -3390,6 +3448,19 @@ class SystemBridge:
         if prewarm_done:
             if force:
                 result = self._probe_sim_services(timeout_sec=6.0)
+                if not result[0]:
+                    # Successful controller prewarm is the authoritative core-service
+                    # readiness check. Shell probes for ATTACHLINK/DETACHLINK are
+                    # known to be flaky under WSL even when live ROS clients already
+                    # connected successfully during prewarm.
+                    self._diag_emit(
+                        "simulation_start_ready(force) downgraded shell probe failure "
+                        f"after completed prewarm: {result[1]}"
+                    )
+                    result = (
+                        True,
+                        self._simulation_perception_warning(),
+                    )
                 self._sim_ready_cache_ts = now
                 self._sim_ready_cache = result
                 return result
@@ -3834,7 +3905,6 @@ class SystemBridge:
             from cais_spade_llm.resources.robot.ur5e_controller import (
                 JOINT_NAMES as UR5E_JOINT_NAMES,
                 JOINT_STATES_TOPIC as UR5E_JOINT_STATES_TOPIC,
-                TRAJECTORY_TOPIC as UR5E_TRAJECTORY_TOPIC,
             )
             from cais_spade_llm.resources.robot.xarm6_controller import (
                 JOINT_NAMES as XARM6_JOINT_NAMES,
@@ -3868,7 +3938,7 @@ class SystemBridge:
                     named_positions=named_positions,
                     execution_mode="simulation",
                     arm_joint_names=UR5E_JOINT_NAMES,
-                    arm_trajectory_topic=UR5E_TRAJECTORY_TOPIC,
+                    arm_trajectory_topic=_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC,
                     joint_states_topic=UR5E_JOINT_STATES_TOPIC,
                 )
             else:
@@ -4321,7 +4391,6 @@ class SystemBridge:
             from cais_spade_llm.resources.robot.ur5e_controller import (
                 JOINT_NAMES as UR5E_JOINT_NAMES,
                 JOINT_STATES_TOPIC as UR5E_JOINT_STATES_TOPIC,
-                TRAJECTORY_TOPIC as UR5E_TRAJECTORY_TOPIC,
             )
             from cais_spade_llm.resources.robot.xarm6_controller import (
                 JOINT_NAMES as XARM6_JOINT_NAMES,
@@ -4350,7 +4419,7 @@ class SystemBridge:
                     named_positions=named_positions,
                     execution_mode="simulation",
                     arm_joint_names=UR5E_JOINT_NAMES,
-                    arm_trajectory_topic=UR5E_TRAJECTORY_TOPIC,
+                    arm_trajectory_topic=_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC,
                     joint_states_topic=UR5E_JOINT_STATES_TOPIC,
                 )
             else:
@@ -4930,12 +4999,66 @@ class SystemBridge:
             merged.update(ts)
         return merged
 
+    def _find_product_agent(self, product_jid: str):
+        target = str(product_jid or "").strip()
+        if not target:
+            raise ValueError("product_jid is required")
+        for pa in self.product_agents:
+            if str(getattr(pa, "jid", "")).strip() == target:
+                return pa
+        raise ValueError(f"product agent not found: {target}")
+
+    @staticmethod
+    def _run_product_agent_coroutine(agent: Any, coroutine: Any, *, timeout_sec: float = 20.0) -> Any:
+        loop = getattr(agent, "loop", None)
+        if loop is None:
+            raise RuntimeError("product agent loop is unavailable")
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            return future.result(timeout=max(1.0, float(timeout_sec)))
+        except Exception:
+            future.cancel()
+            raise
+
     def get_execution_timeline(self) -> list[dict[str, Any]]:
         timeline = []
         for pa in self.product_agents:
             tl = getattr(pa, "execution_timeline", [])
             timeline.extend(tl)
         return timeline
+
+    def get_runtime_recoveries(self) -> list[dict[str, Any]]:
+        recoveries: list[dict[str, Any]] = []
+        for pa in self.product_agents:
+            getter = getattr(pa, "get_runtime_recovery", None)
+            if callable(getter):
+                try:
+                    recovery = getter()
+                except Exception:
+                    recovery = None
+            else:
+                recovery = getattr(pa, "runtime_recovery", None)
+            if isinstance(recovery, dict):
+                recoveries.append(dict(recovery))
+        return recoveries
+
+    def submit_runtime_recovery_guidance(self, product_jid: str, message: str) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        submitter = getattr(agent, "submit_runtime_recovery_guidance", None)
+        if not callable(submitter):
+            raise RuntimeError("product agent does not support runtime recovery guidance")
+        return self._run_product_agent_coroutine(agent, submitter(message))
+
+    def retry_runtime_recovery_des(self, product_jid: str) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        retry = getattr(agent, "retry_runtime_recovery_des", None)
+        if not callable(retry):
+            raise RuntimeError("product agent does not support DES runtime recovery retry")
+        return self._run_product_agent_coroutine(agent, retry())
 
     def get_plan_safety_alerts(self) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []
@@ -4961,15 +5084,41 @@ class SystemBridge:
             merged.update(pt)
         return merged
 
-    def get_safety_rules(self) -> list[dict[str, Any]]:
+    def get_safety_rules(self, bundle_id: str | None = None) -> list[dict[str, Any]]:
+        """
+        Return safety rules currently enforced at runtime when available.
+
+        When the system is not running yet, fall back to the selected or active
+        verified bundle's compiled safety rules so the dashboard can preview the
+        exact rules that will be enforced after startup.
+        """
         if self.cca and hasattr(self.cca, "safety_rules"):
-            return self.cca.safety_rules or []
+            live_rules = self.cca.safety_rules or []
+            if live_rules:
+                normalized: list[dict[str, Any]] = []
+                for rule in live_rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    item = dict(rule)
+                    interpretation = str(item.get("generated_interpretation", "")).strip()
+                    if not interpretation:
+                        interpretation = self._ltlf_plain_feedback(item)
+                    item["generated_interpretation"] = interpretation
+                    normalized.append(item)
+                return normalized
+        target_bundle_id = str(bundle_id or "").strip() or str(self.bundle_store.get_active_bundle_id() or "").strip()
+        if target_bundle_id:
+            return self.get_bundle_safety_rules(target_bundle_id)
         return []
 
     def get_safety_state(self) -> dict[str, Any]:
         if not self.cca:
             alerts = self.get_plan_safety_alerts()
-            return {"plan_alerts": alerts} if alerts else {}
+            recoveries = self.get_runtime_recoveries()
+            result = {"plan_alerts": alerts} if alerts else {}
+            if recoveries:
+                result["runtime_recoveries"] = recoveries
+            return result
         result: dict[str, Any] = {}
         sm = getattr(self.cca, "safety_monitor", None)
         if sm:
@@ -4981,6 +5130,7 @@ class SystemBridge:
             result["fsa_completed"] = list(getattr(fm, "completed_tasks", []))
         result["blocked_tasks"] = getattr(self.cca, "blocked_tasks", {})
         result["plan_alerts"] = self.get_plan_safety_alerts()
+        result["runtime_recoveries"] = self.get_runtime_recoveries()
         return result
 
     def get_log_paths(self) -> dict[str, str]:

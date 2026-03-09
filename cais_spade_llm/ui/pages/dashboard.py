@@ -709,18 +709,35 @@ def render(bridge: SystemBridge) -> None:
         # ── Runtime Safety Rules ────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Runtime Safety Rules").classes("text-lg font-semibold mb-2")
+            runtime_rules_source = ui.label("").classes("text-xs text-slate-500 mb-2")
             runtime_rules_table = ui.table(
                 columns=[
                     {"name": "id", "label": "Rule ID", "field": "id", "sortable": True},
                     {"name": "raw_text", "label": "Rule Text", "field": "raw_text"},
+                    {"name": "generated_interpretation", "label": "Interpretation", "field": "generated_interpretation"},
                     {"name": "constraint_type", "label": "Type", "field": "constraint_type"},
-                    {"name": "ltlf", "label": "LTLf Formula", "field": "ltlf"},
                 ],
                 rows=[],
             ).classes("w-full")
 
             def _refresh_runtime_safety_rules():
-                rules = bridge.get_safety_rules()
+                selected_bundle_id = ""
+                if str(startup_source_select.value or "") == "Use Verified Plan Set":
+                    selected_bundle_id = str(plan_set_select.value or "").strip()
+
+                rules = bridge.get_safety_rules(selected_bundle_id or None)
+                if bridge.system_running and bridge.cca and getattr(bridge.cca, "safety_rules", None):
+                    runtime_rules_source.text = "Source: live runtime rules from the active controller"
+                elif selected_bundle_id:
+                    runtime_rules_source.text = f"Source: selected verified plan set {selected_bundle_id}"
+                else:
+                    active = bridge.get_active_bundle() or {}
+                    active_id = str(active.get("bundle_id", "")).strip()
+                    runtime_rules_source.text = (
+                        f"Source: active verified plan set {active_id}"
+                        if active_id
+                        else "Source: no runtime or verified bundle safety loaded"
+                    )
                 rows = []
                 for i, r in enumerate(rules):
                     rows.append(
@@ -728,6 +745,7 @@ def render(bridge: SystemBridge) -> None:
                             "id": r.get("id", f"R{i}"),
                             "raw_text": r.get("raw_text", r.get("text", str(r))),
                             "constraint_type": r.get("constraint_type", ""),
+                            "generated_interpretation": r.get("generated_interpretation", r.get("ltlf_plain_feedback", "")),
                             "ltlf": r.get("ltlf", r.get("formula", "")),
                         }
                     )
@@ -745,6 +763,210 @@ def render(bridge: SystemBridge) -> None:
                 runtime_safety_state.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
 
             _managed_timer(2.0, _refresh_runtime_safety_state)
+
+        # ── Replan / Recovery ───────────────────────────────────────
+        with ui.card().classes("w-full"):
+            ui.label("Replan / Recovery").classes("text-lg font-semibold mb-2")
+            ui.label(
+                "Runtime DES recovery stays inside one workflow: DES search, narrow LLM bridge, plan validation, then human intervention if needed."
+            ).classes("text-xs text-slate-500 mb-2")
+            runtime_recovery_container = ui.column().classes("w-full gap-3")
+
+            guidance_buffers: dict[str, str] = {}
+
+            def _status_color(status: str) -> str:
+                key = str(status or "").strip().lower()
+                if key == "resolved":
+                    return "green"
+                if key == "human_required":
+                    return "red"
+                if key in {"des_search", "llm_bridge", "validating"}:
+                    return "blue"
+                return "grey"
+
+            def _status_label(status: str) -> str:
+                labels = {
+                    "idle": "Idle",
+                    "des_search": "DES search",
+                    "llm_bridge": "LLM bridge",
+                    "validating": "Plan validation",
+                    "human_required": "Human intervention",
+                    "resolved": "Resolved",
+                }
+                key = str(status or "").strip().lower()
+                return labels.get(key, key.replace("_", " ").title() or "Unknown")
+
+            def _resolution_label(value: str) -> str:
+                labels = {
+                    "none": "In progress",
+                    "des_only": "DES only",
+                    "des_with_llm_bridge": "DES + LLM bridge",
+                    "human_required": "Human required",
+                }
+                key = str(value or "").strip().lower()
+                return labels.get(key, key.replace("_", " ").title() or "Unknown")
+
+            def _resolution_color(value: str) -> str:
+                key = str(value or "").strip().lower()
+                if key in {"des_only", "des_with_llm_bridge"}:
+                    return "green"
+                if key == "human_required":
+                    return "red"
+                return "grey"
+
+            def _stage_badges(recovery: dict[str, Any]) -> list[tuple[str, str]]:
+                status = str(recovery.get("status", "idle") or "idle").strip().lower()
+                used_bridge = bool(recovery.get("used_llm_bridge", False))
+                badges: list[tuple[str, str]] = []
+                stages = [
+                    ("des_search", "DES search"),
+                    ("llm_bridge", "LLM bridge"),
+                    ("validating", "Plan validation"),
+                    ("human_required", "Human intervention"),
+                ]
+                for key, label in stages:
+                    color = "grey"
+                    if status == "resolved":
+                        if key == "des_search":
+                            color = "green"
+                        elif key == "llm_bridge" and used_bridge:
+                            color = "green"
+                        elif key == "validating":
+                            color = "green"
+                    elif status == key:
+                        color = "red" if key == "human_required" else "blue"
+                    elif key == "des_search" and status in {"llm_bridge", "validating", "human_required"}:
+                        color = "green"
+                    elif key == "llm_bridge" and used_bridge and status in {"validating", "human_required"}:
+                        color = "green"
+                    elif key == "validating" and status == "human_required":
+                        color = "green"
+                    badges.append((label, color))
+                return badges
+
+            async def _submit_runtime_guidance(product_jid: str) -> None:
+                message = str(guidance_buffers.get(product_jid, "")).strip()
+                if not message:
+                    ui.notify("Operator guidance is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.submit_runtime_recovery_guidance,
+                        product_jid,
+                        message,
+                    )
+                    guidance_buffers[product_jid] = ""
+                    ui.notify("Operator guidance recorded.", type="positive")
+                    _refresh_runtime_recovery_panel()
+                except Exception as exc:
+                    ui.notify(f"Failed to record guidance: {exc}", type="negative")
+
+            async def _retry_runtime_des(product_jid: str) -> None:
+                try:
+                    await asyncio.to_thread(bridge.retry_runtime_recovery_des, product_jid)
+                    ui.notify("Runtime DES recovery retry started.", type="positive")
+                    _refresh_runtime_recovery_panel()
+                except Exception as exc:
+                    ui.notify(f"Failed to retry DES recovery: {exc}", type="negative")
+
+            def _refresh_runtime_recovery_panel() -> None:
+                runtime_recovery_container.clear()
+                recoveries = bridge.get_runtime_recoveries()
+                if not recoveries:
+                    with runtime_recovery_container:
+                        ui.label("No runtime recovery sessions.").classes("text-slate-400 italic")
+                    return
+
+                with runtime_recovery_container:
+                    for recovery in recoveries:
+                        if not isinstance(recovery, dict):
+                            continue
+                        product_jid = str(recovery.get("product_jid", "")).strip()
+                        product_name = str(recovery.get("product_name", product_jid) or product_jid or "product")
+                        status = str(recovery.get("status", "idle") or "idle")
+                        resolution = str(recovery.get("resolution_class", "none") or "none")
+                        message = str(recovery.get("message", "")).strip() or "No recovery activity."
+                        attempts_used = int(recovery.get("attempts_used", 0) or 0)
+                        attempts_max = int(recovery.get("attempts_max", 0) or 0)
+                        violated_rules = list(recovery.get("violated_rules") or [])
+                        witness_count = int(recovery.get("witness_count", 0) or 0)
+                        operator_guidance = str(
+                            guidance_buffers.get(
+                                product_jid,
+                                recovery.get("operator_guidance", ""),
+                            )
+                            or ""
+                        )
+                        guidance_buffers[product_jid] = operator_guidance
+
+                        with ui.card().classes("w-full bg-slate-50"):
+                            with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                                ui.label(product_name).classes("font-semibold")
+                                with ui.row().classes("items-center gap-2 flex-wrap"):
+                                    ui.badge(_status_label(status)).props(f"color={_status_color(status)}")
+                                    ui.badge(_resolution_label(resolution)).props(
+                                        f"color={_resolution_color(resolution)}"
+                                    )
+
+                            with ui.row().classes("items-center gap-2 flex-wrap text-xs text-slate-600"):
+                                ui.label(f"Trigger: {str(recovery.get('trigger', '') or 'n/a')}")
+                                ui.label(f"Failed task: {str(recovery.get('failed_task_id', '') or 'n/a')}")
+                                if str(recovery.get("replan_mode", "")).strip().lower() == "llm":
+                                    ui.badge("Experimental full-LLM mode").props("color=orange")
+
+                            with ui.row().classes("items-center gap-2 flex-wrap mt-1"):
+                                for stage_label, stage_color in _stage_badges(recovery):
+                                    ui.badge(stage_label).props(f"color={stage_color}")
+
+                            ui.label(message).classes("text-sm mt-2")
+                            ui.label(
+                                f"Attempts: {attempts_used}/{attempts_max} | "
+                                f"Witnesses: {witness_count} | "
+                                f"Violated rules: {', '.join(violated_rules) if violated_rules else 'none'}"
+                            ).classes("text-xs text-slate-600")
+
+                            history = list(recovery.get("history") or [])
+                            if history:
+                                with ui.expansion("Recent history", icon="history", value=False).classes("w-full mt-2"):
+                                    for item in history[-6:]:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        stamp = str(item.get("timestamp", "")).strip()
+                                        item_status = _status_label(str(item.get("status", "")).strip())
+                                        item_message = str(item.get("message", "")).strip()
+                                        ui.label(f"{stamp} | {item_status} | {item_message}").classes(
+                                            "text-xs text-slate-600"
+                                        )
+
+                            if status == "human_required":
+                                guidance_box = ui.textarea(
+                                    label="Operator guidance",
+                                    value=operator_guidance,
+                                ).props("outlined autogrow").classes("w-full mt-2")
+                                guidance_box.on_value_change(
+                                    lambda e, jid=product_jid: guidance_buffers.__setitem__(
+                                        jid,
+                                        str(e.value or ""),
+                                    )
+                                )
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    ui.button(
+                                        "Retry DES",
+                                        on_click=lambda jid=product_jid: asyncio.create_task(
+                                            _retry_runtime_des(jid)
+                                        ),
+                                        icon="restart_alt",
+                                    ).props("color=blue")
+                                    ui.button(
+                                        "Submit operator guidance",
+                                        on_click=lambda jid=product_jid: asyncio.create_task(
+                                            _submit_runtime_guidance(jid)
+                                        ),
+                                        icon="person",
+                                    ).props("color=amber")
+
+            _refresh_runtime_recovery_panel()
+            _managed_timer(3.0, _refresh_runtime_recovery_panel)
 
         # ── Runtime Blocked Tasks ───────────────────────────────────
         with ui.card().classes("w-full"):

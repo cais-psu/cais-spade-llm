@@ -68,7 +68,7 @@ class BaseSafetyChecker:
         Maps a task execution to a list of AP labels based on loaded safety rules.
 
         Matching logic (per AP):
-          - resource:  exact match or wildcard ("any", "robot")
+          - resource:  exact match or wildcard ("any", legacy "robot")
           - event:     must equal function_name
           - product:   must match params["part_name"] (or "product") unless "any"
           - context:   if not "any", either:
@@ -331,16 +331,26 @@ class BaseSafetyChecker:
         ap_list: List[str] = []
         init: Optional[str] = None
         violation: Optional[str] = None
+        accepting: set[str] = set()
 
         text = " ".join(dot_src.split())
+        state_pat = r"[A-Za-z0-9_\.]+"
 
         # Match initial state: 'init -> 1;'
-        m_init = re.search(r"init\s*->\s*([A-Za-z0-9_]+)\s*;", text)
+        m_init = re.search(rf"init\s*->\s*({state_pat})\s*;", text)
         if m_init:
             init = m_init.group(1)
 
+        for state_blob in re.findall(
+            rf"node\s*\[shape\s*=\s*doublecircle\]\s*;\s*([^;]+)\s*;",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            for state in re.findall(state_pat, state_blob):
+                accepting.add(state)
+
         # Match transitions: '1 -> 2 [label="..."];'
-        pattern = re.compile(r"([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)\s*\[label=\"(.*?)\"\];")
+        pattern = re.compile(rf"({state_pat})\s*->\s*({state_pat})\s*\[label=\"(.*?)\"\];")
         
         for src, dst, label in pattern.findall(text):
             transitions.setdefault(src, []).append((label, dst))
@@ -359,5 +369,6 @@ class BaseSafetyChecker:
             "initial": init,
             "transitions": transitions,
             "violation_state": violation,
+            "accepting_states": sorted(accepting),
             "ap_symbols": ap_list
         }

@@ -269,6 +269,23 @@ class ProcessPlanner:
     # ------------------------------------------------------------------ #
     # 3. REPLAN WHEN SAFETY VIOLATION OR ONLINE FAILURE OCCURS
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_des_replan_result(
+        *,
+        plan_changed: bool = False,
+        used_llm_bridge: bool = False,
+        human_required: bool = False,
+        message: str = "",
+        bridge_summary: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "plan_changed": bool(plan_changed),
+            "used_llm_bridge": bool(used_llm_bridge),
+            "human_required": bool(human_required),
+            "message": str(message).strip(),
+            "bridge_summary": list(bridge_summary or []),
+        }
+
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
         self.logger.info("[Planner] Triggering LLM Re-planning with offline feedback...")
@@ -316,22 +333,22 @@ class ProcessPlanner:
         self,
         violations: list[dict],
         system_coordination_state: dict | None = None
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Online replan — routes to DES or LLM based on replan_mode."""
         replan_mode = str(getattr(self.product_agent, "replan_mode", "llm") or "llm").strip().lower()
         if replan_mode == "none":
             self.logger.info("[Planner] Online replanning disabled (replan_mode=none).")
-            return
+            return None
         if replan_mode == "des":
-            await self.replan_with_feedback_des(
+            return await self.replan_with_feedback_des(
                 violations,
                 system_coordination_state=system_coordination_state,
             )
-        else:
-            await self.replan_with_feedback_llm(
-                violations,
-                system_coordination_state=system_coordination_state,
-            )
+        await self.replan_with_feedback_llm(
+            violations,
+            system_coordination_state=system_coordination_state,
+        )
+        return None
 
     async def replan_with_feedback_llm(
         self,
@@ -387,7 +404,7 @@ class ProcessPlanner:
         self,
         violations: list[dict],
         system_coordination_state: dict | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """
         DES replanning: PA computes bids per resource, compiles M_e, runs BFS.
         LLM bridge if stuck. Falls back to human intervention if no path found.
@@ -402,30 +419,50 @@ class ProcessPlanner:
 
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
 
+        def _identify_stuck_resource(
+            resource_states: dict[str, dict[str, Any]],
+        ) -> str:
+            for violation in violations:
+                if not isinstance(violation, dict):
+                    continue
+                candidate = violation.get("resource_jid") or violation.get("failed_resource_jid")
+                if candidate:
+                    return str(candidate)
+            for ra in self.resource_agents:
+                ra_jid_candidate = str(ra.jid)
+                rs = resource_states.get(ra_jid_candidate, {})
+                if rs.get("current_state", "idle") != "idle":
+                    return ra_jid_candidate
+            return str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
+
+        def _resource_infos() -> list[dict[str, Any]]:
+            return [
+                {
+                    "jid": str(ra.jid),
+                    "static_capabilities": getattr(ra, "static_capabilities", {}),
+                }
+                for ra in self.resource_agents
+            ]
+
         # 1. Build P_id: parts not yet at goal state
         product_state = self.product_agent._build_product_state()
-        part_tracker = product_state.get("part_tracker", {})
+        part_tracker = product_state.get("parts")
+        if not isinstance(part_tracker, dict) or not part_tracker:
+            legacy_part_tracker = product_state.get("part_tracker")
+            if isinstance(legacy_part_tracker, dict) and legacy_part_tracker:
+                part_tracker = legacy_part_tracker
+            else:
+                part_tracker = self._derive_part_tracker_from_violations(violations)
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
-        goal_state = next(
-            (
-                t["part_transition"]["completed"]["state"]
-                for t in tools_catalog
-                if t.get("part_transition", {}).get("completed", {}).get("state")
-            ),
-            None,
-        )
+        goal_state = self._resolve_goal_part_state(tools_catalog)
         P_id = [
             name for name, info in part_tracker.items()
-            if info.get("state") != goal_state
+            if not goal_state or info.get("state") != goal_state
         ]
-
-        if not P_id:
-            self.logger.info("[Planner] All parts at goal state (%s) — nothing to replan.", goal_state)
-            return
 
         # 2. Build x_c per resource from coordination state and part tracker
         scs = system_coordination_state or {}
-        # Gracefully handle older formats returning robot_states
+        # Gracefully handle older coordination formats that still use robot_states
         resource_states = scs.get("resource_states", scs.get("robot_states", {}))
         part_states = {name: info.get("state") for name, info in part_tracker.items()}
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
@@ -438,133 +475,161 @@ class ProcessPlanner:
             if t.get("in_state") and t.get("in_state") not in all_out_states
         ]
         default_resource_state = root_states[0] if root_states else "idle"
+        used_llm_bridge = False
+        bridge_summary: list[str] = []
+        path: list[dict[str, Any]] | None = None
+        x_c: dict[str, Any] | None = None
 
-        # 3. Compute a bid for each resource agent
-        bids: list[Bid] = []
-        for ra in self.resource_agents:
-            ra_jid = str(ra.jid)
-            ra_resource_state = resource_states.get(ra_jid, {})
+        if not P_id:
+            stuck_ra_jid = _identify_stuck_resource(resource_states)
+            rs = resource_states.get(stuck_ra_jid, {})
             x_c = {
-                "resource_state": ra_resource_state.get("current_state", default_resource_state),
-                "current_part": ra_resource_state.get("held_part"),
+                "resource_state": rs.get("current_state", default_resource_state),
+                "current_part": rs.get("held_part"),
                 "current_location": None,
                 "part_states": part_states,
                 "part_locations": part_locations,
             }
-            reachability = getattr(ra, "static_capabilities", {}).get("reachability", [])
-            staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {})
-            bid = compute_bid(
-                x_c=x_c,
-                P_id=P_id,
-                goal_state=goal_state,
-                tools=tools_catalog,
-                reachability=reachability,
-                staging_areas=staging_areas,
-                resource_jid=ra_jid,
-            )
-            if bid:
-                self.logger.debug("[Planner] Bid from %s: complete=%s", ra_jid, bid.complete)
-                bids.append(bid)
+
+            if part_tracker:
+                self.logger.info(
+                    "[Planner] All tracked parts already at goal state (%s) — attempting suffix recovery via model bridge.",
+                    goal_state or "unknown",
+                )
             else:
-                self.logger.debug("[Planner] No bid from %s.", ra_jid)
-
-
-        # 4. Compile M_e from all bids
-        M_e = compile_environment_model(bids)
-
-        # 5. BFS — start from the first bid's initial state if available
-        # Find x_c representing the global start state for BFS fallback
-        x_c = None
-        if bids:
-            x_c = bids[0].str_x[0]
-        else:
-            # Reconstruct global state directly if no bids
-            x_c = {
-                "part_states": part_states,
-                "part_locations": part_locations,
-                "resource_state": default_resource_state,
-            }
-
-        path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
-
-        # 6. If stuck, try LLM bridge
-        if path is None:
-            self.logger.info("[Planner] BFS found no path — requesting LLM bridge.")
-            stuck_state = x_c
-
-            # Identify the stuck resource from violations rather than
-            # blindly picking the first resource agent.
-            stuck_ra_jid = None
-            for v in violations:
-                candidate = v.get("resource_jid") or v.get("failed_resource_jid")
-                if candidate:
-                    stuck_ra_jid = candidate
-                    break
-            if not stuck_ra_jid:
-                # Fallback: pick the resource whose state is not idle
-                for ra in self.resource_agents:
-                    ra_jid_candidate = str(ra.jid)
-                    rs = resource_states.get(ra_jid_candidate, {})
-                    if rs.get("current_state", "idle") != "idle":
-                        stuck_ra_jid = ra_jid_candidate
-                        break
-            if not stuck_ra_jid:
-                stuck_ra_jid = str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
-
-            self.logger.info("[Planner] Identified stuck resource: %s", stuck_ra_jid)
-
-            # Build resource_infos for the prompt
-            resource_infos = [
-                {
-                    "jid": str(ra.jid),
-                    "static_capabilities": getattr(ra, "static_capabilities", {}),
-                }
-                for ra in self.resource_agents
-            ]
+                self.logger.warning(
+                    "[Planner] No tracked parts available for DES replanning; attempting suffix recovery via model bridge."
+                )
 
             bridge_tools = await llm_explore_states_and_events(
-                stuck_state=stuck_state,
-                P_id=P_id,
+                stuck_state=x_c,
+                P_id=[],
                 ra_jid=stuck_ra_jid,
                 ask_llm=self.product_agent.ask_llm,
-                goal_state=goal_state,
+                goal_state=goal_state or "unknown",
                 tools_catalog=tools_catalog,
-                resource_infos=resource_infos,
+                resource_infos=_resource_infos(),
                 part_tracker=part_tracker,
             )
-            if bridge_tools:
-                # Inject bridge as synthetic single-RA bid and retry
-                bridge_bid = Bid(
-                    request_id="bridge",
-                    ra_jid=stuck_ra_jid,
-                    str_e=bridge_tools,
-                    str_x=[stuck_state] + [
-                        {
-                            "resource_state": t.get("out_state", stuck_state.get("resource_state")),
-                            "part_states": {
-                                **stuck_state.get("part_states", {}),
-                                **{k: v.get("state") for k, v in t.get("part_effect", {}).items()},
-                            },
-                            "part_locations": {
-                                **stuck_state.get("part_locations", {}),
-                                **{k: v.get("location") for k, v in t.get("part_effect", {}).items()},
-                            },
-                        }
-                        for t in bridge_tools
-                    ],
-                    prp_p_achieved=[],
-                    complete=False,
+            if not bridge_tools:
+                message = (
+                    "DES recovery could not find a modeled suffix and the LLM bridge returned no recovery events."
                 )
-                M_e = compile_environment_model(bids + [bridge_bid])
-                path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
+                self.logger.error("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    human_required=True,
+                    message=message,
+                )
 
-        # 7. If still no path, throw error and exit
+            used_llm_bridge = True
+            bridge_summary = [
+                str(tool.get("function_name", "")).strip()
+                for tool in bridge_tools
+                if isinstance(tool, dict) and str(tool.get("function_name", "")).strip()
+            ]
+            path = [{**tool, "ra_jid": stuck_ra_jid} for tool in bridge_tools if isinstance(tool, dict)]
+
+        # 3. Compute a bid for each resource agent
+        if P_id:
+            bids: list[Bid] = []
+            for ra in self.resource_agents:
+                ra_jid = str(ra.jid)
+                ra_resource_state = resource_states.get(ra_jid, {})
+                x_c = {
+                    "resource_state": ra_resource_state.get("current_state", default_resource_state),
+                    "current_part": ra_resource_state.get("held_part"),
+                    "current_location": None,
+                    "part_states": part_states,
+                    "part_locations": part_locations,
+                }
+                reachability = getattr(ra, "static_capabilities", {}).get("reachability", [])
+                staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {})
+                bid = compute_bid(
+                    x_c=x_c,
+                    P_id=P_id,
+                    goal_state=goal_state,
+                    tools=tools_catalog,
+                    reachability=reachability,
+                    staging_areas=staging_areas,
+                    resource_jid=ra_jid,
+                )
+                if bid:
+                    self.logger.debug("[Planner] Bid from %s: complete=%s", ra_jid, bid.complete)
+                    bids.append(bid)
+                else:
+                    self.logger.debug("[Planner] No bid from %s.", ra_jid)
+
+            M_e = compile_environment_model(bids)
+
+            if bids:
+                x_c = bids[0].str_x[0]
+            else:
+                x_c = {
+                    "part_states": part_states,
+                    "part_locations": part_locations,
+                    "resource_state": default_resource_state,
+                }
+
+            path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
+
+            if path is None:
+                self.logger.info("[Planner] BFS found no path — requesting LLM bridge.")
+                stuck_state = x_c
+                stuck_ra_jid = _identify_stuck_resource(resource_states)
+                self.logger.info("[Planner] Identified stuck resource: %s", stuck_ra_jid)
+
+                bridge_tools = await llm_explore_states_and_events(
+                    stuck_state=stuck_state,
+                    P_id=P_id,
+                    ra_jid=stuck_ra_jid,
+                    ask_llm=self.product_agent.ask_llm,
+                    goal_state=goal_state,
+                    tools_catalog=tools_catalog,
+                    resource_infos=_resource_infos(),
+                    part_tracker=part_tracker,
+                )
+                if bridge_tools:
+                    used_llm_bridge = True
+                    bridge_summary = [
+                        str(tool.get("function_name", "")).strip()
+                        for tool in bridge_tools
+                        if isinstance(tool, dict) and str(tool.get("function_name", "")).strip()
+                    ]
+                    bridge_bid = Bid(
+                        request_id="bridge",
+                        ra_jid=stuck_ra_jid,
+                        str_e=bridge_tools,
+                        str_x=[stuck_state] + [
+                            {
+                                "resource_state": t.get("out_state", stuck_state.get("resource_state")),
+                                "part_states": {
+                                    **stuck_state.get("part_states", {}),
+                                    **{k: v.get("state") for k, v in t.get("part_effect", {}).items()},
+                                },
+                                "part_locations": {
+                                    **stuck_state.get("part_locations", {}),
+                                    **{k: v.get("location") for k, v in t.get("part_effect", {}).items()},
+                                },
+                            }
+                            for t in bridge_tools
+                        ],
+                        prp_p_achieved=[],
+                        complete=False,
+                    )
+                    M_e = compile_environment_model(bids + [bridge_bid])
+                    path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
+
         if path is None:
-            self.logger.error("[Planner] DES + bridge found no path. Human intervention required.")
-            import os
-            os._exit(1)
+            message = "DES recovery could not find or bridge a valid continuation."
+            self.logger.error("[Planner] %s", message)
+            return self._build_des_replan_result(
+                human_required=True,
+                used_llm_bridge=used_llm_bridge,
+                message=message,
+                bridge_summary=bridge_summary,
+            )
 
-        # 8. Translate path to task patch
+        # 4/8. Translate path to task patch
         from uuid import uuid4
         tasks = []
         prev_id = None
@@ -575,15 +640,81 @@ class ProcessPlanner:
                 "id": task_id,
                 "function_name": event["function_name"],
                 "params": params,
-                "resource_jid": event["ra_jid"],
+                "resource_jid": event.get("ra_jid"),
                 "predecessors": [prev_id] if prev_id else [],
                 "successors": [],
-                "change_reason": f"INSERTION: DES recovery — {event['function_name']} on {event['ra_jid']}",
+                "change_reason": (
+                    f"INSERTION: DES recovery — {event['function_name']} on {event.get('ra_jid', 'unknown')}"
+                ),
             })
             prev_id = task_id
 
         self.logger.info("[Planner] DES recovery path: %d tasks.", len(tasks))
         self._apply_replan_patch(tasks)
+        message = (
+            f"DES recovery produced {len(tasks)} task(s)."
+            if not used_llm_bridge
+            else f"DES recovery used the LLM bridge and produced {len(tasks)} task(s)."
+        )
+        return self._build_des_replan_result(
+            plan_changed=bool(tasks),
+            used_llm_bridge=used_llm_bridge,
+            human_required=False,
+            message=message,
+            bridge_summary=bridge_summary,
+        )
+
+    @staticmethod
+    def _resolve_goal_part_state(tools_catalog: list[dict[str, Any]]) -> str | None:
+        completed_states: list[str] = []
+        intermediate_states: set[str] = set()
+        for tool in tools_catalog or []:
+            if not isinstance(tool, dict):
+                continue
+            part_in_state = str(tool.get("part_in_state") or "").strip()
+            if part_in_state:
+                intermediate_states.add(part_in_state)
+            completed_state = str(
+                tool.get("part_transition", {}).get("completed", {}).get("state") or ""
+            ).strip()
+            if completed_state:
+                completed_states.append(completed_state)
+
+        for state in completed_states:
+            if state not in intermediate_states:
+                return state
+        return completed_states[-1] if completed_states else None
+
+    @staticmethod
+    def _derive_part_tracker_from_violations(
+        violations: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        derived: dict[str, dict[str, Any]] = {}
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            failure_context = violation.get("failure_context")
+            if not isinstance(failure_context, dict):
+                continue
+            affected_entities = failure_context.get("affected_entities")
+            if not isinstance(affected_entities, list):
+                continue
+            for entity in affected_entities:
+                if not isinstance(entity, dict):
+                    continue
+                if str(entity.get("entity_type") or "").strip().lower() != "part":
+                    continue
+                part_name = str(entity.get("entity_id") or "").strip()
+                if not part_name:
+                    continue
+                entry = derived.setdefault(part_name, {"state": "unknown", "location": None})
+                state = str(entity.get("state") or "").strip()
+                if state:
+                    entry["state"] = state
+                location = entity.get("location")
+                if isinstance(location, str) and location.strip():
+                    entry["location"] = location.strip()
+        return derived
 
     def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:
         """
@@ -670,9 +801,9 @@ class ProcessPlanner:
     @staticmethod
     def _deduplicate_tools_catalog(catalog: list) -> list:
         """
-        Merge per-robot tool entries into one entry per function.
-        function_owner_agent is replaced by capable_agents: [robot1, robot2, ...]
-        so the LLM sees each capability once and knows which robots can execute it.
+        Merge per-resource tool entries into one entry per function.
+        function_owner_agent is replaced by capable_agents: [resource1, resource2, ...]
+        so the LLM sees each capability once and knows which resources can execute it.
         """
         seen: Dict[str, Dict[str, Any]] = {}
         for row in catalog:
