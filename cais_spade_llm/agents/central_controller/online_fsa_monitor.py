@@ -24,6 +24,11 @@ class OnlineFsaMonitor:
         A = (self.fsa or {}).get("A") or {}
         self.current_state: Optional[str] = A.get("x0")
         self.transitions: List[Dict[str, Any]] = A.get("Tr") or []
+        self._all_states: set[str] = {
+            str(state)
+            for state in (A.get("X") or [])
+            if str(state).strip()
+        }
 
         # Build (from_state, event) -> transition map
         self._tr_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -51,6 +56,28 @@ class OnlineFsaMonitor:
     def matches_fsa(self, fsa: Dict[str, Any]) -> bool:
         """Return True when the provided FSA is structurally identical."""
         return (self.fsa or {}) == (fsa or {})
+
+    def has_state(self, state: Optional[str]) -> bool:
+        """Return True when *state* exists in this monitor's FSA."""
+        return bool(state) and str(state) in self._all_states
+
+    def runtime_progress_snapshot(self) -> Dict[str, List[str]]:
+        """Return the current runtime prefix as task-id lists."""
+        return {
+            "completed_task_ids": sorted(str(task_id) for task_id in self.completed_task_ids),
+            "running_task_ids": self.running_task_ids_from_state(self.current_state),
+            "failed_task_ids": sorted(str(task_id) for task_id in self.failed_task_ids),
+        }
+
+    def restore_from_prior_monitor(self, prior_monitor: "OnlineFsaMonitor" | None) -> bool:
+        """Carry over live runtime state from *prior_monitor* when the state still exists."""
+        if prior_monitor is None or not self.has_state(prior_monitor.current_state):
+            return False
+        self.current_state = prior_monitor.current_state
+        self.completed_task_ids = set(prior_monitor.completed_task_ids)
+        self.failed_task_ids = set(prior_monitor.failed_task_ids)
+        self.last_event = dict(prior_monitor.last_event) if isinstance(prior_monitor.last_event, dict) else prior_monitor.last_event
+        return True
 
     def _apply_event_label(self, event_label: str, *, task_id: str, outcome: str | None = None) -> bool:
         if not self.current_state:
@@ -153,12 +180,24 @@ class OnlineFsaMonitor:
             to_state = tr.get("to") or to_state
             readable_event = tr.get("readable_event")
             self.current_state = to_state
+        else:
+            self.logger.warning(
+                "[OnlineFSA] Event %s not enabled from state %s; leaving plan FSA state unchanged.",
+                event_label,
+                from_state,
+            )
 
         # Track completion/failure for replanning context.
         if event_type == "done":
-            self.completed_task_ids.add(str(task_id))
-            # A completed task should not be considered failed.
-            self.failed_task_ids.discard(str(task_id))
+            if tr:
+                self.completed_task_ids.add(str(task_id))
+                # A completed task should not be considered failed.
+                self.failed_task_ids.discard(str(task_id))
+            else:
+                self.logger.warning(
+                    "[OnlineFSA] Ignoring unmatched completion event for task %s.",
+                    task_id,
+                )
         elif event_type == "fail":
             self.failed_task_ids.add(str(task_id))
 

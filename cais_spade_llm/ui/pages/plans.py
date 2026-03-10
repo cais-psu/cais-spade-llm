@@ -294,7 +294,18 @@ def render(bridge: SystemBridge) -> None:
             if current in options:
                 requirement_select.value = current
             else:
-                requirement_select.value = next(iter(options.keys()), None)
+                # Default to the product's mapped requirement file if available
+                mapped_file = ""
+                if product_init_file:
+                    try:
+                        ctx = bridge._resolve_product_context(product_init_file, include_hashes=False)
+                        mapped_file = bridge._norm_path(str(ctx.get("product_spec_file", "")).strip())
+                    except Exception:
+                        pass
+                if mapped_file and mapped_file in options:
+                    requirement_select.value = mapped_file
+                else:
+                    requirement_select.value = next(iter(options.keys()), None)
 
         def _safety_intent_reason_text(reason: str) -> str:
             mapping = {
@@ -302,6 +313,11 @@ def render(bridge: SystemBridge) -> None:
                 "not_approved": "not approved yet",
                 "revoked": "approval revoked",
                 "content_changed_since_approval": "content changed after approval",
+                "tools_changed_since_approval": "tools changed after approval; regenerate preview and re-approve",
+                "prompts_changed_since_approval": "prompts changed after approval; regenerate preview and re-approve",
+                "approved_preview_provenance_missing": "approved preview metadata missing; regenerate preview and re-approve",
+                "approved_preview_missing": "approved preview missing; regenerate preview and re-approve",
+                "approved_preview_artifacts_missing": "approved preview artifacts missing; regenerate preview and re-approve",
                 "safety_file_empty": "file is empty",
                 "safety_file_missing": "file missing",
             }
@@ -515,8 +531,7 @@ def render(bridge: SystemBridge) -> None:
             verify_btn.set_enabled(
                 bool(selected_id)
                 and not is_busy
-                and str((selected_manifest or {}).get("status", "")).lower() == "draft"
-                and validation_ok
+                and str((selected_manifest or {}).get("status", "")).lower() in {"draft", "invalid"}
             )
             unverify_btn.set_enabled(
                 bool(selected_id)

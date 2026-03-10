@@ -61,6 +61,43 @@ def _current_scope(bridge: SystemBridge) -> tuple[str, dict]:
     }
 
 
+def _current_safety_artifact_hashes(safety_file: Path) -> dict[str, str]:
+    return {
+        "safety_sha256": bridge_module.sha256_text(
+            safety_file.read_text(encoding="utf-8").strip()
+        ),
+        "tools_sha256": sha256_file(bridge_module._TOOLS_OUT),
+        "prompts_sha256": sha256_file(bridge_module._BASE / "prompts.py"),
+    }
+
+
+def _build_preview_record(
+    preview_dir: Path,
+    safety_file: Path,
+    *,
+    preview_id: str,
+    ltlf: str = "G(true)",
+) -> dict[str, object]:
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        preview_dir / "cca_safety_logic.json",
+        {"rules": [{"id": "SAFE_1", "ltlf": ltlf, "aps": []}]},
+    )
+    (preview_dir / "SAFE_1_dfa.dot").write_text("digraph {}", encoding="utf-8")
+    hashes = _current_safety_artifact_hashes(safety_file)
+    return {
+        "preview_id": preview_id,
+        "generated_at_utc": "2026-03-10T15:00:00+00:00",
+        "preview_dir": str(preview_dir.resolve()),
+        "safety_logic_json": str((preview_dir / "cca_safety_logic.json").resolve()),
+        "dfa_dot_files": [str((preview_dir / "SAFE_1_dfa.dot").resolve())],
+        "dfa_png_files": [],
+        **hashes,
+        "refinement_feedback": "",
+        "parent_preview_id": "",
+    }
+
+
 def test_bridge_bundle_compatibility_and_active_context(tmp_path):
     bridge = SystemBridge()
     bridge.bundle_store = BundleStore(tmp_path / "user_verified_plan")
@@ -292,6 +329,110 @@ def test_bridge_startup_bundle_mismatch_auto_deactivates_active_bundle(tmp_path)
     assert bundle_id in notice
     assert "prompts.py changed" in notice
     assert bridge.bundle_store.get_active_bundle_id() is None
+
+
+def test_bridge_startup_bundle_uses_selected_requirement_override_for_compatibility(tmp_path):
+    bridge = SystemBridge()
+    bridge.bundle_store = BundleStore(tmp_path / "user_verified_plan")
+
+    product_dir = tmp_path / "initialization" / "products"
+    req_dir = tmp_path / "specification" / "products" / "requirements"
+    product_dir.mkdir(parents=True, exist_ok=True)
+    req_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_requirement = req_dir / "override_requirement.txt"
+    selected_requirement.write_text(
+        "[Product Requirements]\n- use the explicit requirement override\n",
+        encoding="utf-8",
+    )
+    product_path = product_dir / "demo_product.json"
+    _write_json(
+        product_path,
+        {
+            "demo_product": {
+                "type": "product",
+                "jid": "demo_product@localhost",
+                "password": "none",
+                "domain": "localhost",
+                "functions": [],
+                "instructions": "demo",
+                "product_specification_file": "",
+            }
+        },
+    )
+
+    original_product_dir = bridge_module._PRODUCT_DIR
+    original_req_dir = bridge_module._PRODUCT_REQUIREMENTS_DIR
+    try:
+        bridge_module._PRODUCT_DIR = product_dir
+        bridge_module._PRODUCT_REQUIREMENTS_DIR = req_dir
+
+        ctx = bridge._resolve_product_context(str(product_path), include_hashes=False)
+        safety_file = str(ctx["safety_file"])
+
+        bundle_id = "bundle_startup_override"
+        bdir = bridge.bundle_store.bundle_dir(bundle_id)
+        bdir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "bundle_id": bundle_id,
+            "status": "verified",
+            "verified": True,
+            "product_spec_file": str(selected_requirement.resolve()),
+            "safety_file": safety_file,
+            "product_name": "demo_product",
+            "execution_mode": "simulation",
+            "robot_env": "gazebo",
+            "source_hashes": bridge._compute_source_hashes(
+                selected_requirement.resolve(),
+                Path(safety_file).resolve(),
+            ),
+            "artifacts": {},
+        }
+        bridge.bundle_store.save_manifest(bdir, manifest)
+        bridge.bundle_store.upsert_bundle_summary(
+            {
+                "bundle_id": bundle_id,
+                "display_name": "startup-override",
+                "created_at_utc": "2026-03-10T00:00:00+00:00",
+                "status": "verified",
+                "verified": True,
+                "product_name": "demo_product",
+                "product_spec_file": str(selected_requirement.resolve()),
+                "execution_mode": "simulation",
+                "robot_env": "gazebo",
+                "manifest_path": str(bridge.bundle_store.manifest_path(bundle_id)),
+            }
+        )
+
+        bridge.bundle_store.set_active_bundle_id(bundle_id)
+        bundle_ctx, notice = bridge._resolve_startup_bundle_context(
+            product_spec_file=str(product_path.resolve()),
+            execution_mode="simulation",
+            robot_env="gazebo",
+            safety_requirement_file=safety_file,
+        )
+        assert bundle_ctx is None
+        assert notice is not None
+        assert "requirements file missing" in notice
+        assert bridge.bundle_store.get_active_bundle_id() is None
+
+        bridge.bundle_store.set_active_bundle_id(bundle_id)
+        bundle_ctx, notice = bridge._resolve_startup_bundle_context(
+            product_spec_file=bridge._startup_bundle_scope_input(
+                str(product_path.resolve()),
+                str(selected_requirement.resolve()),
+            ),
+            execution_mode="simulation",
+            robot_env="gazebo",
+            safety_requirement_file=safety_file,
+        )
+        assert bundle_ctx is not None
+        assert notice is None
+        assert bundle_ctx["bundle_id"] == bundle_id
+        assert bridge.bundle_store.get_active_bundle_id() == bundle_id
+    finally:
+        bridge_module._PRODUCT_DIR = original_product_dir
+        bridge_module._PRODUCT_REQUIREMENTS_DIR = original_req_dir
 
 
 def test_bridge_safety_preview_flags_placeholder_dfa_and_builds_interpretation_summary(tmp_path):
@@ -1034,6 +1175,95 @@ def test_bridge_verify_bundle_updates_status(tmp_path):
     assert loaded["verified"] is True
 
 
+def test_bridge_verify_bundle_allows_invalid_plan_set(tmp_path):
+    bridge = SystemBridge()
+    bridge.bundle_store = BundleStore(tmp_path / "user_verified_plan")
+
+    _, ctx = _current_scope(bridge)
+
+    bundle_id = "bundle_invalid"
+    bdir = bridge.bundle_store.bundle_dir(bundle_id)
+    (bdir / "plan").mkdir(parents=True, exist_ok=True)
+    (bdir / "safety").mkdir(parents=True, exist_ok=True)
+    (bdir / "validation").mkdir(parents=True, exist_ok=True)
+    _write_json(bdir / "plan" / "plan.json", {"nodes": []})
+    _write_json(
+        bdir / "plan" / "global_fsa.json",
+        {"A": {"X": ["S0"], "E": [], "Tr": [], "x0": "S0", "Xm": ["S0"]}, "meta": {}},
+    )
+    _write_json(
+        bdir / "safety" / "cca_safety_logic.json",
+        {"rules": [{"id": "SAFE_1", "ltlf": "G(true)", "aps": []}]},
+    )
+    (bdir / "safety" / "SAFE_1_dfa.dot").write_text("digraph {}", encoding="utf-8")
+    _write_json(
+        bdir / "validation" / "offline_validation.json",
+        {
+            "ok": False,
+            "violations": [{"rule_id": "SAFE_1"}],
+            "violated_rules": ["SAFE_1"],
+            "witness_count": 1,
+            "auto_replans_used": 3,
+            "stop_reason": "max_attempts_reached",
+        },
+    )
+
+    manifest = {
+        "bundle_id": bundle_id,
+        "display_name": "invalid",
+        "created_at_utc": "2026-03-10T00:00:00+00:00",
+        "status": "invalid",
+        "verified": False,
+        "product_spec_file": ctx["product_spec_file"],
+        "safety_file": ctx["safety_file"],
+        "product_name": ctx["product_name"],
+        "execution_mode": "simulation",
+        "robot_env": "gazebo",
+        "source_hashes": dict(ctx["source_hashes"]),
+        "artifacts": {
+            "requirements_json": "plan/plan.json",
+            "plan_json": "plan/plan.json",
+            "global_fsa_json": "plan/global_fsa.json",
+            "safety_logic_json": "safety/cca_safety_logic.json",
+            "safety_dfa_dot_files": ["safety/SAFE_1_dfa.dot"],
+            "safety_dfa_png_files": [],
+            "offline_validation_json": "validation/offline_validation.json",
+        },
+        "validation_summary": {
+            "ok": False,
+            "violated_rules": ["SAFE_1"],
+            "witness_count": 1,
+            "auto_replans_used": 3,
+            "stop_reason": "max_attempts_reached",
+        },
+    }
+    bridge.bundle_store.save_manifest(bdir, manifest)
+    bridge.bundle_store.upsert_bundle_summary(
+        {
+            "bundle_id": bundle_id,
+            "display_name": "invalid",
+            "created_at_utc": manifest["created_at_utc"],
+            "status": "invalid",
+            "verified": False,
+            "product_name": ctx["product_name"],
+            "product_spec_file": ctx["product_spec_file"],
+            "execution_mode": "simulation",
+            "robot_env": "gazebo",
+            "manifest_path": str(bridge.bundle_store.manifest_path(bundle_id)),
+        }
+    )
+
+    out = bridge.verify_bundle(bundle_id)
+    assert out["summary"]["status"] == "verified"
+    assert out["summary"]["verified"] is True
+    loaded = bridge.bundle_store.load_manifest(bundle_id)
+    assert loaded is not None
+    assert loaded["status"] == "verified"
+    assert loaded["verified"] is True
+    assert loaded["validation_summary"]["ok"] is False
+    assert loaded["validation_summary"]["stop_reason"] == "max_attempts_reached"
+
+
 def test_bundle_store_reconciles_index_with_bundle_dirs(tmp_path):
     store = BundleStore(tmp_path / "user_verified_plan")
 
@@ -1170,6 +1400,333 @@ def test_bridge_generate_verified_bundle_forwards_refinement_feedback():
     assert captured["refinement_feedback"] == "use xarm6 for LRP first"
     assert captured["parent_bundle_id"] == "bundle_parent"
     assert captured["auto_replan_max_attempts"] == 2
+
+
+def test_bridge_generate_verified_bundle_forwards_approved_preview_descriptor(
+    tmp_path, monkeypatch
+):
+    bridge = SystemBridge()
+    product_files = bridge.list_product_files()
+    assert product_files
+    selected_product = product_files[0]
+    product_ctx = bridge._resolve_product_context(selected_product, include_hashes=False)
+    requirement_file = str(product_ctx["product_spec_file"])
+
+    verified_root = tmp_path / "user_verified_safety"
+    preview_root = verified_root / "previews"
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text("[Safety Requirements]\n- keep robots separated\n", encoding="utf-8")
+    preview_record = _build_preview_record(
+        preview_root / "preview_approved",
+        safety_file,
+        preview_id="preview_approved",
+    )
+
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", verified_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", verified_root / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_APPROVALS", verified_root / "intent_approvals.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", preview_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_VERIFIED_DIR", verified_root / "verified")
+
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [preview_record],
+            },
+        }
+    )
+    bridge.approve_safety_intent(str(safety_file))
+
+    captured: dict[str, object] = {}
+
+    async def _fake_compile_bundle(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"bundle_id": "bundle_new"}, "manifest": {}}
+
+    bridge.bundle_compiler = SimpleNamespace(compile_bundle=_fake_compile_bundle)
+
+    bridge.generate_verified_bundle(
+        selected_product,
+        "simulation",
+        "gazebo",
+        product_requirement_file=requirement_file,
+        safety_requirement_file=str(safety_file),
+    )
+
+    descriptor = captured.get("precomputed_safety_artifacts")
+    assert isinstance(descriptor, dict)
+    assert descriptor["mode"] == "approved_preview"
+    assert descriptor["preview_id"] == "preview_approved"
+    assert descriptor["safety_logic_json"] == str(
+        (preview_root / "preview_approved" / "cca_safety_logic.json").resolve()
+    )
+    assert descriptor["dfa_dot_files"] == [
+        str((preview_root / "preview_approved" / "SAFE_1_dfa.dot").resolve())
+    ]
+
+
+def test_bridge_generate_verified_bundle_fails_when_approved_preview_artifacts_missing(
+    tmp_path, monkeypatch
+):
+    bridge = SystemBridge()
+    product_files = bridge.list_product_files()
+    assert product_files
+    selected_product = product_files[0]
+    product_ctx = bridge._resolve_product_context(selected_product, include_hashes=False)
+    requirement_file = str(product_ctx["product_spec_file"])
+
+    verified_root = tmp_path / "user_verified_safety"
+    preview_root = verified_root / "previews"
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text("[Safety Requirements]\n- keep robots separated\n", encoding="utf-8")
+    preview_record = _build_preview_record(
+        preview_root / "preview_missing",
+        safety_file,
+        preview_id="preview_missing",
+    )
+
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", verified_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", verified_root / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_APPROVALS", verified_root / "intent_approvals.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", preview_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_VERIFIED_DIR", verified_root / "verified")
+
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [preview_record],
+            },
+        }
+    )
+    bridge.approve_safety_intent(str(safety_file))
+
+    compile_called = {"value": False}
+
+    async def _unexpected_compile_bundle(**kwargs):
+        compile_called["value"] = True
+        return {"summary": {"bundle_id": "bundle_new"}, "manifest": {}}
+
+    bridge.bundle_compiler = SimpleNamespace(compile_bundle=_unexpected_compile_bundle)
+    (preview_root / "preview_missing" / "cca_safety_logic.json").unlink()
+
+    try:
+        bridge.generate_verified_bundle(
+            selected_product,
+            "simulation",
+            "gazebo",
+            product_requirement_file=requirement_file,
+            safety_requirement_file=str(safety_file),
+        )
+        assert False, "expected generation to fail when approved preview artifacts are missing"
+    except ValueError as exc:
+        assert "Regenerate the safety preview and approve it again" in str(exc)
+
+    assert compile_called["value"] is False
+
+
+def test_bridge_generate_verified_bundle_blocks_on_tools_hash_drift(
+    tmp_path, monkeypatch
+):
+    bridge = SystemBridge()
+    product_files = bridge.list_product_files()
+    assert product_files
+    selected_product = product_files[0]
+    product_ctx = bridge._resolve_product_context(selected_product, include_hashes=False)
+    requirement_file = str(product_ctx["product_spec_file"])
+
+    verified_root = tmp_path / "user_verified_safety"
+    preview_root = verified_root / "previews"
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text("[Safety Requirements]\n- keep robots separated\n", encoding="utf-8")
+    preview_record = _build_preview_record(
+        preview_root / "preview_tools",
+        safety_file,
+        preview_id="preview_tools",
+    )
+
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", verified_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", verified_root / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_APPROVALS", verified_root / "intent_approvals.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", preview_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_VERIFIED_DIR", verified_root / "verified")
+
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [preview_record],
+            },
+        }
+    )
+    bridge.approve_safety_intent(str(safety_file))
+
+    approvals = bridge._load_safety_intent_approvals()
+    approvals["approvals"][str(safety_file.resolve())]["tools_sha256"] = "stale-tools-hash"
+    bridge._save_safety_intent_approvals(approvals)
+
+    compile_called = {"value": False}
+
+    async def _unexpected_compile_bundle(**kwargs):
+        compile_called["value"] = True
+        return {"summary": {"bundle_id": "bundle_new"}, "manifest": {}}
+
+    bridge.bundle_compiler = SimpleNamespace(compile_bundle=_unexpected_compile_bundle)
+
+    try:
+        bridge.generate_verified_bundle(
+            selected_product,
+            "simulation",
+            "gazebo",
+            product_requirement_file=requirement_file,
+            safety_requirement_file=str(safety_file),
+        )
+        assert False, "expected tools hash drift to block plan-set generation"
+    except ValueError as exc:
+        assert "tools catalog changed" in str(exc)
+
+    assert compile_called["value"] is False
+
+
+def test_bridge_generate_verified_bundle_blocks_on_prompts_hash_drift(
+    tmp_path, monkeypatch
+):
+    bridge = SystemBridge()
+    product_files = bridge.list_product_files()
+    assert product_files
+    selected_product = product_files[0]
+    product_ctx = bridge._resolve_product_context(selected_product, include_hashes=False)
+    requirement_file = str(product_ctx["product_spec_file"])
+
+    verified_root = tmp_path / "user_verified_safety"
+    preview_root = verified_root / "previews"
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text("[Safety Requirements]\n- keep robots separated\n", encoding="utf-8")
+    preview_record = _build_preview_record(
+        preview_root / "preview_prompts",
+        safety_file,
+        preview_id="preview_prompts",
+    )
+
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", verified_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", verified_root / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_APPROVALS", verified_root / "intent_approvals.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", preview_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_VERIFIED_DIR", verified_root / "verified")
+
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [preview_record],
+            },
+        }
+    )
+    bridge.approve_safety_intent(str(safety_file))
+
+    approvals = bridge._load_safety_intent_approvals()
+    approvals["approvals"][str(safety_file.resolve())]["prompts_sha256"] = "stale-prompts-hash"
+    bridge._save_safety_intent_approvals(approvals)
+
+    compile_called = {"value": False}
+
+    async def _unexpected_compile_bundle(**kwargs):
+        compile_called["value"] = True
+        return {"summary": {"bundle_id": "bundle_new"}, "manifest": {}}
+
+    bridge.bundle_compiler = SimpleNamespace(compile_bundle=_unexpected_compile_bundle)
+
+    try:
+        bridge.generate_verified_bundle(
+            selected_product,
+            "simulation",
+            "gazebo",
+            product_requirement_file=requirement_file,
+            safety_requirement_file=str(safety_file),
+        )
+        assert False, "expected prompts hash drift to block plan-set generation"
+    except ValueError as exc:
+        assert "prompts.py changed" in str(exc)
+
+    assert compile_called["value"] is False
+
+
+def test_bridge_generate_verified_bundle_uses_approved_preview_id_not_latest(
+    tmp_path, monkeypatch
+):
+    bridge = SystemBridge()
+    product_files = bridge.list_product_files()
+    assert product_files
+    selected_product = product_files[0]
+    product_ctx = bridge._resolve_product_context(selected_product, include_hashes=False)
+    requirement_file = str(product_ctx["product_spec_file"])
+
+    verified_root = tmp_path / "user_verified_safety"
+    preview_root = verified_root / "previews"
+    safety_file = tmp_path / "safety.txt"
+    safety_file.write_text("[Safety Requirements]\n- keep robots separated\n", encoding="utf-8")
+
+    old_record = _build_preview_record(
+        preview_root / "preview_old",
+        safety_file,
+        preview_id="preview_old",
+        ltlf="G(old_preview)",
+    )
+
+    monkeypatch.setattr(bridge_module, "_USER_VERIFIED_SAFETY", verified_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_PREVIEWS", verified_root / "intent_previews.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_INTENT_APPROVALS", verified_root / "intent_approvals.json")
+    monkeypatch.setattr(bridge_module, "_SAFETY_PREVIEW_DIR", preview_root)
+    monkeypatch.setattr(bridge_module, "_SAFETY_VERIFIED_DIR", verified_root / "verified")
+
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [old_record],
+            },
+        }
+    )
+    bridge.approve_safety_intent(str(safety_file))
+
+    new_record = _build_preview_record(
+        preview_root / "preview_new",
+        safety_file,
+        preview_id="preview_new",
+        ltlf="G(new_preview)",
+    )
+    bridge._save_safety_intent_previews(
+        {
+            "schema_version": 1,
+            "previews": {
+                str(safety_file.resolve()): [new_record, old_record],
+            },
+        }
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_compile_bundle(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"bundle_id": "bundle_new"}, "manifest": {}}
+
+    bridge.bundle_compiler = SimpleNamespace(compile_bundle=_fake_compile_bundle)
+
+    bridge.generate_verified_bundle(
+        selected_product,
+        "simulation",
+        "gazebo",
+        product_requirement_file=requirement_file,
+        safety_requirement_file=str(safety_file),
+    )
+
+    descriptor = captured.get("precomputed_safety_artifacts")
+    assert isinstance(descriptor, dict)
+    assert descriptor["preview_id"] == "preview_old"
+    assert descriptor["safety_logic_json"] == str(
+        (preview_root / "preview_old" / "cca_safety_logic.json").resolve()
+    )
 
 
 def test_bridge_product_requirement_listing_only_uses_product_manifests(tmp_path):

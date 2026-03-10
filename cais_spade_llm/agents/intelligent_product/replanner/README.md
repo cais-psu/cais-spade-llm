@@ -145,7 +145,8 @@ The working path for the bundle `case1_move_home_not_included` is:
 4. DES matches the obligation target to the real catalog tool `move_home` and inserts a runtime recovery task.
 5. The product recompiles the repaired global FSA and sends it back to the CCA.
 6. The CCA restores runtime execution progress into the repaired FSA monitor instead of resetting to `x0`.
-7. The repaired runtime monitor remains `reactive`, so the modeled recovery task is allowed to run.
+7. If the repaired FSA still contains the current live runtime state, the CCA preserves that exact live monitor state rather than rebuilding only from a coarse completed/running snapshot.
+8. The repaired runtime monitor remains `reactive`, so the modeled recovery task is allowed to run.
 
 This is what makes the successful log sequence possible:
 
@@ -155,10 +156,34 @@ This is what makes the successful log sequence possible:
 - `SUPERVISOR DEFERRED ... mode=reactive`
 - `ACK ... status='completed'`
 
+### Repaired-FSA synchronization
+
+Revalidating a repaired runtime plan is not just an offline check. The repaired FSA must stay synchronized with the execution that is already in flight.
+
+The current behavior is:
+
+1. Product recompiles the repaired FSA and sends `plan_safety_check`.
+2. CCA reuses the existing plan monitor if the FSA is unchanged.
+3. If the FSA changed, CCA creates a fresh `OnlineFsaMonitor` for the repaired FSA.
+4. If the old live monitor's exact `current_state` still exists in the repaired FSA, that state is preserved directly.
+5. Otherwise, CCA falls back to rebuilding progress from runtime context plus any prior completed/running/failed task knowledge that can still be replayed safely.
+
+This matters when recovery is inserted while a task is already running. For example, if `REQ_1_T3.start` happened before the repair but `REQ_1_T3.done` arrives after the repaired FSA is installed, the repaired monitor must still know that `REQ_1_T3` is running. Otherwise the later `.done` event lands on the wrong state and downstream tasks such as `REQ_1_T4` can look falsely "not enabled".
+
+### Event guard during resynchronization
+
+`OnlineFsaMonitor` now treats unmatched runtime completion events conservatively.
+
+- If a `.done` or `.fail` event is not enabled from the current repaired FSA state, the monitor leaves the state unchanged.
+- An unmatched `.done` event is not allowed to silently mark the task as completed.
+
+This prevents stale or out-of-order runtime events from corrupting the repaired execution prefix after FSA replacement.
+
 ### Regressions that were fixed for this path
 
 - Startup from a verified bundle was incorrectly drifting into `preventive` mode.
 - Repaired-plan validation was resetting the plan FSA monitor to the initial state instead of preserving the completed runtime prefix.
+- Repaired-plan validation could lose an in-flight start event when swapping monitors, which later made the next real task appear "not enabled" in the repaired FSA.
 - The DES planner was previously reading a robot-specific coordination key instead of a generic resource-state view.
 - Prompt-file changes were incorrectly deactivating otherwise valid verified bundles before startup.
 
@@ -214,6 +239,150 @@ The implementation was verified with targeted checks for the bundle `case1_move_
 - verified-bundle runtime supervision stays `reactive`, which allows the modeled recovery task to execute
 
 Syntax checks were also run with `py_compile` and `git diff --check`.
+
+## Forward Simulation and DFA-Guided Recovery
+
+Two generalized mechanisms were added to make safety-block recovery smarter and avoid unnecessary LLM bridge fallbacks.
+
+### Forward simulation: wait vs. replan
+
+When a safety violation blocks a task, the CCA no longer immediately triggers a replan. Instead, it forward-simulates the composite plan FSA to determine if the violation will naturally resolve.
+
+**Method:** `CentralControllerAgent._will_violation_resolve()`
+
+**Algorithm:**
+
+1. BFS through all reachable FSA transitions from the current composite state, excluding the blocked task's own transitions.
+2. At each transition (`.start` or `.done`), simulate AP changes:
+   - `.start` events add event APs to the running set.
+   - `.done` events remove event APs, update resource state APs (from `out_state`), and advance the safety DFA.
+3. At each reached state, test whether the blocked task would now be allowed (non-mutating safety DFA check).
+4. If any reachable interleaving clears the violation, the CCA waits instead of replanning.
+
+The existing `_retry_blocked_tasks()` mechanism handles the actual unblocking when the real safety DFA reaches a safe state.
+
+**Example — mutex with `move_home` in the plan:**
+
+If ur5e's plan includes `place_approach → place_insert → move_home`, the forward simulation shows that after `move_home.done`, ur5e exits the assembly zone and the mutex clears. CCA logs `"Safety block on task=... will resolve naturally"` and skips the replan.
+
+**Example — mutex without `move_home` in the plan:**
+
+If ur5e's plan ends at `place_insert`, the simulation shows ur5e remains in `placed` state. The mutex persists across all interleavings, so a replan is needed.
+
+This forward simulation only answers whether the current modeled plan can resolve the block naturally. It does not synthesize new recovery steps.
+
+### DFA-guided recovery tool discovery
+
+When a replan IS needed, the obligation target builder now uses DFA-guided recovery as a fallback when direct AP matching produces no candidate tools.
+
+**Method:** `CentralControllerAgent._find_dfa_recovery_tools()`
+
+**Algorithm:**
+
+1. Get the safety DFA for the violated rule and its current state.
+2. Enumerate subsets of currently active AP symbols (the AP symbol set per rule is small — typically 2–8 symbols, so 2^N is feasible).
+3. For each subset removed, check if the DFA transitions to a safe (non-violation) state.
+4. Map the "removed APs" to state AP descriptors to identify which resource states need to be exited.
+5. Find tools in the catalog whose `in_state` matches a violating state and `out_state` does NOT match any violating state.
+
+This is fully general — it works for any constraint type (mutex, ordering, liveness) because it reasons about DFA transitions rather than rule structure. No tool names, rule IDs, or robot names are hardcoded.
+
+**Example:**
+
+For mutex rule `SAFE_1` with APs `{place_approach, positioned, placed}` for ur5e:
+
+- Removing `ap_state/.../ur5e/placed/...` leads to a safe DFA state.
+- The system finds `move_home` because `in_state=placed` (violating) → `out_state=idle` (not violating).
+- DES receives `candidate_tools=[move_home]` with a valid signature, projects the full modeled suffix snapshot for the target resource, finds the catalog-valid recovery path, and avoids the LLM bridge.
+
+The suffix projection step matters. Obligation recovery now searches from a fully consistent modeled resource snapshot:
+
+- `resource_state`
+- `current_part`
+- `current_location`
+- `part_states`
+- `part_locations`
+
+That avoids hybrid search states such as a projected `resource_state='placed'` combined with a live `current_part='MCP'`, which can incorrectly hide pure robot-state recovery actions and force an unnecessary bridge fallback.
+
+If the live product snapshot is stale but the next modeled suffix task provides enough semantic information to reconcile it, the planner aligns the modeled snapshot with that task's catalog preconditions before projecting the suffix. This uses only generic catalog fields such as:
+
+- `part_in_state`
+- `context_mapping.location_type`
+- `context_mapping.location_param`
+- `params.part_name`
+
+No tool-name or rule-name special cases are needed.
+
+### Residual recovery insertion
+
+When suffix projection succeeds, the DES recovery path is computed from the end of the already-modeled suffix, not from the current live start state. That means the inserted repair is only the residual tail that is still missing.
+
+**Example:**
+
+- Existing modeled suffix: `ur5e.place_approach -> ur5e.place_insert`
+- Projected end state after that suffix: `resource_state='placed'`
+- Recovery candidate found by DES: `move_home`
+
+The inserted repair is:
+
+- `ur5e.move_home`
+
+and not:
+
+- `ur5e.place_approach -> ur5e.place_insert -> ur5e.move_home`
+
+### Recovery boundary gating
+
+Recovery tasks are also spliced into the graph at the blocking boundary.
+
+- The recovery path is anchored after the target resource's projected pending suffix.
+- The blocked task that triggered replanning is rewritten to depend on the inserted recovery tail.
+
+This preserves the intended ordering in the plan FSA. In the mutex example, the repaired shape is:
+
+- `ur5e.place_approach`
+- `ur5e.place_insert`
+- `ur5e.move_home`
+- `xarm6.place_approach`
+
+If a resource still has a pending/running suffix but that suffix cannot be projected consistently, the planner does not fall back to a live-state DES search for that same resource. Doing so would replay already-modeled suffix tasks as duplicate "recovery" work. In that case the planner continues searching other modeled options and only falls through to bridge if no catalog-valid residual recovery exists.
+
+### Transient blocked-task retry behavior
+
+When a blocked task becomes safe later, the system now performs a true retry as a new task attempt.
+
+This is important because a ResourceAgent block is terminal for that specific attempt:
+
+- the resource already sent `status='blocked'`
+- that attempt will never spontaneously resume
+- the resource will only ask CCA again if Product dispatches the task again
+
+The runtime behavior is now:
+
+1. CCA keeps a queue of temporarily blocked tasks.
+2. After each real runtime finish/fail event, CCA re-evaluates those blocked tasks against the current safety monitor and online supervisor state.
+3. If a blocked task is now safe, CCA clears its internal blocked-queue entry and notifies Product that the task is `retry_ready`.
+4. Product changes the blocked DAG node back to `pending`.
+5. The normal plan executor dispatches the task again.
+6. The ResourceAgent sends a fresh `safety_check`.
+7. CCA returns a fresh `allow` or `block` for this new attempt.
+
+This is generalized behavior. It does not special-case `xarm6`, `move_home`, or mutex rules. The decision is always based on the current live AP/supervisor state for the exact blocked task.
+
+**Example:**
+
+- `xarm6.place_approach` is blocked because `ur5e` is still occupying the assembly-zone slice.
+- DES inserts `ur5e.move_home` and gates the blocked `xarm6` task after it.
+- After `ur5e.move_home.done`, CCA re-checks the previously blocked `xarm6.place_approach`.
+- Because the safety DFA no longer predicts overlap, CCA marks the task retry-ready.
+- Product requeues `REQ_2_T3` to `pending`, dispatches it again, and the resource performs a fresh `safety_check`.
+
+### Integration
+
+The DFA-guided fallback is invoked in `_build_obligation_targets()`: if `_candidate_tools_for_obligation()` returns an empty list (no direct AP match), `_find_dfa_recovery_tools()` is called as a second pass.
+
+The forward simulation is invoked in `_SafetyCheckInbox._handle_safety_check()`: after blocking the task, the CCA calls `_will_violation_resolve()` and only sends a replan request if the violation cannot naturally resolve.
 
 ## Known Design Boundary
 

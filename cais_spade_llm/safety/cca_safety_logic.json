@@ -2,9 +2,9 @@
   "preview_interpretation_summary": "",
   "rules": [
     {
-      "id": "SAFE_1-1",
-      "raw_text": "each arm should move back home after placing its part is done.",
-      "constraint_type": "post_place_return_home",
+      "id": "SAFE_1",
+      "raw_text": "ur5e and xarm6 must not both be in the assembly board destination area at the same time",
+      "constraint_type": "no_simultaneous_presence_in_destination_area",
       "process": "assembly",
       "product": [],
       "resources": [
@@ -14,52 +14,37 @@
       "resource_types": [
         "robot"
       ],
-      "event": "move_home",
+      "event": null,
       "context": {
-        "trigger_event": "place_insert",
-        "trigger_phase": "after"
+        "destination": "assembly_board-v1"
       },
       "aps": [
-        {
-          "label": "ap002",
-          "full": "ap_event/assembly/any/ur5e/place_insert/phase=completed"
-        },
         {
           "label": "ap001",
-          "full": "ap_event/assembly/any/ur5e/move_home/destination=home"
-        }
-      ],
-      "ltlf": "(G ((ap002 -> F (ap001))))"
-    },
-    {
-      "id": "SAFE_1-2",
-      "raw_text": "each arm should move back home after placing its part is done.",
-      "constraint_type": "post_place_return_home",
-      "process": "assembly",
-      "product": [],
-      "resources": [
-        "ur5e",
-        "xarm6"
-      ],
-      "resource_types": [
-        "robot"
-      ],
-      "event": "move_home",
-      "context": {
-        "trigger_event": "place_insert",
-        "trigger_phase": "after"
-      },
-      "aps": [
+          "full": "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+        },
         {
           "label": "ap004",
-          "full": "ap_event/assembly/any/xarm6/place_insert/phase=completed"
+          "full": "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1"
         },
         {
           "label": "ap003",
-          "full": "ap_event/assembly/any/xarm6/move_home/destination=home"
+          "full": "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/assembly/any/xarm6/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/assembly/any/xarm6/placed/destination=assembly_board-v1"
         }
       ],
-      "ltlf": "(G ((ap004 -> F (ap003))))"
+      "ltlf": "G (!(((ap001 | ap004 | ap003) & (ap002 | ap006 | ap005))))"
     }
   ]
 }

@@ -6,6 +6,7 @@ import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +74,13 @@ def compute_bid(
     def _key(rs, cp, cl, ps, pl):
         return (rs, cp, cl, frozenset(ps.items()), frozenset(pl.items()))
 
+    normalized = _normalize_state(x_c)
     init = dict(
-        rs=x_c.get("resource_state", "idle"),
-        cp=x_c.get("current_part"),
-        cl=x_c.get("current_location"),
-        ps=dict(x_c.get("part_states", {})),
-        pl=dict(x_c.get("part_locations", {})),
+        rs=normalized["resource_state"],
+        cp=normalized["current_part"],
+        cl=normalized["current_location"],
+        ps=dict(normalized["part_states"]),
+        pl=dict(normalized["part_locations"]),
     )
 
     start_state = {
@@ -178,6 +180,60 @@ def compute_bid(
     return None
 
 
+def simulate_catalog_transition(
+    *,
+    x_c: dict,
+    tools: list[dict],
+    resource_jid: str,
+    function_name: str,
+    params: dict[str, Any] | None = None,
+    goal_state: str = "",
+    reachability: list[str] | None = None,
+    staging_areas: dict | None = None,
+) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+    """
+    Simulate one exact catalog-backed task from a modeled search state.
+
+    This reuses the same `_expand()` transition semantics as DES bidding and
+    selects the unique transition whose generated function/params match the
+    requested task.
+    """
+    normalized = _normalize_state(x_c)
+    state_params = dict(params or {})
+    candidate_parts = list(normalized["part_states"].keys())
+    resource_name = resource_jid.split("@")[0]
+    resource_tools = [t for t in tools if t.get("function_owner_agent") == resource_name]
+
+    for new_rs, new_cp, new_cl, new_ps, new_pl, event_dict in _expand(
+        resource_tools,
+        normalized["resource_state"],
+        normalized["current_part"],
+        normalized["current_location"],
+        dict(normalized["part_states"]),
+        dict(normalized["part_locations"]),
+        candidate_parts,
+        list(reachability or []),
+        set((staging_areas or {}).keys()),
+        resource_jid,
+        goal_state,
+    ):
+        if str(event_dict.get("function_name") or "").strip() != str(function_name or "").strip():
+            continue
+        if not _event_params_match(event_dict.get("params") or {}, state_params):
+            continue
+        next_state = {
+            "resource_state": new_rs,
+            "current_part": new_cp,
+            "current_location": new_cl,
+            "part_states": dict(new_ps),
+            "part_locations": dict(new_pl),
+        }
+        clean_event = {k: v for k, v in event_dict.items() if not str(k).startswith("_")}
+        return next_state, clean_event
+
+    return None
+
+
 def _tool_signature(tool: dict) -> str:
     payload = {
         "function_owner_agent": str(tool.get("function_owner_agent") or "").strip(),
@@ -193,6 +249,24 @@ def _tool_signature(tool: dict) -> str:
         ).strip(),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_state(x_c: dict | None) -> dict[str, Any]:
+    payload = dict(x_c or {})
+    return {
+        "resource_state": payload.get("resource_state", "idle"),
+        "current_part": payload.get("current_part"),
+        "current_location": payload.get("current_location"),
+        "part_states": dict(payload.get("part_states", {})),
+        "part_locations": dict(payload.get("part_locations", {})),
+    }
+
+
+def _event_params_match(generated: dict[str, Any], requested: dict[str, Any]) -> bool:
+    for key, value in (generated or {}).items():
+        if requested.get(key) != value:
+            return False
+    return True
 
 
 def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resource_jid, goal_state):

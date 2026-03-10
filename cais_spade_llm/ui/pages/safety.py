@@ -215,6 +215,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 "not_approved": "not verified yet",
                 "revoked": "verification revoked",
                 "content_changed_since_approval": "content changed after verification",
+                "tools_changed_since_approval": "tools changed after verification",
+                "prompts_changed_since_approval": "prompts changed after verification",
+                "approved_preview_provenance_missing": "verified preview metadata missing",
+                "approved_preview_missing": "verified preview missing",
+                "approved_preview_artifacts_missing": "verified preview artifacts missing",
                 "safety_file_empty": "file is empty",
                 "safety_file_missing": "file missing",
             }

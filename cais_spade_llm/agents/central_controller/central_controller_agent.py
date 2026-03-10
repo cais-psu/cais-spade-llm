@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from pathlib import Path
-from typing import Any, Optional, Iterable, Dict, List
+from typing import Any, Optional, Iterable, Dict, List, Set, Tuple
 
 from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
@@ -337,6 +338,273 @@ class CentralControllerAgent(LlmAgent):
             return bool(out_state) and out_state.lower() != "any" and out_state == symbol
         return False
 
+    # ------------------------------------------------------------------ #
+    # Forward simulation: decide wait vs. replan
+    # ------------------------------------------------------------------ #
+    def _will_violation_resolve(
+        self,
+        violated_rule: str,
+        blocked_task_event: dict[str, Any],
+    ) -> bool:
+        """Check if the safety violation will naturally resolve by simulating
+        the composite plan FSA forward through all remaining task interleavings
+        and checking the safety DFA at each reached state.
+
+        Returns True if *any* reachable interleaving clears the violation so
+        that the blocked task would be allowed.
+        """
+        if not self.plan_fsa_monitor or not self.safety_monitor:
+            return False
+
+        blocked_task_id = str(blocked_task_event.get("task_id", "")).strip()
+        if not blocked_task_id:
+            return False
+
+        # APs the blocked task would introduce (needed to test "would it be allowed?")
+        blocked_candidate_aps = frozenset(
+            self.safety_monitor._map_task_to_aps(
+                blocked_task_event["resource_jid"],
+                blocked_task_event["function_name"],
+                blocked_task_event.get("params") or {},
+            )
+        )
+        blocked_predicted_state_aps = frozenset(
+            self.safety_monitor._predict_state_aps(
+                blocked_task_event["resource_jid"],
+                blocked_task_event["function_name"],
+                blocked_task_event.get("params") or {},
+            )
+        )
+
+        # Initial simulation state
+        fsa_state = self.plan_fsa_monitor.current_state
+        init_running_aps = frozenset(self.safety_monitor.running_aps)
+        init_state_aps: dict[str, frozenset[str]] = {
+            rjid: frozenset(aps)
+            for rjid, aps in self.safety_monitor.resource_state_aps.items()
+        }
+        init_dfa_states = {
+            rid: self.safety_monitor.current_states.get(rid, "1")
+            for rid in self.safety_monitor.dfas
+        }
+
+        # BFS state: (fsa_state, running_aps, resource_state_aps_key, dfa_states_key)
+        # resource_state_aps is tracked as a tuple of (resource_jid, frozenset) pairs
+        def _state_aps_key(rsa: dict[str, frozenset[str]]) -> tuple:
+            return tuple(sorted((k, v) for k, v in rsa.items()))
+
+        def _dfa_key(ds: dict[str, str]) -> tuple:
+            return tuple(sorted(ds.items()))
+
+        def _all_state_aps(rsa: dict[str, frozenset[str]]) -> frozenset[str]:
+            result: Set[str] = set()
+            for labels in rsa.values():
+                result |= labels
+            return frozenset(result)
+
+        # Test if blocked task would be allowed given simulated state
+        def _blocked_task_allowed(
+            running: frozenset[str],
+            rsa: dict[str, frozenset[str]],
+            dfa_states: dict[str, str],
+        ) -> bool:
+            sigma = frozenset(
+                set(running)
+                | set(_all_state_aps(rsa))
+                | set(blocked_candidate_aps)
+                | set(blocked_predicted_state_aps)
+            )
+            for rid in self.safety_monitor.dfas:
+                curr = dfa_states.get(rid, "1")
+                nxt = self.safety_monitor._delta(rid, curr, sigma)
+                vio = self.safety_monitor.dfas[rid].get("violation_state")
+                if vio and nxt == vio:
+                    return False
+            return True
+
+        start = (
+            fsa_state,
+            init_running_aps,
+            init_state_aps,
+            init_dfa_states,
+        )
+
+        queue: deque[tuple] = deque([start])
+        visited: set[tuple] = set()
+        max_states = 2000  # bound to prevent explosion on large plans
+
+        while queue and len(visited) < max_states:
+            cur_fsa, cur_running, cur_rsa, cur_dfa = queue.popleft()
+
+            visit_key = (cur_fsa, cur_running, _state_aps_key(cur_rsa), _dfa_key(cur_dfa))
+            if visit_key in visited:
+                continue
+            visited.add(visit_key)
+
+            # Get transitions from the current FSA state
+            for tr in self.plan_fsa_monitor._from_map.get(cur_fsa or "", []):
+                tr_task_id = str(tr.get("task_id", "")).strip()
+                event_label = str(tr.get("event", "")).strip()
+
+                # Skip the blocked task's own transitions
+                if tr_task_id == blocked_task_id:
+                    continue
+
+                next_fsa = tr.get("to") or cur_fsa
+                tr_resource_jid = str(tr.get("resource_jid", "")).strip()
+                tr_function_name = str(tr.get("function_name", "")).strip()
+                tr_params = tr.get("params") or {}
+
+                # Simulate AP changes based on .start vs .done events
+                next_running = set(cur_running)
+                next_rsa = dict(cur_rsa)
+                next_dfa = dict(cur_dfa)
+
+                if event_label.endswith(".start"):
+                    # .start adds event APs to running set
+                    event_aps = self.safety_monitor._map_task_to_aps(
+                        tr_resource_jid, tr_function_name, tr_params,
+                    )
+                    next_running |= set(event_aps)
+
+                elif event_label.endswith(".done"):
+                    # .done removes event APs and updates state APs
+                    event_aps = self.safety_monitor._map_task_to_aps(
+                        tr_resource_jid, tr_function_name, tr_params,
+                    )
+                    next_running -= set(event_aps)
+
+                    # Update resource state APs based on out_state
+                    out_state = str(tr.get("out_state", "")).strip()
+                    if out_state:
+                        new_state_aps = self.safety_monitor._map_state_to_aps(
+                            tr_resource_jid, out_state, tr_params,
+                        )
+                        next_rsa[tr_resource_jid] = frozenset(new_state_aps)
+
+                    # Advance safety DFA on .done
+                    sigma = frozenset(
+                        next_running
+                        | set(_all_state_aps(next_rsa))
+                        | set(event_aps)
+                    )
+                    for rid in self.safety_monitor.dfas:
+                        prev = next_dfa.get(rid, "1")
+                        next_dfa[rid] = self.safety_monitor._delta(rid, prev, sigma)
+
+                next_running_fs = frozenset(next_running)
+
+                # Check if blocked task would now be allowed
+                if _blocked_task_allowed(next_running_fs, next_rsa, next_dfa):
+                    return True
+
+                queue.append((next_fsa, next_running_fs, next_rsa, next_dfa))
+
+        return False
+
+    # ------------------------------------------------------------------ #
+    # DFA-guided recovery: find tools that exit violating states
+    # ------------------------------------------------------------------ #
+    def _find_dfa_recovery_tools(
+        self,
+        rule_id: str,
+        resource_token: str,
+    ) -> list[dict[str, Any]]:
+        """Find tools that transition a resource OUT of states that contribute
+        to the safety DFA violation.
+
+        Instead of checking currently active APs (which may not yet reflect
+        the future violating state), this method extracts the set of
+        *violating state symbols* directly from the rule's AP definitions
+        for the target resource.  It then searches the tools catalog for
+        tools whose ``in_state`` is one of those violating states and whose
+        ``out_state`` is NOT, meaning execution of that tool would clear the
+        resource's contribution to the violation.
+
+        Returns candidate tool dicts in the same format as
+        ``_candidate_tools_for_obligation``.
+        """
+        if not self.safety_monitor:
+            return []
+
+        # 1. Find the rule and extract state AP symbols for the target resource.
+        violating_states: set[str] = set()
+        matched_state_ap_info: list[dict[str, str]] = []
+
+        for rule in self.safety_rules:
+            if str(rule.get("id", "")).strip() != rule_id:
+                continue
+            for ap in rule.get("aps") or []:
+                full = str(ap.get("full", "")).strip()
+                label = str(ap.get("label", "")).strip()
+                if not full or not label:
+                    continue
+                descriptor = self.safety_monitor._parse_ap_descriptor(full)
+                if not descriptor:
+                    continue
+                prefix = str(descriptor.get("prefix", "")).strip().lower()
+                ap_resource = self.safety_monitor._resource_short_name(
+                    str(descriptor.get("resource", "")).strip()
+                )
+                # Only consider state APs belonging to the target resource.
+                if prefix not in {"ap_state", "sp"}:
+                    continue
+                if ap_resource not in {"", "any", "robot", resource_token}:
+                    continue
+                symbol = str(descriptor.get("symbol", "")).strip()
+                if symbol:
+                    violating_states.add(symbol)
+                    matched_state_ap_info.append({"label": label, "full": full})
+            break  # only process the matching rule
+
+        if not violating_states:
+            return []
+
+        # 2. Find tools for this resource whose in_state is a violating
+        #    state and whose out_state is NOT a violating state.
+        resource_jid = self._resource_jid_by_token().get(resource_token, resource_token)
+        candidates: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+
+        for row in getattr(self, "tools_catalog", []) or []:
+            if not isinstance(row, dict):
+                continue
+            row_owner = self.safety_monitor._resource_short_name(
+                str(row.get("function_owner_agent", "")).strip()
+            )
+            if row_owner != resource_token:
+                continue
+
+            out_state = str(row.get("out_state", "")).strip()
+
+            # Only require that the tool's out_state exits the violating
+            # state set.  We deliberately skip in_state filtering — DES
+            # bidding will verify reachability through its own BFS.
+            if not out_state:
+                continue
+            if out_state in violating_states:
+                continue
+
+            sig = self.safety_monitor._tool_signature(row)
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+
+            candidates.append(
+                {
+                    "function_name": str(row.get("function", "")).strip(),
+                    "resource_jid": resource_jid,
+                    "tool_signature": sig,
+                    "in_state": str(row.get("in_state", "")).strip(),
+                    "out_state": out_state,
+                    "description": str(row.get("description", "")).strip(),
+                    "matched_event_aps": [],
+                    "matched_state_aps": list(matched_state_ap_info),
+                }
+            )
+
+        return candidates
+
     def _candidate_tools_for_obligation(
         self,
         *,
@@ -501,6 +769,14 @@ class CentralControllerAgent(LlmAgent):
                     required_event_aps=resource_event_aps,
                     required_state_aps=resource_state_aps,
                 )
+                # Fallback: if direct AP matching found nothing, use
+                # DFA-guided recovery to discover tools that transition
+                # the resource out of the violating state set.
+                if not candidate_tools:
+                    candidate_tools = self._find_dfa_recovery_tools(
+                        rule_id=rule_id,
+                        resource_token=resource_token,
+                    )
                 current_snapshot = dict(resource_states.get(resource_jid) or {})
                 targets.append(
                     {
@@ -671,13 +947,31 @@ class CentralControllerAgent(LlmAgent):
                 await self._send_decision(resource_jid, task_id, "block")
 
                 if product_jid:
-                    replan_msg = agent._build_replan_message(
-                        product_jid=product_jid,
-                        reason="safety_block",
-                        event=event,
-                        safety_info=info,
+                    # Forward-simulate the composite FSA to check if the
+                    # violation will naturally resolve without replanning.
+                    will_resolve = agent._will_violation_resolve(
+                        violated_rule=str(violated_rule or ""),
+                        blocked_task_event=event,
                     )
-                    await self.send(replan_msg)
+                    if will_resolve:
+                        agent.logger.info(
+                            "[CCA] Safety block on task=%s (rule=%s) will resolve "
+                            "naturally; waiting for remaining tasks to complete.",
+                            task_id, violated_rule,
+                        )
+                    else:
+                        agent.logger.info(
+                            "[CCA] Forward simulation: violation persists after "
+                            "all remaining tasks; requesting replan for task=%s.",
+                            task_id,
+                        )
+                        replan_msg = agent._build_replan_message(
+                            product_jid=product_jid,
+                            reason="safety_block",
+                            event=event,
+                            safety_info=info,
+                        )
+                        await self.send(replan_msg)
                 return
 
             if agent.online_supervisor:
@@ -846,6 +1140,7 @@ class CentralControllerAgent(LlmAgent):
                 return
 
             to_clear = []
+            retry_ready_by_product: dict[str, list[str]] = {}
 
             # Check all blocked tasks against the NEW state.
             for task_id, data in agent.blocked_tasks.items():
@@ -883,6 +1178,9 @@ class CentralControllerAgent(LlmAgent):
                         task_id, data.get("violated_rule")
                     )
                     to_clear.append(task_id)
+                    product_jid = str((event.get("params") or {}).get("product_jid", "")).strip()
+                    if product_jid:
+                        retry_ready_by_product.setdefault(product_jid, []).append(str(task_id))
                 else:
                     # Still blocked, keep queued.
                     pass
@@ -890,6 +1188,23 @@ class CentralControllerAgent(LlmAgent):
             # Cleanup
             for tid in to_clear:
                 agent.blocked_tasks.pop(tid, None)
+
+            for product_jid, task_ids in retry_ready_by_product.items():
+                if not task_ids:
+                    continue
+                retry_msg = Message(to=product_jid)
+                retry_msg.set_metadata("type", "task_retry_ready")
+                retry_msg.body = json.dumps({
+                    "task_ids": task_ids,
+                    "reason": "safety_unblocked",
+                })
+                await self.send(retry_msg)
+                agent.logger.info(
+                    "[CCA] Notified product=%s to requeue %d task(s) after transient safety block cleared: %s",
+                    product_jid,
+                    len(task_ids),
+                    ", ".join(task_ids),
+                )
 
         async def _send_decision(self, to_jid: str, task_id: str, decision: str):
             msg = Message(to=to_jid)
@@ -1026,16 +1341,72 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.warning("[CCA] No FSA provided for plan validation.")
                 return
 
+            prior_plan_fsa_monitor = agent.plan_fsa_monitor
+
             # Reuse the live runtime monitor when the validated FSA is unchanged.
-            if agent.plan_fsa_monitor and agent.plan_fsa_monitor.matches_fsa(fsa):
-                plan_fsa_monitor = agent.plan_fsa_monitor
+            if prior_plan_fsa_monitor and prior_plan_fsa_monitor.matches_fsa(fsa):
+                plan_fsa_monitor = prior_plan_fsa_monitor
             else:
                 plan_fsa_monitor = OnlineFsaMonitor(fsa)
-                if isinstance(runtime_context, dict):
+                restored_from_live_state = plan_fsa_monitor.restore_from_prior_monitor(
+                    prior_plan_fsa_monitor
+                )
+                if restored_from_live_state:
+                    prior_progress = plan_fsa_monitor.runtime_progress_snapshot()
+                    agent.logger.info(
+                        "[CCA] Restored repaired FSA from live monitor state "
+                        "state=%s completed=%d running=%d failed=%d",
+                        plan_fsa_monitor.current_state,
+                        len(prior_progress.get("completed_task_ids") or []),
+                        len(prior_progress.get("running_task_ids") or []),
+                        len(prior_progress.get("failed_task_ids") or []),
+                    )
+                elif isinstance(runtime_context, dict):
+                    completed_task_ids = [
+                        str(task_id).strip()
+                        for task_id in (runtime_context.get("completed_task_ids") or [])
+                        if str(task_id).strip()
+                    ]
+                    seen_completed = set(completed_task_ids)
+                    running_task_ids = [
+                        str(task_id).strip()
+                        for task_id in (runtime_context.get("running_task_ids") or [])
+                        if str(task_id).strip()
+                    ]
+                    failed_task_ids = [
+                        str(task_id).strip()
+                        for task_id in (runtime_context.get("failed_task_ids") or [])
+                        if str(task_id).strip()
+                    ]
+                    if prior_plan_fsa_monitor:
+                        prior_progress = prior_plan_fsa_monitor.runtime_progress_snapshot()
+                        for task_id in prior_progress.get("completed_task_ids") or []:
+                            task_id = str(task_id).strip()
+                            if task_id and task_id not in seen_completed:
+                                completed_task_ids.append(task_id)
+                                seen_completed.add(task_id)
+                        running_task_ids = list(
+                            dict.fromkeys(
+                                running_task_ids + [
+                                    str(task_id).strip()
+                                    for task_id in (prior_progress.get("running_task_ids") or [])
+                                    if str(task_id).strip()
+                                ]
+                            )
+                        )
+                        failed_task_ids = list(
+                            dict.fromkeys(
+                                failed_task_ids + [
+                                    str(task_id).strip()
+                                    for task_id in (prior_progress.get("failed_task_ids") or [])
+                                    if str(task_id).strip()
+                                ]
+                            )
+                        )
                     plan_fsa_monitor.restore_runtime_progress(
-                        completed_task_ids=runtime_context.get("completed_task_ids") or [],
-                        running_task_ids=runtime_context.get("running_task_ids") or [],
-                        failed_task_ids=runtime_context.get("failed_task_ids") or [],
+                        completed_task_ids=completed_task_ids,
+                        running_task_ids=running_task_ids,
+                        failed_task_ids=failed_task_ids,
                     )
             agent.plan_fsa_monitor = plan_fsa_monitor
 

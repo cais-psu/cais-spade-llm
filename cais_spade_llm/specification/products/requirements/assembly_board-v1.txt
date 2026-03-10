@@ -1,3 +1,0 @@
-[Product Requirements]
-- assemble MCP to the assembly station.
-- assemble LRP to the assembly station. 

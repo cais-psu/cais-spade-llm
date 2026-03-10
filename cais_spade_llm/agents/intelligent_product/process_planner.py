@@ -322,6 +322,127 @@ class ProcessPlanner:
                 return ra
         return None
 
+    @staticmethod
+    def _resource_short_name(value: str) -> str:
+        token = str(value or "").strip()
+        if "@" in token:
+            token = token.split("@", 1)[0]
+        return token.lower()
+
+    def _tool_row_for_task(
+        self,
+        *,
+        resource_jid: str,
+        function_name: str,
+        tools_catalog: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        target_resource = self._resource_short_name(resource_jid)
+        fallback: dict[str, Any] | None = None
+        for row in tools_catalog or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("function", "")).strip() != str(function_name or "").strip():
+                continue
+            owner = self._resource_short_name(str(row.get("function_owner_agent", "")).strip())
+            if owner and owner == target_resource:
+                return row
+            if fallback is None:
+                fallback = row
+        return fallback or {}
+
+    def _pending_resource_tasks(self, resource_jid: str) -> list[dict[str, Any]]:
+        pending: list[dict[str, Any]] = []
+        for node in self.nodes:
+            if node.get("type") != "task":
+                continue
+            if str(node.get("resource_jid", "")).strip() != str(resource_jid).strip():
+                continue
+            status = str(node.get("status", "")).strip()
+            if status in ("pending", "running", "accepted"):
+                pending.append(node)
+
+        def sort_key(n: dict[str, Any]) -> tuple[int, str]:
+            si = n.get("sequence_index")
+            return (10**9 if si is None else int(si), str(n.get("id", "")))
+
+        pending.sort(key=sort_key)
+        return pending
+
+    def _reconcile_search_state_for_task(
+        self,
+        *,
+        search_state: dict[str, Any],
+        task: dict[str, Any],
+        tool_row: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        reconciled = {
+            "resource_state": search_state.get("resource_state", "idle"),
+            "current_part": search_state.get("current_part"),
+            "current_location": search_state.get("current_location"),
+            "part_states": dict(search_state.get("part_states", {})),
+            "part_locations": dict(search_state.get("part_locations", {})),
+        }
+        notes: list[str] = []
+        params = dict(task.get("params") or {})
+        task_part = str(params.get("part_name") or "").strip() or None
+        current_part = str(reconciled.get("current_part") or "").strip() or None
+        ctx_map = tool_row.get("context_mapping") or {}
+        loc_param = str(ctx_map.get("location_param") or "").strip()
+        loc_type = str(ctx_map.get("location_type") or "").strip()
+        part_in_state = str(tool_row.get("part_in_state") or "").strip()
+
+        if task_part and task_part not in reconciled["part_states"]:
+            reconciled["part_states"][task_part] = part_in_state or "unknown"
+            notes.append(f"initialized part_state[{task_part}]")
+
+        if loc_type == "part_location" and task_part and loc_param:
+            task_location = params.get(loc_param)
+            if task_location and reconciled["part_locations"].get(task_part) != task_location:
+                reconciled["part_locations"][task_part] = task_location
+                notes.append(f"aligned part_location[{task_part}]")
+
+        if part_in_state:
+            if current_part is None and task_part:
+                reconciled["current_part"] = task_part
+                current_part = task_part
+                notes.append(f"inferred current_part={task_part}")
+            if current_part and reconciled["part_states"].get(current_part) != part_in_state:
+                reconciled["part_states"][current_part] = part_in_state
+                notes.append(f"aligned part_state[{current_part}]={part_in_state}")
+
+        if not reconciled.get("current_location"):
+            if loc_type == "current_location" and loc_param and params.get(loc_param):
+                reconciled["current_location"] = params.get(loc_param)
+                notes.append(f"inferred current_location={params.get(loc_param)}")
+            elif loc_type == "part_location" and task_part:
+                part_location = reconciled["part_locations"].get(task_part)
+                if part_location:
+                    reconciled["current_location"] = part_location
+                    notes.append(f"inferred current_location={part_location}")
+
+        return reconciled, notes
+
+    @staticmethod
+    def _entry_task_ids_from_violations(violations: list[dict[str, Any]]) -> list[str]:
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            for key in ("failed_task_id", "task_id"):
+                candidate = str(violation.get(key) or "").strip()
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    task_ids.append(candidate)
+            blocked = violation.get("blocked_task_ids")
+            if isinstance(blocked, (list, tuple, set)):
+                for value in blocked:
+                    candidate = str(value or "").strip()
+                    if candidate and candidate not in seen:
+                        seen.add(candidate)
+                        task_ids.append(candidate)
+        return task_ids
+
     def _identify_stuck_resource(
         self,
         violations: list[dict[str, Any]],
@@ -382,10 +503,105 @@ class ProcessPlanner:
         return {
             "resource_state": rs.get("current_state", default_resource_state),
             "current_part": rs.get("held_part"),
-            "current_location": None,
+            "current_location": rs.get("current_location"),
             "part_states": part_states,
             "part_locations": part_locations,
         }
+
+    def _project_resource_suffix_state(
+        self,
+        *,
+        resource_jid: str,
+        tools_catalog: list[dict[str, Any]],
+        resource_states: dict[str, dict[str, Any]],
+        default_resource_state: str,
+        part_states: dict[str, Any],
+        part_locations: dict[str, Any],
+        goal_state: str | None,
+    ) -> tuple[dict[str, Any] | None, str, str]:
+        """Project the modeled snapshot after this resource's pending suffix.
+
+        Returns (projected_snapshot, last_task_id, failure_reason). If projection
+        cannot be completed consistently from the live modeled state, returns
+        (None, last_successfully_projected_task_id, failure_reason) so callers
+        can fall back to the live snapshot.
+        """
+        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import (
+            simulate_catalog_transition,
+        )
+
+        pending = self._pending_resource_tasks(resource_jid)
+
+        projected_state = self._build_resource_search_state(
+            resource_jid=resource_jid,
+            resource_states=resource_states,
+            default_resource_state=default_resource_state,
+            part_states=part_states,
+            part_locations=part_locations,
+        )
+        if not pending:
+            return projected_state, "", ""
+
+        ra = self._resource_by_jid(resource_jid)
+        reachability = getattr(ra, "static_capabilities", {}).get("reachability", []) if ra else []
+        staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {}) if ra else {}
+        last_task_id = ""
+        for task in pending:
+            fn = str(task.get("function_name", "")).strip()
+            params = dict(task.get("params") or {})
+            tool_row = self._tool_row_for_task(
+                resource_jid=resource_jid,
+                function_name=fn,
+                tools_catalog=tools_catalog,
+            )
+            simulated = simulate_catalog_transition(
+                x_c=projected_state,
+                tools=tools_catalog,
+                resource_jid=resource_jid,
+                function_name=fn,
+                params=params,
+                goal_state=goal_state or "",
+                reachability=reachability,
+                staging_areas=staging_areas,
+            )
+            reconcile_notes: list[str] = []
+            if simulated is None and tool_row:
+                reconciled_state, reconcile_notes = self._reconcile_search_state_for_task(
+                    search_state=projected_state,
+                    task=task,
+                    tool_row=tool_row,
+                )
+                if reconciled_state != projected_state:
+                    simulated = simulate_catalog_transition(
+                        x_c=reconciled_state,
+                        tools=tools_catalog,
+                        resource_jid=resource_jid,
+                        function_name=fn,
+                        params=params,
+                        goal_state=goal_state or "",
+                        reachability=reachability,
+                        staging_areas=staging_areas,
+                    )
+                    if simulated is not None:
+                        projected_state = reconciled_state
+                        self.logger.info(
+                            "[Planner] Reconciled modeled state for %s before projecting %s: %s",
+                            resource_jid,
+                            str(task.get("id", "")).strip() or fn,
+                            "; ".join(reconcile_notes),
+                        )
+            if simulated is None:
+                reason = (
+                    f"task={task.get('id', '')} function={fn} could not be projected "
+                    f"from state={projected_state.get('resource_state', 'unknown')}"
+                )
+                if reconcile_notes:
+                    reason += f" after reconciliation ({'; '.join(reconcile_notes)})"
+                return None, last_task_id, reason
+            projected_state, _ = simulated
+            last_task_id = str(task.get("id", "")).strip()
+
+        return projected_state, last_task_id, ""
 
     def _collect_obligation_targets(
         self,
@@ -483,6 +699,14 @@ class ProcessPlanner:
     ) -> list[dict[str, Any]]:
         from uuid import uuid4
 
+        # Determine a sequence_index base that sorts after all existing tasks.
+        max_si = 0
+        for n in self.nodes:
+            si = n.get("sequence_index")
+            if si is not None:
+                max_si = max(max_si, int(si))
+        base_si = max_si + 1000
+
         tasks: list[dict[str, Any]] = []
         predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
         total_steps = len(path)
@@ -509,11 +733,42 @@ class ProcessPlanner:
                     "resource_jid": event.get("ra_jid"),
                     "predecessors": [predecessor] if predecessor else [],
                     "successors": [],
+                    "sequence_index": base_si + index,
                     "change_reason": reason,
                 }
             )
             predecessor = task_id
         return tasks
+
+    def _gate_tasks_after_recovery_tail(
+        self,
+        modified_tasks: list[dict[str, Any]],
+        *,
+        tail_task_id: str,
+        before_task_ids: list[str] | None = None,
+        change_prefix: str = "DES recovery",
+    ) -> None:
+        if not tail_task_id:
+            return
+        seen: set[str] = set()
+        for task_id in before_task_ids or []:
+            blocked_task_id = str(task_id or "").strip()
+            if not blocked_task_id or blocked_task_id == tail_task_id or blocked_task_id in seen:
+                continue
+            seen.add(blocked_task_id)
+            existing = self._find_node(blocked_task_id)
+            if existing is None:
+                continue
+            preds = list(dict.fromkeys(list(existing.get("predecessors", []) or []) + [tail_task_id]))
+            modified_tasks.append(
+                {
+                    "id": blocked_task_id,
+                    "predecessors": preds,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
+                    ),
+                }
+            )
 
     def apply_bridge_macro_proposal(
         self,
@@ -717,6 +972,10 @@ class ProcessPlanner:
         x_c: dict[str, Any] | None = None
         stuck_ra_jid = self._identify_stuck_resource(violations, resource_states)
 
+        # Track the best anchor for obligation recovery (the target resource's
+        # last pending task, NOT the blocked task on a different resource).
+        obligation_anchor_task_id: str = ""
+
         if obligation_targets:
             best_target: dict[str, Any] | None = None
             best_path: list[dict[str, Any]] | None = None
@@ -736,13 +995,50 @@ class ProcessPlanner:
                 ra = self._resource_by_jid(target_ra_jid)
                 if ra is None:
                     continue
-                candidate_state = self._build_resource_search_state(
+
+                live_candidate_state = self._build_resource_search_state(
                     resource_jid=target_ra_jid,
                     resource_states=resource_states,
                     default_resource_state=default_resource_state,
                     part_states=part_states,
                     part_locations=part_locations,
                 )
+                projected_candidate_state, last_pending_tid, projection_reason = (
+                    self._project_resource_suffix_state(
+                        resource_jid=target_ra_jid,
+                        tools_catalog=tools_catalog,
+                        resource_states=resource_states,
+                        default_resource_state=default_resource_state,
+                        part_states=part_states,
+                        part_locations=part_locations,
+                        goal_state=goal_state,
+                    )
+                )
+                has_pending_suffix = bool(self._pending_resource_tasks(target_ra_jid))
+                if projected_candidate_state is not None:
+                    candidate_state = projected_candidate_state
+                else:
+                    if projection_reason:
+                        if has_pending_suffix:
+                            self.logger.info(
+                                "[Planner] Obligation recovery projection skipped for %s: %s. "
+                                "Live-state fallback disabled because %d pending/running task(s) "
+                                "would otherwise be replayed as duplicate recovery.",
+                                target_ra_jid,
+                                projection_reason,
+                                len(self._pending_resource_tasks(target_ra_jid)),
+                            )
+                        else:
+                            self.logger.info(
+                                "[Planner] Obligation recovery projection skipped for %s: %s. "
+                                "Falling back to live modeled state.",
+                                target_ra_jid,
+                                projection_reason,
+                            )
+                    if has_pending_suffix:
+                        continue
+                    candidate_state = live_candidate_state
+
                 bid = compute_bid(
                     x_c=candidate_state,
                     P_id=[],
@@ -761,6 +1057,9 @@ class ProcessPlanner:
                     best_path = candidate_path
                     stuck_ra_jid = target_ra_jid
                     x_c = candidate_state
+                    obligation_anchor_task_id = (
+                        last_pending_tid if projected_candidate_state is not None else ""
+                    )
 
             if best_path:
                 path = best_path
@@ -893,10 +1192,24 @@ class ProcessPlanner:
             if candidate_task_id:
                 failed_task_id = candidate_task_id
                 break
+
+        # For obligation recovery, anchor to the target resource's last
+        # pending task (not the blocked task on a different resource).
+        anchor = obligation_anchor_task_id if obligation_anchor_task_id else failed_task_id
         tasks = self._path_to_recovery_tasks(
             path,
-            anchor_task_id=failed_task_id,
+            anchor_task_id=anchor,
         )
+        entry_task_ids = [
+            task_id for task_id in self._entry_task_ids_from_violations(violations)
+            if task_id and task_id != anchor
+        ]
+        if tasks and entry_task_ids:
+            self._gate_tasks_after_recovery_tail(
+                tasks,
+                tail_task_id=str(tasks[-1].get("id", "")).strip(),
+                before_task_ids=entry_task_ids,
+            )
         self.logger.info("[Planner] DES recovery path: %d tasks.", len(tasks))
         self._apply_replan_patch(tasks)
         message = f"DES recovery produced {len(tasks)} task(s)."

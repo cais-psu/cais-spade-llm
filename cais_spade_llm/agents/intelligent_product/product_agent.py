@@ -722,6 +722,11 @@ class ProductAgent(LlmAgent):
         t_replan.set_metadata("type", "replan_request")
         self.add_behaviour(self._ReplanInbox(), t_replan)
 
+        # Retry-ready inbox (from CCA) for transient safety blocks that cleared.
+        t_retry_ready = Template()
+        t_retry_ready.set_metadata("type", "task_retry_ready")
+        self.add_behaviour(self._TaskRetryReadyInbox(), t_retry_ready)
+
         # Plan executor (runs cycles, dispatches DAG tasks)
         # self.add_behaviour(self._PlanExecutor())
 
@@ -966,6 +971,35 @@ class ProductAgent(LlmAgent):
 
             node["status"] = "pending"
             reactivated += 1
+
+        return reactivated
+
+    def _handle_task_retry_ready(self, task_ids: Iterable[str]) -> int:
+        """
+        Requeue blocked tasks after CCA reports that a transient safety block
+        has cleared and the task may be retried with a fresh safety_check.
+        """
+        candidate_task_ids = {
+            str(task_id).strip()
+            for task_id in (task_ids or [])
+            if str(task_id).strip()
+        }
+        if not candidate_task_ids:
+            return 0
+
+        reactivated = self._reactivate_blocked_tasks(candidate_task_ids=candidate_task_ids)
+        if not reactivated:
+            return 0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for task_id in candidate_task_ids:
+            self.task_states[task_id] = "pending"
+            self.execution_timeline.append({
+                "timestamp": now_iso,
+                "task_id": task_id,
+                "status": "requeued",
+                "resource_jid": str(self.cca_jid),
+            })
 
         return reactivated
 
@@ -2090,6 +2124,39 @@ class ProductAgent(LlmAgent):
                 await asyncio.to_thread(agent._persist_product_state)
             finally:
                 agent._runtime_repair_inflight = False
+
+    class _TaskRetryReadyInbox(CyclicBehaviour):
+        """Requeue blocked tasks after CCA clears a transient safety block."""
+
+        async def run(self):
+            agent: "ProductAgent" = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning("[Product] Malformed task_retry_ready body.")
+                return
+
+            task_ids = payload.get("task_ids")
+            if not isinstance(task_ids, list):
+                task_id = payload.get("task_id")
+                task_ids = [task_id] if task_id else []
+
+            reactivated = agent._handle_task_retry_ready(task_ids)
+            if not reactivated:
+                return
+
+            agent.logger.info(
+                "[Product] Requeued %d blocked task(s) after CCA cleared transient safety block: %s",
+                reactivated,
+                ", ".join(str(task_id) for task_id in task_ids if task_id),
+            )
+            await asyncio.to_thread(agent._persist_plan_snapshot)
+            await asyncio.to_thread(agent._persist_product_state)
+            await asyncio.to_thread(agent._persist_resource_state)
 
     class _PlanExecutor(CyclicBehaviour):
         """

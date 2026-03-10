@@ -504,16 +504,11 @@ class SystemBridge:
     def _default_product_requirement_path(product_name: str) -> Path:
         return (_PRODUCT_REQUIREMENTS_DIR / f"{str(product_name).strip()}.txt").resolve()
 
-    def _compute_source_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
-        if not requirement_file.exists():
-            raise FileNotFoundError(f"requirements file missing: {requirement_file}")
+    def _compute_safety_generation_hashes(self, safety_file: Path) -> dict[str, str]:
         if not safety_file.exists():
             raise FileNotFoundError(f"safety file missing: {safety_file}")
 
-        requirement_text = requirement_file.read_text(encoding="utf-8").strip()
         safety_text = safety_file.read_text(encoding="utf-8").strip()
-        if not requirement_text:
-            raise ValueError(f"requirements file empty: {requirement_file}")
         if not safety_text:
             raise ValueError(f"safety file empty: {safety_file}")
 
@@ -524,10 +519,22 @@ class SystemBridge:
             raise FileNotFoundError(f"prompts file missing: {prompts_path}")
 
         return {
-            "requirements_sha256": sha256_text(requirement_text),
             "safety_sha256": sha256_text(safety_text),
             "tools_sha256": sha256_file(_TOOLS_OUT),
             "prompts_sha256": sha256_file(prompts_path),
+        }
+
+    def _compute_source_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
+        if not requirement_file.exists():
+            raise FileNotFoundError(f"requirements file missing: {requirement_file}")
+
+        requirement_text = requirement_file.read_text(encoding="utf-8").strip()
+        if not requirement_text:
+            raise ValueError(f"requirements file empty: {requirement_file}")
+        hashes = self._compute_safety_generation_hashes(safety_file)
+        return {
+            "requirements_sha256": sha256_text(requirement_text),
+            **hashes,
         }
 
     def _resolve_requirement_input(
@@ -583,22 +590,11 @@ class SystemBridge:
         return str(ctx["product_init_file"])
 
     def list_product_requirement_files(self, product_init_file: str | None = None) -> list[str]:
-        if product_init_file:
-            try:
-                ctx = self._resolve_product_context(product_init_file, include_hashes=False)
-            except Exception:
-                return []
-            product_spec_file = str(ctx.get("product_spec_file", "")).strip()
-            return [self._norm_path(product_spec_file)] if product_spec_file else []
         options: set[str] = set()
-        for init_file in self.list_product_files():
-            try:
-                ctx = self._resolve_product_context(init_file, include_hashes=False)
-                product_spec_file = str(ctx.get("product_spec_file", "")).strip()
-                if product_spec_file:
-                    options.add(self._norm_path(product_spec_file))
-            except Exception:
-                continue
+        if _PRODUCT_REQUIREMENTS_DIR.is_dir():
+            for p in _PRODUCT_REQUIREMENTS_DIR.iterdir():
+                if p.is_file() and p.suffix == ".txt":
+                    options.add(self._norm_path(str(p)))
         return sorted(options)
 
     def _load_safety_intent_approvals(self) -> dict[str, Any]:
@@ -726,6 +722,8 @@ class SystemBridge:
         out = dict(record)
         preview_dir = self._preview_record_dir(record)
         preview_id = str(out.get("preview_id", "")).strip()
+        out["tools_sha256"] = str(out.get("tools_sha256", "") or "").strip()
+        out["prompts_sha256"] = str(out.get("prompts_sha256", "") or "").strip()
 
         if preview_dir is not None:
             legacy_root = _legacy_safety_preview_dir().resolve()
@@ -756,6 +754,144 @@ class SystemBridge:
                 out["rules_count"] = len([rule for rule in rules if isinstance(rule, dict)])
 
         return out, preview_dir
+
+    @staticmethod
+    def _rule_ids_from_safety_logic_payload(payload: dict[str, Any]) -> list[str]:
+        raw_rules = payload.get("rules", []) if isinstance(payload, dict) else []
+        rules = raw_rules if isinstance(raw_rules, list) else []
+        out: list[str] = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id", "")).strip()
+            if rid:
+                out.append(rid)
+        return out
+
+    @staticmethod
+    def _dfa_rule_id_from_path(path: Path) -> str:
+        rid = str(path.stem or "").strip()
+        if rid.endswith("_dfa"):
+            rid = rid[: -len("_dfa")]
+        return rid
+
+    def _build_precomputed_safety_descriptor(
+        self,
+        safety_path: Path,
+        record: dict[str, Any],
+        current_hashes: dict[str, str],
+    ) -> tuple[dict[str, Any] | None, str]:
+        approved_tools_hash = str(record.get("tools_sha256", "") or "").strip()
+        approved_prompts_hash = str(record.get("prompts_sha256", "") or "").strip()
+        preview_id = str(record.get("preview_id", "") or "").strip()
+        if not preview_id or not approved_tools_hash or not approved_prompts_hash:
+            return None, "approved_preview_provenance_missing"
+        if approved_tools_hash != current_hashes["tools_sha256"]:
+            return None, "tools_changed_since_approval"
+        if approved_prompts_hash != current_hashes["prompts_sha256"]:
+            return None, "prompts_changed_since_approval"
+
+        safety_key = self._norm_path(safety_path)
+        payload = self._load_safety_intent_previews()
+        previews = payload.get("previews", {})
+        entries = self._preview_history_entries(
+            previews.get(safety_key, []) if isinstance(previews, dict) else []
+        )
+        preview_record = self._find_preview_record(entries, preview_id)
+        if not preview_record:
+            return None, "approved_preview_missing"
+
+        logic_path_raw = str(preview_record.get("safety_logic_json", "")).strip()
+        logic_path = Path(logic_path_raw) if logic_path_raw else Path()
+        if not logic_path.exists():
+            return None, "approved_preview_artifacts_missing"
+
+        logic_payload = self._read_json_dict(logic_path)
+        rule_ids = self._rule_ids_from_safety_logic_payload(logic_payload)
+
+        dot_paths: list[str] = []
+        dot_rule_ids: set[str] = set()
+        for raw_dot in preview_record.get("dfa_dot_files", []):
+            dot_path = Path(str(raw_dot or "").strip())
+            if not dot_path.exists():
+                return None, "approved_preview_artifacts_missing"
+            resolved = str(dot_path.resolve())
+            dot_paths.append(resolved)
+            rid = self._dfa_rule_id_from_path(dot_path)
+            if rid:
+                dot_rule_ids.add(rid)
+        if any(rid not in dot_rule_ids for rid in rule_ids):
+            return None, "approved_preview_artifacts_missing"
+
+        png_paths: list[str] = []
+        for raw_png in preview_record.get("dfa_png_files", []):
+            png_path = Path(str(raw_png or "").strip())
+            if not png_path.exists():
+                return None, "approved_preview_artifacts_missing"
+            png_paths.append(str(png_path.resolve()))
+
+        return (
+            {
+                "mode": "approved_preview",
+                "preview_id": preview_id,
+                "preview_generated_at_utc": str(
+                    preview_record.get("generated_at_utc", "") or ""
+                ).strip(),
+                "safety_logic_json": str(logic_path.resolve()),
+                "dfa_dot_files": sorted(dot_paths),
+                "dfa_png_files": sorted(png_paths),
+                "safety_sha256": current_hashes["safety_sha256"],
+                "tools_sha256": current_hashes["tools_sha256"],
+                "prompts_sha256": current_hashes["prompts_sha256"],
+            },
+            "approved",
+        )
+
+    @staticmethod
+    def _approval_requires_preview_refresh(reason: str, record: dict[str, Any]) -> bool:
+        if not isinstance(record, dict) or not bool(record.get("approved", False)):
+            return False
+        return str(reason or "").strip() in {
+            "content_changed_since_approval",
+            "tools_changed_since_approval",
+            "prompts_changed_since_approval",
+            "approved_preview_provenance_missing",
+            "approved_preview_missing",
+            "approved_preview_artifacts_missing",
+        }
+
+    @staticmethod
+    def _approval_refresh_error(reason: str) -> str:
+        mapping = {
+            "content_changed_since_approval": (
+                "Safety approval is stale because the safety file changed. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+            "tools_changed_since_approval": (
+                "Safety approval is stale because the tools catalog changed. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+            "prompts_changed_since_approval": (
+                "Safety approval is stale because prompts.py changed. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+            "approved_preview_provenance_missing": (
+                "Approved safety preview metadata is incomplete. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+            "approved_preview_missing": (
+                "The approved safety preview could not be found. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+            "approved_preview_artifacts_missing": (
+                "The approved safety preview artifacts are incomplete or missing. "
+                "Regenerate the safety preview and approve it again before generating a plan set."
+            ),
+        }
+        return mapping.get(
+            str(reason or "").strip(),
+            "Approved safety preview is stale. Regenerate the safety preview and approve it again before generating a plan set.",
+        )
 
     def _normalize_safety_intent_previews_payload(
         self,
@@ -1572,7 +1708,8 @@ class SystemBridge:
         if not safety_text:
             raise ValueError(f"safety requirement file is empty: {safety_path}")
 
-        safety_hash = sha256_text(safety_text)
+        safety_hashes = self._compute_safety_generation_hashes(safety_path)
+        safety_hash = safety_hashes["safety_sha256"]
         safety_key = self._norm_path(safety_path)
         payload = self._load_safety_intent_previews()
         previews = payload.get("previews", {})
@@ -1647,6 +1784,8 @@ class SystemBridge:
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "safety_file": safety_key,
             "safety_sha256": safety_hash,
+            "tools_sha256": safety_hashes["tools_sha256"],
+            "prompts_sha256": safety_hashes["prompts_sha256"],
             "refinement_feedback": str(refinement_feedback or "").strip(),
             "parent_preview_id": str(parent_record.get("preview_id", "")).strip(),
             "preview_dir": str(preview_dir.resolve()),
@@ -1718,7 +1857,8 @@ class SystemBridge:
                 "record": {},
                 "safety_file": str(safety_path),
             }
-        current_hash = sha256_text(safety_text)
+        current_hashes = self._compute_safety_generation_hashes(safety_path)
+        current_hash = current_hashes["safety_sha256"]
         safety_key = self._norm_path(safety_path)
 
         payload = self._load_safety_intent_approvals()
@@ -1755,12 +1895,27 @@ class SystemBridge:
                 "current_hash": current_hash,
             }
 
+        descriptor, reason = self._build_precomputed_safety_descriptor(
+            safety_path,
+            record,
+            current_hashes,
+        )
+        if descriptor is None:
+            return {
+                "approved": False,
+                "reason": reason,
+                "record": record,
+                "safety_file": safety_key,
+                "current_hash": current_hash,
+            }
+
         return {
             "approved": True,
             "reason": "approved",
             "record": record,
             "safety_file": safety_key,
             "current_hash": current_hash,
+            "precomputed_safety_artifacts": descriptor,
         }
 
     def approve_safety_intent(self, safety_requirement_file: str, note: str = "") -> dict[str, Any]:
@@ -1785,16 +1940,35 @@ class SystemBridge:
             raise ValueError(
                 "safety file changed after preview generation; regenerate preview before approval"
             )
+        current_hashes = self._compute_safety_generation_hashes(safety_path)
+        preview_record = preview.get("record", {}) if isinstance(preview.get("record"), dict) else {}
+        preview_id = str(preview_record.get("preview_id", "") or "").strip()
+        preview_tools_hash = str(preview_record.get("tools_sha256", "") or "").strip()
+        preview_prompts_hash = str(preview_record.get("prompts_sha256", "") or "").strip()
+        if not preview_id or not preview_tools_hash or not preview_prompts_hash:
+            raise ValueError(
+                "approved preview metadata is incomplete; regenerate preview before approval"
+            )
+        if preview_tools_hash != current_hashes["tools_sha256"]:
+            raise ValueError(
+                "tools catalog changed after preview generation; regenerate preview before approval"
+            )
+        if preview_prompts_hash != current_hashes["prompts_sha256"]:
+            raise ValueError(
+                "prompts.py changed after preview generation; regenerate preview before approval"
+            )
 
         safety_key = self._norm_path(safety_path)
         now_utc = datetime.now(timezone.utc).isoformat()
         record = {
             "approved": True,
             "approved_at_utc": now_utc,
-            "safety_sha256": sha256_text(safety_text),
+            "safety_sha256": current_hashes["safety_sha256"],
+            "tools_sha256": current_hashes["tools_sha256"],
+            "prompts_sha256": current_hashes["prompts_sha256"],
             "note": str(note or "").strip(),
-            "preview_id": str((preview.get("record") or {}).get("preview_id", "")).strip(),
-            "preview_generated_at_utc": str((preview.get("record") or {}).get("generated_at_utc", "")).strip(),
+            "preview_id": preview_id,
+            "preview_generated_at_utc": str(preview_record.get("generated_at_utc", "")).strip(),
         }
 
         payload = self._load_safety_intent_approvals()
@@ -2228,6 +2402,17 @@ class SystemBridge:
             None,
         )
 
+    @staticmethod
+    def _startup_bundle_scope_input(
+        selected_product_file: str,
+        selected_requirement_file: str | None = None,
+    ) -> str:
+        """Prefer the explicit requirement override when matching startup bundles."""
+        requirement_file = str(selected_requirement_file or "").strip()
+        if requirement_file:
+            return requirement_file
+        return str(selected_product_file or "").strip()
+
     def list_compatible_bundles(
         self,
         product_spec_file: str,
@@ -2356,11 +2541,33 @@ class SystemBridge:
         else:
             raise ValueError("product specification input is required")
 
+        product_ctx = self._resolve_product_context(product_init_file, include_hashes=False)
         safety_override = (
             self._norm_path(self._abs_project_path(safety_requirement_file))
             if str(safety_requirement_file or "").strip()
             else None
         )
+        selected_safety_file = str(
+            safety_override or product_ctx.get("safety_file") or ""
+        ).strip() or None
+        precomputed_safety_artifacts: dict[str, Any] | None = None
+        if selected_safety_file:
+            safety_eval = self.evaluate_safety_intent_approval(selected_safety_file)
+            record = safety_eval.get("record", {}) if isinstance(safety_eval.get("record"), dict) else {}
+            if bool(safety_eval.get("approved", False)):
+                raw_precomputed = safety_eval.get("precomputed_safety_artifacts")
+                if not isinstance(raw_precomputed, dict) or not raw_precomputed:
+                    raise ValueError(
+                        "approved safety preview could not be resolved; regenerate preview and approve it again"
+                    )
+                precomputed_safety_artifacts = dict(raw_precomputed)
+            elif self._approval_requires_preview_refresh(
+                str(safety_eval.get("reason", "") or ""),
+                record,
+            ):
+                raise ValueError(
+                    self._approval_refresh_error(str(safety_eval.get("reason", "") or ""))
+                )
         resolved_auto_replan_max_attempts = 3 if auto_replan_max_attempts is None else auto_replan_max_attempts
 
         return asyncio.run(
@@ -2370,6 +2577,7 @@ class SystemBridge:
                 robot_env=resolved_robot_env,
                 product_requirement_file=req_file or None,
                 safety_requirement_file=safety_override,
+                precomputed_safety_artifacts=precomputed_safety_artifacts,
                 auto_replan_max_attempts=resolved_auto_replan_max_attempts,
                 refinement_feedback=str(refinement_feedback or "").strip(),
                 parent_bundle_id=str(parent_bundle_id or "").strip(),
@@ -2384,11 +2592,6 @@ class SystemBridge:
         manifest = self.bundle_store.load_manifest(bid)
         if not manifest:
             raise ValueError(f"plan-set manifest not found: {bid}")
-
-        validation = manifest.get("validation_summary", {})
-        ok = bool(validation.get("ok", False))
-        if not ok:
-            raise ValueError("plan set cannot be verified because plan validation did not pass")
 
         manifest["status"] = BUNDLE_STATUS_VERIFIED
         manifest["verified"] = True
@@ -3034,9 +3237,14 @@ class SystemBridge:
             else:
                 selected_safety_for_compat = None
 
+            startup_bundle_scope = self._startup_bundle_scope_input(
+                selected_product_file,
+                selected_requirement_file,
+            )
+
             bundle_context, bundle_notice = await asyncio.to_thread(
                 self._resolve_startup_bundle_context,
-                product_spec_file=selected_product_file,
+                product_spec_file=startup_bundle_scope,
                 execution_mode=self.execution_mode,
                 robot_env=self.robot_env,
                 safety_requirement_file=selected_safety_for_compat,

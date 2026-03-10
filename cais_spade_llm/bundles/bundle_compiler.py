@@ -150,6 +150,73 @@ class BundleCompiler:
         return requirements_nodes, task_nodes
 
     @staticmethod
+    def _safety_rule_ids(rules: list[dict[str, Any]]) -> list[str]:
+        out: list[str] = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id", "")).strip()
+            if rid:
+                out.append(rid)
+        return out
+
+    @staticmethod
+    def _dfa_rule_id_from_filename(path: Path) -> str:
+        rid = str(path.stem or "").strip()
+        if rid.endswith("_dfa"):
+            rid = rid[: -len("_dfa")]
+        return rid
+
+    @classmethod
+    def _copy_precomputed_safety_artifacts(
+        cls,
+        descriptor: dict[str, Any],
+        safety_dir: Path,
+    ) -> tuple[Path, dict[str, str]]:
+        logic_src_raw = str(descriptor.get("safety_logic_json", "") or "").strip()
+        if not logic_src_raw:
+            raise ValueError("approved safety preview is missing safety_logic_json")
+        logic_src = Path(logic_src_raw).resolve()
+        if not logic_src.exists():
+            raise FileNotFoundError(f"approved safety logic missing: {logic_src}")
+
+        safety_dir.mkdir(parents=True, exist_ok=True)
+        logic_dst = (safety_dir / "cca_safety_logic.json").resolve()
+        shutil.copyfile(logic_src, logic_dst)
+
+        logic_payload = cls._load_json(logic_dst)
+        raw_rules = logic_payload.get("rules", [])
+        rules = raw_rules if isinstance(raw_rules, list) else []
+        rule_ids = cls._safety_rule_ids([rule for rule in rules if isinstance(rule, dict)])
+
+        dfa_map: dict[str, str] = {}
+        for raw_dot in descriptor.get("dfa_dot_files", []) if isinstance(descriptor.get("dfa_dot_files", []), list) else []:
+            dot_src = Path(str(raw_dot or "").strip()).resolve()
+            if not dot_src.exists():
+                raise FileNotFoundError(f"approved safety DFA missing: {dot_src}")
+            dot_dst = (safety_dir / dot_src.name).resolve()
+            shutil.copyfile(dot_src, dot_dst)
+            rid = cls._dfa_rule_id_from_filename(dot_dst)
+            if rid:
+                dfa_map[rid] = dot_dst.read_text(encoding="utf-8")
+
+        missing_rule_ids = [rid for rid in rule_ids if rid not in dfa_map]
+        if missing_rule_ids:
+            raise ValueError(
+                "approved safety preview is missing DFA DOT artifacts for rules: "
+                + ", ".join(missing_rule_ids)
+            )
+
+        for raw_png in descriptor.get("dfa_png_files", []) if isinstance(descriptor.get("dfa_png_files", []), list) else []:
+            png_src = Path(str(raw_png or "").strip()).resolve()
+            if not png_src.exists():
+                raise FileNotFoundError(f"approved safety DFA image missing: {png_src}")
+            png_dst = (safety_dir / png_src.name).resolve()
+            shutil.copyfile(png_src, png_dst)
+
+        return logic_dst, dfa_map
+
+    @staticmethod
     def _import_runtime_classes():
         try:
             from agents.central_controller.central_controller_agent import CentralControllerAgent
@@ -273,6 +340,7 @@ class BundleCompiler:
         robot_env: str,
         product_requirement_file: str | None = None,
         safety_requirement_file: str | None = None,
+        precomputed_safety_artifacts: dict[str, Any] | None = None,
         auto_replan_max_attempts: int = 3,
         refinement_feedback: str = "",
         parent_bundle_id: str = "",
@@ -399,19 +467,56 @@ class BundleCompiler:
                 safety_file=str(safety_path),
             )
 
-            safety_logic = getattr(cca_agent, "safety_logic", None)
-            if safety_logic is None:
-                raise RuntimeError("failed to initialize SafetyLogic")
-
             try:
-                await safety_logic.build_safety_rules_and_logic(safety_text)
-                await safety_logic.build_preview_interpretations()
                 safety_logic_path = safety_dir / "cca_safety_logic.json"
-                await asyncio.to_thread(safety_logic.save, safety_logic_path)
-                dfa_map = await asyncio.to_thread(
-                    safety_logic.build_dfas_per_rule,
-                    safety_dir,
-                )
+                safety_source = {
+                    "mode": "live_regeneration",
+                    "safety_sha256": source_hashes["safety_sha256"],
+                    "tools_sha256": source_hashes["tools_sha256"],
+                    "prompts_sha256": source_hashes["prompts_sha256"],
+                }
+                if precomputed_safety_artifacts:
+                    for key in ("safety_sha256", "tools_sha256", "prompts_sha256"):
+                        expected = str(precomputed_safety_artifacts.get(key, "") or "").strip()
+                        actual = str(source_hashes.get(key, "") or "").strip()
+                        if expected != actual:
+                            raise ValueError(
+                                f"approved safety preview hash mismatch for {key}: expected {expected}, current {actual}"
+                            )
+                    safety_logic_path, dfa_map = self._copy_precomputed_safety_artifacts(
+                        precomputed_safety_artifacts,
+                        safety_dir,
+                    )
+                    safety_payload = self._load_json(safety_logic_path)
+                    raw_rules = safety_payload.get("rules", [])
+                    safety_rules = [rule for rule in raw_rules if isinstance(rule, dict)] if isinstance(raw_rules, list) else []
+                    safety_source = {
+                        "mode": "approved_preview",
+                        "preview_id": str(precomputed_safety_artifacts.get("preview_id", "")).strip(),
+                        "preview_generated_at_utc": str(
+                            precomputed_safety_artifacts.get("preview_generated_at_utc", "") or ""
+                        ).strip(),
+                        "safety_sha256": source_hashes["safety_sha256"],
+                        "tools_sha256": source_hashes["tools_sha256"],
+                        "prompts_sha256": source_hashes["prompts_sha256"],
+                    }
+                    log.info(
+                        "Using approved safety preview %s for bundle %s.",
+                        safety_source["preview_id"] or "<unknown>",
+                        bundle_id,
+                    )
+                else:
+                    safety_logic = getattr(cca_agent, "safety_logic", None)
+                    if safety_logic is None:
+                        raise RuntimeError("failed to initialize SafetyLogic")
+                    await safety_logic.build_safety_rules_and_logic(safety_text)
+                    await safety_logic.build_preview_interpretations()
+                    await asyncio.to_thread(safety_logic.save, safety_logic_path)
+                    dfa_map = await asyncio.to_thread(
+                        safety_logic.build_dfas_per_rule,
+                        safety_dir,
+                    )
+                    safety_rules = list(safety_logic.rules or [])
 
                 await product_agent.process_planner.build_high_level(
                     requirement_text,
@@ -437,7 +542,7 @@ class BundleCompiler:
                 )
 
                 validator = PlanSafetyValidator(
-                    rules=safety_logic.rules,
+                    rules=safety_rules,
                     dfa_map=dfa_map,
                     tools_catalog=getattr(product_agent, "tools_catalog", []),
                 )
@@ -486,6 +591,7 @@ class BundleCompiler:
                     "replan_policy": {
                         "auto_replan_max_attempts": auto_replan_max_attempts,
                     },
+                    "safety_source": safety_source,
                     "parent_bundle_id": parent_bundle_id,
                     "refinement_feedback": refinement_feedback,
                     "artifacts": {

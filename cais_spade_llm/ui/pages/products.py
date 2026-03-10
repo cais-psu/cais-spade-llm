@@ -765,7 +765,7 @@ def render(bridge: SystemBridge) -> None:
             # --- Editable Product Requirements ---
             ui.label("Requirements").classes("text-base font-semibold mb-1")
             ui.label(
-                "This editor only shows the requirement file linked to the selected product."
+                "Select a requirement file to view or edit. The product's linked file is pre-selected."
             ).classes("text-xs text-slate-500 mb-1")
 
             _REQ_DIR.mkdir(parents=True, exist_ok=True)
@@ -821,7 +821,7 @@ def render(bridge: SystemBridge) -> None:
                     _persist_selected_product_meta()
 
             def _refresh_requirement_file_list(select_path: str | None = None):
-                """Show only the requirement file currently linked to the selected product."""
+                """Show all requirement files, pre-selecting the one linked to the product."""
                 product_name = str(_product_state.get("name", "") or "").strip()
                 current_path = str(select_path or _selected_requirement_path() or "").strip()
                 if not product_name:
@@ -833,13 +833,17 @@ def render(bridge: SystemBridge) -> None:
                     status_label.classes(replace="text-sm text-slate-600")
                     upload_info_label.text = ""
                     return
-                if not current_path:
-                    current_path = str(_REQ_DIR / f"{product_name}.txt")
-                    _product_state["meta"]["product_specification_file"] = current_path
-                req_path = Path(current_path)
-                label = req_path.name + (" [missing]" if not req_path.exists() else "")
-                req_select.options = {str(req_path): label}
-                req_select.value = str(req_path)
+                # List all requirement files from the directory
+                options: dict[str, str] = {}
+                if _REQ_DIR.is_dir():
+                    for p in sorted(_REQ_DIR.iterdir()):
+                        if p.is_file() and p.suffix == ".txt":
+                            options[str(p)] = p.name
+                req_select.options = options
+                if current_path and current_path in options:
+                    req_select.value = current_path
+                else:
+                    req_select.value = next(iter(options.keys()), None)
                 req_select.update()
                 _load_req()
 
@@ -883,11 +887,8 @@ def render(bridge: SystemBridge) -> None:
                 _product_state.setdefault("meta", {})
                 _product_state["meta"]["product_specification_file"] = ""
                 _persist_selected_product_meta()
-                # Reset the UI.
-                req_select.options = {}
-                req_select.value = None
-                req_select.update()
-                req_editor.value = ""
+                # Refresh the list to show remaining files.
+                _refresh_requirement_file_list()
                 status_label.text = f"Deleted {name}"
                 status_label.classes(replace="text-sm text-red-600")
 

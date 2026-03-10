@@ -1,22 +1,7 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case1_move_home_not_included",
+  "active_bundle_id": "case2_mutex_and_move_home_not_included",
   "bundles": [
-    {
-      "bundle_id": "20260309T182514Z__assembly1__simulation__gazebo__e4b72b94",
-      "display_name": "assembly_board-v1 | simulation/gazebo | draft | 20260309T182514Z",
-      "created_at_utc": "2026-03-09T18:25:25.582516+00:00",
-      "status": "verified",
-      "verified": true,
-      "product_name": "assembly_board-v1",
-      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly1.txt",
-      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_none.txt",
-      "execution_mode": "simulation",
-      "robot_env": "gazebo",
-      "parent_bundle_id": "",
-      "refinement_feedback": "",
-      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/20260309T182514Z__assembly1__simulation__gazebo__e4b72b94/bundle_manifest.json"
-    },
     {
       "bundle_id": "case1_move_home_not_included",
       "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/case1_move_home_not_included/bundle_manifest.json",
@@ -27,6 +12,19 @@
       "product_name": "assembly_board-v1",
       "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/assembly1.txt",
       "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case1.txt",
+      "execution_mode": "simulation",
+      "robot_env": "gazebo"
+    },
+    {
+      "bundle_id": "case2_mutex_and_move_home_not_included",
+      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/case2_mutex_and_move_home_not_included/bundle_manifest.json",
+      "display_name": "assembly_board-v1 | simulation/gazebo | invalid | 20260310T152517Z",
+      "created_at_utc": "2026-03-10T15:25:39.723509+00:00",
+      "status": "verified",
+      "verified": true,
+      "product_name": "assembly_board-v1",
+      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/twopart_assembly.txt",
+      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_mutex.txt",
       "execution_mode": "simulation",
       "robot_env": "gazebo"
     }

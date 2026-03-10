@@ -76,7 +76,7 @@ def _run_headless() -> None:
 
         print("Agents running (headless). Press Ctrl+C to stop.")
         try:
-            while True:
+            while True:     
                 await asyncio.sleep(1)
         except (KeyboardInterrupt, SystemExit):
             pass

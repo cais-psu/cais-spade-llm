@@ -1,41 +1,89 @@
-import json
-import asyncio
-from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
+from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import (
+    _tool_signature,
+    compute_bid,
+)
 
-def run_test():
-    with open("cais_spade_llm/initialization/tools.json") as f:
-        tools = json.load(f)
 
-    # Mimic a simple valid start state
-    x_c = {
-        "resource_state": "idle",
-        "current_part": None,
-        "current_location": None,
-        "part_states": {"sg": "ready", "mcp": "ready"},
-        "part_locations": {"sg": "prusa-mk4-1", "mcp": "prusa-mk4-2"}
-    }
-    
-    P_id = ["sg"]
-    reachability = ["prusa-mk4-1", "assembly_board-v1"]
-    staging_areas = {}
-    resource_jid = "xarm6@localhost"
+def _recovery_tools() -> list[dict]:
+    return [
+        {
+            "function": "move_home",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "any",
+            "out_state": "idle",
+            "context": [],
+            "params": {},
+            "description": "Robot arm move to its home position.",
+        },
+        {
+            "function": "place_approach",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "picked",
+            "out_state": "positioned",
+            "part_in_state": "in_gripper",
+            "context_mapping": {
+                "location_param": "destination_location",
+                "location_type": "reachable_location",
+            },
+            "part_transition": {
+                "completed": {
+                    "state": "in_transit",
+                    "location_template": "{resource_jid}_gripper",
+                }
+            },
+            "params": {},
+            "description": "Move the loaded part to its destination location.",
+        },
+        {
+            "function": "place_insert",
+            "function_owner_agent": "ur5e",
+            "process": "assembly",
+            "resource_type": "robot",
+            "in_state": "positioned",
+            "out_state": "placed",
+            "part_in_state": "in_transit",
+            "context_mapping": {
+                "location_param": "destination_location",
+                "location_type": "current_location",
+            },
+            "part_transition": {
+                "completed": {
+                    "state": "assembled",
+                    "location_param": "destination_location",
+                }
+            },
+            "params": {},
+            "description": "Assemble the currently held part at its final destination.",
+        },
+    ]
 
+
+def test_compute_bid_reaches_catalog_recovery_from_projected_suffix_state():
+    tools = _recovery_tools()
+    move_home = next(tool for tool in tools if tool["function"] == "move_home")
     bid = compute_bid(
-        x_c=x_c,
-        P_id=P_id,
+        x_c={
+            "resource_state": "placed",
+            "current_part": None,
+            "current_location": "Assembly Station",
+            "part_states": {"MCP": "assembled"},
+            "part_locations": {"MCP": "Assembly Station"},
+        },
+        P_id=[],
         goal_state="assembled",
         tools=tools,
-        reachability=reachability,
-        staging_areas=staging_areas,
-        resource_jid=resource_jid
+        reachability=["Assembly Station"],
+        staging_areas={},
+        resource_jid="ur5e@localhost",
+        goal_event_signatures={_tool_signature(move_home)},
     )
 
-    if bid and bid.complete:
-        print("SUCCESS! Found complete bid sequence:")
-        for e in bid.str_e:
-            print(f"  {e['function_name']}: {e['params']}")
-    else:
-        print("FAILED to find valid sequence")
-
-if __name__ == "__main__":
-    run_test()
+    assert bid is not None
+    assert bid.complete is True
+    assert [event["function_name"] for event in bid.str_e] == ["move_home"]
+    assert bid.str_x[-1]["resource_state"] == "idle"
+    assert bid.str_x[-1]["current_part"] is None
