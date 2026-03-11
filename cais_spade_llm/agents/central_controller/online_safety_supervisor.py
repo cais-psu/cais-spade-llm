@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
-import json
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
-from agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
+from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 
 
 ProductState = Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]]
@@ -52,16 +51,20 @@ class OnlineSafetySupervisor:
             winning_set_data.get("initial_resource_states") or {}
         )
 
-    @staticmethod
     def _resource_state_signature(
+        self,
         resource_states: Dict[str, Dict[str, Any]],
     ) -> Tuple[Tuple[str, str, str], ...]:
         items: List[Tuple[str, str, str]] = []
         for resource_jid, payload in sorted((resource_states or {}).items()):
             current_state = str((payload or {}).get("current_state") or "").strip()
             params = dict((payload or {}).get("params") or {})
-            params_token = json.dumps(params, sort_keys=True, separators=(",", ":"))
-            items.append((str(resource_jid), current_state, params_token))
+            state_token = self.safety._resource_state_signature_token(
+                str(resource_jid),
+                current_state,
+                params,
+            )
+            items.append((str(resource_jid), current_state, state_token))
         return tuple(items)
 
     def _merged_resource_states(self) -> Dict[str, Dict[str, Any]]:

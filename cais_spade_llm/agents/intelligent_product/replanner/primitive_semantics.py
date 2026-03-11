@@ -11,8 +11,8 @@ from copy import deepcopy
 import inspect
 from typing import Any
 
-from function_analyzer import FunctionAnalyzer
-from resources.robot import UR5eController, XArm6Controller
+from cais_spade_llm.function_analyzer import FunctionAnalyzer
+from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 
 
 _SUPPORTED_PRECONDITION_OPS = frozenset({"equals", "not_equals", "exists"})
@@ -25,6 +25,305 @@ _SUPPORTED_EFFECT_OPS = frozenset(
         "set_unknown",
     }
 )
+
+
+def _is_scalar_json_value(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _context_ref_tokens(context_ref: str) -> list[str]:
+    ref = str(context_ref or "").strip()
+    if not ref:
+        raise ValueError("context_ref is empty")
+
+    if ref.startswith("/"):
+        return [
+            token.replace("~1", "/").replace("~0", "~")
+            for token in ref.lstrip("/").split("/")
+            if token != ""
+        ]
+
+    tokens = [token for token in ref.split(".") if token]
+    if not tokens:
+        raise ValueError(f"context_ref '{ref}' is invalid")
+    return tokens
+
+
+def _is_step_output_ref(context_ref: str) -> bool:
+    tokens = _context_ref_tokens(context_ref)
+    return bool(tokens) and tokens[0] == "step_outputs"
+
+
+def _walk_context_tokens(root: Any, tokens: list[str], *, context_ref: str) -> Any:
+    current = root
+    for token in tokens:
+        if isinstance(current, dict):
+            if token not in current:
+                raise KeyError(f"context_ref '{context_ref}' could not resolve token '{token}'")
+            current = current[token]
+            continue
+        if isinstance(current, list):
+            try:
+                index = int(token)
+            except (TypeError, ValueError) as exc:
+                raise KeyError(
+                    f"context_ref '{context_ref}' expected list index at token '{token}'"
+                ) from exc
+            if index < 0 or index >= len(current):
+                raise KeyError(
+                    f"context_ref '{context_ref}' list index '{token}' is out of range"
+                )
+            current = current[index]
+            continue
+        raise KeyError(
+            f"context_ref '{context_ref}' cannot descend into non-container value at token '{token}'"
+        )
+    return current
+
+
+def resolve_context_ref(
+    context_ref: str,
+    grounding_context: dict[str, Any],
+    *,
+    step_outputs: dict[str, Any] | None = None,
+) -> Any:
+    """Resolve one context_ref against planner context and optional step outputs.
+
+    Supports JSON Pointer (`/parts/SG/observed_pose/x`) and dot paths
+    (`parts.SG.observed_pose.x`) for compatibility with the current bridge TODO.
+    """
+    ref = str(context_ref or "").strip()
+    tokens = _context_ref_tokens(ref)
+    root = dict(grounding_context or {})
+    if step_outputs is not None:
+        root["step_outputs"] = deepcopy(step_outputs)
+    return deepcopy(_walk_context_tokens(root, tokens, context_ref=ref))
+
+
+def resolve_param_refs(
+    value: Any,
+    grounding_context: dict[str, Any],
+    *,
+    step_outputs: dict[str, Any] | None = None,
+    preserve_step_output_refs: bool = False,
+) -> Any:
+    """Recursively resolve context_ref wrappers inside a primitive params value."""
+    if isinstance(value, dict):
+        if set(value.keys()) == {"context_ref"}:
+            context_ref = str(value.get("context_ref") or "")
+            if preserve_step_output_refs and _is_step_output_ref(context_ref):
+                return deepcopy(value)
+            resolved = resolve_context_ref(
+                context_ref,
+                grounding_context,
+                step_outputs=step_outputs,
+            )
+            if not _is_scalar_json_value(resolved):
+                raise ValueError(
+                    f"context_ref '{value.get('context_ref')}' resolved to a non-scalar value"
+                )
+            return resolved
+        return {
+            str(key): resolve_param_refs(
+                subvalue,
+                grounding_context,
+                step_outputs=step_outputs,
+                preserve_step_output_refs=preserve_step_output_refs,
+            )
+            for key, subvalue in value.items()
+        }
+
+    if isinstance(value, list):
+        return [
+            resolve_param_refs(
+                item,
+                grounding_context,
+                step_outputs=step_outputs,
+                preserve_step_output_refs=preserve_step_output_refs,
+            )
+            for item in value
+        ]
+
+    return deepcopy(value)
+
+
+def resolve_step_param_refs(
+    steps: list[dict[str, Any]],
+    grounding_context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Resolve planner-known context_ref values while preserving step_outputs refs."""
+    resolved_steps: list[dict[str, Any]] = []
+    for index, step in enumerate(steps, start=1):
+        try:
+            normalized = dict(step)
+            normalized["params"] = resolve_param_refs(
+                step.get("params") or {},
+                grounding_context,
+                preserve_step_output_refs=True,
+            )
+            resolved_steps.append(normalized)
+        except Exception as exc:
+            primitive = str(step.get("primitive", "")).strip()
+            return [], f"step {index} {primitive}: {exc}"
+    return resolved_steps, None
+
+
+def _validate_store_as(store_as: Any) -> str | None:
+    alias = str(store_as or "").strip()
+    if not alias:
+        return None
+    if not alias.replace("_", "").isalnum() or alias[0].isdigit():
+        return "store_as must be a snake_case-like identifier"
+    return None
+
+
+def _normalized_xyz_pose(payload: Any) -> dict[str, float] | None:
+    if not isinstance(payload, dict) or not {"x", "y", "z"} <= set(payload.keys()):
+        return None
+    try:
+        return {
+            "x": float(payload["x"]),
+            "y": float(payload["y"]),
+            "z": float(payload["z"]),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_detected_part_output(part: Any, *, fallback_part_name: str = "") -> dict[str, Any] | None:
+    if not isinstance(part, dict):
+        return None
+    try:
+        x = float(part["x"])
+        y = float(part["y"])
+        z = float(part["z"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    part_name = str(part.get("part_name") or fallback_part_name or "").strip()
+    output: dict[str, Any] = {
+        "part_name": part_name,
+        "x": x,
+        "y": y,
+        "z": z,
+        "pose": {"x": x, "y": y, "z": z},
+    }
+    model_name = str(part.get("model_name") or "").strip()
+    if model_name:
+        output["model_name"] = model_name
+    return output
+
+
+def _normalize_pose_output(pose: Any) -> dict[str, Any] | None:
+    pose_xyz = _normalized_xyz_pose(pose)
+    if pose_xyz is None:
+        return None
+    out: dict[str, Any] = {
+        "x": pose_xyz["x"],
+        "y": pose_xyz["y"],
+        "z": pose_xyz["z"],
+        "pose": pose_xyz,
+    }
+    if isinstance(pose, dict):
+        orientation = {
+            key: pose[key]
+            for key in ("qx", "qy", "qz", "qw")
+            if key in pose
+        }
+        if orientation:
+            out["orientation"] = deepcopy(orientation)
+    return out
+
+
+def _preview_detect_parts_output(
+    params: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    part_name = str(params.get("part_name") or "").strip()
+    if not part_name:
+        return None, "detect_parts with store_as requires params.part_name in v1"
+
+    part_info = (grounding_context or {}).get("parts", {}).get(part_name, {})
+    observed_pose = _normalized_xyz_pose((part_info or {}).get("observed_pose"))
+    if observed_pose is None:
+        observed_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    output: dict[str, Any] = {
+        "part_name": part_name,
+        "x": observed_pose["x"],
+        "y": observed_pose["y"],
+        "z": observed_pose["z"],
+        "pose": observed_pose,
+    }
+    target = (part_info or {}).get("target") or {}
+    model_name = str(target.get("model_name") or "").strip()
+    if model_name:
+        output["model_name"] = model_name
+    return output, None
+
+
+def _preview_get_current_pose_output(
+    snapshot: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    pose = _normalized_xyz_pose(
+        ((grounding_context or {}).get("resource") or {}).get("current_pose")
+    ) or _normalized_xyz_pose(snapshot.get("current_pose"))
+    if pose is None:
+        pose = {"x": 0.0, "y": 0.0, "z": 0.0}
+    return {
+        "x": pose["x"],
+        "y": pose["y"],
+        "z": pose["z"],
+        "pose": pose,
+    }, None
+
+
+def preview_step_output(
+    *,
+    primitive: str,
+    params: dict[str, Any],
+    snapshot: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return a validation-time preview output for supported observational primitives."""
+    if primitive == "detect_parts":
+        return _preview_detect_parts_output(params, grounding_context)
+    if primitive == "get_current_pose":
+        return _preview_get_current_pose_output(snapshot, grounding_context)
+    return None, f"primitive '{primitive}' does not support store_as in v1"
+
+
+def extract_step_output(
+    *,
+    primitive: str,
+    params: dict[str, Any],
+    step_result: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Extract one normalized runtime step output for supported observational primitives."""
+    if primitive == "detect_parts":
+        part_name = str(params.get("part_name") or "").strip()
+        if not part_name:
+            return None, "detect_parts with store_as requires params.part_name in v1"
+        items = step_result.get("data")
+        if not isinstance(items, list):
+            return None, "detect_parts store_as expected list result data"
+        if len(items) != 1:
+            return None, (
+                f"detect_parts store_as expected exactly one result for '{part_name}', "
+                f"found {len(items)}"
+            )
+        output = _normalize_detected_part_output(items[0], fallback_part_name=part_name)
+        if output is None:
+            return None, "detect_parts store_as result did not contain x/y/z fields"
+        return output, None
+
+    if primitive == "get_current_pose":
+        output = _normalize_pose_output(step_result.get("pose"))
+        if output is None:
+            return None, "get_current_pose store_as result did not contain pose x/y/z"
+        return output, None
+
+    return None, f"primitive '{primitive}' does not support store_as in v1"
 
 
 def _controller_owner(robot_agent: Any) -> Any | None:
@@ -278,9 +577,12 @@ def validate_and_project_steps(
     steps: list[dict[str, Any]],
     primitive_catalog: list[dict[str, Any]],
     snapshot: dict[str, Any],
+    *,
+    grounding_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], str | None]:
     """Validate a primitive sequence and project the resulting snapshot."""
     projected = deepcopy(snapshot or {})
+    step_outputs: dict[str, Any] = {}
     catalog_by_name = {
         str(entry.get("name", "")).strip(): entry
         for entry in (primitive_catalog or [])
@@ -296,7 +598,23 @@ def validate_and_project_steps(
         if primitive_meta is None:
             return False, projected, f"step {index} used unknown primitive '{primitive}'"
 
-        params_error = _validate_step_params(step.get("params") or {}, primitive_meta)
+        store_as = str(step.get("store_as") or "").strip()
+        store_as_error = _validate_store_as(store_as)
+        if store_as_error:
+            return False, projected, f"step {index} {primitive}: {store_as_error}"
+        if store_as and store_as in step_outputs:
+            return False, projected, f"step {index} {primitive}: duplicate store_as '{store_as}'"
+
+        try:
+            resolved_params = resolve_param_refs(
+                step.get("params") or {},
+                grounding_context or {},
+                step_outputs=step_outputs,
+            )
+        except Exception as exc:
+            return False, projected, f"step {index} {primitive}: {exc}"
+
+        params_error = _validate_step_params(resolved_params, primitive_meta)
         if params_error:
             return False, projected, f"step {index} {primitive}: {params_error}"
 
@@ -304,10 +622,22 @@ def validate_and_project_steps(
         if precondition_error:
             return False, projected, f"step {index} {primitive}: {precondition_error}"
 
+        preview_step = {**dict(step), "params": resolved_params}
         try:
-            projected = apply_effects_to_snapshot(step, primitive_meta, projected)
+            projected = apply_effects_to_snapshot(preview_step, primitive_meta, projected)
         except Exception as exc:
             return False, projected, f"step {index} {primitive}: failed to apply effects ({exc})"
+
+        if store_as:
+            preview_output, preview_error = preview_step_output(
+                primitive=primitive,
+                params=resolved_params,
+                snapshot=projected,
+                grounding_context=grounding_context or {},
+            )
+            if preview_error:
+                return False, projected, f"step {index} {primitive}: {preview_error}"
+            step_outputs[store_as] = preview_output
 
     return True, projected, None
 

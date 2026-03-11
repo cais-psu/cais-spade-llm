@@ -6,7 +6,7 @@
     "domain": "localhost",
     "functions": [],
     "instructions": "This product requires to be printed and assembled as specified.",
-    "product_specification_file": "",
+    "product_specification_file": "cais_spade_llm/specification/products/requirements/twopart_assembly_llm_bridge.txt",
     "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json",
     "replan_mode": "des"
   }

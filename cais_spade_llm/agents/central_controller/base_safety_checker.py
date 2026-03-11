@@ -229,6 +229,30 @@ class BaseSafetyChecker:
 
         return labels
 
+    def _resource_state_signature_token(
+        self,
+        resource_jid: str,
+        current_state: str,
+        params: dict[str, Any] | None,
+    ) -> str:
+        """
+        Build a stable, safety-relevant signature token for a resource state.
+
+        Runtime task payloads often carry extra fields such as geometry snapshots
+        that do not affect any state AP. Using the matched AP labels instead of
+        the raw params keeps online and offline product-state signatures aligned.
+        """
+        labels = sorted(
+            set(
+                self._map_state_to_aps(
+                    resource_jid,
+                    str(current_state or "").strip(),
+                    dict(params or {}),
+                )
+            )
+        )
+        return json.dumps(labels, separators=(",", ":"))
+
     def _tool_rows_for_action(self, resource_jid: str, function_name: str) -> List[Dict[str, Any]]:
         res_short = self._resource_short_name(resource_jid)
         rows: List[Dict[str, Any]] = []

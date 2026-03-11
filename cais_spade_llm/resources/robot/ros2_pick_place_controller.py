@@ -590,12 +590,30 @@ class Ros2PickPlaceController:
         ee = self._get_ee_pose()
         if ee is None:
             return {"success": False, "message": "cannot read current ee pose"}
-        ori = ee.orientation
-        time_scale = _as_float(speed, self.trajectory_time_scale)
-        ok = self._move_xy_direct(float(x), float(y), float(z), ori, "move_cartesian")
-        if not ok:
-            return {"success": False, "message": f"failed to move to ({x}, {y}, {z})"}
-        return {"success": True, "message": f"moved to ({x:.4f}, {y:.4f}, {z:.4f})"}
+        target_x = float(x)
+        target_y = float(y)
+        target_z = float(z)
+        same_xy = (
+            math.isclose(float(ee.position.x), target_x, abs_tol=1e-6)
+            and math.isclose(float(ee.position.y), target_y, abs_tol=1e-6)
+        )
+        if same_xy:
+            return self._move_pose_direct(
+                target_x,
+                target_y,
+                target_z,
+                orientation=ee.orientation,
+                label="move_cartesian",
+                speed=speed,
+            )
+        return self._move_xy_at_z(
+            target_x,
+            target_y,
+            target_z,
+            orientation=ee.orientation,
+            label="move_cartesian",
+            speed=speed,
+        )
 
     def move_relative(
         self,
@@ -847,6 +865,12 @@ class Ros2PickPlaceController:
         ee = self._get_ee_pose()
         if ee is None:
             return {"success": False, "message": "cannot read current ee pose"}
+        self._last_start_pose = self._make_pose(
+            ee.position.x,
+            ee.position.y,
+            ee.position.z,
+            ee.orientation,
+        )
 
         ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
         pick_bias = max(
@@ -932,6 +956,7 @@ class Ros2PickPlaceController:
             "slot_y": by,
             "board_top_z": board_top_z,
             "place_z": place_z,
+            "place_tcp_z": place_tcp_z,
             "part_height": target_height,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
@@ -1213,10 +1238,16 @@ class Ros2PickPlaceController:
         if not log_miss:
             return False
         if not saw_feedback:
+            self._last_failure_message = (
+                f"no joint-state feedback for '{self.gripper_joint}' while waiting gripper move"
+            )
             self._log().warn(
                 f"No joint-state feedback for '{self.gripper_joint}' while waiting gripper move"
             )
         else:
+            self._last_failure_message = (
+                f"gripper target not reached: target={target:.3f} current={float(last_pos):.3f}"
+            )
             self._log().warn(
                 f"Gripper target not reached: target={target:.3f} current={float(last_pos):.3f}"
             )
@@ -1232,6 +1263,7 @@ class Ros2PickPlaceController:
         log_target_miss: bool | None = None,
     ) -> bool:
         if not self._gripper_pub:
+            self._last_failure_message = "gripper publisher is not configured"
             self._log().error("Gripper publisher is not configured")
             return False
 
@@ -1266,8 +1298,13 @@ class Ros2PickPlaceController:
                 self._log().error(
                     f"Gripper command did not reach required target: target={position:.3f}"
                 )
+            if not self._last_failure_message:
+                self._last_failure_message = (
+                    f"gripper command did not reach required target {position:.3f}"
+                )
             return False
         time.sleep(max(0.0, wait_s))
+        self._last_failure_message = ""
         return True
 
     def _wait_future(self, future, timeout_sec: float, label: str):
@@ -1470,14 +1507,21 @@ class Ros2PickPlaceController:
         future = self._cart_client.call_async(request)
         response = self._wait_future(future, timeout_sec=10.0, label=f"plan:{label}")
         if response is None:
+            self._last_failure_message = f"[{label}] planning response timed out"
             self._log().error(f"[{label}] planning response timed out")
             return False
         if response.fraction < min_fraction:
+            self._last_failure_message = (
+                f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
+            )
             self._log().error(
                 f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
             )
             return False
         if response.fraction < 0.999 and not allow_partial:
+            self._last_failure_message = (
+                f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
+            )
             self._log().error(
                 f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
             )
@@ -1494,6 +1538,7 @@ class Ros2PickPlaceController:
         send_future = self._exec_client.send_goal_async(exec_goal)
         goal_handle = self._wait_future(send_future, timeout_sec=10.0, label=f"send:{label}")
         if not goal_handle or not goal_handle.accepted:
+            self._last_failure_message = f"[{label}] trajectory goal rejected by execute action"
             self._log().error(f"[{label}] trajectory goal rejected by execute action")
             return False
 
@@ -1501,27 +1546,231 @@ class Ros2PickPlaceController:
         result = self._wait_future(result_future, timeout_sec=30.0, label=f"result:{label}")
         code = result.result.error_code.val if result else None
         if code != 1:
+            self._last_failure_message = (
+                f"[{label}] execute_trajectory failed with error_code={code}"
+            )
             self._log().error(f"[{label}] execute_trajectory failed with error_code={code}")
-        return code == 1
+            return False
+        self._last_failure_message = ""
+        return True
+
+    def _move_xy_at_z(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        *,
+        orientation=None,
+        label: str = "move_xy_at_z",
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        if orientation is None:
+            ee = self._get_ee_pose()
+            if ee is None:
+                return {"success": False, "message": "cannot read current ee pose"}
+            orientation = ee.orientation
+        ok = self._move_xy_direct(
+            float(x),
+            float(y),
+            float(z),
+            orientation,
+            label,
+            time_scale=_as_float(speed, self.trajectory_time_scale),
+        )
+        if not ok:
+            return {"success": False, "message": f"failed to move above target ({x}, {y}, {z})"}
+        return {"success": True, "message": f"moved above target ({x:.4f}, {y:.4f}, {z:.4f})"}
+
+    def _move_pose_direct(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        *,
+        orientation=None,
+        label: str = "move_pose_direct",
+        speed: float | None = None,
+        avoid_collisions: bool = True,
+        min_fraction: float = 0.9,
+        allow_partial: bool = False,
+    ) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        if orientation is None:
+            ee = self._get_ee_pose()
+            if ee is None:
+                return {"success": False, "message": "cannot read current ee pose"}
+            orientation = ee.orientation
+        ok = self._cartesian_move(
+            self._make_pose(float(x), float(y), float(z), orientation),
+            label,
+            avoid_collisions=avoid_collisions,
+            min_fraction=min_fraction,
+            allow_partial=allow_partial,
+            time_scale=_as_float(speed, self.trajectory_time_scale),
+        )
+        if not ok:
+            return {"success": False, "message": f"failed to move directly to ({x}, {y}, {z})"}
+        return {"success": True, "message": f"moved directly to ({x:.4f}, {y:.4f}, {z:.4f})"}
+
+    def _release_part_sequence(
+        self,
+        *,
+        model_name: str,
+        slot_x: float,
+        slot_y: float,
+        part_height: float,
+        board_top_z: float,
+        place_z: float,
+        travel_z: float,
+        orientation=None,
+    ) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+
+        if orientation is None:
+            ee = self._get_ee_pose()
+            if ee is None:
+                return {"success": False, "message": "cannot read current ee pose"}
+            orientation = ee.orientation
+
+        time.sleep(self.release_preopen_settle_sec)
+
+        open_ok = self._gripper_command(
+            self.gripper_open,
+            "OPEN - releasing",
+            move_time_s=self.gripper_move_time_sec,
+            wait_s=self.gripper_settle_sec,
+            require_target=True,
+            log_target_miss=False,
+        )
+        if not open_ok:
+            open_ok = self._gripper_command(
+                self.gripper_open,
+                "OPEN - releasing (retry)",
+                move_time_s=max(1.2, self.gripper_move_time_sec * 2.0),
+                wait_s=max(0.20, self.gripper_settle_sec * 1.5),
+                require_target=True,
+                log_target_miss=False,
+            )
+        if not open_ok and self.execution_mode == "physical":
+            return {
+                "success": False,
+                "message": "failed to open gripper to release part",
+            }
+        time.sleep(self.release_postopen_settle_sec)
+
+        detached = False
+        attempts = max(1, 1 + self.release_detach_retry_count)
+        for attempt_idx in range(attempts):
+            if attempt_idx > 0:
+                if attempt_idx == 1 and self.release_retry_lift_m > 0.0:
+                    lift_z = float(place_z) + self.release_retry_lift_m
+                    lift_ok = self._cartesian_move(
+                        self._make_pose(float(slot_x), float(slot_y), lift_z, orientation),
+                        f"Release micro-lift +{self.release_retry_lift_m * 1000.0:.1f}mm",
+                        avoid_collisions=False,
+                        min_fraction=0.70,
+                        allow_partial=True,
+                        time_scale=self.release_descend_time_scale,
+                    )
+                    if not lift_ok:
+                        self._log().warn("Release micro-lift retry move failed")
+                time.sleep(self.release_detach_retry_delay_sec)
+
+            detached = self._detach_part(
+                str(model_name),
+                timeout_sec=self.release_detach_timeout_sec,
+                attached_link_only=(attempt_idx == 0),
+            )
+            if detached:
+                break
+            self._log().warn(
+                f"Detach attempt {attempt_idx + 1}/{attempts} failed for {model_name or 'held part'}"
+            )
+        if not detached:
+            self._log().warn("Detach still failed after retries")
+        time.sleep(self.release_postdetach_settle_sec)
+
+        if detached and model_name:
+            self._snap_part_to_slot(
+                str(model_name),
+                float(slot_x),
+                float(slot_y),
+                float(part_height),
+                float(board_top_z),
+            )
+
+        lift_ok = self._cartesian_move(
+            self._make_pose(float(slot_x), float(slot_y), float(travel_z), orientation),
+            "Lift after place",
+        )
+        if not lift_ok:
+            lift_ok = self._cartesian_move(
+                self._make_pose(float(slot_x), float(slot_y), float(travel_z), orientation),
+                "Lift after place (no-collision)",
+                avoid_collisions=False,
+                min_fraction=0.70,
+                allow_partial=True,
+            )
+
+        if not detached:
+            self._detach_part(str(model_name), timeout_sec=self.release_detach_timeout_sec)
+
+        if detached and lift_ok:
+            return {"success": True, "message": "released part and lifted clear"}
+        if not detached and not lift_ok:
+            return {"success": False, "message": "failed to detach part and lift clear"}
+        if not detached:
+            return {"success": False, "message": "failed to detach part"}
+        return {"success": False, "message": "failed to lift clear after release"}
 
     def _move_xy_direct(
-        self, target_x: float, target_y: float, z: float, orientation, label_prefix: str
+        self,
+        target_x: float,
+        target_y: float,
+        z: float,
+        orientation,
+        label_prefix: str,
+        *,
+        time_scale: float | None = None,
     ) -> bool:
         if self._cartesian_move(
-            self._make_pose(target_x, target_y, z, orientation), label_prefix
+            self._make_pose(target_x, target_y, z, orientation),
+            label_prefix,
+            time_scale=time_scale,
         ):
             return True
+
+        current = self._get_ee_pose()
+        if current is None:
+            self._log().error(
+                f"[{label_prefix}] cannot read current EE pose for staged fallback"
+            )
+            return False
+        if (
+            math.isclose(float(current.position.x), float(target_x), abs_tol=1e-6)
+            and math.isclose(float(current.position.y), float(target_y), abs_tol=1e-6)
+        ):
+            self._log().warn(
+                f"[{label_prefix}] direct Cartesian move failed with no XY delta; "
+                "retrying direct no-collision fallback"
+            )
+            return self._cartesian_move(
+                self._make_pose(target_x, target_y, z, orientation),
+                f"{label_prefix} (no-collision)",
+                avoid_collisions=False,
+                min_fraction=0.70,
+                allow_partial=True,
+                time_scale=time_scale,
+            )
 
         self._log().warn(
             f"[{label_prefix}] direct Cartesian move failed; retrying staged XY fallback"
         )
         for axis_order in (("x", "y"), ("y", "x")):
-            current = self._get_ee_pose()
-            if current is None:
-                self._log().error(
-                    f"[{label_prefix}] cannot read current EE pose for staged fallback"
-                )
-                return False
             if self._move_xy_axis_order(
                 current=current,
                 target_x=target_x,
@@ -1530,6 +1779,7 @@ class Ros2PickPlaceController:
                 orientation=orientation,
                 label_prefix=label_prefix,
                 axis_order=axis_order,
+                time_scale=time_scale,
             ):
                 if axis_order == ("y", "x"):
                     self._log().info(
@@ -1548,6 +1798,7 @@ class Ros2PickPlaceController:
         orientation,
         label_prefix: str,
         axis_order: tuple[str, str],
+        time_scale: float | None = None,
     ) -> bool:
         start_x = float(current.position.x)
         start_y = float(current.position.y)
@@ -1581,6 +1832,7 @@ class Ros2PickPlaceController:
                     f"{label_base}{step_suffix})",
                     min_fraction=0.85,
                     allow_partial=False,
+                    time_scale=time_scale,
                 ):
                     if not self._cartesian_move(
                         self._make_pose(step_x, step_y, z, orientation),
@@ -1588,6 +1840,7 @@ class Ros2PickPlaceController:
                         avoid_collisions=False,
                         min_fraction=0.70,
                         allow_partial=True,
+                        time_scale=time_scale,
                     ):
                         return False
             current_x = leg_x

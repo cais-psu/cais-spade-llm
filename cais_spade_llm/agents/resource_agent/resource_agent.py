@@ -12,7 +12,7 @@ from spade.behaviour import CyclicBehaviour  # Behaviour base used for our inbox
 from spade.message import Message  # SPADE message objects (XMPP stanzas under the hood).
 from spade.template import Template  # Filters incoming messages by metadata.
 
-from agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 
 
 class ResourceAgent(LlmAgent):
@@ -479,7 +479,20 @@ class ResourceAgent(LlmAgent):
             # ---------------------------
             #  SEND FINAL ACK TO PA
             # ---------------------------
-            await self._ack(msg, task_id=task_id, status=final_status)
+            ack_content = ""
+            ack_observations = None
+            if isinstance(result, dict):
+                ack_content = str(result.get("content") or "").strip()
+                raw_observations = result.get("observations")
+                if isinstance(raw_observations, dict):
+                    ack_observations = raw_observations
+            await self._ack(
+                msg,
+                task_id=task_id,
+                status=final_status,
+                content=ack_content,
+                observations=ack_observations,
+            )
 
         async def _ack(
             self,
@@ -487,11 +500,18 @@ class ResourceAgent(LlmAgent):
             *,
             task_id: Optional[str],
             status: str,
+            content: str = "",
+            observations: Dict[str, Any] | None = None,
         ) -> None:
             """Send an acknowledgement/status update back to the originating ProductAgent."""
             reply = Message(to=str(msg.sender))
             reply.set_metadata("type", "ack")
-            reply.body = json.dumps({"task_id": task_id, "status": status})
+            payload = {"task_id": task_id, "status": status}
+            if content:
+                payload["content"] = str(content).strip()
+            if isinstance(observations, dict) and observations:
+                payload["observations"] = observations
+            reply.body = json.dumps(payload)
             await self.send(reply)
 
     class _SafetyDecisionInbox(CyclicBehaviour):

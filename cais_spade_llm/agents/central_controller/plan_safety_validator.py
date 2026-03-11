@@ -8,7 +8,7 @@ import json
 import re
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
-from agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 
 
 class PlanSafetyValidator(BaseSafetyChecker):
@@ -340,14 +340,20 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         return resource_states
 
-    @staticmethod
-    def _resource_state_signature(resource_states: Dict[str, Dict[str, Any]]) -> Tuple[Tuple[str, str, str], ...]:
+    def _resource_state_signature(
+        self,
+        resource_states: Dict[str, Dict[str, Any]],
+    ) -> Tuple[Tuple[str, str, str], ...]:
         items: List[Tuple[str, str, str]] = []
         for resource_jid, payload in sorted((resource_states or {}).items()):
             current_state = str((payload or {}).get("current_state") or "").strip()
             params = dict((payload or {}).get("params") or {})
-            params_token = json.dumps(params, sort_keys=True, separators=(",", ":"))
-            items.append((str(resource_jid), current_state, params_token))
+            state_token = self._resource_state_signature_token(
+                str(resource_jid),
+                current_state,
+                params,
+            )
+            items.append((str(resource_jid), current_state, state_token))
         return tuple(items)
 
     def _ordered_rule_ids(self) -> List[str]:

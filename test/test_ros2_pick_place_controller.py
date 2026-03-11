@@ -214,3 +214,61 @@ def test_move_xy_direct_segments_long_axis_legs_for_small_step_size():
         "Move above part (leg Y, step 3/4)",
         "Move above part (leg Y, step 4/4)",
     ]
+
+
+def test_move_xy_direct_retries_direct_no_collision_when_xy_unchanged():
+    controller, logger = _build_controller()
+    orientation = object()
+    calls: list[str] = []
+
+    controller._get_ee_pose = lambda: _pose(0.4, -0.2, 1.25, orientation)
+
+    def fake_cartesian_move(target, label: str, **_kwargs) -> bool:
+        calls.append(label)
+        assert target.position.x == 0.4
+        assert target.position.y == -0.2
+        assert target.position.z == 1.3
+        return label.endswith("(no-collision)")
+
+    controller._cartesian_move = fake_cartesian_move
+
+    assert controller._move_xy_direct(0.4, -0.2, 1.3, orientation, "Descend")
+    assert calls == ["Descend", "Descend (no-collision)"]
+    assert logger.warn_messages == [
+        "[Descend] direct Cartesian move failed with no XY delta; retrying direct no-collision fallback"
+    ]
+
+
+def test_move_cartesian_uses_direct_pose_helper_when_xy_is_unchanged():
+    controller, _logger = _build_controller()
+    orientation = object()
+    helper_calls: list[tuple[str, tuple[float, float, float], dict[str, float | str | object | None]]] = []
+
+    controller.wait_for_services = lambda: True
+    controller._get_ee_pose = lambda: _pose(0.4, -0.2, 1.25, orientation)
+
+    def fake_move_pose_direct(x: float, y: float, z: float, **kwargs):
+        helper_calls.append(("_move_pose_direct", (x, y, z), kwargs))
+        return {"success": True, "message": "direct path"}
+
+    def fake_move_xy_at_z(x: float, y: float, z: float, **kwargs):
+        helper_calls.append(("_move_xy_at_z", (x, y, z), kwargs))
+        return {"success": True, "message": "xy path"}
+
+    controller._move_pose_direct = fake_move_pose_direct
+    controller._move_xy_at_z = fake_move_xy_at_z
+
+    result = controller.move_cartesian(0.4, -0.2, 1.3, speed=0.75)
+
+    assert result == {"success": True, "message": "direct path"}
+    assert helper_calls == [
+        (
+            "_move_pose_direct",
+            (0.4, -0.2, 1.3),
+            {
+                "orientation": orientation,
+                "label": "move_cartesian",
+                "speed": 0.75,
+            },
+        )
+    ]

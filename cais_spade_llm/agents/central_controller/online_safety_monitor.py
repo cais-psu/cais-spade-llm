@@ -5,8 +5,7 @@ import json
 import logging
 from typing import Tuple, Dict, Any, List, Optional, Set
 
-# Ensure this import works in your project structure
-from agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 
 class OnlineSafetyMonitor(BaseSafetyChecker):
     """

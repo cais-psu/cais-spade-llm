@@ -155,6 +155,28 @@ def _pick_and_place_tools_catalog() -> list[dict]:
     ]
 
 
+def _load_case3_llm_bridge_bundle() -> tuple[list[dict], dict[str, str], dict, dict, list[dict]]:
+    bundle_root = (
+        REPO_ROOT
+        / "cais_spade_llm"
+        / "user_verified_plan"
+        / "bundles"
+        / "case3_llm_bridge"
+    )
+    safety_logic = json.loads((bundle_root / "safety" / "cca_safety_logic.json").read_text())
+    plan = json.loads((bundle_root / "plan" / "twopart_assembly_llm_bridge_plan.json").read_text())
+    fsa = json.loads(
+        (bundle_root / "plan" / "twopart_assembly_llm_bridge_global_fsa.json").read_text()
+    )
+    tools_catalog = json.loads((bundle_root / "catalog" / "tools.json").read_text())
+    dfa_map = {
+        str(rule["id"]): (bundle_root / "safety" / f"{rule['id']}_dfa.dot").read_text()
+        for rule in safety_logic["rules"]
+        if rule.get("id")
+    }
+    return safety_logic["rules"], dfa_map, plan, fsa, tools_catalog
+
+
 def _board_mutex_rule() -> dict:
     return {
         "id": "SAFE_1",
@@ -1667,3 +1689,120 @@ def test_winning_set_initial_state_includes_idle_catalog_resources() -> None:
     )
     assert allowed is True
     assert diagnosis["status"] == "safe"
+
+
+def test_supervisor_matches_case3_runtime_state_despite_enriched_finish_params() -> None:
+    rules, dfa_map, plan, fsa, tools_catalog = _load_case3_llm_bridge_bundle()
+    validator = PlanSafetyValidator(
+        rules=rules,
+        dfa_map=dfa_map,
+        tools_catalog=tools_catalog,
+    )
+    winning = validator.compute_winning_set(fsa=fsa, plan=plan)
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, rules, tools_catalog=tools_catalog)
+    safety_monitor.seed_resource_states(
+        {
+            "ur5e@localhost": {"current_state": "idle"},
+            "xarm6@localhost": {"current_state": "idle"},
+        }
+    )
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        winning_set_data=winning,
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="REQ_2_T1",
+        function_name="pick_approach",
+        resource_jid="xarm6@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(
+        {
+            "resource_jid": "xarm6@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-1",
+                "part_name": "LCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_2_T1",
+                "product_geometry": {
+                    "slot_xy": [0.1, -0.08],
+                    "part_height_m": 0.1,
+                    "model_name": "circ_pin_large",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+        }
+    )
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="REQ_1_T1",
+        function_name="pick_approach",
+        resource_jid="ur5e@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-2",
+                "part_name": "MCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_1_T1",
+                "product_geometry": {
+                    "slot_xy": [0.0, -0.08],
+                    "part_height_m": 0.08,
+                    "model_name": "circ_pin_medium",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+        }
+    )
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="REQ_1_T1",
+        function_name="pick_approach",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-2",
+                "part_name": "MCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_1_T1",
+                "product_geometry": {
+                    "slot_xy": [0.0, -0.08],
+                    "part_height_m": 0.08,
+                    "model_name": "circ_pin_medium",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+            "current_state": "at_pick",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "pending_obligation"
+    assert diagnosis["rule_ids"] == ["SAFE_1"]
+    assert diagnosis["safe_next_task_ids"] == ["REQ_1_T2"]

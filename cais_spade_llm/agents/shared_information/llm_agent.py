@@ -8,8 +8,8 @@ from typing import Any, Callable, Optional, Dict, List, Iterable
 from openai import OpenAI  # REST client for GPT models.
 from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 
-from function_analyzer import FunctionAnalyzer  # Introspects agent methods for tool schemas.
-from prompts import PROMPT_MAS_AGENT, BASE_INSTRUCTIONS, ROLE_BLOCKS
+from cais_spade_llm.function_analyzer import FunctionAnalyzer  # Introspects agent methods for tool schemas.
+from cais_spade_llm.prompts import PROMPT_MAS_AGENT, BASE_INSTRUCTIONS, ROLE_BLOCKS
 from dotenv import load_dotenv
 load_dotenv()
 

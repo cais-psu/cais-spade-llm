@@ -4,7 +4,7 @@ This module intentionally keeps the agent thin and defers behavior to
 ResourceAgent. Add printer-specific tools here as the system evolves.
 """
 
-from agents.resource_agent.resource_agent import ResourceAgent
+from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 
 # --- Printing / Resource Agent ---
 class PrintingAgent(ResourceAgent):

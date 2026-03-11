@@ -21,11 +21,12 @@ import subprocess
 import sys
 import warnings
 
-# Ensure the cais_spade_llm package directory is on sys.path so that
-# agent_creator, utils, etc. can be imported the same way spade_main.py does.
-_pkg_dir = os.path.join(os.path.dirname(__file__))
-if _pkg_dir not in sys.path:
-    sys.path.insert(0, _pkg_dir)
+# When launched as a script (e.g. `python cais_spade_llm/ui_main.py`), add the
+# repo root so the package is imported through a single `cais_spade_llm.*`
+# module graph instead of mixed top-level/package aliases.
+_repo_root = os.path.dirname(os.path.dirname(__file__))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 # Silence noisy third-party loggers.
 for _name in ("pyjabber", "winloop", "asyncio"):
@@ -36,9 +37,9 @@ warnings.filterwarnings("ignore", message="Unknown stanza interface")
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
     from spade import run as spade_run
-    import utils, agent_creator
-    from function_analyzer import FunctionAnalyzer
-    from agent_creator import ALLOWED_FUNCS
+    from cais_spade_llm import agent_creator, utils
+    from cais_spade_llm.function_analyzer import FunctionAnalyzer
+    from cais_spade_llm.agent_creator import ALLOWED_FUNCS
     from cais_spade_llm.ui.bridge import SystemBridge
 
     async def _main():

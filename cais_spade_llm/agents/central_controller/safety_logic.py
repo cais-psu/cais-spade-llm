@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover - dependency may be absent in lightweight test envs
     Source = None  # type: ignore[assignment]
 
-from prompts import (
+from cais_spade_llm.prompts import (
     build_safety_parse_prompt,
     build_safety_logic_prompt,
     build_safety_interpretation_prompt,

@@ -12,12 +12,12 @@ from spade.behaviour import OneShotBehaviour, CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
 
-from agents.shared_information.llm_agent import LlmAgent
-from agents.central_controller.safety_logic import SafetyLogic
+from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
-from agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
-from agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
-from agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
+from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
+from cais_spade_llm.agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
 from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
 
 class CentralControllerAgent(LlmAgent):

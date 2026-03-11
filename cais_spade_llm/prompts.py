@@ -1306,6 +1306,8 @@ def build_state_exploration_prompt(
     operator_feedback: str = "",
     primitive_catalog: list[dict] | None = None,
     bridge_snapshot: dict | None = None,
+    grounding_context: dict | None = None,
+    bridge_resources: dict | None = None,
 ) -> str:
     """
     Prompt to generate a bridge recovery macro proposal when DES finds no modeled path.
@@ -1319,50 +1321,108 @@ def build_state_exploration_prompt(
     obligation_info = json.dumps(obligation_targets or [], indent=2)
     feedback_text = str(operator_feedback or "").strip() or "(none)"
     bridge_snapshot_info = json.dumps(bridge_snapshot or {}, indent=2)
+    grounding_context_info = json.dumps(grounding_context or {}, indent=2)
 
     # Decide whether to use primitive-based or legacy catalog-based prompt.
-    if primitive_catalog:
-        primitives_info = json.dumps(primitive_catalog, indent=2)
+    if primitive_catalog or bridge_resources:
+        resource_overview = {}
+        resource_catalogs = {}
+        for resource_jid, raw_entry in (bridge_resources or {}).items():
+            if not isinstance(raw_entry, dict):
+                continue
+            resource_overview[str(resource_jid)] = {
+                "primitive_snapshot": raw_entry.get("bridge_snapshot") or raw_entry.get("primitive_snapshot") or {},
+                "modeled_state": raw_entry.get("modeled_state") or {},
+                "pending_tasks": raw_entry.get("pending_tasks") or [],
+                "static_capabilities": raw_entry.get("static_capabilities") or {},
+            }
+            resource_catalogs[str(resource_jid)] = raw_entry.get("primitive_catalog") or []
+        if not resource_catalogs and primitive_catalog:
+            resource_catalogs[str(ra_jid)] = primitive_catalog
+        if not resource_overview and bridge_snapshot:
+            resource_overview[str(ra_jid)] = {
+                "primitive_snapshot": bridge_snapshot or {},
+                "modeled_state": {},
+                "pending_tasks": [],
+                "static_capabilities": {},
+            }
+        resources_info = json.dumps(resource_overview, indent=2)
+        primitives_info = json.dumps(resource_catalogs, indent=2)
         tools_info = json.dumps(tools_catalog, indent=2)
         return (
-            f"A resource ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
+            f"The system is disrupted. Current focused/stuck resource: {ra_jid}\n"
+            f"CURRENT DISRUPTED SEARCH STATE:\n{json.dumps(stuck_state, indent=2)}\n\n"
             f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"
             f"Parts that still need to reach {goal_state}: {P_id}\n\n"
             f"ACTIVE SAFETY OBLIGATION TARGETS:\n{obligation_info}\n\n"
             f"OPERATOR REFINEMENT FEEDBACK:\n{feedback_text}\n\n"
-            f"CURRENT PRIMITIVE-LEVEL SNAPSHOT FOR {ra_jid}:\n{bridge_snapshot_info}\n\n"
+            f"WHOLE-SYSTEM BRIDGE RESOURCES (snapshots, modeled states, pending tasks):\n{resources_info}\n\n"
+            f"GROUNDING CONTEXT (use context_ref paths into this structure for grounded values; "
+            "resource is the focused resource and resources/<resource_jid>/... exposes all bridge resources):\n"
+            f"{grounding_context_info}\n\n"
             f"TASK-LEVEL TOOLS CATALOG (for reference on normal task semantics):\n{tools_info}\n\n"
-            f"CONTROLLER PRIMITIVES (use these to compose your recovery macro):\n{primitives_info}\n\n"
+            f"PER-RESOURCE CONTROLLER PRIMITIVES (use the catalog for the specific resource_jid of each macro_task):\n{primitives_info}\n\n"
             f"RESOURCE CAPABILITIES: (Check reachability and staging areas before assigning coordinates)\n{resource_info}\n\n"
-            "The resource has no catalog-valid modeled path to satisfy the active recovery target. "
-            "Propose exactly one RECOVERY MACRO as JSON.\n"
+            "There is no catalog-valid modeled continuation for the active recovery situation. "
+            "Propose exactly one SAFETY-DRIVEN BRIDGE PLAN as JSON.\n"
             "Rules:\n"
-            "1. The macro_name should describe what the recovery accomplishes.\n"
-            "2. primitive_steps MUST use only the controller primitives listed above.\n"
-            "3. Each primitive_steps entry needs the exact primitive name and params.\n"
-            "4. Respect each primitive's preconditions and effects over the projected snapshot.\n"
-            "5. Do not use a primitive whose preconditions are false after earlier steps.\n"
-            "6. Specify expected_start_state matching the resource's current state.\n"
-            "7. Specify task_metadata with in_state, out_state for safety validation.\n"
-            "8. If the macro manipulates parts, include part_transition in task_metadata.\n"
-            "9. Prefer the smallest macro that satisfies the active safety obligation target.\n"
+            "1. The bridge plan MUST target exactly one primary active safety obligation from ACTIVE SAFETY OBLIGATION TARGETS.\n"
+            "2. The bridge plan MUST use ordered macro_tasks[] and the order is serial in v1.\n"
+            "3. The sequence must be state-connected: each macro_task must be valid from the projected post-state of earlier macro_tasks.\n"
+            "4. Each macro_task may choose any resource_jid shown in WHOLE-SYSTEM BRIDGE RESOURCES if that is needed to satisfy the primary obligation.\n"
+            "5. Do not optimize unrelated work; only add the bridge tasks needed to satisfy the primary obligation and restore modeled DES continuation.\n"
+            "6. primitive_steps MUST use only the controller primitives listed above for that macro_task.resource_jid.\n"
+            "7. Each primitive_steps entry needs the exact primitive name and params.\n"
+            "8. When a param value should come from current observed or known context, use "
+            '{"context_ref": "/..."} pointing into the GROUNDING CONTEXT.\n'
+            "9. Do not invent absolute Cartesian coordinates or pose names when the grounding context already provides them.\n"
+            "10. Small literal relative offsets for move_relative are allowed when they are part of the recovery motion itself.\n"
+            "11. Observational primitives may include store_as to save one output for later steps.\n"
+            '12. Later steps may reference stored outputs via {"context_ref": "/step_outputs/<alias>/..."}.\n'
+            "13. In v1, use store_as only with detect_parts(part_name=...) or get_current_pose().\n"
+            "14. Respect each primitive's preconditions and effects over the projected snapshot.\n"
+            "15. Do not use a primitive whose preconditions are false after earlier steps.\n"
+            "16. Specify expected_start_state matching the resource's projected current state for each macro_task.\n"
+            "17. If a macro_task manipulates exactly one part, set part_name to that canonical part name.\n"
+            "18. Put any macro-level task context needed for tracking/safety in task_params "
+            "(for example destination_location or last_known_location).\n"
+            "19. If task_metadata.required_context_keys or task_metadata.part_transition "
+            "refer to params such as destination_location, include them in task_params.\n"
+            "20. Specify task_metadata with in_state, out_state for safety validation.\n"
+            "21. If the macro_task manipulates parts, include part_transition in task_metadata.\n"
+            "22. Prefer the smallest serial macro_tasks[] sequence that satisfies the primary safety obligation and reconnects DES.\n"
+            "23. The final projected post-state after the last macro_task must discharge the primary obligation and restore a state where normal DES planning can continue.\n"
+            'Example grounded param:\n{"primitive":"move_cartesian","params":{"x":{"context_ref":"/resource/current_pose/x"}}}\n'
+            'Example observation binding:\n{"primitive":"detect_parts","params":{"part_name":"SG"},"store_as":"detected_sg"}\n'
+            'Then later use {"context_ref":"/step_outputs/detected_sg/pose/x"}\n'
             "{\n"
-            '  "macro_name": "<descriptive recovery macro name>",\n'
-            f'  "resource_jid": "{ra_jid}",\n'
-            '  "description": "<what this recovery macro accomplishes>",\n'
-            '  "rationale": "<why this satisfies the obligation or unsticks the resource>",\n'
-            '  "expected_start_state": "<current resource state>",\n'
-            '  "task_metadata": {\n'
-            '    "in_state": "<resource state before macro>",\n'
-            '    "out_state": "<resource state after macro>",\n'
-            '    "required_context_keys": [],\n'
-            '    "context_mapping": {},\n'
-            '    "part_transition": null\n'
+            '  "primary_obligation": {\n'
+            '    "rule_id": "<one rule_id from ACTIVE SAFETY OBLIGATION TARGETS>",\n'
+            '    "resource_jid": "<matching obligation target resource_jid>"\n'
             "  },\n"
-            '  "primitive_steps": [\n'
+            '  "macro_tasks": [\n'
             "    {\n"
-            '      "primitive": "<controller primitive name>",\n'
-            '      "params": {"<param_name>": "<value>"}\n'
+            f'      "resource_jid": "{ra_jid}",\n'
+            '      "macro_name": "<descriptive recovery macro name>",\n'
+            '      "description": "<what this macro_task accomplishes>",\n'
+            '      "rationale": "<why this step helps satisfy the primary obligation>",\n'
+            '      "expected_start_state": "<projected current state for this resource>",\n'
+            '      "part_name": "<optional canonical part name for tracking>",\n'
+            '      "task_params": {"<tracking_or_context_key>": "<literal or context_ref object>"},\n'
+            '      "task_metadata": {\n'
+            '        "in_state": "<resource state before macro>",\n'
+            '        "out_state": "<resource state after macro>",\n'
+            '        "required_context_keys": [],\n'
+            '        "context_mapping": {},\n'
+            '        "part_transition": null\n'
+            "      },\n"
+            '      "primitive_steps": [\n'
+            "        {\n"
+            '          "primitive": "<controller primitive name>",\n'
+            '          "params": {"<param_name>": "<literal or context_ref object>"},\n'
+            '          "store_as": "<optional alias for detect_parts/get_current_pose output>"\n'
+            "        }\n"
+            "      ]\n"
             "    }\n"
             "  ]\n"
             "}\n\n"

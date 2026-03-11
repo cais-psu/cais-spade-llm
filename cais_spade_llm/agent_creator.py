@@ -10,17 +10,17 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 import logging
-import utils
+from cais_spade_llm import utils
 
 _log = logging.getLogger(__name__)
 _REQ_DIR = Path("cais_spade_llm/specification/products/requirements")
 
-from agents.shared_information.user import User
-from agents.intelligent_product.product_agent import ProductAgent
-from agents.resource_agent.printing_agent import PrintingAgent
-from agents.resource_agent.robot_agent import RobotAgent
-from agents.central_controller.central_controller_agent import CentralControllerAgent
-from resources.sensor.camera_module import CameraModule
+from cais_spade_llm.agents.shared_information.user import User
+from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
+from cais_spade_llm.agents.resource_agent.printing_agent import PrintingAgent
+from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+from cais_spade_llm.agents.central_controller.central_controller_agent import CentralControllerAgent
+from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _CAMERA_LOCK = threading.Lock()
 _UNSET_OVERRIDE = object()

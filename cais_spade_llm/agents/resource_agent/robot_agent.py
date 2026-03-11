@@ -7,8 +7,8 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-from agents.resource_agent.resource_agent import ResourceAgent
-from resources.robot import UR5eController, XArm6Controller
+from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 
 
 class RobotAgent(ResourceAgent):
@@ -264,6 +264,104 @@ class RobotAgent(ResourceAgent):
             return False, time.monotonic() - start
         return bool(ok), time.monotonic() - start
 
+    def _classify_failure_mode(self, message: str) -> str:
+        text = str(message or "").strip().lower()
+        if not text:
+            return "unknown"
+        if "timed out" in text or "timeout" in text:
+            return "timeout"
+        if any(
+            marker in text
+            for marker in (
+                "no parts detected",
+                "not detected",
+                "cannot read current ee pose",
+                "planning fraction",
+                "trajectory goal rejected",
+                "failed to move",
+                "failed to descend",
+                "failed to lift",
+                "unreachable",
+            )
+        ):
+            return "unreachable"
+        if "safety" in text and "block" in text:
+            return "safety_block"
+        return "unknown"
+
+    def _task_failure(
+        self,
+        message: str,
+        *,
+        step: str,
+        observations: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        detail = str(message or "task failed")
+        self.logger.error("[Robot] %s failed: %s", step, detail)
+        failure_observations: Dict[str, Any] = {"step": step}
+        if isinstance(observations, dict):
+            failure_observations.update(observations)
+        return {
+            "status": "failed",
+            "content": detail,
+            "failure_context": {
+                "failure_mode": self._classify_failure_mode(detail),
+                "observations": failure_observations,
+            },
+        }
+
+    async def _execute_controller_helper(
+        self,
+        helper_name: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute a controller-only helper that is not exposed as a bridge primitive."""
+        if self.execution_mode == "dry_run":
+            await self._simulate_action(f"helper:{helper_name}({params})", duration=1.0)
+            return {"success": True, "message": f"Simulated helper: {helper_name}"}
+
+        await self._ensure_controller_prewarmed()
+
+        if self._controller is None:
+            return {"success": False, "message": "controller is not initialized"}
+
+        method = getattr(self._controller, helper_name, None)
+        if not callable(method):
+            return {
+                "success": False,
+                "message": f"controller missing helper '{helper_name}'",
+            }
+
+        try:
+            result = await asyncio.to_thread(method, **params)
+            last_failure = str(getattr(self._controller, "_last_failure_message", "") or "").strip()
+            if isinstance(result, bool):
+                message = f"{helper_name} {'ok' if result else 'failed'}"
+                if not result and last_failure:
+                    message = f"{message}: {last_failure}"
+                return {"success": result, "message": message}
+            if isinstance(result, dict):
+                normalized = dict(result)
+                if (
+                    not normalized.get("success")
+                    and not str(normalized.get("message") or "").strip()
+                    and last_failure
+                ):
+                    normalized["message"] = last_failure
+                return normalized
+            return {"success": False, "message": f"{helper_name} returned unexpected type"}
+        except Exception as exc:
+            self.logger.exception("[Robot] Helper '%s' execution failed", helper_name)
+            return {
+                "success": False,
+                "message": f"{helper_name} exception: {type(exc).__name__}: {exc}",
+            }
+
+    def _log_step(self, step: str, message: str, **fields: Any) -> None:
+        details = ", ".join(f"{key}={value}" for key, value in fields.items())
+        suffix = f" ({details})" if details else ""
+        self.logger.info("[Robot] %s: %s%s", step, message, suffix)
+
     async def pick_approach(
         self,
         origin_resource_location: str,
@@ -345,31 +443,69 @@ class RobotAgent(ResourceAgent):
             product_geometry,
         )
         if not targets.get("success"):
-            return {
-                "status": "failed",
-                "content": f"Failed to compute pick targets: {targets.get('message', '')}",
-            }
+            return self._task_failure(
+                str(targets.get("message") or "failed to compute pick targets"),
+                step="pick_approach.compute_pick_targets",
+                observations={"part_name": part_name},
+            )
+        self._log_step(
+            "pick_approach",
+            "computed pick targets",
+            part=targets.get("part_name"),
+            x=f"{targets.get('tx', 0.0):.3f}",
+            y=f"{targets.get('ty', 0.0):.3f}",
+            pick_z=f"{targets.get('pick_z', 0.0):.3f}",
+            travel_z=f"{targets.get('travel_z', 0.0):.3f}",
+        )
 
         # Open gripper.
+        self._log_step("pick_approach", "opening gripper")
         r = await self._execute_primitive("open_gripper", {})
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to open gripper before pick approach."}
+            return self._task_failure(
+                str(r.get("message") or "failed to open gripper before pick approach"),
+                step="pick_approach.open_gripper",
+            )
 
         # Move above part at travel height.
-        r = await self._execute_primitive(
-            "move_cartesian",
-            {"x": targets["tx"], "y": targets["ty"], "z": targets["travel_z"]},
+        self._log_step("pick_approach", "moving above part", z=f"{targets['travel_z']:.3f}")
+        r = await self._execute_controller_helper(
+            "_move_xy_at_z",
+            {
+                "x": targets["tx"],
+                "y": targets["ty"],
+                "z": targets["travel_z"],
+                "label": "Move above part",
+                "speed": speed,
+            },
         )
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to move above part."}
+            return self._task_failure(
+                str(r.get("message") or "failed to move above part"),
+                step="pick_approach.move_above_part",
+                observations={"part_name": targets.get("part_name")},
+            )
 
         # Descend to pick height.
-        r = await self._execute_primitive(
-            "move_cartesian",
-            {"x": targets["tx"], "y": targets["ty"], "z": targets["pick_z"]},
+        self._log_step("pick_approach", "descending to pick pose", z=f"{targets['pick_z']:.3f}")
+        r = await self._execute_controller_helper(
+            "_move_pose_direct",
+            {
+                "x": targets["tx"],
+                "y": targets["ty"],
+                "z": targets["pick_z"],
+                "label": (
+                    f"Descend to pick (EE z={targets['pick_z']:.3f}, "
+                    f"TCP z={targets['pick_tcp_z']:.3f})"
+                ),
+            },
         )
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to descend to pick position."}
+            return self._task_failure(
+                str(r.get("message") or "failed to descend to pick position"),
+                step="pick_approach.descend",
+                observations={"part_name": targets.get("part_name")},
+            )
 
         self._pick_ctx = {
             "part_name": targets["part_name"],
@@ -459,16 +595,26 @@ class RobotAgent(ResourceAgent):
             )
         else:
             # Close gripper to grasp.
+            self._log_step("pick_grasp", "closing gripper", part=part_name)
             r = await self._execute_primitive("close_gripper", {})
             if not r.get("success"):
-                return {"status": "failed", "content": f"Failed to close gripper to grasp {part_name}."}
+                return self._task_failure(
+                    str(r.get("message") or f"failed to close gripper to grasp {part_name}"),
+                    step="pick_grasp.close_gripper",
+                    observations={"part_name": part_name},
+                )
 
             # Attach part in simulation (Gazebo link attacher).
             model_name = self._pick_ctx.get("model_name", "")
             if model_name:
+                self._log_step("pick_grasp", "attaching part", model=model_name)
                 r = await self._execute_primitive("attach_part", {"model_name": model_name})
                 if not r.get("success"):
-                    return {"status": "failed", "content": f"Failed to attach {model_name}."}
+                    return self._task_failure(
+                        str(r.get("message") or f"failed to attach {model_name}"),
+                        step="pick_grasp.attach_part",
+                        observations={"part_name": part_name, "model_name": model_name},
+                    )
 
         self._held_part = part_name
         self._current_state = "picked"
@@ -565,35 +711,77 @@ class RobotAgent(ResourceAgent):
             product_geometry,
         )
         if not place.get("success"):
-            return {
-                "status": "failed",
-                "content": f"Failed to compute place targets: {place.get('message', '')}",
-            }
-
+            return self._task_failure(
+                str(place.get("message") or "failed to compute place targets"),
+                step="place_approach.compute_place_targets",
+                observations={"part_name": self._held_part},
+            )
         travel_z = self._pick_ctx.get("travel_z", 1.2)
         tx = self._pick_ctx.get("tx", 0.0)
         ty = self._pick_ctx.get("ty", 0.0)
+        self._log_step(
+            "place_approach",
+            "computed place targets",
+            part=self._held_part,
+            slot_x=f"{place.get('slot_x', 0.0):.3f}",
+            slot_y=f"{place.get('slot_y', 0.0):.3f}",
+            place_z=f"{place.get('place_z', 0.0):.3f}",
+            travel_z=f"{travel_z:.3f}",
+        )
 
         # Lift with part to travel height.
-        r = await self._execute_primitive(
-            "move_cartesian", {"x": tx, "y": ty, "z": travel_z},
+        self._log_step("place_approach", "lifting part", z=f"{travel_z:.3f}")
+        r = await self._execute_controller_helper(
+            "_move_pose_direct",
+            {"x": tx, "y": ty, "z": travel_z, "label": "Lift with part"},
         )
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to lift with part."}
+            return self._task_failure(
+                str(r.get("message") or "failed to lift with part"),
+                step="place_approach.lift",
+                observations={"part_name": self._held_part},
+            )
 
         # Move laterally above destination.
-        r = await self._execute_primitive(
-            "move_cartesian", {"x": place["slot_x"], "y": place["slot_y"], "z": travel_z},
+        self._log_step("place_approach", "moving above destination")
+        r = await self._execute_controller_helper(
+            "_move_xy_at_z",
+            {
+                "x": place["slot_x"],
+                "y": place["slot_y"],
+                "z": travel_z,
+                "label": "Move above destination",
+                "speed": speed,
+            },
         )
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to move above destination."}
+            return self._task_failure(
+                str(r.get("message") or "failed to move above destination"),
+                step="place_approach.move_above_destination",
+                observations={"part_name": self._held_part},
+            )
 
         # Descend to place height.
-        r = await self._execute_primitive(
-            "move_cartesian", {"x": place["slot_x"], "y": place["slot_y"], "z": place["place_z"]},
+        self._log_step("place_approach", "descending to place pose", z=f"{place['place_z']:.3f}")
+        r = await self._execute_controller_helper(
+            "_move_pose_direct",
+            {
+                "x": place["slot_x"],
+                "y": place["slot_y"],
+                "z": place["place_z"],
+                "label": (
+                    f"Descend to place (EE z={place['place_z']:.3f}, "
+                    f"TCP z={place.get('place_tcp_z', 0.0):.3f})"
+                ),
+                "speed": getattr(self._controller, "release_descend_time_scale", None),
+            },
         )
         if not r.get("success"):
-            return {"status": "failed", "content": "Failed to descend to place position."}
+            return self._task_failure(
+                str(r.get("message") or "failed to descend to place position"),
+                step="place_approach.descend",
+                observations={"part_name": self._held_part},
+            )
 
         self._pick_ctx.update({
             "slot_x": place["slot_x"],
@@ -723,69 +911,27 @@ class RobotAgent(ResourceAgent):
         part_height = self._pick_ctx.get("part_height", 0.08)
         place_z = self._pick_ctx.get("place_z", board_top_z + part_height)
         travel_z = self._pick_ctx.get("travel_z", 1.2)
-
-        # Pre-open settle.
-        cfg = self._controller.controller_config.get("motion", {}) if self._controller else {}
-        preopen_settle = float(cfg.get("release_preopen_settle_sec", 0.10))
-        postopen_settle = float(cfg.get("release_postopen_settle_sec", 0.20))
-        postdetach_settle = float(cfg.get("release_postdetach_settle_sec", 0.15))
-        detach_retry_count = max(0, int(cfg.get("release_detach_retry_count", 2)))
-        detach_retry_delay = max(0.0, float(cfg.get("release_detach_retry_delay_sec", 0.35)))
-        retry_lift_m = max(0.0, float(cfg.get("release_retry_lift_m", 0.005)))
-
-        await asyncio.sleep(preopen_settle)
-
-        # Open gripper with retry.
-        r = await self._execute_primitive("open_gripper", {})
-        if not r.get("success"):
-            r = await self._execute_primitive("open_gripper", {})
-        if not r.get("success") and self.execution_mode == "physical":
-            self._current_state = "recovery_required"
-            return {"status": "failed", "content": "Failed to open gripper to release part."}
-        await asyncio.sleep(postopen_settle)
-
-        # Detach with retry + micro-lift.
-        detached = False
-        attempts = max(1, 1 + detach_retry_count)
-        for attempt_idx in range(attempts):
-            if attempt_idx > 0:
-                if attempt_idx == 1 and retry_lift_m > 0.0:
-                    lift_z = place_z + retry_lift_m
-                    await self._execute_primitive(
-                        "move_cartesian", {"x": slot_x, "y": slot_y, "z": lift_z},
-                    )
-                await asyncio.sleep(detach_retry_delay)
-
-            dr = await self._execute_primitive(
-                "detach_part", {"model_name": model_name},
-            )
-            if dr.get("success"):
-                detached = True
-                break
-            self.logger.warning(
-                "[Robot] Detach attempt %d/%d failed for %s",
-                attempt_idx + 1, attempts, model_name or "held part",
-            )
-        if not detached:
-            self.logger.warning("[Robot] Detach still failed after retries")
-        await asyncio.sleep(postdetach_settle)
-
-        # Snap part to exact slot pose (simulation).
-        if detached and model_name:
-            await asyncio.to_thread(
-                self._controller.snap_part_to_slot,
-                model_name, slot_x, slot_y, part_height, board_top_z,
-            )
-
-        # Lift away.
-        lift_r = await self._execute_primitive(
-            "move_cartesian", {"x": slot_x, "y": slot_y, "z": travel_z},
+        self._log_step(
+            "place_insert",
+            "releasing part",
+            part=self._held_part,
+            model=model_name or "(none)",
+            slot_x=f"{slot_x:.3f}",
+            slot_y=f"{slot_y:.3f}",
         )
-        lift_ok = lift_r.get("success", False)
-
-        # Last-resort detach if still attached.
-        if not detached:
-            await self._execute_primitive("detach_part", {"model_name": model_name})
+        release = await self._execute_controller_helper(
+            "_release_part_sequence",
+            {
+                "model_name": model_name,
+                "slot_x": slot_x,
+                "slot_y": slot_y,
+                "part_height": part_height,
+                "board_top_z": board_top_z,
+                "place_z": place_z,
+                "travel_z": travel_z,
+            },
+        )
+        released_ok = bool(release.get("success"))
 
         placed = self._held_part
         self._held_part = None
@@ -793,12 +939,13 @@ class RobotAgent(ResourceAgent):
         self._gripper_state = "open"
         self._pick_ctx = {}
 
-        if not (detached and lift_ok):
+        if not released_ok:
             self._current_state = "recovery_required"
-            return {
-                "status": "failed",
-                "content": f"Failed to assemble {placed} at {destination_location}.",
-            }
+            return self._task_failure(
+                str(release.get("message") or f"failed to assemble {placed} at {destination_location}"),
+                step="place_insert.release",
+                observations={"part_name": placed, "destination_location": destination_location},
+            )
 
         return {
             "status": "completed",
@@ -846,31 +993,40 @@ class RobotAgent(ResourceAgent):
             self._pick_ctx = {}
             return {"status": "completed", "content": "At home position."}
 
-        # Prefer returning to remembered start pose from pick_approach.
-        start_x = self._pick_ctx.get("start_x")
-        start_y = self._pick_ctx.get("start_y")
-        start_z = self._pick_ctx.get("start_z")
-        if start_x is not None and start_y is not None and start_z is not None:
-            r = await self._execute_primitive(
-                "move_cartesian", {"x": start_x, "y": start_y, "z": start_z},
-            )
-            if r.get("success"):
-                self._current_state = "idle"
-                self._position = {"x": start_x, "y": start_y, "z": start_z}
-                self._bridge_pose_ref = None
-                self._pick_ctx = {}
-                return {"status": "completed", "content": "At home position."}
-
-        # Fallback to named home pose.
-        r = await self._execute_primitive("move_to_named_pose", {"pose_name": "home"})
+        self._log_step("move_home", "returning robot to home pose")
+        r = await self._execute_controller_helper("move_home", {})
         if r.get("success"):
             self._current_state = "idle"
-            self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
-            self._bridge_pose_ref = "home"
+            message = str(r.get("message") or "")
+            if "remembered start pose" in message:
+                pose = await self._execute_primitive("get_current_pose", {})
+                pose_data = pose.get("pose") if isinstance(pose, dict) else None
+                if isinstance(pose_data, dict):
+                    self._position = {
+                        "x": float(pose_data.get("x", 0.0)),
+                        "y": float(pose_data.get("y", 0.0)),
+                        "z": float(pose_data.get("z", 0.0)),
+                    }
+                else:
+                    start_x = self._pick_ctx.get("start_x")
+                    start_y = self._pick_ctx.get("start_y")
+                    start_z = self._pick_ctx.get("start_z")
+                    self._position = {
+                        "x": float(start_x or 0.0),
+                        "y": float(start_y or 0.0),
+                        "z": float(start_z or 0.0),
+                    }
+                self._bridge_pose_ref = None
+            else:
+                self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
+                self._bridge_pose_ref = "home"
             self._pick_ctx = {}
             return {"status": "completed", "content": "At home position."}
 
-        return {"status": "failed", "content": "Failed to move to home position."}
+        return self._task_failure(
+            str(r.get("message") or "failed to move to home position"),
+            step="move_home.controller",
+        )
 
     # ------------------------------------------------------------------ #
     # Bridge-only recovery macro executor
@@ -911,9 +1067,12 @@ class RobotAgent(ResourceAgent):
         from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
             apply_effects_to_snapshot,
             build_primitive_catalog,
+            extract_step_output,
             get_robot_bridge_snapshot,
+            resolve_param_refs,
             snapshot_matches_expected,
             sync_agent_from_bridge_snapshot,
+            validate_and_project_steps,
         )
 
         self.logger.info(
@@ -974,12 +1133,37 @@ class RobotAgent(ResourceAgent):
             for entry in primitive_catalog
             if isinstance(entry, dict) and str(entry.get("name", "")).strip()
         }
+        semantic_ok, _projected_runtime_snapshot, semantic_error = validate_and_project_steps(
+            primitive_steps,
+            primitive_catalog,
+            runtime_snapshot,
+            grounding_context={},
+        )
+        if not semantic_ok:
+            msg = (
+                f"Recovery macro '{macro_name}' failed runtime semantic validation: "
+                f"{semantic_error}"
+            )
+            self.logger.error("[Robot] %s", msg)
+            return {
+                "status": "failed",
+                "content": msg,
+                "observations": {
+                    "macro_name": macro_name,
+                    "expected_snapshot": expected_snapshot,
+                    "actual_snapshot": runtime_snapshot,
+                    "semantic_error": semantic_error,
+                    "step_index": -1,
+                },
+            }
 
         # Execute each primitive step sequentially.
         results: list[Dict[str, Any]] = []
+        step_outputs: dict[str, Any] = {}
         for step_idx, step in enumerate(primitive_steps):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
-            params = step.get("params", {}) if isinstance(step, dict) else {}
+            raw_params = step.get("params", {}) if isinstance(step, dict) else {}
+            store_as = str(step.get("store_as", "")).strip() if isinstance(step, dict) else ""
 
             if primitive not in self._BRIDGE_PRIMITIVES:
                 msg = (
@@ -995,6 +1179,30 @@ class RobotAgent(ResourceAgent):
                         "step_index": step_idx,
                         "primitive": primitive,
                         "completed_steps": len(results),
+                    },
+                }
+
+            try:
+                params = resolve_param_refs(
+                    raw_params,
+                    {},
+                    step_outputs=step_outputs,
+                )
+            except Exception as exc:
+                msg = (
+                    f"Macro '{macro_name}' could not resolve params at step {step_idx} "
+                    f"({primitive}): {exc}"
+                )
+                self.logger.error("[Robot] %s", msg)
+                return {
+                    "status": "failed",
+                    "content": msg,
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "raw_params": raw_params,
+                        "step_outputs": deepcopy(step_outputs),
                     },
                 }
 
@@ -1030,8 +1238,36 @@ class RobotAgent(ResourceAgent):
 
             primitive_meta = primitive_meta_by_name.get(primitive)
             if primitive_meta is not None:
-                runtime_snapshot = apply_effects_to_snapshot(step, primitive_meta, runtime_snapshot)
+                runtime_snapshot = apply_effects_to_snapshot(
+                    {**dict(step), "params": params},
+                    primitive_meta,
+                    runtime_snapshot,
+                )
                 sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+
+            if store_as:
+                step_output, output_error = extract_step_output(
+                    primitive=primitive,
+                    params=params,
+                    step_result=step_result,
+                )
+                if output_error:
+                    return {
+                        "status": "failed",
+                        "content": (
+                            f"Macro '{macro_name}' could not store output at step {step_idx} "
+                            f"({primitive}): {output_error}"
+                        ),
+                        "observations": {
+                            "macro_name": macro_name,
+                            "step_index": step_idx,
+                            "primitive": primitive,
+                            "primitive_result": step_result,
+                            "store_as": store_as,
+                            "completed_steps": len(results),
+                        },
+                    }
+                step_outputs[store_as] = step_output
 
         # All steps succeeded. Update logical state if out_state specified.
         if out_state:
@@ -1078,11 +1314,15 @@ class RobotAgent(ResourceAgent):
 
         try:
             result = await asyncio.to_thread(method, **params)
+            last_failure = str(getattr(self._controller, "_last_failure_message", "") or "").strip()
             # Normalize: bool-returning primitives (open_gripper, close_gripper)
             if isinstance(result, bool):
+                message = f"{primitive} {'ok' if result else 'failed'}"
+                if not result and last_failure:
+                    message = f"{message}: {last_failure}"
                 return {
                     "success": result,
-                    "message": f"{primitive} {'ok' if result else 'failed'}",
+                    "message": message,
                 }
             # List-returning primitives (detect_parts)
             if isinstance(result, list):
@@ -1093,7 +1333,14 @@ class RobotAgent(ResourceAgent):
                 }
             # Dict-returning primitives (move_cartesian, etc.)
             if isinstance(result, dict):
-                return result
+                normalized = dict(result)
+                if (
+                    not normalized.get("success")
+                    and not str(normalized.get("message") or "").strip()
+                    and last_failure
+                ):
+                    normalized["message"] = last_failure
+                return normalized
             return {"success": False, "message": f"{primitive} returned unexpected type"}
         except Exception as exc:
             self.logger.exception("[Robot] Primitive '%s' execution failed", primitive)

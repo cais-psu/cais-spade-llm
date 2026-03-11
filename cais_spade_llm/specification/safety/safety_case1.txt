@@ -1,1 +1,2 @@
-- each arm should move back home after placing its part is done.
+- xarm move_home should be done after its place_insert.
+- ur5e move_home should be done after its place_insert.

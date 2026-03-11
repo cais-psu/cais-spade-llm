@@ -1,13 +1,19 @@
 """SPADe entry point that collects initialization data, spins up agents, and keeps them running."""
 
 from __future__ import annotations
+import sys
 import os, asyncio, logging, shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from spade import run as spade_run
-import utils, agent_creator
-from function_analyzer import FunctionAnalyzer
-from agent_creator import ALLOWED_FUNCS
+
+_repo_root = os.path.dirname(os.path.dirname(__file__))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from cais_spade_llm import agent_creator, utils
+from cais_spade_llm.function_analyzer import FunctionAnalyzer
+from cais_spade_llm.agent_creator import ALLOWED_FUNCS
 
 # Silence third‑party loggers that otherwise spam the console during development.
 for n in ("pyjabber", "winloop", "asyncio"):
