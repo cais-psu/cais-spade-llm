@@ -1304,16 +1304,73 @@ def build_state_exploration_prompt(
     resource_infos: list[dict],
     obligation_targets: list[dict] | None = None,
     operator_feedback: str = "",
+    primitive_catalog: list[dict] | None = None,
+    bridge_snapshot: dict | None = None,
 ) -> str:
     """
     Prompt to generate a bridge recovery macro proposal when DES finds no modeled path.
+
+    When primitive_catalog is provided, the bridge LLM is asked to compose
+    recovery macros from controller primitives (the new path).  When absent,
+    falls back to the legacy behavior of composing from catalog task functions.
     """
     part_info = json.dumps(part_tracker, indent=2) if part_tracker else "unavailable"
-    tools_info = json.dumps(tools_catalog, indent=2)
     resource_info = json.dumps(resource_infos, indent=2)
     obligation_info = json.dumps(obligation_targets or [], indent=2)
     feedback_text = str(operator_feedback or "").strip() or "(none)"
+    bridge_snapshot_info = json.dumps(bridge_snapshot or {}, indent=2)
 
+    # Decide whether to use primitive-based or legacy catalog-based prompt.
+    if primitive_catalog:
+        primitives_info = json.dumps(primitive_catalog, indent=2)
+        tools_info = json.dumps(tools_catalog, indent=2)
+        return (
+            f"A resource ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
+            f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"
+            f"Parts that still need to reach {goal_state}: {P_id}\n\n"
+            f"ACTIVE SAFETY OBLIGATION TARGETS:\n{obligation_info}\n\n"
+            f"OPERATOR REFINEMENT FEEDBACK:\n{feedback_text}\n\n"
+            f"CURRENT PRIMITIVE-LEVEL SNAPSHOT FOR {ra_jid}:\n{bridge_snapshot_info}\n\n"
+            f"TASK-LEVEL TOOLS CATALOG (for reference on normal task semantics):\n{tools_info}\n\n"
+            f"CONTROLLER PRIMITIVES (use these to compose your recovery macro):\n{primitives_info}\n\n"
+            f"RESOURCE CAPABILITIES: (Check reachability and staging areas before assigning coordinates)\n{resource_info}\n\n"
+            "The resource has no catalog-valid modeled path to satisfy the active recovery target. "
+            "Propose exactly one RECOVERY MACRO as JSON.\n"
+            "Rules:\n"
+            "1. The macro_name should describe what the recovery accomplishes.\n"
+            "2. primitive_steps MUST use only the controller primitives listed above.\n"
+            "3. Each primitive_steps entry needs the exact primitive name and params.\n"
+            "4. Respect each primitive's preconditions and effects over the projected snapshot.\n"
+            "5. Do not use a primitive whose preconditions are false after earlier steps.\n"
+            "6. Specify expected_start_state matching the resource's current state.\n"
+            "7. Specify task_metadata with in_state, out_state for safety validation.\n"
+            "8. If the macro manipulates parts, include part_transition in task_metadata.\n"
+            "9. Prefer the smallest macro that satisfies the active safety obligation target.\n"
+            "{\n"
+            '  "macro_name": "<descriptive recovery macro name>",\n'
+            f'  "resource_jid": "{ra_jid}",\n'
+            '  "description": "<what this recovery macro accomplishes>",\n'
+            '  "rationale": "<why this satisfies the obligation or unsticks the resource>",\n'
+            '  "expected_start_state": "<current resource state>",\n'
+            '  "task_metadata": {\n'
+            '    "in_state": "<resource state before macro>",\n'
+            '    "out_state": "<resource state after macro>",\n'
+            '    "required_context_keys": [],\n'
+            '    "context_mapping": {},\n'
+            '    "part_transition": null\n'
+            "  },\n"
+            '  "primitive_steps": [\n'
+            "    {\n"
+            '      "primitive": "<controller primitive name>",\n'
+            '      "params": {"<param_name>": "<value>"}\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Return ONLY the JSON object, no explanation."
+        )
+
+    # Legacy fallback: compose from existing catalog functions.
+    tools_info = json.dumps(tools_catalog, indent=2)
     return (
         f"A resource ({ra_jid}) is stuck in state:\n{json.dumps(stuck_state, indent=2)}\n\n"
         f"Current part states and locations (including camera coordinates for lost parts):\n{part_info}\n\n"

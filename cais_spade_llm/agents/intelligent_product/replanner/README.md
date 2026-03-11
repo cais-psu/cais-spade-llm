@@ -386,6 +386,16 @@ The forward simulation is invoked in `_SafetyCheckInbox._handle_safety_check()`:
 
 ## Known Design Boundary
 
-Bridge proposals currently compile into existing catalog-backed task nodes. They do not create new low-level robot controller capabilities at runtime.
+> **Superseded.** The original constraint below has been removed. See
+> [`llm_bridge_construction.md`](llm_bridge_construction.md) for the
+> current design.
 
-That is intentional. It keeps runtime execution inside the existing resource-agent tool model while still allowing the LLM bridge to propose new high-level recovery macros for operator approval.
+Bridge proposals now embed **controller-level primitive sequences** that
+execute through `RobotAgent.execute_recovery_macro`. This allows the LLM
+bridge to compose novel recovery actions from low-level motion, gripper,
+and perception primitives without being limited to existing catalog
+functions.
+
+The shared `tools.json` catalog and DES planning surface remain
+unchanged — only the bridge path gains access to controller primitives
+via a private in-memory catalog.

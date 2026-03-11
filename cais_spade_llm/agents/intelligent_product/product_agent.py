@@ -543,8 +543,13 @@ class ProductAgent(LlmAgent):
             self.logger.exception("[Product] Failed to persist resource state.")
 
 
-    def _get_part_transition(self, function_name: str) -> Dict[str, Any]:
-        """Look up the part_transition map for a function from the shared tools catalogue."""
+    def _get_part_transition(
+        self, function_name: str, task_node: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Look up the part_transition map, preferring node-level for bridge macros."""
+        # Prefer node-level part_transition (set by bridge macro proposals).
+        if task_node and task_node.get("part_transition"):
+            return dict(task_node["part_transition"])
         self.__class__._load_shared_tools_catalogue()
         row = LlmAgent._TOOLS_BY_FUNC.get(function_name, {})
         return row.get("part_transition", {})
@@ -557,9 +562,10 @@ class ProductAgent(LlmAgent):
         params: Dict[str, Any],
         resource_jid: str,
         task_id: str,
+        task_node: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Generic interpreter: applies the part_transition declared in each function's docstring."""
-        transition_map = self._get_part_transition(function_name)
+        transition_map = self._get_part_transition(function_name, task_node=task_node)
         if not transition_map:
             return  # function has no declared part_transition — nothing to track
 
@@ -1876,6 +1882,7 @@ class ProductAgent(LlmAgent):
                         params=params,
                         resource_jid=str(msg.sender),
                         task_id=task_id,
+                        task_node=task_node,
                     )
 
             # NOTE: Robot states are NOT cached here - they're collected by CentralControllerAgent

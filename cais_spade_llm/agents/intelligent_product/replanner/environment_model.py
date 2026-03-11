@@ -127,9 +127,15 @@ async def llm_explore_states_and_events(
     part_tracker: dict | None = None,
     obligation_targets: list[dict] | None = None,
     operator_feedback: str = "",
+    primitive_catalog: list[dict] | None = None,
+    bridge_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Ask the LLM for a recovery macro proposal when DES finds no modeled path.
+
+    When primitive_catalog is provided, the bridge generates primitive-based
+    macros that execute through execute_recovery_macro.  Otherwise, falls back
+    to the legacy catalog-function-based macro shape.
     """
     from cais_spade_llm.prompts import build_state_exploration_prompt
 
@@ -143,24 +149,135 @@ async def llm_explore_states_and_events(
         resource_infos=resource_infos,
         obligation_targets=obligation_targets,
         operator_feedback=operator_feedback,
+        primitive_catalog=primitive_catalog,
+        bridge_snapshot=bridge_snapshot,
     )
 
     raw = await ask_llm(prompt=prompt, with_functions=False)
-    proposal = _normalize_bridge_proposal(
-        raw=raw,
-        ra_jid=ra_jid,
-        tools_catalog=tools_catalog,
-    )
+
+    if primitive_catalog:
+        proposal = _normalize_primitive_bridge_proposal(
+            raw=raw,
+            ra_jid=ra_jid,
+            primitive_catalog=primitive_catalog,
+            bridge_snapshot=bridge_snapshot or {},
+        )
+    else:
+        proposal = _normalize_bridge_proposal(
+            raw=raw,
+            ra_jid=ra_jid,
+            tools_catalog=tools_catalog,
+        )
+
     if proposal:
+        name_key = proposal.get("macro_name") or proposal.get("function_name")
+        steps_key = proposal.get("primitive_steps") or proposal.get("macro_steps") or []
         logger.info(
             "[EnvironmentModel] LLM bridge proposed macro '%s' with %d step(s).",
-            proposal.get("function_name"),
-            len(proposal.get("macro_steps") or []),
+            name_key,
+            len(steps_key),
         )
         return proposal
 
     logger.warning("[EnvironmentModel] LLM bridge response was invalid or not compilable.")
     return None
+
+
+def _normalize_primitive_bridge_proposal(
+    *,
+    raw: str,
+    ra_jid: str,
+    primitive_catalog: list[dict],
+    bridge_snapshot: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Validate and normalize a primitive-based bridge proposal."""
+    from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+        expected_snapshot_from_bridge_snapshot,
+        validate_and_project_steps,
+    )
+
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("[EnvironmentModel] LLM bridge response was not valid JSON.")
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    # Validate primitive_steps.
+    primitive_steps = parsed.get("primitive_steps") or parsed.get("steps") or []
+    if not isinstance(primitive_steps, list) or not primitive_steps:
+        logger.warning("[EnvironmentModel] Bridge proposal has no primitive_steps.")
+        return None
+
+    validated_steps: list[dict[str, Any]] = []
+    for index, step in enumerate(primitive_steps, start=1):
+        if not isinstance(step, dict):
+            return None
+        primitive = str(step.get("primitive", "")).strip()
+        params = step.get("params") or {}
+        if not isinstance(params, dict):
+            return None
+        validated_steps.append({"primitive": primitive, "params": dict(params)})
+
+    semantic_ok, projected_snapshot, semantic_error = validate_and_project_steps(
+        validated_steps,
+        primitive_catalog,
+        bridge_snapshot or {},
+    )
+    if not semantic_ok:
+        logger.warning(
+            "[EnvironmentModel] Primitive bridge proposal rejected: %s",
+            semantic_error,
+        )
+        return None
+
+    macro_name = str(parsed.get("macro_name", "")).strip()
+    if not macro_name:
+        macro_name = "bridge_recovery_macro"
+
+    # Validate resource_jid.
+    proposal_resource_jid = str(parsed.get("resource_jid") or ra_jid).strip() or ra_jid
+    if proposal_resource_jid != ra_jid:
+        logger.warning(
+            "[EnvironmentModel] Bridge proposal targeted unexpected resource '%s' (expected '%s').",
+            proposal_resource_jid,
+            ra_jid,
+        )
+        return None
+
+    # Extract task_metadata for safety/tracking integration.
+    task_metadata = parsed.get("task_metadata") or {}
+    if not isinstance(task_metadata, dict):
+        task_metadata = {}
+
+    expected_start_state = str(parsed.get("expected_start_state", "")).strip()
+    if expected_start_state:
+        actual_state = str((bridge_snapshot or {}).get("current_state", "")).strip()
+        if actual_state and expected_start_state != actual_state:
+            logger.warning(
+                "[EnvironmentModel] Bridge macro expected_start_state '%s' mismatched actual '%s'.",
+                expected_start_state,
+                actual_state,
+            )
+            return None
+
+    return {
+        "macro_name": macro_name,
+        "resource_jid": proposal_resource_jid,
+        "description": str(parsed.get("description", "")).strip(),
+        "rationale": str(parsed.get("rationale", "")).strip(),
+        "expected_start_state": expected_start_state,
+        "expected_snapshot": expected_snapshot_from_bridge_snapshot(bridge_snapshot or {}),
+        "projected_snapshot": projected_snapshot,
+        "task_metadata": task_metadata,
+        "primitive_steps": validated_steps,
+        "summary": [
+            macro_name,
+            *[s["primitive"] for s in validated_steps],
+        ],
+    }
 
 
 def _normalize_bridge_proposal(
@@ -169,6 +286,7 @@ def _normalize_bridge_proposal(
     ra_jid: str,
     tools_catalog: list[dict],
 ) -> Optional[dict[str, Any]]:
+    """Legacy: validate and normalize a catalog-function-based bridge proposal."""
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError):

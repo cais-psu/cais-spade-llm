@@ -321,8 +321,7 @@ class Ros2PickPlaceController:
         self._joint_lock = threading.Lock()
         self._joint_positions: dict[str, float] = {}
 
-        # Runtime pose context across phased calls.
-        self._active_ctx: dict[str, Any] = {}
+        # Remembered start pose for move_home (set externally or by UI bridge).
         self._last_start_pose = None
 
     # ------------------------------------------------------------------ #
@@ -561,7 +560,191 @@ class Ros2PickPlaceController:
         return True
 
     # ------------------------------------------------------------------ #
-    # Legacy low-level API
+    # Public primitives (bridge-visible low-level API)
+    # ------------------------------------------------------------------ #
+    def move_cartesian(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Move end-effector to an absolute Cartesian position.
+        params:
+          x: {type: number, description: "Target X coordinate in meters (base frame)"}
+          y: {type: number, description: "Target Y coordinate in meters (base frame)"}
+          z: {type: number, description: "Target Z coordinate in meters (base frame)"}
+          speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
+        preconditions: {}
+        effects:
+          current_pose:
+            pose_absolute_from_params: [x, y, z]
+          current_pose_ref:
+            set_unknown: true
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {"success": False, "message": "cannot read current ee pose"}
+        ori = ee.orientation
+        time_scale = _as_float(speed, self.trajectory_time_scale)
+        ok = self._move_xy_direct(float(x), float(y), float(z), ori, "move_cartesian")
+        if not ok:
+            return {"success": False, "message": f"failed to move to ({x}, {y}, {z})"}
+        return {"success": True, "message": f"moved to ({x:.4f}, {y:.4f}, {z:.4f})"}
+
+    def move_relative(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Move end-effector relative to its current position.
+        params:
+          dx: {type: number, description: "Delta X in meters"}
+          dy: {type: number, description: "Delta Y in meters"}
+          dz: {type: number, description: "Delta Z in meters"}
+          speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
+        preconditions:
+          current_pose:
+            exists: true
+        effects:
+          current_pose:
+            pose_relative_from_params: [dx, dy, dz]
+          current_pose_ref:
+            set_unknown: true
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {"success": False, "message": "cannot read current ee pose"}
+        target_x = ee.position.x + float(dx)
+        target_y = ee.position.y + float(dy)
+        target_z = ee.position.z + float(dz)
+        time_scale = _as_float(speed, self.trajectory_time_scale)
+        ok = self._cartesian_move(
+            self._make_pose(target_x, target_y, target_z, ee.orientation),
+            f"move_relative(dx={dx}, dy={dy}, dz={dz})",
+            time_scale=time_scale,
+        )
+        if not ok:
+            return {"success": False, "message": f"failed relative move ({dx}, {dy}, {dz})"}
+        return {"success": True, "message": f"moved relative ({dx}, {dy}, {dz})"}
+
+    def move_to_named_pose(self, pose_name: str) -> dict[str, Any]:
+        """
+        ---
+        description: Move to a named joint configuration (e.g. 'home').
+        params:
+          pose_name: {type: string, description: "Name of the joint configuration from robot manifest"}
+        preconditions: {}
+        effects:
+          current_pose_ref:
+            set_from_param: pose_name
+          current_pose:
+            set_unknown: true
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        positions = self.named_positions.get(str(pose_name))
+        if not isinstance(positions, (list, tuple)) or not positions:
+            available = sorted(self.named_positions.keys()) if self.named_positions else []
+            return {
+                "success": False,
+                "message": f"unknown pose '{pose_name}'; available={available}",
+            }
+        joint_values = [float(v) for v in positions]
+        # Try trajectory publisher first, then MoveIt fallback.
+        if self._arm_pub and self.move_joints(joint_values, duration_sec=4):
+            return {"success": True, "message": f"moved to named pose '{pose_name}'"}
+        if self._exec_client and self._move_joints_via_moveit(joint_values, duration_sec=4):
+            return {"success": True, "message": f"moved to named pose '{pose_name}' via MoveIt"}
+        return {"success": False, "message": f"failed to move to named pose '{pose_name}'"}
+
+    def get_current_pose(self) -> dict[str, Any]:
+        """
+        ---
+        description: Return the current end-effector pose in the base frame.
+        params: {}
+        preconditions: {}
+        effects: {}
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {"success": False, "message": "cannot read current ee pose"}
+        return {
+            "success": True,
+            "message": "current pose",
+            "pose": {
+                "x": ee.position.x,
+                "y": ee.position.y,
+                "z": ee.position.z,
+                "qx": ee.orientation.x,
+                "qy": ee.orientation.y,
+                "qz": ee.orientation.z,
+                "qw": ee.orientation.w,
+            },
+        }
+
+    def attach_part(self, model_name: str, link: str | None = None) -> dict[str, Any]:
+        """
+        ---
+        description: Attach a part model to the robot gripper (Gazebo link attacher).
+        params:
+          model_name: {type: string, description: "Gazebo model name of the part to attach"}
+          link: {type: string, description: "Optional specific attach link. Uses default candidates if omitted."}
+        preconditions:
+          held_part:
+            equals: null
+        effects:
+          held_part:
+            set_from_param: model_name
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ok = self._attach_part(str(model_name))
+        if not ok:
+            return {"success": False, "message": f"failed to attach {model_name}"}
+        return {"success": True, "message": f"attached {model_name}"}
+
+    def detach_part(self, model_name: str = "", link: str | None = None) -> dict[str, Any]:
+        """
+        ---
+        description: Detach a part model from the robot gripper (Gazebo link detacher).
+        params:
+          model_name: {type: string, description: "Gazebo model name to detach. Uses currently attached model if empty."}
+          link: {type: string, description: "Optional specific detach link. Tries all candidates if omitted."}
+        preconditions:
+          held_part:
+            not_equals: null
+        effects:
+          held_part:
+            set: null
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ok = self._detach_part(str(model_name))
+        if not ok:
+            return {"success": False, "message": f"failed to detach {model_name or 'held part'}"}
+        return {"success": True, "message": f"detached {model_name or 'held part'}"}
+
+    # ------------------------------------------------------------------ #
+    # Legacy low-level API (kept for backward compat)
     # ------------------------------------------------------------------ #
     def move_joints(self, positions: list[float], duration_sec: int = 2) -> bool:
         if not self.wait_for_services():
@@ -585,19 +768,203 @@ class Ros2PickPlaceController:
         return True
 
     def open_gripper(self) -> bool:
+        """
+        ---
+        description: Open the robot gripper.
+        params: {}
+        preconditions: {}
+        effects:
+          gripper_state:
+            set: open
+        ---
+        """
         if not self.wait_for_services():
             return False
         return self._gripper_command(self.gripper_open, "OPEN")
 
     def close_gripper(self) -> bool:
+        """
+        ---
+        description: Close the robot gripper.
+        params: {}
+        preconditions: {}
+        effects:
+          gripper_state:
+            set: closed
+        ---
+        """
         if not self.wait_for_services():
             return False
         return self._gripper_command(self.gripper_close, "CLOSE")
 
     # ------------------------------------------------------------------ #
-    # Framework tool phases
+    # Geometry helpers (agent calls these to compute targets, then moves)
     # ------------------------------------------------------------------ #
-    def detect_parts(self) -> list[dict[str, Any]]:
+    def compute_pick_targets(
+        self,
+        part_name: str = "",
+        product_geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compute pick target positions from perception + geometry without moving.
+
+        Returns a dict with keys: part_name, model_name, tx, ty, tz, pick_z,
+        travel_z, part_height, tcp_offset_z, pick_tcp_z, start_x, start_y,
+        start_z, or {"success": False, "message": ...} on failure.
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+
+        parts = self.detect_parts()
+        if not parts:
+            return {"success": False, "message": "no parts detected"}
+
+        target = None
+        if part_name:
+            target = next((p for p in parts if p.get("part_name") == part_name), None)
+            if target is None:
+                detected_names = sorted(
+                    {str(p.get("part_name")) for p in parts if str(p.get("part_name") or "").strip()}
+                )
+                return {
+                    "success": False,
+                    "message": f"requested part '{part_name}' not detected; detected={detected_names}",
+                }
+        if target is None:
+            target = parts[0]
+
+        tx = _as_float(target.get("x"), 0.0)
+        ty = _as_float(target.get("y"), 0.0)
+        tz = _as_float(target.get("z"), 0.0)
+        target_part_name = str(target.get("part_name") or part_name or "")
+
+        geo = product_geometry or {}
+        board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
+        board_center_z = _as_float(board_center.get("z"), 1.02)
+
+        target_height = _as_float(geo.get("part_height_m"), 0.08)
+        target_model = str(geo.get("model_name") or target.get("model_name") or "")
+
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {"success": False, "message": "cannot read current ee pose"}
+
+        ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
+        pick_bias = max(
+            self.pick_tcp_z_bias_min_m,
+            min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
+        )
+        pick_tcp_z_raw = tz + pick_bias
+        pick_tcp_z = max(pick_tcp_z_raw, self.min_pick_tcp_z_m)
+        pick_z = pick_tcp_z - ee_tcp_offset_z
+
+        travel_z = max(
+            ee.position.z,
+            tz + self.approach_height_m,
+            board_center_z + self.approach_height_m,
+            pick_z + 0.05,
+        )
+
+        self._log().info(
+            "[ComputePickTargets] "
+            f"part={target_part_name} "
+            f"current=({ee.position.x:.3f}, {ee.position.y:.3f}, {ee.position.z:.3f}) "
+            f"target=({tx:.3f}, {ty:.3f}, {tz:.3f}) "
+            f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
+        )
+
+        return {
+            "success": True,
+            "part_name": target_part_name,
+            "model_name": target_model,
+            "tx": tx,
+            "ty": ty,
+            "tz": tz,
+            "pick_z": pick_z,
+            "travel_z": travel_z,
+            "part_height": target_height,
+            "tcp_offset_z": ee_tcp_offset_z,
+            "pick_tcp_z": pick_tcp_z,
+            "start_x": ee.position.x,
+            "start_y": ee.position.y,
+            "start_z": ee.position.z,
+        }
+
+    def compute_place_targets(
+        self,
+        pick_ctx: dict[str, Any],
+        product_geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compute placement target positions from pick context + geometry without moving.
+
+        Returns a dict with keys: slot_x, slot_y, board_top_z, place_z,
+        part_height, or {"success": False, "message": ...} on failure.
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+
+        geo = product_geometry or {}
+        board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
+        slot_xy = geo.get("slot_xy")
+        if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
+            bx = _as_float(board_center.get("x"), 0.0) + _as_float(slot_xy[0], 0.0)
+            by = _as_float(board_center.get("y"), 0.0) + _as_float(slot_xy[1], 0.0)
+        else:
+            bx = _as_float(board_center.get("x"), pick_ctx.get("tx", 0.0))
+            by = _as_float(board_center.get("y"), pick_ctx.get("ty", 0.0))
+
+        board_top_z = _as_float(
+            geo.get("slot_floor_z_m"),
+            _as_float(board_center.get("z"), 1.025),
+        )
+        target_height = _as_float(geo.get("part_height_m"), pick_ctx.get("part_height", 0.08))
+
+        grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
+            pick_ctx.get("tz"), 0.0
+        )
+        place_gap = self.place_surface_gap_m - self.insertion_depth_m
+        place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
+        place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
+        place_z = place_tcp_z - _as_float(pick_ctx.get("tcp_offset_z"), -0.17)
+
+        return {
+            "success": True,
+            "slot_x": bx,
+            "slot_y": by,
+            "board_top_z": board_top_z,
+            "place_z": place_z,
+            "part_height": target_height,
+            "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
+        }
+
+    def get_tcp_offset_z(self) -> float:
+        """Return the world-frame Z offset between EE link and TCP link."""
+        if not self.wait_for_services():
+            return -0.17
+        return self._get_ee_tcp_world_z_offset()
+
+    def snap_part_to_slot(
+        self,
+        model_name: str,
+        slot_x: float,
+        slot_y: float,
+        part_height: float,
+        board_top_z: float,
+    ) -> bool:
+        """Teleport a Gazebo model to its exact slot pose (post-placement correction)."""
+        if not self.wait_for_services():
+            return False
+        return self._snap_part_to_slot(model_name, slot_x, slot_y, part_height, board_top_z)
+
+    def detect_parts(self, part_name: str | None = None) -> list[dict[str, Any]]:
+        """
+        ---
+        description: Detect parts via perception service. Optionally filter by part name.
+        params:
+          part_name: {type: string, description: "Filter results to this part name. Returns all parts if omitted."}
+        preconditions: {}
+        effects: {}
+        ---
+        """
         if not self.wait_for_services():
             return []
         if self.execution_mode == "physical":
@@ -618,362 +985,14 @@ class Ros2PickPlaceController:
         except Exception:
             self._log().exception("Failed to parse /detect_all payload")
             return []
-        return parsed if isinstance(parsed, list) else []
-
-    def pick_approach(
-        self,
-        *,
-        origin_resource_location: str = "",
-        part_name: str = "",
-        product_geometry: dict[str, Any] | None = None,
-        speed: float | None = None,
-    ) -> dict[str, Any]:
-        del origin_resource_location, speed  # location is resolved by perception in ROS2 path.
-        if not self.wait_for_services():
-            return {
-                "success": False,
-                "message": self._unavailable_message("services not ready"),
-            }
-
-        parts = self.detect_parts()
-        if not parts:
-            return {"success": False, "message": "no parts detected"}
-
-        target = None
+        parts = parsed if isinstance(parsed, list) else []
         if part_name:
-            target = next((p for p in parts if p.get("part_name") == part_name), None)
-            if target is None:
-                detected_names = sorted(
-                    {
-                        str(p.get("part_name"))
-                        for p in parts
-                        if str(p.get("part_name") or "").strip()
-                    }
-                )
-                return {
-                    "success": False,
-                    "message": (
-                        f"requested part '{part_name}' not detected; "
-                        f"detected={detected_names}"
-                    ),
-                }
-        if target is None:
-            target = parts[0]
+            parts = [p for p in parts if p.get("part_name") == part_name]
+        return parts
 
-        tx = _as_float(target.get("x"), 0.0)
-        ty = _as_float(target.get("y"), 0.0)
-        tz = _as_float(target.get("z"), 0.0)
-        target_part_name = str(target.get("part_name") or part_name or "")
-
-        geo = product_geometry or {}
-        board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
-        board_center_z = _as_float(board_center.get("z"), 1.02)
-
-        target_height = _as_float(geo.get("part_height_m"), 0.08)
-        target_model = str(geo.get("model_name") or target.get("model_name") or "")
-
-        ee = self._get_ee_pose()
-        if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
-        start_pose = self._make_pose(
-            ee.position.x, ee.position.y, ee.position.z, ee.orientation
-        )
-        ori = ee.orientation
-
-        ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
-        pick_bias = max(
-            self.pick_tcp_z_bias_min_m,
-            min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
-        )
-        pick_tcp_z_raw = tz + pick_bias
-        pick_tcp_z = max(pick_tcp_z_raw, self.min_pick_tcp_z_m)
-        pick_z = pick_tcp_z - ee_tcp_offset_z
-
-        travel_z = max(
-            ee.position.z,
-            tz + self.approach_height_m,
-            board_center_z + self.approach_height_m,
-            pick_z + 0.05,
-        )
-
-        self._log().info(
-            "[PickApproach] "
-            f"part={target_part_name or str(target.get('part_name') or '')} "
-            f"current=({ee.position.x:.3f}, {ee.position.y:.3f}, {ee.position.z:.3f}) "
-            f"target=({tx:.3f}, {ty:.3f}, {tz:.3f}) "
-            f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
-        )
-
-        if not self._gripper_command(self.gripper_open, "OPEN"):
-            return {"success": False, "message": "failed to open gripper"}
-
-        if not self._move_xy_direct(
-            tx, ty, travel_z, ori, "Move above part"
-        ):
-            return {"success": False, "message": "failed to move above part"}
-
-        if not self._cartesian_move(
-            self._make_pose(tx, ty, pick_z, ori),
-            f"Descend to pick (EE z={pick_z:.3f}, TCP z={pick_tcp_z:.3f})",
-        ):
-            return {"success": False, "message": "failed to descend to pick"}
-
-        self._last_start_pose = start_pose
-        self._active_ctx = {
-            "part_name": target_part_name,
-            "target_model": target_model,
-            "target_height": target_height,
-            "tx": tx,
-            "ty": ty,
-            "tz": tz,
-            "orientation": ori,
-            "pick_tcp_z": pick_tcp_z,
-            "pick_z": pick_z,
-            "travel_z": travel_z,
-            "ee_tcp_offset_z": ee_tcp_offset_z,
-            "destination_location": None,
-            "slot_x": None,
-            "slot_y": None,
-            "board_top_z": None,
-            "place_z": None,
-            "grasped": False,
-        }
-        return {
-            "success": True,
-            "message": f"Approached {target_part_name} for grasp",
-            "part_name": target_part_name,
-        }
-
-    def pick_grasp(
-        self,
-        *,
-        part_name: str = "",
-        origin_resource_location: str = "",
-        product_geometry: dict[str, Any] | None = None,
-        gripper: str | None = None,
-    ) -> dict[str, Any]:
-        del origin_resource_location, product_geometry, gripper
-        if not self.wait_for_services():
-            return {
-                "success": False,
-                "message": self._unavailable_message("services not ready"),
-            }
-        ctx = self._active_ctx
-        if not ctx:
-            return {"success": False, "message": "pick_approach must run first"}
-        if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
-            self._log().warn(
-                f"pick_grasp requested {part_name} but active part is {ctx.get('part_name')}"
-            )
-
-        if not self._gripper_command(self.gripper_close, "CLOSE — grasping"):
-            return {"success": False, "message": "failed to close gripper"}
-
-        model_name = str(ctx.get("target_model") or "")
-        if not self._attach_part(model_name):
-            return {"success": False, "message": f"failed to attach {model_name}"}
-
-        ctx["grasped"] = True
-        return {"success": True, "message": f"Grasped {ctx.get('part_name', '')}"}
-
-    def place_approach(
-        self,
-        *,
-        destination_location: str = "",
-        part_name: str = "",
-        product_geometry: dict[str, Any] | None = None,
-        speed: float | None = None,
-    ) -> dict[str, Any]:
-        del speed
-        if not self.wait_for_services():
-            return {
-                "success": False,
-                "message": self._unavailable_message("services not ready"),
-            }
-        ctx = self._active_ctx
-        if not ctx or not ctx.get("grasped"):
-            return {"success": False, "message": "pick_grasp must complete first"}
-        if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
-            self._log().warn(
-                f"place_approach requested {part_name} but active part is {ctx.get('part_name')}"
-            )
-
-        geo = product_geometry or {}
-        board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
-        slot_xy = geo.get("slot_xy")
-        if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
-            bx = _as_float(board_center.get("x"), 0.0) + _as_float(slot_xy[0], 0.0)
-            by = _as_float(board_center.get("y"), 0.0) + _as_float(slot_xy[1], 0.0)
-        else:
-            bx = _as_float(board_center.get("x"), ctx.get("tx", 0.0))
-            by = _as_float(board_center.get("y"), ctx.get("ty", 0.0))
-
-        board_top_z = _as_float(
-            geo.get("slot_floor_z_m"),
-            _as_float(board_center.get("z"), 1.025),
-        )
-        target_height = _as_float(geo.get("part_height_m"), ctx.get("target_height", 0.08))
-        if geo.get("model_name"):
-            ctx["target_model"] = str(geo.get("model_name"))
-
-        tx = _as_float(ctx.get("tx"), 0.0)
-        ty = _as_float(ctx.get("ty"), 0.0)
-        travel_z = _as_float(ctx.get("travel_z"), 1.2)
-        ori = ctx.get("orientation")
-
-        if not self._cartesian_move(
-            self._make_pose(tx, ty, travel_z, ori), "Lift with part"
-        ):
-            return {"success": False, "message": "failed to lift with part"}
-
-        if not self._move_xy_direct(
-            bx, by, travel_z, ori, "Move above destination"
-        ):
-            return {"success": False, "message": "failed to move above destination"}
-
-        grasp_tcp_to_part_origin_z = _as_float(ctx.get("pick_tcp_z"), 0.0) - _as_float(
-            ctx.get("tz"), 0.0
-        )
-        place_gap = self.place_surface_gap_m - self.insertion_depth_m
-        place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
-        place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
-        place_z = place_tcp_z - _as_float(ctx.get("ee_tcp_offset_z"), -0.17)
-
-        if not self._cartesian_move(
-            self._make_pose(bx, by, place_z, ori),
-            f"Descend to place (EE z={place_z:.3f}, TCP z={place_tcp_z:.3f})",
-            time_scale=self.release_descend_time_scale,
-        ):
-            return {"success": False, "message": "failed to descend to place"}
-
-        ctx["destination_location"] = destination_location
-        ctx["slot_x"] = bx
-        ctx["slot_y"] = by
-        ctx["board_top_z"] = board_top_z
-        ctx["target_height"] = target_height
-        ctx["place_z"] = place_z
-        return {
-            "success": True,
-            "message": f"Positioned over {destination_location or 'target slot'}",
-        }
-
-    def place_insert(
-        self,
-        *,
-        destination_location: str = "",
-        part_name: str = "",
-        product_geometry: dict[str, Any] | None = None,
-        orientation: str | None = None,
-    ) -> dict[str, Any]:
-        del product_geometry, orientation
-        if not self.wait_for_services():
-            return {
-                "success": False,
-                "message": self._unavailable_message("services not ready"),
-            }
-        ctx = self._active_ctx
-        if not ctx or ctx.get("place_z") is None:
-            return {"success": False, "message": "place_approach must complete first"}
-        if part_name and ctx.get("part_name") and part_name != ctx.get("part_name"):
-            self._log().warn(
-                f"place_insert requested {part_name} but active part is {ctx.get('part_name')}"
-            )
-
-        model_name = str(ctx.get("target_model") or "")
-        slot_x = _as_float(ctx.get("slot_x"), 0.0)
-        slot_y = _as_float(ctx.get("slot_y"), 0.0)
-        board_top_z = _as_float(ctx.get("board_top_z"), 1.025)
-        target_height = _as_float(ctx.get("target_height"), 0.08)
-        place_z = _as_float(ctx.get("place_z"), board_top_z + target_height)
-        travel_z = _as_float(ctx.get("travel_z"), 1.2)
-        ori = ctx.get("orientation")
-
-        time.sleep(self.release_preopen_settle_sec)
-
-        open_ok = self._gripper_command(
-            self.gripper_open,
-            "OPEN — releasing",
-            move_time_s=self.gripper_move_time_sec,
-            wait_s=self.gripper_settle_sec,
-            require_target=True,
-            log_target_miss=False,
-        )
-        if not open_ok:
-            open_ok = self._gripper_command(
-                self.gripper_open,
-                "OPEN — releasing (retry)",
-                move_time_s=max(1.2, self.gripper_move_time_sec * 2.0),
-                wait_s=max(0.20, self.gripper_settle_sec * 1.5),
-                require_target=True,
-                log_target_miss=False,
-            )
-        if not open_ok and self.execution_mode == "physical":
-            return {
-                "success": False,
-                "message": "failed to open gripper to release part",
-            }
-        time.sleep(self.release_postopen_settle_sec)
-
-        detached = False
-        attempts = max(1, 1 + self.release_detach_retry_count)
-        for attempt_idx in range(attempts):
-            if attempt_idx > 0:
-                if attempt_idx == 1 and self.release_retry_lift_m > 0.0:
-                    lift_z = place_z + self.release_retry_lift_m
-                    lift_ok = self._cartesian_move(
-                        self._make_pose(slot_x, slot_y, lift_z, ori),
-                        f"Release micro-lift +{self.release_retry_lift_m * 1000.0:.1f}mm",
-                        avoid_collisions=False,
-                        min_fraction=0.70,
-                        allow_partial=True,
-                        time_scale=self.release_descend_time_scale,
-                    )
-                    if not lift_ok:
-                        self._log().warn("Release micro-lift retry move failed")
-                time.sleep(self.release_detach_retry_delay_sec)
-
-            detached = self._detach_part(
-                model_name,
-                timeout_sec=self.release_detach_timeout_sec,
-                attached_link_only=(attempt_idx == 0),
-            )
-            if detached:
-                break
-            self._log().warn(
-                f"Detach attempt {attempt_idx + 1}/{attempts} failed for {model_name or 'held part'}"
-            )
-        if not detached:
-            self._log().warn("Detach still failed after retries")
-        time.sleep(self.release_postdetach_settle_sec)
-
-        if detached and model_name:
-            self._snap_part_to_slot(model_name, slot_x, slot_y, target_height, board_top_z)
-
-        lift_ok = self._cartesian_move(
-            self._make_pose(slot_x, slot_y, travel_z, ori),
-            "Lift after place",
-        )
-        if not lift_ok:
-            lift_ok = self._cartesian_move(
-                self._make_pose(slot_x, slot_y, travel_z, ori),
-                "Lift after place (no-collision)",
-                avoid_collisions=False,
-                min_fraction=0.70,
-                allow_partial=True,
-            )
-
-        if not detached:
-            self._detach_part(model_name, timeout_sec=self.release_detach_timeout_sec)
-
-        placed_part = str(ctx.get("part_name") or part_name or "")
-        self._active_ctx = {}
-        status = "completed" if (detached and lift_ok) else "partial"
-        return {
-            "success": bool(detached and lift_ok),
-            "status": status,
-            "message": f"Placed {placed_part} at {destination_location or 'target'}",
-        }
-
+    # ------------------------------------------------------------------ #
+    # Standalone utility methods (called directly by UI bridge / tests)
+    # ------------------------------------------------------------------ #
     def move_home(self) -> dict[str, Any]:
         if not self.wait_for_services():
             return {

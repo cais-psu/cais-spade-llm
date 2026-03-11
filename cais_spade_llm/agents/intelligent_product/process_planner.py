@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -443,6 +444,28 @@ class ProcessPlanner:
                         task_ids.append(candidate)
         return task_ids
 
+    async def _bridge_primitive_context(
+        self, target_jid: str
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+        resource = self._resource_by_jid(target_jid)
+        if resource is None or not hasattr(resource, "_BRIDGE_PRIMITIVES"):
+            return None, None
+
+        from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+            build_primitive_catalog,
+        )
+
+        try:
+            primitive_catalog = build_primitive_catalog(resource)
+            bridge_snapshot = await asyncio.to_thread(resource.get_bridge_snapshot)
+            return primitive_catalog or None, bridge_snapshot or None
+        except Exception:
+            self.logger.exception(
+                "[Planner] Failed to build primitive bridge context for %s",
+                target_jid,
+            )
+            return None, None
+
     def _identify_stuck_resource(
         self,
         violations: list[dict[str, Any]],
@@ -654,6 +677,7 @@ class ProcessPlanner:
             llm_explore_states_and_events,
         )
 
+        primitive_catalog, bridge_snapshot = await self._bridge_primitive_context(ra_jid)
         return await llm_explore_states_and_events(
             stuck_state=stuck_state,
             P_id=P_id,
@@ -665,15 +689,26 @@ class ProcessPlanner:
             part_tracker=part_tracker,
             obligation_targets=obligation_targets,
             operator_feedback=bridge_feedback,
+            primitive_catalog=primitive_catalog,
+            bridge_snapshot=bridge_snapshot,
         )
 
     def _bridge_summary(self, proposal: dict[str, Any] | None) -> list[str]:
         if not isinstance(proposal, dict):
             return []
         summary: list[str] = []
+        macro_name = str(proposal.get("macro_name", "")).strip()
+        if macro_name:
+            summary.append(macro_name)
         function_name = str(proposal.get("function_name", "")).strip()
         if function_name:
             summary.append(function_name)
+        for step in proposal.get("primitive_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            primitive = str(step.get("primitive", "")).strip()
+            if primitive:
+                summary.append(primitive)
         for step in proposal.get("macro_steps") or []:
             if not isinstance(step, dict):
                 continue
@@ -779,6 +814,11 @@ class ProcessPlanner:
         if not isinstance(proposal, dict):
             raise ValueError("bridge proposal is missing")
 
+        # Primitive-based proposal (new path): compile into one execute_recovery_macro node.
+        if proposal.get("primitive_steps"):
+            return self._apply_primitive_bridge_proposal(proposal, anchor_task_id=anchor_task_id)
+
+        # Legacy catalog-function-based proposal: compile into multiple task nodes.
         path: list[dict[str, Any]] = []
         proposal_name = str(proposal.get("function_name", "")).strip()
         for step in proposal.get("macro_steps") or []:
@@ -807,6 +847,73 @@ class ProcessPlanner:
         )
         self._apply_replan_patch(tasks)
         return tasks
+
+    def _apply_primitive_bridge_proposal(
+        self,
+        proposal: dict[str, Any],
+        *,
+        anchor_task_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Compile a primitive-based bridge proposal into one execute_recovery_macro task node."""
+        from uuid import uuid4
+
+        macro_name = str(proposal.get("macro_name", "bridge_recovery_macro")).strip()
+        resource_jid = str(proposal.get("resource_jid", "")).strip()
+        primitive_steps = proposal.get("primitive_steps") or []
+        expected_start_state = str(proposal.get("expected_start_state", "")).strip()
+        task_metadata = proposal.get("task_metadata") or {}
+
+        if not primitive_steps:
+            raise ValueError("bridge proposal has no primitive_steps")
+
+        task_id = f"RECOVERY_BRIDGE_{uuid4().hex[:6].upper()}"
+        predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
+
+        params: dict[str, Any] = {
+            "macro_name": macro_name,
+            "primitive_steps": list(primitive_steps),
+            "expected_start_state": expected_start_state,
+            "product_jid": str(self.product_agent.jid),
+            "task_id": task_id,
+        }
+        if proposal.get("expected_snapshot"):
+            params["expected_snapshot"] = dict(proposal["expected_snapshot"])
+        # Pass out_state so execute_recovery_macro can update agent state on success.
+        if task_metadata.get("out_state"):
+            params["out_state"] = str(task_metadata["out_state"])
+
+        step_summary = ", ".join(s.get("primitive", "?") for s in primitive_steps[:5])
+        if len(primitive_steps) > 5:
+            step_summary += f", ... ({len(primitive_steps)} total)"
+
+        task_node: dict[str, Any] = {
+            "id": task_id,
+            "function_name": "execute_recovery_macro",
+            "params": params,
+            "resource_jid": resource_jid,
+            "predecessors": [predecessor] if predecessor else [],
+            "successors": [],
+            "change_reason": (
+                f"INSERTION: Approved bridge recovery macro '{macro_name}' "
+                f"({len(primitive_steps)} primitives: {step_summary}) "
+                f"on {resource_jid}"
+            ),
+        }
+
+        # Attach node-level metadata for safety/FSA/tracking.
+        if task_metadata.get("in_state"):
+            task_node["in_state"] = str(task_metadata["in_state"])
+        if task_metadata.get("out_state"):
+            task_node["out_state"] = str(task_metadata["out_state"])
+        if task_metadata.get("required_context_keys"):
+            task_node["required_context_keys"] = list(task_metadata["required_context_keys"])
+        if task_metadata.get("context_mapping"):
+            task_node["context_mapping"] = dict(task_metadata["context_mapping"])
+        if task_metadata.get("part_transition"):
+            task_node["part_transition"] = dict(task_metadata["part_transition"])
+
+        self._apply_replan_patch([task_node])
+        return [task_node]
 
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
@@ -1709,13 +1816,24 @@ class ProcessPlanner:
             fallback_tool_meta_by_fn.setdefault(fn, row)
 
         def _tool_meta_for_task(task: dict[str, Any]) -> dict[str, Any]:
+            """Look up tool metadata, preferring node-level in_state/out_state for bridge macros."""
             resource = _resource_short_name(str(task.get("resource_jid", "")).strip())
             fn = str(task.get("function_name", "")).strip()
-            return (
+            catalog_meta = (
                 tool_meta_by_resource_fn.get((resource, fn))
                 or fallback_tool_meta_by_fn.get(fn)
                 or {}
             )
+            # Prefer node-level metadata (set by bridge macro proposals)
+            # over shared-catalog metadata.
+            if task.get("in_state") or task.get("out_state"):
+                merged = dict(catalog_meta)
+                if task.get("in_state"):
+                    merged["in_state"] = task["in_state"]
+                if task.get("out_state"):
+                    merged["out_state"] = task["out_state"]
+                return merged
+            return catalog_meta
 
         # ---- deterministic per-resource local order ----
         res_to_tasks: Dict[str, List[str]] = defaultdict(list)
