@@ -178,8 +178,8 @@ def _try_build_robot_agent(
             execution_mode=execution_mode,
             controller_config=env_block.get("controller", {}),
             named_positions=env_block.get("named_positions", {}),
-            sg_slippage_mode=meta.get("sg_slippage_mode", "off"),
-            sg_slippage_scope=meta.get("sg_slippage_scope", robot_name),
+            lcp_slippage_mode=meta.get("lcp_slippage_mode", "off"),
+            lcp_slippage_scope=meta.get("lcp_slippage_scope", robot_name),
         )
         return agent, ""
     except Exception as exc:

@@ -173,10 +173,10 @@ def create_resource_agents(
             if kind == "printing":
                 agent = PrintingAgent(jid, pw, **common)
             elif kind == "robot":
-                if "sg_slippage_mode" in meta:
-                    common["sg_slippage_mode"] = meta.get("sg_slippage_mode")
-                if "sg_slippage_scope" in meta:
-                    common["sg_slippage_scope"] = meta.get("sg_slippage_scope")
+                if "lcp_slippage_mode" in meta:
+                    common["lcp_slippage_mode"] = meta.get("lcp_slippage_mode")
+                if "lcp_slippage_scope" in meta:
+                    common["lcp_slippage_scope"] = meta.get("lcp_slippage_scope")
                 common["execution_mode"] = _EXECUTION_MODE_OVERRIDE or str(
                     env_block.get("execution_mode", meta.get("execution_mode", "dry_run"))
                 ).strip().lower()

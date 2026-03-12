@@ -13,8 +13,8 @@
       "place_insert",
       "move_home"
     ],
-    "sg_slippage_mode": "off",
-    "sg_slippage_scope": "ur5e",
+    "lcp_slippage_mode": "off",
+    "lcp_slippage_scope": "ur5e",
     "gazebo": {
       "static_capabilities": {
         "reachability": [

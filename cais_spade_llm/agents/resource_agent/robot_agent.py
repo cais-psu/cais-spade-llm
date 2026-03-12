@@ -24,17 +24,17 @@ class RobotAgent(ResourceAgent):
     _DEFAULT_PREWARM_TIMEOUT_S = 60.0
 
     def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
-        # Failure-injection controls for SG placement tests.
-        # - always: fail every qualifying SG place
-        # - once: fail first qualifying SG place, then allow
-        # - off: never inject SG slippage failures
-        sg_slippage_mode = str(kw.pop("sg_slippage_mode", "always")).lower()
-        if sg_slippage_mode not in {"always", "once", "off"}:
-            sg_slippage_mode = "always"
-        self.sg_slippage_mode = sg_slippage_mode
+        # Failure-injection controls for LCP placement tests.
+        # - always: fail every qualifying LCP place
+        # - once: fail first qualifying LCP place, then allow
+        # - off: never inject LCP slippage failures
+        lcp_slippage_mode = str(kw.pop("lcp_slippage_mode", "always")).lower()
+        if lcp_slippage_mode not in {"always", "once", "off"}:
+            lcp_slippage_mode = "always"
+        self.lcp_slippage_mode = lcp_slippage_mode
         # Scope to one robot by name ("xarm6"), or "any".
-        self.sg_slippage_scope = str(kw.pop("sg_slippage_scope", "xarm6")).lower()
-        self._sg_slippage_triggered = False
+        self.lcp_slippage_scope = str(kw.pop("lcp_slippage_scope", "xarm6")).lower()
+        self._lcp_slippage_triggered = False
 
         # Controller config from the environment-specific robot JSON block.
         controller_config = kw.pop("controller_config", {})
@@ -103,13 +103,13 @@ class RobotAgent(ResourceAgent):
         self.logger.info(
             (
                 "RobotAgent '%s' initialized. mode=%s tools=%s "
-                "sg_slippage_mode=%s sg_slippage_scope=%s"
+                "lcp_slippage_mode=%s lcp_slippage_scope=%s"
             ),
             name,
             self.execution_mode,
             list(self.executables.keys()),
-            self.sg_slippage_mode,
-            self.sg_slippage_scope,
+            self.lcp_slippage_mode,
+            self.lcp_slippage_scope,
         )
 
     async def teardown(self) -> None:
@@ -171,20 +171,20 @@ class RobotAgent(ResourceAgent):
             return ref
         return f"{ref}@{self._jid_domain()}"
 
-    def _should_inject_sg_slippage(self, target_part_name: str) -> bool:
-        """Return True if SG slippage should be injected for this placement."""
-        if str(target_part_name) != "SG":
+    def _should_inject_lcp_slippage(self, target_part_name: str) -> bool:
+        """Return True if LCP slippage should be injected for this placement."""
+        if str(target_part_name) != "LCP":
             return False
-        if self.sg_slippage_mode == "off":
-            return False
-
-        if self.sg_slippage_scope not in ("any", self._robot_scope_name()):
+        if self.lcp_slippage_mode == "off":
             return False
 
-        if self.sg_slippage_mode == "once" and self._sg_slippage_triggered:
+        if self.lcp_slippage_scope not in ("any", self._robot_scope_name()):
             return False
 
-        self._sg_slippage_triggered = True
+        if self.lcp_slippage_mode == "once" and self._lcp_slippage_triggered:
+            return False
+
+        self._lcp_slippage_triggered = True
         return True
 
     def _build_controller(self):
@@ -616,6 +616,22 @@ class RobotAgent(ResourceAgent):
                         observations={"part_name": part_name, "model_name": model_name},
                     )
 
+            # Lift part to travel height after grasping.
+            travel_z = self._pick_ctx.get("travel_z", 1.2)
+            tx = self._pick_ctx.get("tx", 0.0)
+            ty = self._pick_ctx.get("ty", 0.0)
+            self._log_step("pick_grasp", "lifting part", z=f"{travel_z:.3f}")
+            r = await self._execute_controller_helper(
+                "_move_pose_direct",
+                {"x": tx, "y": ty, "z": travel_z, "label": "Lift after grasp"},
+            )
+            if not r.get("success"):
+                return self._task_failure(
+                    str(r.get("message") or "failed to lift after grasp"),
+                    step="pick_grasp.lift",
+                    observations={"part_name": part_name},
+                )
+
         self._held_part = part_name
         self._current_state = "picked"
         self._gripper_state = "closed"
@@ -729,20 +745,7 @@ class RobotAgent(ResourceAgent):
             travel_z=f"{travel_z:.3f}",
         )
 
-        # Lift with part to travel height.
-        self._log_step("place_approach", "lifting part", z=f"{travel_z:.3f}")
-        r = await self._execute_controller_helper(
-            "_move_pose_direct",
-            {"x": tx, "y": ty, "z": travel_z, "label": "Lift with part"},
-        )
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to lift with part"),
-                step="place_approach.lift",
-                observations={"part_name": self._held_part},
-            )
-
-        # Move laterally above destination.
+        # Move laterally above destination (already at travel_z from pick_grasp lift).
         self._log_step("place_approach", "moving above destination")
         r = await self._execute_controller_helper(
             "_move_xy_at_z",
@@ -863,12 +866,36 @@ class RobotAgent(ResourceAgent):
             return {"status": "blocked", "content": msg}
 
         placed_target = part_name or self._held_part
-        if self._should_inject_sg_slippage(placed_target):
+        if self._should_inject_lcp_slippage(placed_target):
             self.logger.error("[Robot] Assembly verification failed for %s.", placed_target)
+
+            # -- Gazebo: simulate failed insertion → part rolls to UR5e area --
+            drop_x, drop_y, drop_z = 0.10, 0.35, 1.035
+            if self.execution_mode != "dry_run":
+                model_name = self._pick_ctx.get("model_name", "")
+                if model_name and self._controller is not None:
+                    await asyncio.to_thread(
+                        self._controller.detach_part, model_name
+                    )
+                    # Place on its side near UR5e base (Y=+0.35).
+                    # 90° around X-axis: cylinder fully on side, stable.
+                    await asyncio.to_thread(
+                        self._controller.set_entity_pose,
+                        model_name,
+                        x=drop_x, y=drop_y, z=drop_z,
+                        qx=0.7071, qy=0.0, qz=0.0, qw=0.7071,
+                    )
+                    self.logger.warning(
+                        "[Robot] LCP slippage: %s rolled to UR5e table area "
+                        "(%.2f, %.2f, %.2f)",
+                        model_name, drop_x, drop_y, drop_z,
+                    )
+                    await asyncio.to_thread(self._controller.open_gripper)
 
             self._held_part = None
             self._current_state = "recovery_required"
             self._gripper_state = "open"
+            self._pick_ctx = {}
 
             return {
                 "status": "failed",
@@ -877,12 +904,18 @@ class RobotAgent(ResourceAgent):
                     "gripper_force": 0.0,
                     "camera_detection": {
                         "object_found": True,
-                        "zone": f"{self._robot_scope_name()}_workspace",
+                        "zone": "assembly_board_v1",
                         "shape_match_confidence": 0.85,
-                        "orientation": "upright",
+                        "orientation": "on_side",
                         "visible_damage": False,
                     },
                     "last_commanded_location": destination_location,
+                    "dropped_location": {
+                        "x": drop_x, "y": drop_y, "z": drop_z,
+                        "region": "ur5e_workspace",
+                        "near": "ur5e_base",
+                        "description": "Rolled off assembly board to UR5e table area",
+                    },
                 },
             }
 

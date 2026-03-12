@@ -4759,6 +4759,7 @@ class SystemBridge:
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
         self._kill_stale_gazebo_helpers()
+        self._cleanup_shm_and_tmp()
 
     def ros2_cleanup_processes(self) -> None:
         """Aggressively clean stale ROS2/MoveIt/driver processes without killing the UI."""
@@ -4782,8 +4783,25 @@ class SystemBridge:
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
         self._kill_stale_gazebo_helpers()
+        self._cleanup_shm_and_tmp()
 
         self._ros2_procs = {k: p for k, p in self._ros2_procs.items() if p.poll() is None}
+
+    @staticmethod
+    def _cleanup_shm_and_tmp() -> None:
+        """Remove stale DDS shared-memory and Gazebo temp/lock files (WSL2)."""
+        import time
+        for pattern in [
+            "/dev/shm/fastrtps_*",
+            "/dev/shm/cyclonedds_*",
+            "/tmp/gazebo-*",
+            "/tmp/.gazebo-*",
+        ]:
+            subprocess.run(
+                ["bash", "-c", f"rm -rf {pattern} 2>/dev/null"],
+                capture_output=True, timeout=5,
+            )
+        time.sleep(3)
 
     @staticmethod
     def _tail_output(text: str) -> str:

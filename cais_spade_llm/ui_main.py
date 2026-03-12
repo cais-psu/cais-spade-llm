@@ -21,12 +21,11 @@ import subprocess
 import sys
 import warnings
 
-# When launched as a script (e.g. `python cais_spade_llm/ui_main.py`), add the
-# repo root so the package is imported through a single `cais_spade_llm.*`
-# module graph instead of mixed top-level/package aliases.
-_repo_root = os.path.dirname(os.path.dirname(__file__))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
+# Ensure the cais_spade_llm package directory is on sys.path so that
+# agent_creator, utils, etc. can be imported the same way spade_main.py does.
+_pkg_dir = os.path.join(os.path.dirname(__file__))
+if _pkg_dir not in sys.path:
+    sys.path.insert(0, _pkg_dir)
 
 # Silence noisy third-party loggers.
 for _name in ("pyjabber", "winloop", "asyncio"):
@@ -37,9 +36,9 @@ warnings.filterwarnings("ignore", message="Unknown stanza interface")
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
     from spade import run as spade_run
-    from cais_spade_llm import agent_creator, utils
-    from cais_spade_llm.function_analyzer import FunctionAnalyzer
-    from cais_spade_llm.agent_creator import ALLOWED_FUNCS
+    import utils, agent_creator
+    from function_analyzer import FunctionAnalyzer
+    from agent_creator import ALLOWED_FUNCS
     from cais_spade_llm.ui.bridge import SystemBridge
 
     async def _main():
@@ -104,6 +103,7 @@ _KILL_CMDS: list[str] = [
     "pkill -9 -f xarm_driver_node 2>/dev/null",
     "pkill -9 -f controller_manager 2>/dev/null",
     "pkill -9 -f ur_robot_driver 2>/dev/null",
+    "pkill -9 -f robot_state_publisher 2>/dev/null",
 ]
 
 
@@ -125,26 +125,42 @@ def _kill_stale_ros2_processes(*, quiet: bool = False) -> None:
                 killed_any = True
         except Exception:
             pass
-    if killed_any and not quiet:
-        log.info("Startup cleanup: killed stale ROS2/Gazebo processes from previous session.")
+    if killed_any:
+        # Give OS time to release ports/shared memory (critical on WSL2)
+        import time
+        time.sleep(3)
+        if not quiet:
+            log.info("Startup cleanup: killed stale ROS2/Gazebo processes from previous session.")
 
 
 def _cleanup_ros2_shm() -> None:
-    """Remove stale ROS2 shared-memory segments that accumulate in WSL."""
+    """Remove stale ROS2/DDS shared-memory and Gazebo temp files (WSL2)."""
     log = logging.getLogger("ui_main")
-    try:
-        result = subprocess.run(
-            ["bash", "-c", "ls /dev/shm/fastrtps_* 2>/dev/null"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.stdout.strip():
-            subprocess.run(
-                ["bash", "-c", "rm -f /dev/shm/fastrtps_* 2>/dev/null"],
-                capture_output=True, timeout=5,
+    shm_patterns = [
+        "/dev/shm/fastrtps_*",
+        "/dev/shm/cyclonedds_*",
+    ]
+    tmp_patterns = [
+        "/tmp/gazebo-*",
+        "/tmp/.gazebo-*",
+    ]
+    cleaned = False
+    for pattern in shm_patterns + tmp_patterns:
+        try:
+            result = subprocess.run(
+                ["bash", "-c", f"ls {pattern} 2>/dev/null"],
+                capture_output=True, text=True, timeout=5,
             )
-            log.info("Startup cleanup: removed stale ROS2 shared-memory files.")
-    except Exception:
-        pass
+            if result.stdout.strip():
+                subprocess.run(
+                    ["bash", "-c", f"rm -rf {pattern} 2>/dev/null"],
+                    capture_output=True, timeout=5,
+                )
+                cleaned = True
+        except Exception:
+            pass
+    if cleaned:
+        log.info("Startup cleanup: removed stale shared-memory / Gazebo temp files.")
 
 
 def _install_exit_cleanup() -> None:
@@ -175,7 +191,7 @@ def _run_ui() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CAIS-SP ADE-LLM: multi-agent manufacturing system",
+        description="CAIS-SPADE-LLM: multi-agent manufacturing system",
     )
     parser.add_argument(
         "--headless",

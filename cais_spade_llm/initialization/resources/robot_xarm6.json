@@ -13,8 +13,8 @@
       "place_insert",
       "move_home"
     ],
-    "sg_slippage_mode": "once",
-    "sg_slippage_scope": "xarm6",
+    "lcp_slippage_mode": "once",
+    "lcp_slippage_scope": "xarm6",
     "gazebo": {
       "static_capabilities": {
         "reachability": [

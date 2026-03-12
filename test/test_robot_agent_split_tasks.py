@@ -227,8 +227,8 @@ def _build_agent(controller: _FakeController | None = None) -> tuple[RobotAgent,
         controller_config={"motion": {}},
         named_positions={"home": [0, 1, 2, 3, 4, 5]},
         prewarmed_controller=fake,
-        sg_slippage_mode="off",
-        sg_slippage_scope="ur5e",
+        lcp_slippage_mode="off",
+        lcp_slippage_scope="ur5e",
     )
     return agent, fake
 
@@ -334,19 +334,17 @@ def test_place_insert_and_move_home_preserve_split_task_path() -> None:
     call_names = [name for name, _payload in controller.calls]
     assert call_names == [
         "compute_place_targets",
-        "_move_pose_direct",
         "_move_xy_at_z",
         "_move_pose_direct",
         "_release_part_sequence",
         "move_home",
         "get_current_pose",
     ]
-    assert controller.calls[1][1]["label"] == "Lift with part"
-    assert controller.calls[2][1]["label"] == "Move above destination"
-    assert controller.calls[2][1]["speed"] == 0.5
-    assert "Descend to place" in controller.calls[3][1]["label"]
-    assert controller.calls[3][1]["speed"] == controller.release_descend_time_scale
-    assert controller.calls[4][1]["model_name"] == "circ_pin_medium"
+    assert controller.calls[1][1]["label"] == "Move above destination"
+    assert controller.calls[1][1]["speed"] == 0.5
+    assert "Descend to place" in controller.calls[2][1]["label"]
+    assert controller.calls[2][1]["speed"] == controller.release_descend_time_scale
+    assert controller.calls[3][1]["model_name"] == "circ_pin_medium"
 
 
 def test_execute_recovery_macro_binds_detected_part_pose_to_move_cartesian() -> None:
