@@ -201,6 +201,34 @@ def test_base_safety_checker_requires_all_composite_pairs_when_param_keys_exist(
     assert mismatched == []
 
 
+def test_base_safety_checker_treats_any_value_in_composite_context_as_wildcard() -> None:
+    checker = BaseSafetyChecker(
+        dfa_map={},
+        safety_rules=[
+            {
+                "context": {},
+                "aps": [
+                    {
+                        "label": "ap001",
+                        "full": "ap/assembly/any/xarm6/place_insert/destination=any",
+                    }
+                ],
+            }
+        ],
+    )
+
+    labels = checker._map_task_to_aps(
+        resource_jid="xarm6@localhost",
+        function_name="place_insert",
+        params={
+            "part_name": "LCP",
+            "destination_location": "Assembly Station",
+        },
+    )
+
+    assert labels == ["ap001"]
+
+
 def test_base_safety_checker_preserves_legacy_single_token_context_matching() -> None:
     checker = BaseSafetyChecker(
         dfa_map={},

@@ -1068,6 +1068,7 @@ class RobotAgent(ResourceAgent):
     # Controller primitives available for bridge macro steps.
     _BRIDGE_PRIMITIVES = frozenset({
         "move_cartesian",
+        "move_pose",
         "move_relative",
         "move_to_named_pose",
         "open_gripper",

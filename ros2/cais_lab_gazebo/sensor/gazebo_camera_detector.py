@@ -80,7 +80,7 @@ class PerceptionNode(Node):
             )
 
     def _get_part_pose(self, model_name: str):
-        """Query Gazebo for a model's world pose. Returns (x, y, z) or None."""
+        """Query Gazebo for a model's world pose. Returns a pose dict or None."""
         if not self._get_state_client.service_is_ready():
             self.get_logger().warn("Gazebo service not ready")
             return None
@@ -107,17 +107,29 @@ class PerceptionNode(Node):
             return None
 
         pos = result.state.pose.position
-        return (pos.x, pos.y, pos.z)
+        ori = result.state.pose.orientation
+        return {
+            "x": pos.x,
+            "y": pos.y,
+            "z": pos.z,
+            "qx": ori.x,
+            "qy": ori.y,
+            "qz": ori.z,
+            "qw": ori.w,
+        }
 
     @staticmethod
-    def _detection_dict(part_id: str, model_name: str, pose: tuple[float, float, float]) -> dict:
-        x, y, z = pose
+    def _detection_dict(part_id: str, model_name: str, pose: dict) -> dict:
         return {
             "part_name": part_id,
             "model_name": model_name,
-            "x": round(float(x), 4),
-            "y": round(float(y), 4),
-            "z": round(float(z), 4),
+            "x": round(float(pose["x"]), 4),
+            "y": round(float(pose["y"]), 4),
+            "z": round(float(pose["z"]), 4),
+            "qx": round(float(pose["qx"]), 6),
+            "qy": round(float(pose["qy"]), 6),
+            "qz": round(float(pose["qz"]), 6),
+            "qw": round(float(pose["qw"]), 6),
         }
 
     def _all_detections(self) -> list[dict]:
@@ -159,6 +171,10 @@ class PerceptionNode(Node):
                     "x": det["x"],
                     "y": det["y"],
                     "z": det["z"],
+                    "qx": det["qx"],
+                    "qy": det["qy"],
+                    "qz": det["qz"],
+                    "qw": det["qw"],
                     "detected": True,
                 }
             )

@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -5549,13 +5550,25 @@ class SystemBridge:
         raise ValueError(f"product agent not found: {target}")
 
     @staticmethod
-    def _run_product_agent_coroutine(agent: Any, coroutine: Any, *, timeout_sec: float = 20.0) -> Any:
+    def _run_product_agent_coroutine(
+        agent: Any,
+        coroutine: Any,
+        *,
+        timeout_sec: float = 20.0,
+        operation_name: str = "product agent request",
+    ) -> Any:
         loop = getattr(agent, "loop", None)
         if loop is None:
             raise RuntimeError("product agent loop is unavailable")
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         try:
             return future.result(timeout=max(1.0, float(timeout_sec)))
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise RuntimeError(
+                f"{str(operation_name or 'product agent request').strip() or 'product agent request'} "
+                f"timed out after {max(1.0, float(timeout_sec)):.0f}s"
+            ) from exc
         except Exception:
             future.cancel()
             raise
@@ -5600,14 +5613,69 @@ class SystemBridge:
             raise RuntimeError("product agent does not support DES runtime recovery retry")
         return self._run_product_agent_coroutine(agent, retry())
 
+    def generate_runtime_bridge_proposal(self, product_jid: str) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        generate = getattr(agent, "generate_runtime_bridge_proposal", None)
+        if not callable(generate):
+            raise RuntimeError("product agent does not support runtime bridge generation")
+        return self._run_product_agent_coroutine(agent, generate())
+
+    def load_preprogrammed_runtime_bridge_scenario(
+        self,
+        product_jid: str,
+        scenario_id: str,
+    ) -> dict[str, Any]:
+        if not self.system_running:
+            raise RuntimeError("system is not running")
+        agent = self._find_product_agent(product_jid)
+        loader = getattr(agent, "load_preprogrammed_runtime_bridge_scenario", None)
+        loader_sync = getattr(agent, "load_preprogrammed_runtime_bridge_scenario_sync", None)
+        if not callable(loader):
+            if not callable(loader_sync):
+                raise RuntimeError("product agent does not support preprogrammed runtime bridge scenarios")
+        log.info(
+            "[ui.bridge] Loading preprogrammed runtime bridge scenario product=%s scenario=%s",
+            product_jid,
+            scenario_id,
+        )
+        if callable(loader_sync):
+            log.info(
+                "[ui.bridge] Using direct sync path for preprogrammed runtime bridge scenario product=%s scenario=%s",
+                product_jid,
+                scenario_id,
+            )
+            return loader_sync(scenario_id)
+        return self._run_product_agent_coroutine(
+            agent,
+            loader(scenario_id),
+            timeout_sec=60.0,
+            operation_name="loading preprogrammed recovery scenario",
+        )
+
     def approve_runtime_bridge_proposal(self, product_jid: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
         approve = getattr(agent, "approve_runtime_bridge_proposal", None)
+        approve_sync = getattr(agent, "approve_runtime_bridge_proposal_sync", None)
         if not callable(approve):
-            raise RuntimeError("product agent does not support runtime bridge approval")
-        return self._run_product_agent_coroutine(agent, approve())
+            if not callable(approve_sync):
+                raise RuntimeError("product agent does not support runtime bridge approval")
+        log.info("[ui.bridge] Approving runtime bridge proposal product=%s", product_jid)
+        if callable(approve_sync):
+            log.info(
+                "[ui.bridge] Using direct sync path for runtime bridge approval product=%s",
+                product_jid,
+            )
+            return approve_sync()
+        return self._run_product_agent_coroutine(
+            agent,
+            approve(),
+            timeout_sec=60.0,
+            operation_name="approving bridge proposal",
+        )
 
     def reject_runtime_bridge_proposal(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:

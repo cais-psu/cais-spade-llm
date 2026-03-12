@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,11 +23,17 @@ _MODE_MAP = {
     "Physical": "physical",
 }
 _MODE_LABELS = list(_MODE_MAP.keys())
+logger = logging.getLogger(__name__)
 
 
 def render(bridge: SystemBridge) -> None:
     client = context.client
     timers: list[Any] = []
+
+    def _notify(message: Any, **kwargs: Any) -> None:
+        if getattr(client, "_deleted", False):
+            return
+        client.safe_invoke(lambda: ui.notify(message, **kwargs))
 
     def _managed_timer(interval: float, callback, **kwargs):
         def _safe_callback():
@@ -755,14 +762,18 @@ def render(bridge: SystemBridge) -> None:
 
         # ── Runtime Safety State ────────────────────────────────────
         with ui.card().classes("w-full"):
-            ui.label("Runtime Safety State").classes("text-lg font-semibold mb-2")
-            runtime_safety_state = ui.code("{}", language="json").classes("w-full")
+            with ui.expansion(
+                "Runtime Safety State",
+                icon="shield",
+                value=False,
+            ).classes("w-full"):
+                runtime_safety_state = ui.code("{}", language="json").classes("w-full")
 
             def _refresh_runtime_safety_state():
                 ss = bridge.get_safety_state()
                 runtime_safety_state.content = json.dumps(ss, indent=2, default=str) if ss else "{}"
 
-            _managed_timer(2.0, _refresh_runtime_safety_state)
+            _managed_timer(5.0, _refresh_runtime_safety_state)
 
         # ── Replan / Recovery ───────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -774,11 +785,122 @@ def render(bridge: SystemBridge) -> None:
 
             guidance_buffers: dict[str, str] = {}
             bridge_feedback_buffers: dict[str, str] = {}
+            preprogrammed_bridge_buffers: dict[str, str] = {}
+            action_feedback_buffers: dict[str, dict[str, str]] = {}
+            pending_action_buffers: dict[str, str] = {}
+
+            def _json_text(value: Any) -> str:
+                if isinstance(value, str):
+                    return value
+                try:
+                    return json.dumps(value, indent=2, default=str)
+                except Exception:
+                    return str(value)
+
+            def _preview_text(value: Any, *, max_chars: int = 1400) -> str:
+                text = str(value or "").strip()
+                if len(text) <= max_chars:
+                    return text
+                return f"{text[:max_chars].rstrip()}\n...[truncated]"
+
+            def _set_action_feedback(product_jid: str, kind: str, text: str) -> None:
+                jid = str(product_jid or "").strip()
+                message = str(text or "").strip()
+                if not jid:
+                    return
+                if not message:
+                    action_feedback_buffers.pop(jid, None)
+                    return
+                action_feedback_buffers[jid] = {
+                    "kind": str(kind or "info").strip().lower() or "info",
+                    "text": message,
+                }
+
+            def _queue_runtime_action(
+                product_jid: str,
+                *,
+                action_label: str,
+                runner: Callable[[str], asyncio.Future[Any] | asyncio.Task[Any] | Any],
+            ) -> None:
+                jid = str(product_jid or "").strip()
+                label = str(action_label or "Action").strip() or "Action"
+                pending_label = str(pending_action_buffers.get(jid, "")).strip()
+                if pending_label:
+                    logger.warning(
+                        "[Dashboard] Runtime recovery action ignored while pending: requested=%s pending=%s product=%s",
+                        label,
+                        pending_label,
+                        jid,
+                    )
+                    _set_action_feedback(
+                        jid,
+                        "warning",
+                        f"{pending_label} is already in progress.",
+                    )
+                    _notify(f"{pending_label} is already in progress.", type="warning")
+                    return
+                pending_action_buffers[jid] = label
+                logger.info("[Dashboard] Runtime recovery action requested: %s product=%s", label, jid)
+                _set_action_feedback(jid, "info", f"{label} requested...")
+                _notify(f"{label} requested.", type="info")
+                asyncio.create_task(runner(jid))
+
+            def _bridge_task_rows_for_display(
+                task_ids: list[str],
+                *,
+                node_lookup: dict[str, dict[str, Any]],
+                task_states: dict[str, str],
+                fallback_rows: list[dict[str, Any]] | None = None,
+            ) -> list[dict[str, Any]]:
+                rows: list[dict[str, Any]] = []
+                fallback_lookup = {
+                    str(row.get("id", "")).strip(): row
+                    for row in (fallback_rows or [])
+                    if isinstance(row, dict) and str(row.get("id", "")).strip()
+                }
+                seen: set[str] = set()
+                for task_id in task_ids:
+                    task_key = str(task_id or "").strip()
+                    if not task_key or task_key in seen:
+                        continue
+                    seen.add(task_key)
+                    row = dict(fallback_lookup.get(task_key) or {})
+                    node = node_lookup.get(task_key)
+                    if isinstance(node, dict):
+                        row.update(
+                            {
+                                "id": task_key,
+                                "function_name": str(node.get("function_name", "")).strip(),
+                                "resource_jid": str(node.get("resource_jid", "")).strip(),
+                                "status": str(
+                                    task_states.get(
+                                        task_key,
+                                        node.get("status", ""),
+                                    )
+                                    or ""
+                                ).strip(),
+                                "predecessors": list(node.get("predecessors") or []),
+                                "successors": list(node.get("successors") or []),
+                                "params": dict(node.get("params") or {}),
+                                "bridge_sequence_id": str(node.get("bridge_sequence_id", "")).strip(),
+                                "bridge_sequence_index": int(node.get("bridge_sequence_index") or 0),
+                                "bridge_sequence_length": int(node.get("bridge_sequence_length") or 0),
+                                "primary_obligation": dict(node.get("primary_obligation") or {}),
+                                "change_reason": str(node.get("change_reason", "")).strip(),
+                            }
+                        )
+                    else:
+                        row.setdefault("id", task_key)
+                        row.setdefault("status", str(task_states.get(task_key, "missing") or "missing"))
+                    rows.append(row)
+                return rows
 
             def _status_color(status: str) -> str:
                 key = str(status or "").strip().lower()
                 if key == "resolved":
                     return "green"
+                if key == "bridge_ready":
+                    return "orange"
                 if key == "human_required":
                     return "red"
                 if key in {"des_search", "llm_bridge", "validating"}:
@@ -789,7 +911,8 @@ def render(bridge: SystemBridge) -> None:
                 labels = {
                     "idle": "Idle",
                     "des_search": "DES search",
-                    "llm_bridge": "LLM bridge",
+                    "bridge_ready": "Bridge ready",
+                    "llm_bridge": "Bridge proposal",
                     "validating": "Plan validation",
                     "human_required": "Human intervention",
                     "resolved": "Resolved",
@@ -821,7 +944,8 @@ def render(bridge: SystemBridge) -> None:
                 badges: list[tuple[str, str]] = []
                 stages = [
                     ("des_search", "DES search"),
-                    ("llm_bridge", "LLM bridge"),
+                    ("bridge_ready", "Bridge review"),
+                    ("llm_bridge", "Bridge proposal"),
                     ("validating", "Plan validation"),
                     ("human_required", "Human intervention"),
                 ]
@@ -830,13 +954,24 @@ def render(bridge: SystemBridge) -> None:
                     if status == "resolved":
                         if key == "des_search":
                             color = "green"
+                        elif key == "bridge_ready" and str(
+                            recovery.get("bridge_approval_state", "none") or "none"
+                        ).strip().lower() in {"ready", "pending", "approved"}:
+                            color = "green"
                         elif key == "llm_bridge" and used_bridge:
                             color = "green"
                         elif key == "validating":
                             color = "green"
                     elif status == key:
-                        color = "red" if key == "human_required" else "blue"
-                    elif key == "des_search" and status in {"llm_bridge", "validating", "human_required"}:
+                        if key == "human_required":
+                            color = "red"
+                        elif key == "bridge_ready":
+                            color = "orange"
+                        else:
+                            color = "blue"
+                    elif key == "des_search" and status in {"bridge_ready", "llm_bridge", "validating", "human_required"}:
+                        color = "green"
+                    elif key == "bridge_ready" and status in {"llm_bridge", "validating", "human_required"}:
                         color = "green"
                     elif key == "llm_bridge" and used_bridge and status in {"validating", "human_required"}:
                         color = "green"
@@ -848,7 +983,9 @@ def render(bridge: SystemBridge) -> None:
             async def _submit_runtime_guidance(product_jid: str) -> None:
                 message = str(guidance_buffers.get(product_jid, "")).strip()
                 if not message:
-                    ui.notify("Operator guidance is empty.", type="warning")
+                    _set_action_feedback(product_jid, "warning", "Operator guidance is empty.")
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _notify("Operator guidance is empty.", type="warning")
                     return
                 try:
                     await asyncio.to_thread(
@@ -857,31 +994,122 @@ def render(bridge: SystemBridge) -> None:
                         message,
                     )
                     guidance_buffers[product_jid] = ""
-                    ui.notify("Operator guidance recorded.", type="positive")
-                    _refresh_runtime_recovery_panel()
+                    _set_action_feedback(product_jid, "positive", "Operator guidance recorded.")
+                    _notify("Operator guidance recorded.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
-                    ui.notify(f"Failed to record guidance: {exc}", type="negative")
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to record guidance: {exc}",
+                    )
+                    _notify(f"Failed to record guidance: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
 
             async def _retry_runtime_des(product_jid: str) -> None:
                 try:
                     await asyncio.to_thread(bridge.retry_runtime_recovery_des, product_jid)
-                    ui.notify("Runtime DES recovery retry started.", type="positive")
-                    _refresh_runtime_recovery_panel()
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Runtime DES recovery retry started.",
+                    )
+                    _notify("Runtime DES recovery retry started.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
-                    ui.notify(f"Failed to retry DES recovery: {exc}", type="negative")
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to retry DES recovery: {exc}",
+                    )
+                    _notify(f"Failed to retry DES recovery: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+
+            async def _run_runtime_bridge(product_jid: str) -> None:
+                try:
+                    await asyncio.to_thread(bridge.generate_runtime_bridge_proposal, product_jid)
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "LLM bridge exploration started from the prepared request.",
+                    )
+                    _notify("LLM bridge exploration started from the prepared request.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to start LLM bridge exploration: {exc}",
+                    )
+                    _notify(f"Failed to start LLM bridge exploration: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+
+            async def _load_preprogrammed_runtime_bridge(product_jid: str) -> None:
+                scenario_id = str(
+                    preprogrammed_bridge_buffers.get(product_jid, "recover_lcp_sideways_v1")
+                    or "recover_lcp_sideways_v1"
+                ).strip()
+                if not scenario_id:
+                    _set_action_feedback(
+                        product_jid,
+                        "warning",
+                        "No preprogrammed recovery scenario is selected.",
+                    )
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _notify("No preprogrammed recovery scenario is selected.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.load_preprogrammed_runtime_bridge_scenario,
+                        product_jid,
+                        scenario_id,
+                    )
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Preprogrammed recovery scenario loaded for review.",
+                    )
+                    _notify("Preprogrammed recovery scenario loaded for review.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to load preprogrammed recovery scenario: {exc}",
+                    )
+                    _notify(f"Failed to load preprogrammed recovery scenario: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
 
             async def _approve_runtime_bridge(product_jid: str) -> None:
                 try:
                     await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
-                    ui.notify("Bridge proposal approved. Runtime recovery resumed.", type="positive")
-                    _refresh_runtime_recovery_panel()
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Bridge proposal approved. Waiting for runtime plan validation.",
+                    )
+                    _notify("Bridge proposal approved. Waiting for runtime plan validation.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
-                    ui.notify(f"Failed to approve bridge proposal: {exc}", type="negative")
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to approve bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to approve bridge proposal: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
 
             async def _reject_runtime_bridge(product_jid: str) -> None:
                 feedback = str(bridge_feedback_buffers.get(product_jid, "")).strip()
                 if not feedback:
-                    ui.notify("Bridge rejection feedback is empty.", type="warning")
+                    _set_action_feedback(product_jid, "warning", "Bridge rejection feedback is empty.")
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _notify("Bridge rejection feedback is empty.", type="warning")
                     return
                 try:
                     await asyncio.to_thread(
@@ -890,10 +1118,25 @@ def render(bridge: SystemBridge) -> None:
                         feedback,
                     )
                     bridge_feedback_buffers[product_jid] = ""
-                    ui.notify("Bridge proposal rejected. Regenerating with feedback.", type="positive")
-                    _refresh_runtime_recovery_panel()
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Bridge proposal rejected. The next bridge request is prepared for another attempt.",
+                    )
+                    _notify(
+                        "Bridge proposal rejected. The next bridge request is prepared; run the LLM again when ready.",
+                        type="positive",
+                    )
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
-                    ui.notify(f"Failed to reject bridge proposal: {exc}", type="negative")
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to reject bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to reject bridge proposal: {exc}", type="negative")
+                finally:
+                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
 
             def _refresh_runtime_recovery_panel() -> None:
                 runtime_recovery_container.clear()
@@ -902,6 +1145,14 @@ def render(bridge: SystemBridge) -> None:
                     with runtime_recovery_container:
                         ui.label("No runtime recovery sessions.").classes("text-slate-400 italic")
                     return
+
+                nodes = _preview_or_runtime_nodes()
+                task_states = _preview_or_runtime_task_states(nodes)
+                node_lookup = {
+                    str(node.get("id") or node.get("task_id") or "").strip(): node
+                    for node in nodes
+                    if isinstance(node, dict) and str(node.get("id") or node.get("task_id") or "").strip()
+                }
 
                 with runtime_recovery_container:
                     for recovery in recoveries:
@@ -927,12 +1178,35 @@ def render(bridge: SystemBridge) -> None:
                             bridge_feedback_buffers.get(product_jid, "")
                             or ""
                         )
+                        selected_preprogrammed = str(
+                            preprogrammed_bridge_buffers.get(
+                                product_jid,
+                                "recover_lcp_sideways_v1",
+                            )
+                            or "recover_lcp_sideways_v1"
+                        )
                         guidance_buffers[product_jid] = operator_guidance
                         bridge_feedback_buffers[product_jid] = bridge_feedback
+                        preprogrammed_bridge_buffers[product_jid] = selected_preprogrammed
+                        action_feedback = (
+                            action_feedback_buffers.get(product_jid)
+                            if isinstance(action_feedback_buffers.get(product_jid), dict)
+                            else None
+                        )
                         bridge_proposal = recovery.get("bridge_proposal")
+                        bridge_debug = (
+                            recovery.get("bridge_debug")
+                            if isinstance(recovery.get("bridge_debug"), dict)
+                            else None
+                        )
                         bridge_approval_state = str(
                             recovery.get("bridge_approval_state", "none") or "none"
                         ).strip()
+                        active_bridge_sequence = (
+                            recovery.get("active_bridge_sequence")
+                            if isinstance(recovery.get("active_bridge_sequence"), dict)
+                            else None
+                        )
 
                         with ui.card().classes("w-full bg-slate-50"):
                             with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
@@ -963,28 +1237,120 @@ def render(bridge: SystemBridge) -> None:
                                 f"Witnesses: {witness_count} | "
                                 f"Violated rules: {', '.join(violated_rules) if violated_rules else 'none'}"
                             ).classes("text-xs text-slate-600")
+                            if action_feedback and str(action_feedback.get("text", "")).strip():
+                                tone = {
+                                    "positive": "bg-green-50 text-green-700",
+                                    "warning": "bg-orange-50 text-orange-700",
+                                    "negative": "bg-red-50 text-red-700",
+                                    "info": "bg-blue-50 text-blue-700",
+                                }.get(
+                                    str(action_feedback.get("kind", "info") or "info").strip().lower(),
+                                    "bg-slate-100 text-slate-700",
+                                )
+                                ui.label(str(action_feedback.get("text", "")).strip()).classes(
+                                    f"w-full mt-2 px-3 py-2 rounded text-xs {tone}"
+                                )
+
+                            if status == "bridge_ready":
+                                ui.label(
+                                    "Bridge request is prepared. Review the prompt and context below, then click "
+                                    "`Run LLM Explore States + Events` to send it, or load a deterministic "
+                                    "preprogrammed recovery scenario for operator review."
+                                ).classes("text-xs text-orange-700 mt-2")
+                                preprogrammed_select = ui.select(
+                                    {
+                                        "recover_lcp_sideways_v1": "recover_lcp_sideways_v1",
+                                    },
+                                    value=selected_preprogrammed,
+                                    label="Preprogrammed scenario",
+                                ).props("outlined dense").classes("min-w-64 mt-2")
+                                preprogrammed_select.on_value_change(
+                                    lambda e, jid=product_jid: preprogrammed_bridge_buffers.__setitem__(
+                                        jid,
+                                        str(e.value or "recover_lcp_sideways_v1"),
+                                    )
+                                )
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    ui.button(
+                                        "Run LLM Explore States + Events",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Run LLM Explore States + Events",
+                                            runner=_run_runtime_bridge,
+                                        ),
+                                        icon="play_arrow",
+                                    ).props("color=blue")
+                                    ui.button(
+                                        "Load Preprogrammed Recovery",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Load Preprogrammed Recovery",
+                                            runner=_load_preprogrammed_runtime_bridge,
+                                        ),
+                                        icon="playlist_add_check",
+                                    ).props("color=teal")
+                                    ui.button(
+                                        "Retry DES",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Retry DES",
+                                            runner=_retry_runtime_des,
+                                        ),
+                                        icon="restart_alt",
+                                    ).props("color=grey")
 
                             if status == "llm_bridge" and isinstance(bridge_proposal, dict):
                                 with ui.expansion("Bridge proposal", icon="alt_route", value=True).classes("w-full mt-2"):
-                                    ui.label(
-                                        f"Macro: {str(bridge_proposal.get('function_name', '') or 'unnamed')}"
-                                    ).classes("text-sm font-medium")
-                                    ui.label(
-                                        f"Resource: {str(bridge_proposal.get('resource_jid', '') or 'n/a')}"
-                                    ).classes("text-xs text-slate-600")
+                                    primary_obligation = bridge_proposal.get("primary_obligation")
+                                    if isinstance(primary_obligation, dict):
+                                        ui.label(
+                                            "Primary obligation: "
+                                            f"{str(primary_obligation.get('rule_id', '') or 'n/a')} on "
+                                            f"{str(primary_obligation.get('resource_jid', '') or 'n/a')}"
+                                        ).classes("text-xs text-slate-600")
                                     description = str(bridge_proposal.get("description", "")).strip()
                                     rationale = str(bridge_proposal.get("rationale", "")).strip()
                                     if description:
                                         ui.label(description).classes("text-sm")
                                     if rationale:
                                         ui.label(f"Rationale: {rationale}").classes("text-xs text-slate-600")
-                                    for idx, step in enumerate(bridge_proposal.get("macro_steps") or [], start=1):
-                                        if not isinstance(step, dict):
-                                            continue
-                                        params_text = json.dumps(step.get("params") or {}, default=str)
+                                    macro_tasks = bridge_proposal.get("macro_tasks") or []
+                                    if isinstance(macro_tasks, list) and macro_tasks:
+                                        for idx, task in enumerate(macro_tasks, start=1):
+                                            if not isinstance(task, dict):
+                                                continue
+                                            macro_name = str(task.get("macro_name", "") or f"macro_{idx}")
+                                            resource_name = str(task.get("resource_jid", "") or "n/a")
+                                            ui.label(
+                                                f"{idx}. {macro_name} -> {resource_name}"
+                                            ).classes("text-sm font-medium mt-2")
+                                            ui.label(
+                                                "Expected start: "
+                                                f"{str(task.get('expected_start_state', '') or 'n/a')} | "
+                                                "Projected final: "
+                                                f"{str((task.get('projected_snapshot') or {}).get('current_state', '') or 'n/a')}"
+                                            ).classes("text-xs text-slate-600")
+                                            for step_idx, step in enumerate(task.get("primitive_steps") or [], start=1):
+                                                if not isinstance(step, dict):
+                                                    continue
+                                                params_text = json.dumps(step.get("params") or {}, default=str)
+                                                ui.label(
+                                                    f"  {step_idx}. {step.get('primitive', '')}({params_text})"
+                                                ).classes("text-xs font-mono text-slate-700")
+                                    else:
                                         ui.label(
-                                            f"{idx}. {step.get('function_name', '')}({params_text})"
-                                        ).classes("text-xs font-mono text-slate-700")
+                                            f"Macro: {str(bridge_proposal.get('function_name', '') or 'unnamed')}"
+                                        ).classes("text-sm font-medium")
+                                        ui.label(
+                                            f"Resource: {str(bridge_proposal.get('resource_jid', '') or 'n/a')}"
+                                        ).classes("text-xs text-slate-600")
+                                        for idx, step in enumerate(bridge_proposal.get("macro_steps") or [], start=1):
+                                            if not isinstance(step, dict):
+                                                continue
+                                            params_text = json.dumps(step.get("params") or {}, default=str)
+                                            ui.label(
+                                                f"{idx}. {step.get('function_name', '')}({params_text})"
+                                            ).classes("text-xs font-mono text-slate-700")
                                 bridge_feedback_box = ui.textarea(
                                     label="Rejection feedback",
                                     value=bridge_feedback,
@@ -998,18 +1364,213 @@ def render(bridge: SystemBridge) -> None:
                                 with ui.row().classes("gap-2 mt-2 flex-wrap"):
                                     ui.button(
                                         "Approve and Resume",
-                                        on_click=lambda jid=product_jid: asyncio.create_task(
-                                            _approve_runtime_bridge(jid)
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Approve and Resume",
+                                            runner=_approve_runtime_bridge,
                                         ),
                                         icon="play_arrow",
                                     ).props("color=green")
                                     ui.button(
                                         "Reject and Regenerate",
-                                        on_click=lambda jid=product_jid: asyncio.create_task(
-                                            _reject_runtime_bridge(jid)
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Reject and Regenerate",
+                                            runner=_reject_runtime_bridge,
                                         ),
                                         icon="refresh",
                                     ).props("color=orange")
+
+                            if bridge_debug:
+                                debug_status = str(bridge_debug.get("status", "") or "n/a").strip()
+                                warning_messages = list(bridge_debug.get("warning_messages") or [])
+                                request_payload = (
+                                    bridge_debug.get("request")
+                                    if isinstance(bridge_debug.get("request"), dict)
+                                    else {}
+                                )
+                                llm_inputs = (
+                                    bridge_debug.get("llm_inputs")
+                                    if isinstance(bridge_debug.get("llm_inputs"), dict)
+                                    else {}
+                                )
+                                bridge_context = (
+                                    bridge_debug.get("bridge_context")
+                                    if isinstance(bridge_debug.get("bridge_context"), dict)
+                                    else {}
+                                )
+                                modeled_check = (
+                                    bridge_debug.get("modeled_continuation_check")
+                                    if isinstance(bridge_debug.get("modeled_continuation_check"), dict)
+                                    else {}
+                                )
+                                approval_info = (
+                                    bridge_debug.get("approval")
+                                    if isinstance(bridge_debug.get("approval"), dict)
+                                    else {}
+                                )
+                                debug_prompt = str(bridge_debug.get("prompt", "") or "").strip()
+                                raw_response = str(bridge_debug.get("raw_response", "") or "").strip()
+                                normalized_proposal = bridge_debug.get("normalized_proposal")
+                                request_ra = str(
+                                    request_payload.get("ra_jid")
+                                    or llm_inputs.get("ra_jid")
+                                    or "n/a"
+                                ).strip() or "n/a"
+                                request_goal = str(
+                                    request_payload.get("goal_state")
+                                    or llm_inputs.get("goal_state")
+                                    or "n/a"
+                                ).strip() or "n/a"
+                                request_parts = list(request_payload.get("P_id") or llm_inputs.get("P_id") or [])
+                                obligations = list(
+                                    request_payload.get("obligation_targets")
+                                    or llm_inputs.get("obligation_targets")
+                                    or []
+                                )
+                                compiled_rows = _bridge_task_rows_for_display(
+                                    list(approval_info.get("compiled_bridge_task_ids") or [])
+                                    + list((active_bridge_sequence or {}).get("bridge_task_ids") or []),
+                                    node_lookup=node_lookup,
+                                    task_states=task_states,
+                                    fallback_rows=list(approval_info.get("compiled_bridge_tasks") or []),
+                                )
+                                with ui.expansion(
+                                    "Bridge Debug (temporary)",
+                                    icon="bug_report",
+                                    value=False,
+                                ).classes("w-full mt-2"):
+                                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                                        ui.badge(
+                                            f"Trace: {(debug_status or 'unknown').replace('_', ' ')}"
+                                        ).props("color=teal")
+                                        ui.badge(
+                                            "Primitive bridge"
+                                            if bool(bridge_debug.get("primitive_mode"))
+                                            else "Legacy bridge"
+                                        ).props("color=indigo")
+                                        if warning_messages:
+                                            ui.badge(f"Warnings: {len(warning_messages)}").props("color=orange")
+                                    if modeled_check:
+                                        ui.label(
+                                            "Modeled continuation check: "
+                                            f"{'accepted' if modeled_check.get('accepted') else 'rejected'}"
+                                            + (
+                                                f" ({str(modeled_check.get('reason', '')).strip()})"
+                                                if str(modeled_check.get("reason", "")).strip()
+                                                else ""
+                                            )
+                                        ).classes("text-xs text-slate-600")
+                                    ui.label(
+                                        f"Focused resource: {request_ra} | Goal state: {request_goal} | "
+                                        f"Open obligations: {len(obligations)} | Remaining parts: "
+                                        f"{', '.join(str(item) for item in request_parts) if request_parts else 'none'}"
+                                    ).classes("text-xs text-slate-600 mt-2")
+                                    if status == "bridge_ready" and not raw_response:
+                                        ui.label(
+                                            "The LLM has not run yet. The prepared request, grounding context, and prompt "
+                                            "below are exactly what will be used when you click the run button."
+                                        ).classes("text-xs text-orange-700")
+                                    if debug_prompt:
+                                        ui.label("Prompt preview").classes("text-xs font-medium mt-2")
+                                        ui.code(
+                                            _preview_text(debug_prompt),
+                                            language="text",
+                                        ).classes("w-full text-xs")
+                                    if raw_response:
+                                        ui.label("Raw LLM output preview").classes("text-xs font-medium mt-2")
+                                        ui.code(
+                                            _preview_text(raw_response),
+                                            language="text",
+                                        ).classes("w-full text-xs")
+                                    elif debug_status not in {"ready", "running"}:
+                                        ui.label("No raw LLM output was captured.").classes("text-xs text-slate-600 mt-2")
+                                    if normalized_proposal:
+                                        ui.label("Normalization preview").classes("text-xs font-medium mt-2")
+                                        ui.code(
+                                            _preview_text(_json_text(normalized_proposal)),
+                                            language="json",
+                                        ).classes("w-full text-xs")
+                                    if request_payload:
+                                        with ui.expansion(
+                                            "Bridge request inputs",
+                                            icon="input",
+                                            value=False,
+                                        ).classes("w-full mt-2"):
+                                            ui.code(_json_text(request_payload), language="json").classes("w-full text-xs")
+                                    if llm_inputs:
+                                        with ui.expansion(
+                                            "Prompt grounding context",
+                                            icon="hub",
+                                            value=False,
+                                        ).classes("w-full mt-2"):
+                                            ui.code(_json_text(llm_inputs), language="json").classes("w-full text-xs")
+                                    if bridge_context:
+                                        with ui.expansion(
+                                            "Primitive bridge context",
+                                            icon="precision_manufacturing",
+                                            value=False,
+                                        ).classes("w-full mt-2"):
+                                            ui.code(_json_text(bridge_context), language="json").classes("w-full text-xs")
+                                    if debug_prompt:
+                                        with ui.expansion(
+                                            "Prompt sent to LLM",
+                                            icon="description",
+                                            value=False,
+                                        ).classes("w-full mt-2"):
+                                            ui.code(
+                                                debug_prompt,
+                                                language="text",
+                                            ).classes("w-full text-xs")
+                                    if raw_response:
+                                        with ui.expansion(
+                                            "Raw LLM output",
+                                            icon="smart_toy",
+                                            value=status in {"llm_bridge", "human_required"},
+                                        ).classes("w-full mt-2"):
+                                            ui.code(
+                                                raw_response,
+                                                language="text",
+                                            ).classes("w-full text-xs")
+                                    with ui.expansion(
+                                        "Normalization result",
+                                        icon="rule",
+                                        value=status in {"llm_bridge", "human_required"},
+                                    ).classes("w-full mt-2"):
+                                        if warning_messages:
+                                            ui.code(
+                                                "\n".join(f"- {msg}" for msg in warning_messages),
+                                                language="text",
+                                            ).classes("w-full text-xs")
+                                        if normalized_proposal:
+                                            ui.code(
+                                                _json_text(normalized_proposal),
+                                                language="json",
+                                            ).classes("w-full text-xs")
+                                        else:
+                                            ui.label("No compilable bridge proposal was produced.").classes(
+                                                "text-xs text-slate-600"
+                                            )
+                                    if compiled_rows:
+                                        with ui.expansion(
+                                            "Compiled bridge tasks",
+                                            icon="account_tree",
+                                            value=status in {"llm_bridge", "human_required"},
+                                        ).classes("w-full mt-2"):
+                                            ui.code(
+                                                _json_text(compiled_rows),
+                                                language="json",
+                                            ).classes("w-full text-xs")
+                                    if active_bridge_sequence:
+                                        with ui.expansion(
+                                            "Bridge execution state",
+                                            icon="play_circle",
+                                            value=status in {"llm_bridge", "human_required", "resolved"},
+                                        ).classes("w-full mt-2"):
+                                            ui.code(
+                                                _json_text(active_bridge_sequence),
+                                                language="json",
+                                            ).classes("w-full text-xs")
 
                             history = list(recovery.get("history") or [])
                             if history:
@@ -1038,21 +1599,25 @@ def render(bridge: SystemBridge) -> None:
                                 with ui.row().classes("gap-2 mt-2 flex-wrap"):
                                     ui.button(
                                         "Retry DES",
-                                        on_click=lambda jid=product_jid: asyncio.create_task(
-                                            _retry_runtime_des(jid)
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Retry DES",
+                                            runner=_retry_runtime_des,
                                         ),
                                         icon="restart_alt",
                                     ).props("color=blue")
                                     ui.button(
                                         "Submit operator guidance",
-                                        on_click=lambda jid=product_jid: asyncio.create_task(
-                                            _submit_runtime_guidance(jid)
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Submit operator guidance",
+                                            runner=_submit_runtime_guidance,
                                         ),
                                         icon="person",
                                     ).props("color=amber")
 
             _refresh_runtime_recovery_panel()
-            _managed_timer(3.0, _refresh_runtime_recovery_panel)
+            _managed_timer(5.0, _refresh_runtime_recovery_panel)
 
         # ── Runtime Blocked Tasks ───────────────────────────────────
         with ui.card().classes("w-full"):

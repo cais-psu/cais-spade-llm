@@ -658,6 +658,65 @@ class Ros2PickPlaceController:
             return {"success": False, "message": f"failed relative move ({dx}, {dy}, {dz})"}
         return {"success": True, "message": f"moved relative ({dx}, {dy}, {dz})"}
 
+    def move_pose(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Move end-effector to an absolute pose with explicit quaternion orientation.
+        params:
+          x: {type: number, description: "Target X coordinate in meters (base frame)"}
+          y: {type: number, description: "Target Y coordinate in meters (base frame)"}
+          z: {type: number, description: "Target Z coordinate in meters (base frame)"}
+          qx: {type: number, description: "Target quaternion X component"}
+          qy: {type: number, description: "Target quaternion Y component"}
+          qz: {type: number, description: "Target quaternion Z component"}
+          qw: {type: number, description: "Target quaternion W component"}
+          speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
+        preconditions: {}
+        effects:
+          current_pose:
+            pose_absolute_from_params: [x, y, z]
+          current_pose_ref:
+            set_unknown: true
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        target_orientation = self._make_orientation(qx, qy, qz, qw)
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {"success": False, "message": "cannot read current ee pose"}
+        same_xy = (
+            math.isclose(float(ee.position.x), float(x), abs_tol=1e-6)
+            and math.isclose(float(ee.position.y), float(y), abs_tol=1e-6)
+        )
+        if same_xy:
+            return self._move_pose_direct(
+                float(x),
+                float(y),
+                float(z),
+                orientation=target_orientation,
+                label="move_pose",
+                speed=speed,
+            )
+        return self._move_xy_at_z(
+            float(x),
+            float(y),
+            float(z),
+            orientation=target_orientation,
+            label="move_pose",
+            speed=speed,
+        )
+
     def move_to_named_pose(self, pose_name: str) -> dict[str, Any]:
         """
         ---
@@ -1876,3 +1935,11 @@ class Ros2PickPlaceController:
         pose.position.z = float(z)
         pose.orientation = orientation
         return pose
+
+    def _make_orientation(self, qx: float, qy: float, qz: float, qw: float):
+        orientation = self._Pose().orientation
+        orientation.x = float(qx)
+        orientation.y = float(qy)
+        orientation.z = float(qz)
+        orientation.w = float(qw)
+        return orientation

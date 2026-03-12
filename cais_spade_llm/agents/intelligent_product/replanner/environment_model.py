@@ -13,6 +13,20 @@ from .resource_bidding import Bid, _tool_signature
 logger = logging.getLogger(__name__)
 
 
+class _BridgeWarningCapture(logging.Handler):
+    """Collect bridge-normalization warnings for temporary UI debugging."""
+
+    def __init__(self, sink: list[str]) -> None:
+        super().__init__(level=logging.WARNING)
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._sink.append(record.getMessage())
+        except Exception:
+            pass
+
+
 _BRIDGE_TASK_PARAM_RESERVED_KEYS = frozenset(
     {
         "macro_name",
@@ -419,6 +433,7 @@ async def llm_explore_states_and_events(
     bridge_snapshot: dict[str, Any] | None = None,
     grounding_context: dict[str, Any] | None = None,
     bridge_resources: dict[str, Any] | None = None,
+    debug_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Ask the LLM for a recovery macro proposal when DES finds no modeled path.
@@ -430,6 +445,26 @@ async def llm_explore_states_and_events(
     from cais_spade_llm.prompts import build_state_exploration_prompt
 
     primitive_mode = bool(primitive_catalog or bridge_resources)
+    debug_payload = debug_trace if isinstance(debug_trace, dict) else None
+    warnings: list[str] = []
+
+    if debug_payload is not None:
+        debug_payload["primitive_mode"] = primitive_mode
+        debug_payload["llm_inputs"] = {
+            "stuck_state": deepcopy(stuck_state),
+            "P_id": deepcopy(P_id),
+            "ra_jid": str(ra_jid or "").strip(),
+            "goal_state": str(goal_state or "").strip(),
+            "part_tracker": deepcopy(part_tracker),
+            "obligation_targets": deepcopy(obligation_targets),
+            "operator_feedback": str(operator_feedback or "").strip(),
+            "resource_infos": deepcopy(resource_infos),
+            "tools_catalog": deepcopy(tools_catalog),
+            "primitive_catalog": deepcopy(primitive_catalog),
+            "bridge_snapshot": deepcopy(bridge_snapshot),
+            "grounding_context": deepcopy(grounding_context),
+            "bridge_resources": deepcopy(bridge_resources),
+        }
 
     prompt = build_state_exploration_prompt(
         stuck_state=stuck_state,
@@ -446,25 +481,52 @@ async def llm_explore_states_and_events(
         grounding_context=grounding_context,
         bridge_resources=bridge_resources,
     )
+    if debug_payload is not None:
+        debug_payload["prompt"] = prompt
 
-    raw = await ask_llm(prompt=prompt, with_functions=False)
+    capture = _BridgeWarningCapture(warnings)
+    logger.addHandler(capture)
+    try:
+        raw = await ask_llm(prompt=prompt, with_functions=False)
+        if debug_payload is not None:
+            debug_payload["raw_response"] = (
+                raw
+                if isinstance(raw, str)
+                else json.dumps(raw, indent=2, default=str)
+            )
 
-    if primitive_mode:
-        proposal = _normalize_primitive_bridge_proposal(
-            raw=raw,
-            ra_jid=ra_jid,
-            primitive_catalog=primitive_catalog,
-            bridge_snapshot=bridge_snapshot or {},
-            grounding_context=grounding_context or {},
-            bridge_resources=bridge_resources,
-            obligation_targets=obligation_targets,
+        if primitive_mode:
+            proposal = _normalize_primitive_bridge_proposal(
+                raw=raw,
+                ra_jid=ra_jid,
+                primitive_catalog=primitive_catalog,
+                bridge_snapshot=bridge_snapshot or {},
+                grounding_context=grounding_context or {},
+                bridge_resources=bridge_resources,
+                obligation_targets=obligation_targets,
+            )
+        else:
+            proposal = _normalize_bridge_proposal(
+                raw=raw,
+                ra_jid=ra_jid,
+                tools_catalog=tools_catalog,
+            )
+    except Exception as exc:
+        if debug_payload is not None:
+            debug_payload["status"] = "exception"
+            debug_payload["exception"] = repr(exc)
+            debug_payload["warning_messages"] = list(warnings)
+        raise
+    finally:
+        logger.removeHandler(capture)
+        capture.close()
+
+    if debug_payload is not None:
+        debug_payload["warning_messages"] = list(warnings)
+        debug_payload["normalized_proposal"] = (
+            deepcopy(proposal) if isinstance(proposal, dict) else None
         )
-    else:
-        proposal = _normalize_bridge_proposal(
-            raw=raw,
-            ra_jid=ra_jid,
-            tools_catalog=tools_catalog,
-        )
+        debug_payload["status"] = "accepted" if proposal else "rejected"
 
     if proposal:
         if proposal.get("macro_tasks"):

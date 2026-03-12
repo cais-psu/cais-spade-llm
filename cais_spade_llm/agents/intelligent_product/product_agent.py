@@ -7,6 +7,9 @@ import hashlib
 import json
 import os, uuid
 import shutil
+import threading
+import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,9 @@ from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
+    build_preprogrammed_bridge_proposal,
+)
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
@@ -213,6 +219,15 @@ class ProductAgent(LlmAgent):
         trace_category: str = "agent",
     ) -> None:
         """Send a SPADE message from agent methods that are outside a Behaviour."""
+        self._dispatch_agent_message_sync(msg, trace_category=trace_category)
+
+    def _dispatch_agent_message_sync(
+        self,
+        msg: Message,
+        *,
+        trace_category: str = "agent",
+    ) -> None:
+        """Send a SPADE message synchronously from local helper code."""
         if msg.empty_sender():
             msg.sender = str(self.jid)
 
@@ -226,6 +241,26 @@ class ProductAgent(LlmAgent):
 
         msg.sent = True
         self.traces.append(msg, category=trace_category)
+
+    def _run_coroutine_on_agent_loop_sync(
+        self,
+        coroutine: Any,
+        *,
+        timeout_sec: float = 10.0,
+        operation_name: str = "product agent coroutine",
+    ) -> Any:
+        loop = getattr(self, "loop", None)
+        if loop is None:
+            raise RuntimeError("product agent loop is unavailable")
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            return future.result(timeout=max(1.0, float(timeout_sec)))
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise RuntimeError(
+                f"{str(operation_name or 'product agent coroutine').strip() or 'product agent coroutine'} "
+                f"timed out after {max(1.0, float(timeout_sec)):.0f}s"
+            ) from exc
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -320,6 +355,7 @@ class ProductAgent(LlmAgent):
             "used_llm_bridge": False,
             "operator_guidance": "",
             "bridge_proposal": None,
+            "bridge_debug": None,
             "bridge_approval_state": "none",
             "active_bridge_sequence": None,
             "bridge_feedback_history": [],
@@ -331,7 +367,7 @@ class ProductAgent(LlmAgent):
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         if status in {"des_search", "llm_bridge", "validating"}:
             self.runtime_repair_state = "repairing"
-        elif status == "human_required":
+        elif status in {"bridge_ready", "human_required"}:
             self.runtime_repair_state = "paused_after_failure"
         else:
             self.runtime_repair_state = "idle"
@@ -350,6 +386,7 @@ class ProductAgent(LlmAgent):
         used_llm_bridge: bool | None = None,
         operator_guidance: str | None = None,
         bridge_proposal: dict[str, Any] | None | object = _UNSET,
+        bridge_debug: dict[str, Any] | None | object = _UNSET,
         bridge_approval_state: str | None = None,
         active_bridge_sequence: dict[str, Any] | None | object = _UNSET,
         bridge_feedback_history: list[str] | object = _UNSET,
@@ -383,6 +420,8 @@ class ProductAgent(LlmAgent):
             current["operator_guidance"] = str(operator_guidance).strip()
         if bridge_proposal is not _UNSET:
             current["bridge_proposal"] = deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None
+        if bridge_debug is not _UNSET:
+            current["bridge_debug"] = deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None
         if bridge_approval_state is not None:
             current["bridge_approval_state"] = str(bridge_approval_state or "none").strip() or "none"
         if active_bridge_sequence is not _UNSET:
@@ -1056,6 +1095,67 @@ class ProductAgent(LlmAgent):
         payload = self.runtime_recovery.get("active_bridge_sequence")
         return deepcopy(payload) if isinstance(payload, dict) else None
 
+    @staticmethod
+    def _bridge_used_llm(
+        active_bridge_sequence: dict[str, Any] | None,
+        runtime_recovery: dict[str, Any] | None = None,
+    ) -> bool:
+        if isinstance(active_bridge_sequence, dict) and "used_llm_bridge" in active_bridge_sequence:
+            return bool(active_bridge_sequence.get("used_llm_bridge", False))
+        if isinstance(runtime_recovery, dict):
+            return bool(runtime_recovery.get("used_llm_bridge", False))
+        return False
+
+    @staticmethod
+    def _bridge_execution_policy(active_bridge_sequence: dict[str, Any] | None) -> dict[str, Any]:
+        payload = (
+            active_bridge_sequence.get("execution_policy")
+            if isinstance(active_bridge_sequence, dict)
+            else {}
+        )
+        return deepcopy(payload) if isinstance(payload, dict) else {}
+
+    def _bridge_requires_complete_full_tail(
+        self,
+        active_bridge_sequence: dict[str, Any] | None,
+    ) -> bool:
+        return bool(self._bridge_execution_policy(active_bridge_sequence).get("complete_full_tail"))
+
+    def _bridge_task_debug_rows(self, task_ids: list[str] | None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        lookup = {
+            str(node.get("id", "")).strip(): node
+            for node in self.process_planner.nodes
+            if isinstance(node, dict) and str(node.get("id", "")).strip()
+        }
+        for task_id in task_ids or []:
+            task_key = str(task_id or "").strip()
+            if not task_key:
+                continue
+            node = lookup.get(task_key)
+            if not isinstance(node, dict):
+                rows.append({"id": task_key, "missing": True})
+                continue
+            rows.append(
+                {
+                    "id": task_key,
+                    "function_name": str(node.get("function_name", "")).strip(),
+                    "resource_jid": str(node.get("resource_jid", "")).strip(),
+                    "status": str(node.get("status", "")).strip(),
+                    "predecessors": list(node.get("predecessors") or []),
+                    "successors": list(node.get("successors") or []),
+                    "params": deepcopy(node.get("params") or {}),
+                    "bridge_sequence_id": str(node.get("bridge_sequence_id", "")).strip(),
+                    "bridge_sequence_index": int(node.get("bridge_sequence_index") or 0),
+                    "bridge_sequence_length": int(node.get("bridge_sequence_length") or 0),
+                    "primary_obligation": deepcopy(node.get("primary_obligation") or {}),
+                    "projected_snapshot": deepcopy(node.get("projected_snapshot") or {}),
+                    "projected_part_entry": deepcopy(node.get("projected_part_entry") or {}),
+                    "change_reason": str(node.get("change_reason", "")).strip(),
+                }
+            )
+        return rows
+
     def _bridge_sequence_tail_task_ids(
         self,
         *,
@@ -1165,6 +1265,13 @@ class ProductAgent(LlmAgent):
             "[Product] Recompiled plan FSA after runtime recovery and sent plan_safety_check to CCA."
         )
 
+    def _send_runtime_plan_validation_check_sync(self) -> None:
+        self._run_coroutine_on_agent_loop_sync(
+            self._send_runtime_plan_validation_check(),
+            timeout_sec=10.0,
+            operation_name="runtime plan validation dispatch",
+        )
+
     async def _fail_closed_bridge_sequence(
         self,
         *,
@@ -1199,6 +1306,7 @@ class ProductAgent(LlmAgent):
         violations = deepcopy(list(sequence.get("violations") or []))
         trigger = str(sequence.get("trigger", "")).strip()
         failed_task_id = str(sequence.get("failed_task_id", "")).strip()
+        used_llm_bridge = self._bridge_used_llm(sequence, self.runtime_recovery)
         self._runtime_recovery_context = {}
         self._set_runtime_recovery(
             status="human_required",
@@ -1208,7 +1316,7 @@ class ProductAgent(LlmAgent):
             message=message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
+            used_llm_bridge=used_llm_bridge,
             bridge_proposal=None,
             bridge_approval_state="approved",
             active_bridge_sequence=sequence,
@@ -1256,6 +1364,7 @@ class ProductAgent(LlmAgent):
         trigger = str(active_bridge_sequence.get("trigger", "")).strip()
         violations = deepcopy(list(active_bridge_sequence.get("violations") or []))
         feedback_history = self.runtime_recovery.get("bridge_feedback_history") or []
+        used_llm_bridge = self._bridge_used_llm(active_bridge_sequence, self.runtime_recovery)
 
         if isinstance(status, str) and status.startswith("failed"):
             detail = str(content or "").strip()
@@ -1340,6 +1449,34 @@ class ProductAgent(LlmAgent):
             resource_jid=resource_jid,
             bridge_snapshot=actual_snapshot,
         )
+        if tail_task_ids and self._bridge_requires_complete_full_tail(active_bridge_sequence):
+            next_sequence = deepcopy(active_bridge_sequence)
+            next_sequence["state"] = "executing"
+            next_sequence["last_task_id"] = str(task_node.get("id", "")).strip()
+            next_sequence["last_completed_macro_name"] = macro_name
+            next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
+            continue_message = (
+                f"Bridge macro '{macro_name}' matched projection; continuing the approved bridge tail."
+            )
+            self._set_runtime_recovery(
+                status="resolved",
+                resolution_class="des_with_llm_bridge",
+                trigger=trigger,
+                failed_task_id=failed_task_id,
+                message=continue_message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=used_llm_bridge,
+                bridge_proposal=None,
+                bridge_approval_state="approved",
+                active_bridge_sequence=next_sequence,
+                bridge_feedback_history=feedback_history,
+                violations=[],
+                append_history=True,
+                history_message=continue_message,
+            )
+            await asyncio.to_thread(self._persist_product_state)
+            return True
 
         if failed_task_id and self.process_planner.can_execute_task_from_system_state(
             task_id=failed_task_id,
@@ -1378,7 +1515,7 @@ class ProductAgent(LlmAgent):
                 message=validation_message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
+                used_llm_bridge=used_llm_bridge,
                 bridge_proposal=None,
                 bridge_approval_state="approved",
                 active_bridge_sequence=None,
@@ -1433,7 +1570,7 @@ class ProductAgent(LlmAgent):
                 message=validation_message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
+                used_llm_bridge=used_llm_bridge,
                 bridge_proposal=None,
                 bridge_approval_state="approved",
                 active_bridge_sequence=None,
@@ -1466,7 +1603,7 @@ class ProductAgent(LlmAgent):
                 message=continue_message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
+                used_llm_bridge=used_llm_bridge,
                 bridge_proposal=None,
                 bridge_approval_state="approved",
                 active_bridge_sequence=next_sequence,
@@ -1550,6 +1687,7 @@ class ProductAgent(LlmAgent):
             attempts_max=self._runtime_repair_max_attempts,
             used_llm_bridge=False,
             bridge_proposal=None,
+            bridge_debug=None,
             bridge_approval_state="none",
             active_bridge_sequence=None,
             bridge_feedback_history=feedback_history,
@@ -1566,6 +1704,7 @@ class ProductAgent(LlmAgent):
                 violations,
                 system_coordination_state=system_coordination_state,
                 bridge_feedback=feedback_text,
+                bridge_generation_mode="manual",
             )
             if not isinstance(result, dict):
                 result = {}
@@ -1574,9 +1713,41 @@ class ProductAgent(LlmAgent):
             used_llm_bridge = bool(result.get("used_llm_bridge", False))
             human_required = bool(result.get("human_required", False))
             awaiting_bridge_approval = bool(result.get("awaiting_bridge_approval", False))
+            awaiting_bridge_generation = bool(result.get("awaiting_bridge_generation", False))
             base_message = str(result.get("message", "")).strip()
             bridge_summary = result.get("bridge_summary") or []
             bridge_proposal = result.get("bridge_proposal")
+            bridge_debug = result.get("bridge_debug")
+            prepared_bridge_request = result.get("prepared_bridge_request")
+            if awaiting_bridge_generation and isinstance(prepared_bridge_request, dict):
+                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
+                    prepared_bridge_request
+                )
+                recovery = self._set_runtime_recovery(
+                    status="bridge_ready",
+                    trigger=trigger,
+                    failed_task_id=failed_task_id,
+                    message=(
+                        base_message
+                        or "DES found no modeled continuation. Review the bridge request and run LLM exploration."
+                    ),
+                    attempts_used=attempt_number,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=False,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug,
+                    bridge_approval_state="ready",
+                    active_bridge_sequence=None,
+                    bridge_feedback_history=feedback_history,
+                    violations=violations,
+                    append_history=True,
+                    history_message=(
+                        "Bridge request prepared for review. Waiting for operator to run LLM exploration."
+                    ),
+                )
+                self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
             if awaiting_bridge_approval and isinstance(bridge_proposal, dict):
                 bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
                 recovery = self._set_runtime_recovery(
@@ -1588,6 +1759,7 @@ class ProductAgent(LlmAgent):
                     attempts_max=self._runtime_repair_max_attempts,
                     used_llm_bridge=True,
                     bridge_proposal=bridge_proposal,
+                    bridge_debug=bridge_debug,
                     bridge_approval_state="pending",
                     active_bridge_sequence=None,
                     bridge_feedback_history=feedback_history,
@@ -1614,6 +1786,7 @@ class ProductAgent(LlmAgent):
                     attempts_max=self._runtime_repair_max_attempts,
                     used_llm_bridge=used_llm_bridge,
                     bridge_proposal=None,
+                    bridge_debug=bridge_debug,
                     bridge_approval_state="none",
                     active_bridge_sequence=None,
                     bridge_feedback_history=feedback_history,
@@ -1656,6 +1829,7 @@ class ProductAgent(LlmAgent):
                 attempts_max=self._runtime_repair_max_attempts,
                 used_llm_bridge=used_llm_bridge,
                 bridge_proposal=None,
+                bridge_debug=bridge_debug if used_llm_bridge else None,
                 bridge_approval_state="approved" if used_llm_bridge else "none",
                 active_bridge_sequence=None,
                 bridge_feedback_history=feedback_history,
@@ -1713,7 +1887,7 @@ class ProductAgent(LlmAgent):
         system_coordination_state: dict | None = None,
     ) -> dict[str, Any]:
         current_status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if current_status in {"des_search", "llm_bridge", "validating", "human_required"}:
+        if current_status in {"des_search", "bridge_ready", "llm_bridge", "validating", "human_required"}:
             self.logger.warning(
                 "[Product] Runtime recovery already active for %s; ignoring duplicate replan request.",
                 self.runtime_recovery.get("failed_task_id") or failed_task_id,
@@ -1773,6 +1947,11 @@ class ProductAgent(LlmAgent):
                 if active_bridge_sequence
                 else "Plan validation passed; runtime recovery resolved."
             )
+            self.logger.info(
+                "[Product] Runtime plan validation passed: active_bridge_sequence=%s status_before=%s",
+                bool(active_bridge_sequence),
+                status,
+            )
             self._set_runtime_recovery(
                 status="resolved",
                 resolution_class=resolution_class,
@@ -1795,6 +1974,11 @@ class ProductAgent(LlmAgent):
             await asyncio.to_thread(self._persist_product_state)
             return True
 
+        self.logger.warning(
+            "[Product] Runtime plan validation failed: status=%s violations=%d",
+            status,
+            len(violations),
+        )
         if self._runtime_repair_inflight:
             self.logger.warning(
                 "[Product] Runtime plan validation failed while DES recovery is already running; ignoring duplicate result."
@@ -1890,52 +2074,104 @@ class ProductAgent(LlmAgent):
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    async def approve_runtime_bridge_proposal(self) -> dict[str, Any]:
+    async def generate_runtime_bridge_proposal(self) -> dict[str, Any]:
         if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("bridge approval is only available when replan_mode=des")
-        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status != "llm_bridge":
-            raise RuntimeError("no pending bridge proposal is awaiting approval")
+            raise RuntimeError("runtime bridge generation is only available when replan_mode=des")
+        if not self._runtime_recovery_context:
+            raise RuntimeError("no active runtime DES recovery context is available")
+        prepared_bridge_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        )
+        if not prepared_bridge_request:
+            raise RuntimeError("no prepared bridge request is available")
+        if self._runtime_repair_inflight:
+            raise RuntimeError("runtime recovery is already in progress")
 
-        proposal = self.runtime_recovery.get("bridge_proposal")
-        if not isinstance(proposal, dict):
-            raise RuntimeError("bridge proposal is missing")
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if status != "bridge_ready":
+            raise RuntimeError("bridge exploration can only be started from the bridge-ready state")
 
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
-        violations = list(self._runtime_recovery_context.get("violations") or [])
+        violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
+        bridge_debug = deepcopy(
+            (prepared_bridge_request.get("bridge_debug") or self.runtime_recovery.get("bridge_debug") or {})
+        )
+
+        self._set_runtime_recovery(
+            status="bridge_ready",
+            resolution_class="none",
+            trigger=str(self._runtime_recovery_context.get("trigger", "")),
+            failed_task_id=failed_task_id,
+            message="Running LLM bridge exploration from the prepared request.",
+            attempts_used=self._runtime_repair_fail_streak,
+            attempts_max=self._runtime_repair_max_attempts,
+            used_llm_bridge=False,
+            bridge_proposal=None,
+            bridge_debug=bridge_debug if bridge_debug else None,
+            bridge_approval_state="generating",
+            active_bridge_sequence=None,
+            bridge_feedback_history=list(self._runtime_recovery_context.get("bridge_feedback_history") or []),
+            violations=violations,
+            append_history=True,
+            history_message="Operator started LLM bridge exploration from the prepared request.",
+        )
+        await asyncio.to_thread(self._persist_product_state)
+
+        self._runtime_repair_inflight = True
         try:
-            tasks = self.process_planner.apply_bridge_macro_proposal(
-                proposal,
-                anchor_task_id="",
+            proposal = await self.process_planner.execute_prepared_bridge_request(
+                prepared_bridge_request
             )
-            entry_task_ids = [
-                task_id
-                for task_id in self.process_planner._entry_task_ids_from_violations(violations)
-                if task_id
-            ]
-            if tasks and entry_task_ids:
-                gating_updates: list[dict[str, Any]] = []
-                self.process_planner._gate_tasks_after_recovery_tail(
-                    gating_updates,
-                    tail_task_id=str(tasks[-1].get("id", "")).strip(),
-                    before_task_ids=entry_task_ids,
-                    change_prefix="Approved bridge recovery",
+            bridge_debug = self.process_planner.get_last_bridge_debug()
+            if isinstance(proposal, dict):
+                bridge_summary = self.process_planner._bridge_summary(proposal)
+                bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                recovery = self._set_runtime_recovery(
+                    status="llm_bridge",
+                    resolution_class="none",
+                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                    failed_task_id=failed_task_id,
+                    message="LLM bridge proposal is ready for approval.",
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    bridge_proposal=proposal,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="pending",
+                    active_bridge_sequence=None,
+                    bridge_feedback_history=list(
+                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    ),
+                    violations=violations,
+                    append_history=True,
+                    history_message=f"LLM bridge proposed {bridge_text}.",
                 )
-                if gating_updates:
-                    self.process_planner._apply_replan_patch(gating_updates)
-        except Exception as exc:
-            self.logger.exception("[Product] Failed to materialize approved bridge proposal.")
-            message = f"{self.agent_name}: approved bridge proposal could not be compiled ({exc})."
+                self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
+
+            message = (
+                "LLM bridge exploration produced no compilable proposal. Review the debug trace or retry DES."
+            )
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=failed_task_id,
                 message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
                 used_llm_bridge=True,
+                bridge_proposal=None,
+                bridge_debug=bridge_debug if bridge_debug else None,
                 bridge_approval_state="none",
                 active_bridge_sequence=None,
+                bridge_feedback_history=list(
+                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                ),
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -1949,6 +2185,303 @@ class ProductAgent(LlmAgent):
                 paused=True,
             )
             await asyncio.to_thread(self._persist_product_state)
+            return recovery
+        except Exception as exc:
+            self.logger.exception("[Product] LLM bridge exploration failed.")
+            bridge_debug = self.process_planner.get_last_bridge_debug()
+            message = f"{self.agent_name}: LLM bridge exploration failed ({exc})."
+            recovery = self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=failed_task_id,
+                message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=True,
+                bridge_proposal=None,
+                bridge_debug=bridge_debug if bridge_debug else None,
+                bridge_approval_state="none",
+                active_bridge_sequence=None,
+                bridge_feedback_history=list(
+                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                ),
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            await asyncio.to_thread(self._persist_product_state)
+            return recovery
+        finally:
+            self._runtime_repair_inflight = False
+
+    def load_preprogrammed_runtime_bridge_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        if str(self.replan_mode or "llm").strip().lower() != "des":
+            raise RuntimeError("preprogrammed bridge scenarios are only available when replan_mode=des")
+        if not self._runtime_recovery_context:
+            raise RuntimeError("no active runtime DES recovery context is available")
+
+        prepared_bridge_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        )
+        if not prepared_bridge_request:
+            raise RuntimeError("no prepared bridge request is available")
+        if self._runtime_repair_inflight:
+            raise RuntimeError("runtime recovery is already in progress")
+
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if status != "bridge_ready":
+            raise RuntimeError("preprogrammed bridge scenarios can only be loaded from the bridge-ready state")
+
+        scenario_key = str(scenario_id or "").strip()
+        if not scenario_key:
+            raise ValueError("scenario_id is empty")
+        self.logger.info(
+            "[Product] Loading preprogrammed runtime bridge scenario start: scenario_id=%s elapsed=%.3fs",
+            scenario_key,
+            time.perf_counter() - started_at,
+        )
+        try:
+            proposal = build_preprogrammed_bridge_proposal(
+                scenario_id=scenario_key,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+            self.logger.info(
+                "[Product] Preprogrammed runtime bridge scenario built: scenario_id=%s elapsed=%.3fs",
+                scenario_key,
+                time.perf_counter() - started_at,
+            )
+            normalized = self.process_planner.validate_preprogrammed_bridge_proposal(
+                proposal=proposal,
+                prepared_bridge_request=prepared_bridge_request,
+                source="preprogrammed_scenario",
+                scenario_id=scenario_key,
+            )
+            self.logger.info(
+                "[Product] Preprogrammed runtime bridge scenario validated: scenario_id=%s elapsed=%.3fs",
+                scenario_key,
+                time.perf_counter() - started_at,
+            )
+        except Exception:
+            self.logger.exception(
+                "[Product] Loading preprogrammed runtime bridge scenario failed: scenario_id=%s",
+                scenario_key,
+            )
+            raise
+        bridge_debug = self.process_planner.get_last_bridge_debug()
+        bridge_debug["source"] = "preprogrammed_scenario"
+        bridge_debug["scenario_id"] = scenario_key
+        bridge_debug["execution_policy"] = {"complete_full_tail": True}
+
+        failed_task_id = str(
+            self.runtime_recovery.get("failed_task_id")
+            or self._runtime_recovery_context.get("failed_task_id", "")
+        ).strip()
+        violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
+        bridge_summary = self.process_planner._bridge_summary(normalized)
+        bridge_text = ", ".join(str(item) for item in bridge_summary if item) or scenario_key
+        recovery = self._set_runtime_recovery(
+            status="llm_bridge",
+            resolution_class="none",
+            trigger=str(self._runtime_recovery_context.get("trigger", "")),
+            failed_task_id=failed_task_id,
+            message="Preprogrammed recovery scenario is ready for approval.",
+            attempts_used=self._runtime_repair_fail_streak,
+            attempts_max=self._runtime_repair_max_attempts,
+            used_llm_bridge=False,
+            bridge_proposal=normalized,
+            bridge_debug=bridge_debug if bridge_debug else None,
+            bridge_approval_state="pending",
+            active_bridge_sequence=None,
+            bridge_feedback_history=list(
+                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            ),
+            violations=violations,
+            append_history=True,
+            history_message=f"Loaded preprogrammed recovery scenario: {bridge_text}.",
+        )
+        self._clear_plan_safety_alert()
+        self.logger.info(
+            "[Product] Preprogrammed runtime bridge scenario ready: scenario_id=%s elapsed=%.3fs",
+            scenario_key,
+            time.perf_counter() - started_at,
+        )
+        threading.Thread(
+            target=self._persist_product_state,
+            name=f"{self.agent_name}-persist-product-state",
+            daemon=True,
+        ).start()
+        return recovery
+
+    async def load_preprogrammed_runtime_bridge_scenario(self, scenario_id: str) -> dict[str, Any]:
+        return self.load_preprogrammed_runtime_bridge_scenario_sync(scenario_id)
+
+    async def _finalize_approved_runtime_bridge_proposal(self) -> None:
+        self.logger.info("[Product] Approved bridge proposal finalization started: sending runtime plan validation.")
+        try:
+            await self._send_runtime_plan_validation_check()
+        except Exception as exc:
+            self.logger.exception("[Product] Approved bridge proposal validation dispatch failed.")
+            violations = list(self._runtime_recovery_context.get("violations") or [])
+            message = (
+                f"{self.agent_name}: approved bridge proposal could not start runtime "
+                f"plan validation ({exc})."
+            )
+            self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
+                message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
+                bridge_approval_state="approved",
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            try:
+                await asyncio.to_thread(self._persist_product_state)
+            except Exception:
+                self.logger.exception(
+                    "[Product] Failed to persist runtime recovery state after validation dispatch failure."
+                )
+            return
+
+        try:
+            self.logger.info(
+                "[Product] Approved bridge proposal validation sent successfully; persisting updated runtime state."
+            )
+            await asyncio.to_thread(self._persist_plan_snapshot)
+            await asyncio.to_thread(self._persist_product_state)
+            await asyncio.to_thread(self._persist_resource_state)
+        except Exception:
+            self.logger.exception(
+                "[Product] Approved bridge proposal persisted with errors after validation dispatch."
+            )
+
+    def _schedule_approved_runtime_bridge_finalization(self) -> None:
+        loop = getattr(self, "loop", None)
+        if loop is None:
+            raise RuntimeError("product agent loop is unavailable")
+        future = asyncio.run_coroutine_threadsafe(
+            self._finalize_approved_runtime_bridge_proposal(),
+            loop,
+        )
+
+        def _on_done(done_future) -> None:
+            try:
+                done_future.result()
+            except Exception:
+                self.logger.exception("[Product] Approved bridge proposal finalization crashed.")
+
+        future.add_done_callback(_on_done)
+
+    def approve_runtime_bridge_proposal_sync(self) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        if str(self.replan_mode or "llm").strip().lower() != "des":
+            raise RuntimeError("bridge approval is only available when replan_mode=des")
+        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        if status != "llm_bridge":
+            raise RuntimeError("no pending bridge proposal is awaiting approval")
+
+        proposal = self.runtime_recovery.get("bridge_proposal")
+        if not isinstance(proposal, dict):
+            raise RuntimeError("bridge proposal is missing")
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        used_llm_bridge = bool(self.runtime_recovery.get("used_llm_bridge", False))
+
+        failed_task_id = str(
+            self.runtime_recovery.get("failed_task_id")
+            or self._runtime_recovery_context.get("failed_task_id", "")
+        ).strip()
+        violations = list(self._runtime_recovery_context.get("violations") or [])
+        self.logger.info(
+            "[Product] Approving runtime bridge proposal start: failed_task_id=%s elapsed=%.3fs",
+            failed_task_id,
+            time.perf_counter() - started_at,
+        )
+        planner_nodes_snapshot = deepcopy(self.process_planner.nodes)
+        planner_global_fsa_snapshot = deepcopy(self.process_planner.global_fsa)
+        resumable_task_ids = [
+            str(node.get("id", "")).strip()
+            for node in planner_nodes_snapshot
+            if isinstance(node, dict)
+            and node.get("type") == "task"
+            and str(node.get("id", "")).strip()
+            and str(node.get("id", "")).strip() != failed_task_id
+            and str(node.get("status", "")).strip().lower() in {"pending", "blocked"}
+        ]
+        try:
+            tasks = self.process_planner.apply_bridge_macro_proposal(
+                proposal,
+                anchor_task_id=failed_task_id,
+            )
+            if tasks and resumable_task_ids:
+                gating_updates: list[dict[str, Any]] = []
+                self.process_planner._gate_tasks_after_recovery_tail(
+                    gating_updates,
+                    tail_task_id=str(tasks[-1].get("id", "")).strip(),
+                    before_task_ids=resumable_task_ids,
+                    change_prefix="Approved bridge recovery",
+                )
+                if gating_updates:
+                    self.process_planner._apply_replan_patch(gating_updates)
+        except Exception as exc:
+            self.logger.exception("[Product] Failed to materialize approved bridge proposal.")
+            try:
+                self.process_planner.nodes = planner_nodes_snapshot
+                self.process_planner.global_fsa = deepcopy(planner_global_fsa_snapshot)
+                if hasattr(self, "plan_path"):
+                    self.process_planner.save(self.plan_path)
+                if planner_global_fsa_snapshot is not None and hasattr(self, "global_fsa_path"):
+                    self.process_planner.save_global_fsa(self.global_fsa_path)
+            except Exception:
+                self.logger.exception("[Product] Failed to roll back planner state after approval failure.")
+            message = f"{self.agent_name}: approved bridge proposal could not be compiled ({exc})."
+            recovery = self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                message=message,
+                used_llm_bridge=used_llm_bridge,
+                bridge_approval_state="none",
+                bridge_debug=bridge_debug if bridge_debug else None,
+                active_bridge_sequence=None,
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            threading.Thread(
+                target=self._persist_product_state,
+                name=f"{self.agent_name}-persist-product-state",
+                daemon=True,
+            ).start()
             return recovery
 
         bridge_sequence_id = str(tasks[0].get("bridge_sequence_id", "")).strip() if tasks else ""
@@ -1965,22 +2498,37 @@ class ProductAgent(LlmAgent):
                 "trigger": str(self._runtime_recovery_context.get("trigger", "")),
                 "failed_task_id": failed_task_id,
                 "violations": deepcopy(violations),
+                "used_llm_bridge": used_llm_bridge,
                 "system_coordination_state": deepcopy(
                     self._runtime_recovery_context.get("system_coordination_state") or {}
                 ),
                 "state": "approved",
             }
-
-        reactivated = self._reactivate_blocked_tasks(
-            candidate_task_ids=self._candidate_task_ids_from_violations(
-                list(self._runtime_recovery_context.get("violations") or [])
-            ) or None
-        )
-        if reactivated:
-            self.logger.info(
-                "[Product] Reactivated %d blocked task(s) after approving bridge proposal.",
-                reactivated,
-            )
+            if isinstance(bridge_debug, dict):
+                execution_policy = bridge_debug.get("execution_policy")
+                if isinstance(execution_policy, dict) and execution_policy:
+                    active_bridge_sequence["execution_policy"] = deepcopy(execution_policy)
+                source = str(bridge_debug.get("source", "")).strip()
+                if source:
+                    active_bridge_sequence["source"] = source
+                scenario_id = str(bridge_debug.get("scenario_id", "")).strip()
+                if scenario_id:
+                    active_bridge_sequence["scenario_id"] = scenario_id
+        if bridge_debug:
+            bridge_debug["approval"] = {
+                "approved_at_utc": self._utc_now_iso(),
+                "entry_task_ids": deepcopy(resumable_task_ids),
+                "compiled_bridge_task_ids": (
+                    deepcopy(active_bridge_sequence.get("bridge_task_ids") or [])
+                    if isinstance(active_bridge_sequence, dict)
+                    else []
+                ),
+                "compiled_bridge_tasks": self._bridge_task_debug_rows(
+                    list(active_bridge_sequence.get("bridge_task_ids") or [])
+                    if isinstance(active_bridge_sequence, dict)
+                    else []
+                ),
+            }
 
         validation_message = (
             f"Approved bridge proposal '{proposal.get('macro_name') or proposal.get('function_name') or 'bridge_recovery'}' compiled to "
@@ -1994,8 +2542,9 @@ class ProductAgent(LlmAgent):
             message=validation_message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
+            used_llm_bridge=used_llm_bridge,
             bridge_proposal=proposal,
+            bridge_debug=bridge_debug if bridge_debug else None,
             bridge_approval_state="approved",
             active_bridge_sequence=active_bridge_sequence,
             violations=violations,
@@ -2003,11 +2552,58 @@ class ProductAgent(LlmAgent):
             history_message=validation_message,
         )
         self._clear_plan_safety_alert()
-        await self._send_runtime_plan_validation_check()
-        await asyncio.to_thread(self._persist_plan_snapshot)
-        await asyncio.to_thread(self._persist_product_state)
-        await asyncio.to_thread(self._persist_resource_state)
+        self.logger.info(
+            "[Product] Approved runtime bridge proposal compiled: tasks=%d elapsed=%.3fs",
+            len(tasks),
+            time.perf_counter() - started_at,
+        )
+        try:
+            self._schedule_approved_runtime_bridge_finalization()
+        except Exception as exc:
+            self.logger.exception("[Product] Approved bridge proposal validation dispatch failed.")
+            message = (
+                f"{self.agent_name}: approved bridge proposal could not start runtime "
+                f"plan validation ({exc})."
+            )
+            recovery = self._set_runtime_recovery(
+                status="human_required",
+                resolution_class="human_required",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
+                message=message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=used_llm_bridge,
+                bridge_proposal=None,
+                bridge_approval_state="approved",
+                bridge_debug=bridge_debug if bridge_debug else None,
+                active_bridge_sequence=None,
+                violations=violations,
+                append_history=True,
+                history_message=message,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=message,
+                retries_used=self._runtime_repair_fail_streak,
+                retries_max=self._runtime_repair_max_attempts,
+                violations=violations,
+                paused=True,
+            )
+            threading.Thread(
+                target=self._persist_product_state,
+                name=f"{self.agent_name}-persist-product-state",
+                daemon=True,
+            ).start()
+            return recovery
+        self.logger.info(
+            "[Product] Approved runtime bridge proposal queued runtime validation: elapsed=%.3fs",
+            time.perf_counter() - started_at,
+        )
         return recovery
+
+    async def approve_runtime_bridge_proposal(self) -> dict[str, Any]:
+        return self.approve_runtime_bridge_proposal_sync()
 
     async def reject_runtime_bridge_proposal(self, feedback: str) -> dict[str, Any]:
         if str(self.replan_mode or "llm").strip().lower() != "des":
@@ -2030,7 +2626,7 @@ class ProductAgent(LlmAgent):
             message="Operator rejected the bridge proposal; regenerating with feedback.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
+            used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
             bridge_proposal=None,
             bridge_approval_state="none",
             active_bridge_sequence=None,

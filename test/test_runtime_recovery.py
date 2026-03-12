@@ -9,6 +9,8 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("OPENAI_API_KEY", "sk-local-test")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +19,11 @@ if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
+from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
+    build_preprogrammed_bridge_proposal,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+    build_primitive_catalog,
     get_robot_bridge_snapshot,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import _tool_signature
@@ -141,6 +147,7 @@ class _DummyBridgeRobot:
     _BRIDGE_PRIMITIVES = frozenset(
         {
             "move_cartesian",
+            "move_pose",
             "move_relative",
             "move_to_named_pose",
             "open_gripper",
@@ -155,7 +162,10 @@ class _DummyBridgeRobot:
     def __init__(self, jid: str, scope_name: str, *, current_state: str, held_part: str | None) -> None:
         self.jid = jid
         self.agent_name = scope_name
-        self.static_capabilities = {"reachability": ["Assembly Station"], "staging_areas": {}}
+        self.static_capabilities = {
+            "reachability": ["Assembly Station", "assembly_board-v1", "prusa-mk4-1", "prusa-mk4-2"],
+            "staging_areas": {},
+        }
         self._controller = None
         self.execution_mode = "dry_run"
         self._current_state = current_state
@@ -163,7 +173,13 @@ class _DummyBridgeRobot:
         self._gripper_state = "closed" if held_part else "open"
         self._position = {"x": 0.1, "y": 0.2, "z": 0.3}
         self._bridge_pose_ref = None
-        self.named_positions = {"home": [0, 1, 2, 3, 4, 5]}
+        self.named_positions = {
+            "home": [0, 1, 2, 3, 4, 5],
+            "side_pick_approach": [0, 1, 2, 3, 4, 5],
+            "side_insert_pre": [0, 1, 2, 3, 4, 5],
+            "side_insert_post": [0, 1, 2, 3, 4, 5],
+            "recovery_clear": [0, 1, 2, 3, 4, 5],
+        }
         self._scope_name = scope_name
 
     def _robot_scope_name(self) -> str:
@@ -329,6 +345,8 @@ def _activate_bridge_sequence(
     violations: list[dict[str, Any]],
     system_coordination_state: dict[str, Any],
     trigger: str = "safety_block",
+    used_llm_bridge: bool = True,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return agent._set_runtime_recovery(
         reset=True,
@@ -339,7 +357,7 @@ def _activate_bridge_sequence(
         message="Plan validation passed; approved bridge sequence is executing.",
         attempts_used=1,
         attempts_max=agent._runtime_repair_max_attempts,
-        used_llm_bridge=True,
+        used_llm_bridge=used_llm_bridge,
         bridge_proposal=None,
         bridge_approval_state="approved",
         active_bridge_sequence={
@@ -349,12 +367,232 @@ def _activate_bridge_sequence(
             "trigger": trigger,
             "failed_task_id": failed_task_id,
             "violations": deepcopy(violations),
+            "used_llm_bridge": used_llm_bridge,
+            "execution_policy": deepcopy(execution_policy or {}),
             "system_coordination_state": deepcopy(system_coordination_state),
             "state": "executing",
         },
         bridge_feedback_history=[],
         violations=[],
     )
+
+
+def _build_preprogrammed_bridge_request() -> tuple[dict[str, Any], _DummyBridgeRobot, _DummyBridgeRobot]:
+    ur5e_robot = _DummyBridgeRobot(
+        "ur5e@localhost",
+        "ur5e",
+        current_state="picked",
+        held_part="MCP",
+    )
+    xarm6_robot = _DummyBridgeRobot(
+        "xarm6@localhost",
+        "xarm6",
+        current_state="recovery_required",
+        held_part=None,
+    )
+
+    ur5e_snapshot = ur5e_robot.get_bridge_snapshot()
+    xarm6_snapshot = xarm6_robot.get_bridge_snapshot()
+    part_tracker = {
+        "MCP": {
+            "state": "in_gripper",
+            "location": "ur5e@localhost_gripper",
+            "last_successful_task": "REQ_1_T2",
+        },
+        "LCP": {
+            "state": "in_transit",
+            "location": "xarm6@localhost_gripper",
+            "observed_pose": {
+                "x": 0.42,
+                "y": -0.08,
+                "z": 1.03,
+                "qx": 0.0,
+                "qy": 0.7071,
+                "qz": 0.0,
+                "qw": 0.7071,
+            },
+            "last_successful_task": "REQ_2_T3",
+        },
+    }
+    grounding_context = {
+        "resource": {
+            "jid": "xarm6@localhost",
+            "current_state": "recovery_required",
+            "held_part": None,
+            "gripper_state": "open",
+            "current_pose": deepcopy(xarm6_snapshot.get("current_pose")),
+            "current_pose_ref": xarm6_snapshot.get("current_pose_ref"),
+            "named_poses": {name: name for name in xarm6_snapshot.get("named_poses", [])},
+        },
+        "resources": {
+            "ur5e@localhost": {
+                "jid": "ur5e@localhost",
+                "current_state": "picked",
+                "held_part": "MCP",
+                "gripper_state": "closed",
+                "current_pose": deepcopy(ur5e_snapshot.get("current_pose")),
+                "current_pose_ref": ur5e_snapshot.get("current_pose_ref"),
+                "named_poses": {name: name for name in ur5e_snapshot.get("named_poses", [])},
+                "modeled_state": {
+                    "resource_state": "picked",
+                    "current_part": "MCP",
+                    "current_location": None,
+                    "part_states": {"MCP": "in_gripper", "LCP": "in_transit"},
+                    "part_locations": {
+                        "MCP": "ur5e@localhost_gripper",
+                        "LCP": "xarm6@localhost_gripper",
+                    },
+                },
+                "pending_tasks": [
+                    {
+                        "id": "REQ_1_T3",
+                        "function_name": "place_approach",
+                        "params": {
+                            "part_name": "MCP",
+                            "destination_location": "Assembly Station",
+                        },
+                        "resource_jid": "ur5e@localhost",
+                    },
+                    {
+                        "id": "REQ_1_T4",
+                        "function_name": "place_insert",
+                        "params": {
+                            "part_name": "MCP",
+                            "destination_location": "Assembly Station",
+                        },
+                        "resource_jid": "ur5e@localhost",
+                    },
+                    {
+                        "id": "REQ_1_T5",
+                        "function_name": "move_home",
+                        "params": {},
+                        "resource_jid": "ur5e@localhost",
+                    },
+                ],
+                "static_capabilities": deepcopy(ur5e_robot.static_capabilities),
+            },
+            "xarm6@localhost": {
+                "jid": "xarm6@localhost",
+                "current_state": "recovery_required",
+                "held_part": None,
+                "gripper_state": "open",
+                "current_pose": deepcopy(xarm6_snapshot.get("current_pose")),
+                "current_pose_ref": xarm6_snapshot.get("current_pose_ref"),
+                "named_poses": {name: name for name in xarm6_snapshot.get("named_poses", [])},
+                "modeled_state": {
+                    "resource_state": "recovery_required",
+                    "current_part": None,
+                    "current_location": None,
+                    "part_states": {"MCP": "in_gripper", "LCP": "in_transit"},
+                    "part_locations": {
+                        "MCP": "ur5e@localhost_gripper",
+                        "LCP": "xarm6@localhost_gripper",
+                    },
+                },
+                "pending_tasks": [
+                    {
+                        "id": "REQ_2_T5",
+                        "function_name": "move_home",
+                        "params": {},
+                        "resource_jid": "xarm6@localhost",
+                    }
+                ],
+                "static_capabilities": deepcopy(xarm6_robot.static_capabilities),
+            },
+        },
+        "parts": {
+            "MCP": {
+                "state": "in_gripper",
+                "location": "ur5e@localhost_gripper",
+                "last_known_location": None,
+                "observed_pose": {
+                    "x": 0.55,
+                    "y": 0.11,
+                    "z": 1.02,
+                },
+                "target": {
+                    "slot_pose": {"x": 0.0, "y": -0.08, "z": 1.025},
+                    "board_top_z": 1.025,
+                    "part_height": 0.08,
+                    "model_name": "circ_pin_medium",
+                },
+            },
+            "LCP": {
+                "state": "in_transit",
+                "location": "xarm6@localhost_gripper",
+                "last_known_location": None,
+                "observed_pose": deepcopy(part_tracker["LCP"]["observed_pose"]),
+                "target": {
+                    "slot_pose": {"x": 0.1, "y": -0.08, "z": 1.025},
+                    "board_top_z": 1.025,
+                    "part_height": 0.1,
+                    "model_name": "circ_pin_large",
+                },
+            },
+        },
+        "goal": {"goal_state": "assembled", "pending_parts": ["MCP", "LCP"]},
+        "focused_resource_jid": "xarm6@localhost",
+        "obligation_targets": [
+            {
+                "rule_id": "SAFE_2",
+                "resource_jid": "xarm6@localhost",
+                "required_event_aps": [],
+                "required_state_aps": [],
+                "candidate_tools": [],
+                "required_out_states": [],
+                "current_resource_state": "recovery_required",
+            }
+        ],
+    }
+
+    request = {
+        "ra_jid": "xarm6@localhost",
+        "goal_state": "assembled",
+        "tools_catalog": _minimal_recovery_tools(),
+        "part_tracker": deepcopy(part_tracker),
+        "obligation_targets": deepcopy(grounding_context["obligation_targets"]),
+        "primitive_catalog": build_primitive_catalog(xarm6_robot),
+        "bridge_snapshot": deepcopy(xarm6_snapshot),
+        "grounding_context": grounding_context,
+        "bridge_resources": {
+            "ur5e@localhost": {
+                "primitive_catalog": build_primitive_catalog(ur5e_robot),
+                "bridge_snapshot": deepcopy(ur5e_snapshot),
+                "modeled_state": deepcopy(grounding_context["resources"]["ur5e@localhost"]["modeled_state"]),
+                "pending_tasks": deepcopy(grounding_context["resources"]["ur5e@localhost"]["pending_tasks"]),
+                "static_capabilities": deepcopy(ur5e_robot.static_capabilities),
+            },
+            "xarm6@localhost": {
+                "primitive_catalog": build_primitive_catalog(xarm6_robot),
+                "bridge_snapshot": deepcopy(xarm6_snapshot),
+                "modeled_state": deepcopy(grounding_context["resources"]["xarm6@localhost"]["modeled_state"]),
+                "pending_tasks": deepcopy(grounding_context["resources"]["xarm6@localhost"]["pending_tasks"]),
+                "static_capabilities": deepcopy(xarm6_robot.static_capabilities),
+            },
+        },
+        "plan_nodes": [
+            {
+                "id": "REQ_1_T1",
+                "function_name": "pick_approach",
+                "resource_jid": "ur5e@localhost",
+                "params": {
+                    "part_name": "MCP",
+                    "origin_resource_location": "prusa-mk4-2",
+                },
+            },
+            {
+                "id": "REQ_1_T2",
+                "function_name": "pick_grasp",
+                "resource_jid": "ur5e@localhost",
+                "params": {
+                    "part_name": "MCP",
+                    "origin_resource_location": "prusa-mk4-2",
+                },
+            },
+        ],
+        "bridge_debug": {},
+    }
+    return request, ur5e_robot, xarm6_robot
 
 
 def test_runtime_des_recovery_starts_session_and_validates(tmp_path):
@@ -771,6 +1009,10 @@ def test_bridge_request_uses_whole_system_bridge_context(tmp_path):
     assert '"ur5e@localhost"' in captured_prompt["value"]
     assert '"xarm6@localhost"' in captured_prompt["value"]
     assert "pending_tasks" in captured_prompt["value"]
+    bridge_debug = agent.process_planner.get_last_bridge_debug()
+    assert bridge_debug["prompt"] == captured_prompt["value"]
+    assert bridge_debug["status"] == "accepted"
+    assert bridge_debug["normalized_proposal"]["macro_tasks"][0]["macro_name"] == "stabilize_pick"
 
 
 def test_approve_runtime_bridge_proposal_compiles_ordered_macro_tasks_and_gates_blocked_tasks(tmp_path):
@@ -906,6 +1148,8 @@ def test_approve_runtime_bridge_proposal_compiles_ordered_macro_tasks_and_gates_
     assert recovery["bridge_approval_state"] == "approved"
     assert recovery["active_bridge_sequence"]["bridge_sequence_id"] == inserted[0]["bridge_sequence_id"]
     assert recovery["active_bridge_sequence"]["bridge_task_ids"] == [inserted[0]["id"], inserted[1]["id"]]
+    assert recovery["bridge_debug"]["approval"]["compiled_bridge_task_ids"] == [inserted[0]["id"], inserted[1]["id"]]
+    assert recovery["bridge_debug"]["approval"]["compiled_bridge_tasks"][0]["id"] == inserted[0]["id"]
 
 
 def test_ack_updates_bridge_part_tracker_from_bridge_part_name_stash(tmp_path):
@@ -1609,10 +1853,15 @@ def test_runtime_des_recovery_falls_back_to_bridge_when_no_modeled_path_exists(t
 
     try:
         recovery = asyncio.run(_run())
-        assert recovery["status"] == "llm_bridge"
-        assert recovery["used_llm_bridge"] is True
-        assert recovery["bridge_approval_state"] == "pending"
-        assert recovery["bridge_proposal"]["macro_steps"][0]["function_name"] == "move_home"
+        assert recovery["status"] == "bridge_ready"
+        assert recovery["used_llm_bridge"] is False
+        assert recovery["bridge_approval_state"] == "ready"
+        assert recovery["bridge_debug"]["status"] == "ready"
+        generated = asyncio.run(agent.generate_runtime_bridge_proposal())
+        assert generated["status"] == "llm_bridge"
+        assert generated["used_llm_bridge"] is True
+        assert generated["bridge_approval_state"] == "pending"
+        assert generated["bridge_proposal"]["macro_steps"][0]["function_name"] == "move_home"
         assert sent_messages == []
     finally:
         ProductAgent.configure_shared_tools_catalogue()
@@ -1680,8 +1929,11 @@ def test_runtime_des_recovery_skips_live_duplicate_suffix_fallback(tmp_path):
 
     try:
         recovery = asyncio.run(_run())
-        assert recovery["status"] == "llm_bridge"
-        assert recovery["used_llm_bridge"] is True
+        assert recovery["status"] == "bridge_ready"
+        assert recovery["used_llm_bridge"] is False
+        generated = asyncio.run(agent.generate_runtime_bridge_proposal())
+        assert generated["status"] == "llm_bridge"
+        assert generated["used_llm_bridge"] is True
         inserted = [
             node for node in agent.process_planner.nodes
             if str(node.get("change_reason", "")).startswith("INSERTION: DES recovery")
@@ -1690,6 +1942,193 @@ def test_runtime_des_recovery_skips_live_duplicate_suffix_fallback(tmp_path):
         assert sent_messages == []
     finally:
         ProductAgent.configure_shared_tools_catalogue()
+
+
+def test_build_preprogrammed_bridge_proposal_returns_valid_sideways_scenario(tmp_path):
+    prepared_bridge_request, ur5e_robot, xarm6_robot = _build_preprogrammed_bridge_request()
+    proposal = build_preprogrammed_bridge_proposal(
+        scenario_id="recover_lcp_sideways_v1",
+        prepared_bridge_request=prepared_bridge_request,
+    )
+
+    assert [task["macro_name"] for task in proposal["macro_tasks"]] == [
+        "clear_xarm6_zone",
+        "return_mcp_to_printer",
+        "pick_lcp_sideways",
+        "insert_lcp_sideways",
+        "resume_mcp_assembly",
+    ]
+
+    agent, _sent_messages = _make_product_agent(
+        tmp_path,
+        resource_agents=[ur5e_robot, xarm6_robot],
+        resource_jids=["ur5e@localhost", "xarm6@localhost"],
+    )
+    normalized = agent.process_planner.validate_preprogrammed_bridge_proposal(
+        proposal=proposal,
+        prepared_bridge_request=prepared_bridge_request,
+        source="preprogrammed_scenario",
+        scenario_id="recover_lcp_sideways_v1",
+    )
+
+    assert normalized["macro_tasks"][-1]["projected_snapshot"]["current_state"] == "picked"
+    assert normalized["projected_parts"]["LCP"]["state"] == "assembled"
+    assert normalized["projected_parts"]["MCP"]["state"] == "in_gripper"
+
+
+def test_build_preprogrammed_bridge_proposal_rejects_missing_mcp_origin():
+    prepared_bridge_request, _ur5e_robot, _xarm6_robot = _build_preprogrammed_bridge_request()
+    prepared_bridge_request["plan_nodes"] = []
+    prepared_bridge_request["part_tracker"]["MCP"].pop("last_successful_task", None)
+
+    with pytest.raises(ValueError, match="origin_resource_location"):
+        build_preprogrammed_bridge_proposal(
+            scenario_id="recover_lcp_sideways_v1",
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+
+def test_load_preprogrammed_runtime_bridge_scenario_sets_pending_bridge_proposal(tmp_path):
+    prepared_bridge_request, ur5e_robot, xarm6_robot = _build_preprogrammed_bridge_request()
+    agent, _sent_messages = _make_product_agent(
+        tmp_path,
+        resource_agents=[ur5e_robot, xarm6_robot],
+        resource_jids=["ur5e@localhost", "xarm6@localhost"],
+    )
+    agent._set_runtime_recovery(
+        reset=True,
+        status="bridge_ready",
+        resolution_class="none",
+        trigger="safety_block",
+        failed_task_id="REQ_2_T5",
+        message="Bridge request prepared.",
+        attempts_used=1,
+        attempts_max=agent._runtime_repair_max_attempts,
+        used_llm_bridge=False,
+        bridge_proposal=None,
+        bridge_approval_state="ready",
+        violations=_runtime_mutex_violation([]),
+    )
+    agent._runtime_recovery_context = {
+        "trigger": "safety_block",
+        "failed_task_id": "REQ_2_T5",
+        "violations": _runtime_mutex_violation([]),
+        "system_coordination_state": {},
+        "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        "bridge_feedback_history": [],
+    }
+
+    recovery = asyncio.run(
+        agent.load_preprogrammed_runtime_bridge_scenario("recover_lcp_sideways_v1")
+    )
+
+    assert recovery["status"] == "llm_bridge"
+    assert recovery["used_llm_bridge"] is False
+    assert recovery["bridge_approval_state"] == "pending"
+    assert recovery["bridge_debug"]["source"] == "preprogrammed_scenario"
+    assert recovery["bridge_debug"]["scenario_id"] == "recover_lcp_sideways_v1"
+
+    async def _fake_validation_check() -> None:
+        return None
+
+    agent._send_runtime_plan_validation_check = _fake_validation_check  # type: ignore[assignment]
+    approved = asyncio.run(agent.approve_runtime_bridge_proposal())
+    assert approved["used_llm_bridge"] is False
+    assert approved["active_bridge_sequence"]["execution_policy"]["complete_full_tail"] is True
+    assert approved["active_bridge_sequence"]["scenario_id"] == "recover_lcp_sideways_v1"
+
+
+def test_bridge_ack_continues_full_tail_when_execution_policy_requires_it(tmp_path):
+    robot = _DummyBridgeRobot(
+        "ur5e@localhost",
+        "ur5e",
+        current_state="idle",
+        held_part=None,
+    )
+    nodes = [
+        {
+            "id": "REQ_1_T4",
+            "type": "task",
+            "status": "blocked",
+            "function_name": "move_home",
+            "params": {},
+            "resource_jid": "ur5e@localhost",
+            "sequence_index": 1,
+            "predecessors": ["RECOVERY_BRIDGE_2"],
+            "successors": [],
+        },
+        {
+            "id": "RECOVERY_BRIDGE_1",
+            "type": "task",
+            "status": "pending",
+            "function_name": "execute_recovery_macro",
+            "resource_jid": "ur5e@localhost",
+            "params": {"macro_name": "clear_fault", "primitive_steps": []},
+            "bridge_sequence_id": "BRIDGESEQ_TEST",
+            "bridge_sequence_index": 1,
+            "bridge_sequence_length": 2,
+            "projected_snapshot": {
+                "current_state": "idle",
+                "held_part": None,
+                "gripper_state": "open",
+            },
+            "predecessors": [],
+            "successors": ["RECOVERY_BRIDGE_2"],
+        },
+        {
+            "id": "RECOVERY_BRIDGE_2",
+            "type": "task",
+            "status": "pending",
+            "function_name": "execute_recovery_macro",
+            "resource_jid": "ur5e@localhost",
+            "params": {"macro_name": "complete_tail", "primitive_steps": []},
+            "bridge_sequence_id": "BRIDGESEQ_TEST",
+            "bridge_sequence_index": 2,
+            "bridge_sequence_length": 2,
+            "projected_snapshot": {
+                "current_state": "idle",
+                "held_part": None,
+                "gripper_state": "open",
+            },
+            "predecessors": ["RECOVERY_BRIDGE_1"],
+            "successors": [],
+        },
+    ]
+    agent, _sent_messages, _tools_catalog = _configure_bridge_runtime_agent(
+        tmp_path,
+        nodes=nodes,
+        part_tracker={},
+        robot=robot,
+    )
+
+    async def _unexpected_validation() -> None:
+        raise AssertionError("validation should not run before the approved tail is exhausted")
+
+    async def _unexpected_des(*_args, **_kwargs):
+        raise AssertionError("DES handoff should not run before the approved tail is exhausted")
+
+    agent._send_runtime_plan_validation_check = _unexpected_validation  # type: ignore[assignment]
+    agent.process_planner.replan_with_feedback_des = _unexpected_des  # type: ignore[assignment]
+    _activate_bridge_sequence(
+        agent,
+        bridge_sequence_id="BRIDGESEQ_TEST",
+        bridge_task_ids=["RECOVERY_BRIDGE_1", "RECOVERY_BRIDGE_2"],
+        failed_task_id="REQ_1_T4",
+        violations=_runtime_violation("REQ_1_T4"),
+        system_coordination_state={
+            "resource_states": {
+                "ur5e@localhost": {"current_state": "idle", "held_part": None},
+            }
+        },
+        used_llm_bridge=False,
+        execution_policy={"complete_full_tail": True},
+    )
+
+    asyncio.run(_deliver_ack(agent, task_id="RECOVERY_BRIDGE_1"))
+
+    assert agent.process_planner._find_node("RECOVERY_BRIDGE_2") is not None
+    assert agent.runtime_recovery["used_llm_bridge"] is False
+    assert agent.runtime_recovery["active_bridge_sequence"]["last_completed_macro_name"] == "clear_fault"
 
 
 class _BridgeProductAgent:
@@ -1732,6 +2171,20 @@ class _BridgeProductAgent:
         self.runtime_recovery["message"] = "Retrying DES recovery."
         return self.get_runtime_recovery()
 
+    async def generate_runtime_bridge_proposal(self) -> dict:
+        self.runtime_recovery["status"] = "llm_bridge"
+        self.runtime_recovery["resolution_class"] = "none"
+        self.runtime_recovery["message"] = "Bridge proposal ready."
+        self.runtime_recovery["used_llm_bridge"] = True
+        return self.get_runtime_recovery()
+
+    async def load_preprogrammed_runtime_bridge_scenario(self, scenario_id: str) -> dict:
+        self.runtime_recovery["status"] = "llm_bridge"
+        self.runtime_recovery["resolution_class"] = "none"
+        self.runtime_recovery["message"] = f"Loaded {scenario_id}."
+        self.runtime_recovery["used_llm_bridge"] = False
+        return self.get_runtime_recovery()
+
     def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2.0)
@@ -1755,5 +2208,18 @@ def test_bridge_runtime_recovery_actions_use_product_agent_loop():
         retried = bridge.retry_runtime_recovery_des(fake_product.jid)
         assert retried["status"] == "des_search"
         assert retried["resolution_class"] == "none"
+
+        fake_product.runtime_recovery["status"] = "bridge_ready"
+        generated = bridge.generate_runtime_bridge_proposal(fake_product.jid)
+        assert generated["status"] == "llm_bridge"
+        assert generated["resolution_class"] == "none"
+
+        fake_product.runtime_recovery["status"] = "bridge_ready"
+        loaded = bridge.load_preprogrammed_runtime_bridge_scenario(
+            fake_product.jid,
+            "recover_lcp_sideways_v1",
+        )
+        assert loaded["status"] == "llm_bridge"
+        assert loaded["used_llm_bridge"] is False
     finally:
         fake_product.close()

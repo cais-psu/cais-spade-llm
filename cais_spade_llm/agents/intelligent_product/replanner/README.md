@@ -11,7 +11,7 @@ The recovery path was changed from a generic suffix-search plus synthetic LLM to
 3. `"any"` remains only a tool applicability wildcard for `in_state`; it is not used to guess the missing recovery action.
 4. If DES cannot find a catalog-valid obligation-satisfying path, the LLM bridge is used only to propose a high-level recovery macro.
 5. Bridge proposals are approval-gated. They are not executed directly as invented tool names.
-6. On approval, the proposal is compiled into normal runtime recovery tasks using existing catalog functions, and execution resumes automatically.
+6. On approval, the proposal is compiled into ordered `execute_recovery_macro` runtime recovery tasks, and execution resumes automatically.
 7. On rejection, operator feedback is recorded and immediately fed back into bridge regeneration.
 8. If no modeled path exists and the bridge cannot produce a compilable proposal, runtime recovery ends in `human_required`.
 
@@ -79,10 +79,14 @@ If no catalog-valid modeled path exists for the active obligation:
 
 - the planner calls the LLM bridge
 - the bridge must return exactly one proposal object
-- the outer `function_name` may be new
-- `macro_steps` must use exact existing catalog functions for the same resource
+- the proposal contains one `primary_obligation` and ordered `macro_tasks[]`
+- each `macro_task` chooses a `resource_jid`, carries node-level task metadata,
+  and executes controller-level `primitive_steps`
+- the proposal is normalized and semantically validated before approval
 
-This means the bridge is allowed to invent a new high-level recovery macro name, but it is not allowed to invent a new low-level executable tool.
+This means the bridge is allowed to invent a recovery macro structure, but it
+is not allowed to invent a new runtime execution surface outside the approved
+controller primitive set.
 
 ### 5. Approval and resume
 
@@ -94,16 +98,20 @@ Runtime recovery stores:
 
 When the operator approves:
 
-1. `ProductAgent.approve_runtime_bridge_proposal()` compiles the proposal into ordinary recovery task nodes.
-2. Those nodes are inserted into the runtime plan as normal tasks.
+1. `ProductAgent.approve_runtime_bridge_proposal()` compiles the proposal into
+   ordered `execute_recovery_macro` recovery task nodes.
+2. Those nodes are inserted into the runtime plan as a serial bridge sequence.
 3. The plan FSA is rebuilt and revalidated with the CCA.
-4. Execution resumes automatically after approval because the approved macro has been materialized into executable catalog-backed tasks.
+4. Execution resumes automatically after approval.
+5. After each completed bridge macro, Product refreshes the runtime snapshot and
+   either hands control back to DES, trims the remaining bridge tail, or
+   continues the approved bridge sequence.
 
 Implementation detail:
 
-- The current runtime executor does not execute bridge macros directly.
-- Instead, approval materializes the macro into standard recovery task nodes.
-- This preserves existing resource-agent execution semantics and avoids adding a second execution engine.
+- Approved bridge nodes execute directly through `RobotAgent.execute_recovery_macro`.
+- The bridge remains approval-gated and isolated from the shared DES tools
+  catalog.
 
 ### 6. Rejection and regeneration
 
@@ -121,7 +129,11 @@ No manual retry is required after rejection.
 Recovery transitions to `human_required` when:
 
 - DES finds no catalog-valid obligation path, and
-- the bridge returns nothing, invalid JSON, a wrong-resource proposal, or macro steps that do not compile to exact existing catalog functions
+- the bridge returns nothing, invalid JSON, a wrong-resource proposal, or a
+  normalized proposal that still fails validation or compilation
+- an approved bridge macro fails runtime semantic validation or diverges from
+  its approved projected post-state
+- the approved bridge tail finishes but DES still has no valid continuation
 
 ## Verified-Bundle Runtime Recovery
 
@@ -223,11 +235,11 @@ The operator can:
 
 The UI displays:
 
-- proposal macro name
-- target resource
-- description
-- rationale
-- compiled macro steps
+- proposal macro tasks
+- target resource(s)
+- description and rationale
+- compiled bridge tasks
+- temporary LLM bridge debug trace for prompt/input/output inspection
 
 ## Verified Behavior
 
@@ -388,7 +400,8 @@ The forward simulation is invoked in `_SafetyCheckInbox._handle_safety_check()`:
 
 > **Superseded.** The original constraint below has been removed. See
 > [`llm_bridge_construction.md`](llm_bridge_construction.md) for the
-> current design.
+> current design and [`llm_bridge_todo.md`](llm_bridge_todo.md) for the
+> current implementation status / known issues.
 
 Bridge proposals now embed **controller-level primitive sequences** that
 execute through `RobotAgent.execute_recovery_macro`. This allows the LLM

@@ -190,6 +190,20 @@ def _normalized_xyz_pose(payload: Any) -> dict[str, float] | None:
         return None
 
 
+def _normalized_orientation(payload: Any) -> dict[str, float] | None:
+    if not isinstance(payload, dict) or not {"qx", "qy", "qz", "qw"} <= set(payload.keys()):
+        return None
+    try:
+        return {
+            "qx": float(payload["qx"]),
+            "qy": float(payload["qy"]),
+            "qz": float(payload["qz"]),
+            "qw": float(payload["qw"]),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_detected_part_output(part: Any, *, fallback_part_name: str = "") -> dict[str, Any] | None:
     if not isinstance(part, dict):
         return None
@@ -207,6 +221,11 @@ def _normalize_detected_part_output(part: Any, *, fallback_part_name: str = "") 
         "z": z,
         "pose": {"x": x, "y": y, "z": z},
     }
+    orientation = _normalized_orientation(part)
+    if orientation is not None:
+        output.update(orientation)
+        output["orientation"] = deepcopy(orientation)
+        output["pose"].update(orientation)
     model_name = str(part.get("model_name") or "").strip()
     if model_name:
         output["model_name"] = model_name
@@ -221,16 +240,13 @@ def _normalize_pose_output(pose: Any) -> dict[str, Any] | None:
         "x": pose_xyz["x"],
         "y": pose_xyz["y"],
         "z": pose_xyz["z"],
-        "pose": pose_xyz,
+        "pose": dict(pose_xyz),
     }
-    if isinstance(pose, dict):
-        orientation = {
-            key: pose[key]
-            for key in ("qx", "qy", "qz", "qw")
-            if key in pose
-        }
-        if orientation:
-            out["orientation"] = deepcopy(orientation)
+    orientation = _normalized_orientation(pose)
+    if orientation is not None:
+        out.update(orientation)
+        out["orientation"] = deepcopy(orientation)
+        out["pose"].update(orientation)
     return out
 
 
@@ -252,8 +268,13 @@ def _preview_detect_parts_output(
         "x": observed_pose["x"],
         "y": observed_pose["y"],
         "z": observed_pose["z"],
-        "pose": observed_pose,
+        "pose": dict(observed_pose),
     }
+    orientation = _normalized_orientation((part_info or {}).get("observed_pose"))
+    if orientation is not None:
+        output.update(orientation)
+        output["orientation"] = deepcopy(orientation)
+        output["pose"].update(orientation)
     target = (part_info or {}).get("target") or {}
     model_name = str(target.get("model_name") or "").strip()
     if model_name:
@@ -265,17 +286,38 @@ def _preview_get_current_pose_output(
     snapshot: dict[str, Any],
     grounding_context: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    pose = _normalized_xyz_pose(
+    raw_pose = (
         ((grounding_context or {}).get("resource") or {}).get("current_pose")
-    ) or _normalized_xyz_pose(snapshot.get("current_pose"))
+        or snapshot.get("current_pose")
+        or {}
+    )
+    pose = _normalize_pose_output(raw_pose)
     if pose is None:
-        pose = {"x": 0.0, "y": 0.0, "z": 0.0}
-    return {
-        "x": pose["x"],
-        "y": pose["y"],
-        "z": pose["z"],
-        "pose": pose,
-    }, None
+        pose = {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+            "orientation": {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            "pose": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            },
+        }
+    elif "qx" not in pose:
+        orientation = {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+        pose.update(orientation)
+        pose["orientation"] = deepcopy(orientation)
+        pose["pose"].update(orientation)
+    return pose, None
 
 
 def preview_step_output(

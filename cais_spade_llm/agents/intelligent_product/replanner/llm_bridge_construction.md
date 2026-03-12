@@ -102,62 +102,152 @@ snapshot for the target robot resource. This snapshot includes:
 - `current_pose_ref`
 - available `named_poses`
 
-The snapshot is shown to the LLM and is also used by the deterministic semantic
-validator to project primitive effects across the proposed macro before it is
-approved.
+The focused resource snapshot is shown to the LLM and is also used by the
+deterministic semantic validator to project primitive effects across each
+proposed macro task before it is approved.
+
+The current bridge prompt is whole-system scoped. In addition to the focused
+resource snapshot, the planner also provides:
+
+- per-resource primitive catalogs for all bridge-capable robot resources
+- per-resource bridge snapshots and modeled states
+- pending tasks per resource
+- part tracker state and observed locations
+- active `obligation_targets`
+- a grounded context tree that supports `{"context_ref": "/..."}` lookups
 
 ### Bridge proposal schema
 
-A bridge proposal contains one recovery macro:
+The current bridge schema is:
+
+- one top-level `primary_obligation`
+- ordered `macro_tasks[]`
+- one `macro_task` per recovery step in the bridge sequence
+
+In v1, `macro_tasks[]` are executed serially in array order. Each task is
+validated against the projected post-state of earlier tasks.
 
 ```json
 {
-  "macro_name": "retry_insert_with_detection",
-  "resource_jid": "xarm6@localhost",
-  "description": "Re-detect part position and retry insertion",
-  "rationale": "Part slipped during place_insert; re-detection needed",
-  "expected_start_state": "recovery_required",
-  "task_metadata": {
-    "in_state": "recovery_required",
-    "out_state": "placed",
-    "required_context_keys": ["destination"],
-    "context_mapping": {
-      "location_param": "destination_location",
-      "location_type": "current_location"
+  "primary_obligation": {
+    "rule_id": "SAFE_2",
+    "resource_jid": "xarm6@localhost"
+  },
+  "macro_tasks": [
+    {
+      "resource_jid": "ur5e@localhost",
+      "macro_name": "stash_mcp",
+      "description": "Temporarily clear the later-priority part from UR5e.",
+      "rationale": "Free UR5e to recover the slipped prerequisite part.",
+      "expected_start_state": "picked",
+      "part_name": "MCP",
+      "task_params": {
+        "destination_location": "buffer_a"
+      },
+      "task_metadata": {
+        "in_state": "picked",
+        "out_state": "idle",
+        "required_context_keys": ["destination_location"],
+        "context_mapping": {
+          "location_param": "destination_location",
+          "location_type": "current_location"
+        },
+        "part_transition": {
+          "completed": {
+            "state": "ready",
+            "location_param": "destination_location"
+          }
+        }
+      },
+      "primitive_steps": [
+        {"primitive": "open_gripper", "params": {}},
+        {"primitive": "move_to_named_pose", "params": {"pose_name": "home"}}
+      ],
+      "expected_snapshot": {
+        "current_state": "picked",
+        "held_part": "MCP",
+        "gripper_state": "closed"
+      },
+      "projected_snapshot": {
+        "current_state": "idle",
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose_ref": "home"
+      },
+      "projected_part_entry": {
+        "state": "ready",
+        "location": "buffer_a"
+      }
     },
-    "part_transition": {
-      "completed": {
-        "state": "assembled",
-        "location_param": "destination_location"
+    {
+      "resource_jid": "xarm6@localhost",
+      "macro_name": "recover_lcp",
+      "description": "Restore XArm6 to a modeled idle state after the failed insert.",
+      "rationale": "Discharge the primary obligation and allow DES to continue.",
+      "expected_start_state": "recovery_required",
+      "task_metadata": {
+        "in_state": "recovery_required",
+        "out_state": "idle",
+        "required_context_keys": [],
+        "context_mapping": {},
+        "part_transition": null
+      },
+      "primitive_steps": [
+        {"primitive": "move_to_named_pose", "params": {"pose_name": "home"}}
+      ],
+      "expected_snapshot": {
+        "current_state": "recovery_required",
+        "held_part": null,
+        "gripper_state": "open"
+      },
+      "projected_snapshot": {
+        "current_state": "idle",
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose_ref": "home"
       }
     }
-  },
-  "primitive_steps": [
-    {"primitive": "detect_parts", "params": {"part_name": "SG"}},
-    {"primitive": "move_cartesian", "params": {"x": 0.3, "y": 0.1, "z": 0.15}},
-    {"primitive": "close_gripper", "params": {}},
-    {"primitive": "attach_part", "params": {"model_name": "SG"}},
-    {"primitive": "move_cartesian", "params": {"x": 0.25, "y": -0.1, "z": 0.12}},
-    {"primitive": "open_gripper", "params": {}},
-    {"primitive": "detach_part", "params": {"model_name": "SG"}},
-    {"primitive": "move_to_named_pose", "params": {"pose_name": "home"}}
   ]
 }
 ```
 
-Before approval, `primitive_steps` are validated against the current bridge
-snapshot using the primitive `preconditions/effects`. For example, a proposal
-that tries `attach_part(LCP)` while `held_part = MRP` is rejected before
-execution.
+Before approval, each macro task is normalized and validated against the current
+or projected bridge snapshot using the primitive `preconditions/effects`.
+Examples of pre-approval rejection include:
 
-### Compilation into plan node
+- a primitive sequence that violates semantic preconditions
+- unresolved `context_ref` values
+- invalid `store_as` / step-output references
+- missing `task_params` required by `task_metadata.required_context_keys`
+- proposals whose final projected state does not restore a modeled continuation
 
-`apply_bridge_macro_proposal` compiles one approved proposal into one plan node:
+### Compilation into runtime recovery tasks
 
-- `function_name`: `execute_recovery_macro`
-- `resource_jid`: from proposal
-- `params`: `macro_name`, `primitive_steps`, `expected_start_state`, plus task context
-- Node-level metadata: `in_state`, `out_state`, `required_context_keys`, `context_mapping`, `part_transition` — all copied from `task_metadata`
+`ProcessPlanner.apply_bridge_macro_proposal()` compiles each approved
+`macro_task` into one `execute_recovery_macro` task node. Those nodes are
+inserted as a serial runtime recovery chain.
+
+Each compiled node carries:
+
+- `function_name = execute_recovery_macro`
+- `resource_jid`
+- `params`: `macro_name`, `primitive_steps`, `expected_start_state`,
+  `expected_snapshot`, `product_jid`, `task_id`, plus any bridge `task_params`
+- bridge sequencing metadata:
+  - `bridge_sequence_id`
+  - `bridge_sequence_index`
+  - `bridge_sequence_length`
+- node-level metadata copied from `task_metadata`:
+  - `in_state`
+  - `out_state`
+  - `required_context_keys`
+  - `context_mapping`
+  - `part_transition`
+- bridge validation / tracking fields:
+  - `part_name`
+  - `primary_obligation`
+  - `projected_snapshot`
+  - `projected_part_entry`
 
 ### execute_recovery_macro
 
@@ -166,31 +256,67 @@ execution.
 At runtime, `execute_recovery_macro`:
 
 1. Validates `expected_start_state` against the robot's current `_current_state`
-2. Validates `expected_snapshot` against the robot's current primitive-level bridge snapshot
-3. Iterates `primitive_steps` sequentially, calling the corresponding controller primitive
-4. Applies the same primitive `effects` to the live `RobotAgent` bridge state (`_held_part`, `_gripper_state`, pose snapshot)
-5. On success: returns normal task-style status payload
-6. On failure: stops at the failing step, returns failure context with the step index and primitive that failed
+2. Validates `expected_snapshot` against the robot's current primitive-level
+   bridge snapshot
+3. Re-validates the primitive sequence against the latest runtime snapshot
+4. Resolves runtime param refs, including supported `/step_outputs/...` lookups
+5. Iterates `primitive_steps` sequentially, calling the corresponding
+   controller primitive
+6. Extracts supported observational outputs (`detect_parts`, `get_current_pose`)
+   when `store_as` is used
+7. Applies the same primitive `effects` to the live `RobotAgent` bridge state
+   (`_held_part`, `_gripper_state`, pose snapshot)
+8. On success: returns a normal task-style status payload
+9. On failure: stops at the failing step and returns failure context that
+   includes the step index / primitive plus semantic or snapshot details when
+   available
 
 ## Safety and Tracking Integration
 
 ### Node-level metadata
 
-Bridge macro tasks carry their own `in_state`/`out_state`/`part_transition` on the plan node because `execute_recovery_macro` does not exist in the shared catalog.
+Bridge macro tasks carry their own `in_state`/`out_state`/`part_transition` on
+the plan node because `execute_recovery_macro` does not exist in the shared
+catalog.
 
 The following systems prefer node-level metadata when present, and fall back to shared-catalog lookup for normal tasks:
 
 - **Global FSA compilation**: uses node `in_state`/`out_state` to construct state transitions
 - **Runtime plan safety validation**: validates node-level states against safety rules
-- **Product part-tracker**: applies node-level `part_transition` after task completion
+- **Product part-tracker**: applies node-level `part_transition` after task
+  completion, using `part_name` / `touched_part` from the bridge node
 
 ### Approval gate
 
-Bridge proposals remain approval-gated. The operator reviews the macro (name, description, rationale, primitive steps) before it is compiled into the plan. Rejection feedback is fed back into bridge regeneration as before.
+Bridge proposals remain approval-gated. The operator reviews the ordered bridge
+macro tasks before they are compiled into the plan. Rejection feedback is fed
+back into bridge regeneration as before.
+
+## Runtime Handoff and Fail-Closed Checks
+
+After an approved bridge macro task completes, Product does not blindly run the
+rest of the bridge tail. It performs a runtime handoff check:
+
+1. Refresh the affected resource's bridge snapshot
+2. Compare the refreshed runtime snapshot against `projected_snapshot`
+3. Compare the tracked part entry against `projected_part_entry` when present
+4. If the live state diverged, stop and fail closed to `human_required`
+5. If the original failed task is directly executable again, validate the
+   updated plan and resume normal execution
+6. Otherwise, re-run DES from the refreshed runtime state
+7. If DES can now continue, trim the remaining bridge tail and validate the
+   repaired plan
+8. If DES still cannot continue but more bridge tasks remain, continue the
+   approved bridge tail
+9. If the final approved bridge task completes and DES still has no
+   continuation, escalate to `human_required`
 
 ## Relationship to Existing Recovery Flow
 
-This design supersedes the "Known Design Boundary" described in `README.md` (line 220). Previously, bridge proposals compiled into existing catalog-backed task nodes. Now, bridge proposals embed primitive sequences that execute through `execute_recovery_macro`.
+This design supersedes the older legacy bridge flow described in
+`README.md`. Previously, bridge proposals compiled into existing
+catalog-backed task nodes. Now, bridge proposals embed primitive sequences that
+execute through ordered `execute_recovery_macro` tasks.
 
 The rest of the recovery flow is unchanged:
 

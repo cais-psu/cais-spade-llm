@@ -177,6 +177,19 @@ def _load_case3_llm_bridge_bundle() -> tuple[list[dict], dict[str, str], dict, d
     return safety_logic["rules"], dfa_map, plan, fsa, tools_catalog
 
 
+def test_case3_bundle_winning_set_is_nonempty() -> None:
+    rules, dfa_map, plan, fsa, tools_catalog = _load_case3_llm_bridge_bundle()
+    validator = PlanSafetyValidator(
+        rules=rules,
+        dfa_map=dfa_map,
+        tools_catalog=tools_catalog,
+    )
+
+    winning = validator.compute_winning_set(fsa=fsa, plan=plan)
+
+    assert winning["W"]
+
+
 def _board_mutex_rule() -> dict:
     return {
         "id": "SAFE_1",

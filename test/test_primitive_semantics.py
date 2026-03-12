@@ -17,6 +17,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.environment_model impor
 from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
     apply_effects_to_snapshot,
     build_primitive_catalog,
+    extract_step_output,
     get_robot_bridge_snapshot,
     sync_agent_from_bridge_snapshot,
     validate_and_project_steps,
@@ -27,6 +28,7 @@ class _DummyRobot:
     _BRIDGE_PRIMITIVES = frozenset(
         {
             "move_cartesian",
+            "move_pose",
             "move_relative",
             "move_to_named_pose",
             "open_gripper",
@@ -67,6 +69,10 @@ def test_build_primitive_catalog_includes_preconditions_and_effects():
 
     open_gripper = by_name["open_gripper"]
     assert open_gripper["effects"]["gripper_state"]["set"] == "open"
+
+    move_pose = by_name["move_pose"]
+    assert move_pose["required_params"] == ["x", "y", "z", "qx", "qy", "qz", "qw"]
+    assert move_pose["effects"]["current_pose"]["pose_absolute_from_params"] == ["x", "y", "z"]
 
 
 def test_validate_and_project_steps_rejects_attach_when_holding_part():
@@ -113,6 +119,32 @@ def test_validate_and_project_steps_projects_gripper_and_held_part_state():
     assert error is None
     assert projected["gripper_state"] == "open"
     assert projected["held_part"] is None
+
+
+def test_validate_and_project_steps_accepts_move_pose_and_projects_xyz_only():
+    robot = _DummyRobot()
+    ok, projected, error = validate_and_project_steps(
+        [
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": 0.4,
+                    "y": -0.1,
+                    "z": 0.8,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.7071,
+                    "qw": 0.7071,
+                },
+            }
+        ],
+        build_primitive_catalog(robot),
+        robot.get_bridge_snapshot(),
+    )
+
+    assert ok is True
+    assert error is None
+    assert projected["current_pose"] == {"x": 0.4, "y": -0.1, "z": 0.8}
 
 
 def test_normalize_primitive_bridge_proposal_rejects_semantically_invalid_steps():
@@ -228,6 +260,133 @@ def test_validate_and_project_steps_supports_store_as_and_step_output_refs():
     assert ok is True
     assert error is None
     assert projected["current_pose"] == {"x": 0.31, "y": -0.12, "z": 0.15}
+
+
+def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_detect_parts_store_as():
+    robot = _DummyRobot()
+    proposal = _normalize_primitive_bridge_proposal(
+        raw=json.dumps(
+            {
+                "macro_name": "side_pick",
+                "resource_jid": "ur5e@localhost",
+                "expected_start_state": "picked",
+                "primitive_steps": [
+                    {
+                        "primitive": "detect_parts",
+                        "params": {"part_name": "LCP"},
+                        "store_as": "detected_lcp",
+                    },
+                    {
+                        "primitive": "move_pose",
+                        "params": {
+                            "x": {"context_ref": "/step_outputs/detected_lcp/pose/x"},
+                            "y": {"context_ref": "/step_outputs/detected_lcp/pose/y"},
+                            "z": {"context_ref": "/step_outputs/detected_lcp/pose/z"},
+                            "qx": {"context_ref": "/step_outputs/detected_lcp/pose/qx"},
+                            "qy": {"context_ref": "/step_outputs/detected_lcp/pose/qy"},
+                            "qz": {"context_ref": "/step_outputs/detected_lcp/pose/qz"},
+                            "qw": {"context_ref": "/step_outputs/detected_lcp/pose/qw"},
+                        },
+                    },
+                ],
+            }
+        ),
+        ra_jid="ur5e@localhost",
+        primitive_catalog=build_primitive_catalog(robot),
+        bridge_snapshot=robot.get_bridge_snapshot(),
+        grounding_context={
+            "parts": {
+                "LCP": {
+                    "observed_pose": {
+                        "x": 0.41,
+                        "y": -0.18,
+                        "z": 0.12,
+                        "qx": 0.0,
+                        "qy": 0.7071,
+                        "qz": 0.0,
+                        "qw": 0.7071,
+                    },
+                    "target": {"model_name": "circ_pin_large"},
+                }
+            }
+        },
+    )
+
+    assert proposal is not None
+    assert proposal["projected_snapshot"]["current_pose"] == {"x": 0.41, "y": -0.18, "z": 0.12}
+    assert proposal["primitive_steps"][1]["params"]["qx"] == {
+        "context_ref": "/step_outputs/detected_lcp/pose/qx"
+    }
+
+
+def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_get_current_pose_store_as():
+    robot = _DummyRobot()
+    proposal = _normalize_primitive_bridge_proposal(
+        raw=json.dumps(
+            {
+                "macro_name": "resume_pick",
+                "resource_jid": "ur5e@localhost",
+                "expected_start_state": "picked",
+                "primitive_steps": [
+                    {
+                        "primitive": "get_current_pose",
+                        "params": {},
+                        "store_as": "home_pose",
+                    },
+                    {
+                        "primitive": "move_pose",
+                        "params": {
+                            "x": 0.2,
+                            "y": 0.1,
+                            "z": 0.5,
+                            "qx": {"context_ref": "/step_outputs/home_pose/pose/qx"},
+                            "qy": {"context_ref": "/step_outputs/home_pose/pose/qy"},
+                            "qz": {"context_ref": "/step_outputs/home_pose/pose/qz"},
+                            "qw": {"context_ref": "/step_outputs/home_pose/pose/qw"},
+                        },
+                    },
+                ],
+            }
+        ),
+        ra_jid="ur5e@localhost",
+        primitive_catalog=build_primitive_catalog(robot),
+        bridge_snapshot=robot.get_bridge_snapshot(),
+        grounding_context={"resource": {"current_pose": {"x": 1.0, "y": 2.0, "z": 3.0}}},
+    )
+
+    assert proposal is not None
+    assert proposal["projected_snapshot"]["current_pose"] == {"x": 0.2, "y": 0.1, "z": 0.5}
+    assert proposal["primitive_steps"][1]["params"]["qw"] == {
+        "context_ref": "/step_outputs/home_pose/pose/qw"
+    }
+
+
+def test_extract_step_output_preserves_detected_part_orientation():
+    output, error = extract_step_output(
+        primitive="detect_parts",
+        params={"part_name": "LCP"},
+        step_result={
+            "data": [
+                {
+                    "part_name": "LCP",
+                    "model_name": "circ_pin_large",
+                    "x": 0.12,
+                    "y": -0.05,
+                    "z": 1.02,
+                    "qx": 0.0,
+                    "qy": 0.7071,
+                    "qz": 0.0,
+                    "qw": 0.7071,
+                }
+            ]
+        },
+    )
+
+    assert error is None
+    assert output is not None
+    assert output["pose"]["qx"] == 0.0
+    assert output["pose"]["qy"] == 0.7071
+    assert output["orientation"]["qw"] == 0.7071
 
 
 def test_normalize_primitive_bridge_proposal_rejects_unknown_step_output_ref():

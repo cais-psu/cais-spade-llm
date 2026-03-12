@@ -321,6 +321,8 @@ class BaseSafetyChecker:
             return token in rule_ctx_value_strings or token in param_value_strings
 
         for key, value in pairs:
+            if str(value).strip().lower() == "any":
+                continue
             if key in params:
                 if cls._context_scalar_text(params.get(key)) != value:
                     return False
