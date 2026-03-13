@@ -3286,6 +3286,13 @@ class SystemBridge:
                 bundle_context,
                 runtime_overrides,
             )
+            self._bind_agents_to_running_loop(
+                asyncio.get_running_loop(),
+                user_agent=self.user_agent,
+                resource_agents=self.resource_agents,
+                product_agents=self.product_agents,
+                cca=self.cca,
+            )
             self._diag_emit(
                 f"startup#{startup_id} agents created resources={len(self.resource_agents)} "
                 f"products={len(self.product_agents)} in {time.monotonic() - startup_t0:.2f}s"
@@ -3557,6 +3564,41 @@ class SystemBridge:
             **cca_kwargs,
         )
         return user_agent, resource_agents, product_agents, cca
+
+    @staticmethod
+    def _bind_agents_to_running_loop(
+        loop: asyncio.AbstractEventLoop,
+        *,
+        user_agent: Any,
+        resource_agents: list[Any],
+        product_agents: list[Any],
+        cca: Any,
+    ) -> None:
+        agents = [
+            agent
+            for agent in [user_agent, cca, *list(resource_agents or []), *list(product_agents or [])]
+            if agent is not None
+        ]
+        containers: list[Any] = []
+        for agent in agents:
+            container = getattr(agent, "container", None)
+            if container is None or container in containers:
+                continue
+            containers.append(container)
+        for container in containers:
+            try:
+                container.loop = loop
+            except Exception:
+                continue
+        for agent in agents:
+            setter = getattr(agent, "set_loop", None)
+            if callable(setter):
+                setter(loop)
+            else:
+                try:
+                    agent.loop = loop
+                except Exception:
+                    continue
 
     @staticmethod
     def _resolve_llm_tools_catalogue_path(
@@ -5536,6 +5578,15 @@ class SystemBridge:
     def get_task_states(self) -> dict[str, str]:
         merged = {}
         for pa in self.product_agents:
+            planner = getattr(pa, "process_planner", None)
+            nodes = getattr(planner, "nodes", []) if planner is not None else []
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                task_id = str(node.get("id") or node.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                merged[task_id] = str(node.get("status", "pending") or "pending")
             ts = getattr(pa, "task_states", {})
             merged.update(ts)
         return merged

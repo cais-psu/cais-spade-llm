@@ -227,8 +227,8 @@ def _build_agent(controller: _FakeController | None = None) -> tuple[RobotAgent,
         controller_config={"motion": {}},
         named_positions={"home": [0, 1, 2, 3, 4, 5]},
         prewarmed_controller=fake,
-        lcp_slippage_mode="off",
-        lcp_slippage_scope="ur5e",
+        lg_slippage_mode="off",
+        lg_slippage_scope="ur5e",
     )
     return agent, fake
 

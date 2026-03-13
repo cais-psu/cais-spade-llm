@@ -810,11 +810,29 @@ def render(bridge: SystemBridge) -> None:
                     return
                 if not message:
                     action_feedback_buffers.pop(jid, None)
+                    try:
+                        client.safe_invoke(_refresh_runtime_recovery_panel)
+                    except Exception:
+                        pass
                     return
                 action_feedback_buffers[jid] = {
                     "kind": str(kind or "info").strip().lower() or "info",
                     "text": message,
                 }
+                try:
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception:
+                    pass
+
+            def _clear_pending_runtime_action(product_jid: str) -> None:
+                jid = str(product_jid or "").strip()
+                if not jid:
+                    return
+                pending_action_buffers.pop(jid, None)
+                try:
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception:
+                    pass
 
             def _queue_runtime_action(
                 product_jid: str,
@@ -984,7 +1002,7 @@ def render(bridge: SystemBridge) -> None:
                 message = str(guidance_buffers.get(product_jid, "")).strip()
                 if not message:
                     _set_action_feedback(product_jid, "warning", "Operator guidance is empty.")
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _clear_pending_runtime_action(product_jid)
                     _notify("Operator guidance is empty.", type="warning")
                     return
                 try:
@@ -1005,7 +1023,7 @@ def render(bridge: SystemBridge) -> None:
                     )
                     _notify(f"Failed to record guidance: {exc}", type="negative")
                 finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _clear_pending_runtime_action(product_jid)
 
             async def _retry_runtime_des(product_jid: str) -> None:
                 try:
@@ -1025,7 +1043,7 @@ def render(bridge: SystemBridge) -> None:
                     )
                     _notify(f"Failed to retry DES recovery: {exc}", type="negative")
                 finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _clear_pending_runtime_action(product_jid)
 
             async def _run_runtime_bridge(product_jid: str) -> None:
                 try:
@@ -1045,98 +1063,7 @@ def render(bridge: SystemBridge) -> None:
                     )
                     _notify(f"Failed to start LLM bridge exploration: {exc}", type="negative")
                 finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
-
-            async def _load_preprogrammed_runtime_bridge(product_jid: str) -> None:
-                scenario_id = str(
-                    preprogrammed_bridge_buffers.get(product_jid, "recover_lcp_sideways_v1")
-                    or "recover_lcp_sideways_v1"
-                ).strip()
-                if not scenario_id:
-                    _set_action_feedback(
-                        product_jid,
-                        "warning",
-                        "No preprogrammed recovery scenario is selected.",
-                    )
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
-                    _notify("No preprogrammed recovery scenario is selected.", type="warning")
-                    return
-                try:
-                    await asyncio.to_thread(
-                        bridge.load_preprogrammed_runtime_bridge_scenario,
-                        product_jid,
-                        scenario_id,
-                    )
-                    _set_action_feedback(
-                        product_jid,
-                        "positive",
-                        "Preprogrammed recovery scenario loaded for review.",
-                    )
-                    _notify("Preprogrammed recovery scenario loaded for review.", type="positive")
-                    client.safe_invoke(_refresh_runtime_recovery_panel)
-                except Exception as exc:
-                    _set_action_feedback(
-                        product_jid,
-                        "negative",
-                        f"Failed to load preprogrammed recovery scenario: {exc}",
-                    )
-                    _notify(f"Failed to load preprogrammed recovery scenario: {exc}", type="negative")
-                finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
-
-            async def _approve_runtime_bridge(product_jid: str) -> None:
-                try:
-                    await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
-                    _set_action_feedback(
-                        product_jid,
-                        "positive",
-                        "Bridge proposal approved. Waiting for runtime plan validation.",
-                    )
-                    _notify("Bridge proposal approved. Waiting for runtime plan validation.", type="positive")
-                    client.safe_invoke(_refresh_runtime_recovery_panel)
-                except Exception as exc:
-                    _set_action_feedback(
-                        product_jid,
-                        "negative",
-                        f"Failed to approve bridge proposal: {exc}",
-                    )
-                    _notify(f"Failed to approve bridge proposal: {exc}", type="negative")
-                finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
-
-            async def _reject_runtime_bridge(product_jid: str) -> None:
-                feedback = str(bridge_feedback_buffers.get(product_jid, "")).strip()
-                if not feedback:
-                    _set_action_feedback(product_jid, "warning", "Bridge rejection feedback is empty.")
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
-                    _notify("Bridge rejection feedback is empty.", type="warning")
-                    return
-                try:
-                    await asyncio.to_thread(
-                        bridge.reject_runtime_bridge_proposal,
-                        product_jid,
-                        feedback,
-                    )
-                    bridge_feedback_buffers[product_jid] = ""
-                    _set_action_feedback(
-                        product_jid,
-                        "positive",
-                        "Bridge proposal rejected. The next bridge request is prepared for another attempt.",
-                    )
-                    _notify(
-                        "Bridge proposal rejected. The next bridge request is prepared; run the LLM again when ready.",
-                        type="positive",
-                    )
-                    client.safe_invoke(_refresh_runtime_recovery_panel)
-                except Exception as exc:
-                    _set_action_feedback(
-                        product_jid,
-                        "negative",
-                        f"Failed to reject bridge proposal: {exc}",
-                    )
-                    _notify(f"Failed to reject bridge proposal: {exc}", type="negative")
-                finally:
-                    pending_action_buffers.pop(str(product_jid or "").strip(), None)
+                    _clear_pending_runtime_action(product_jid)
 
             def _refresh_runtime_recovery_panel() -> None:
                 runtime_recovery_container.clear()
@@ -1181,9 +1108,9 @@ def render(bridge: SystemBridge) -> None:
                         selected_preprogrammed = str(
                             preprogrammed_bridge_buffers.get(
                                 product_jid,
-                                "recover_lcp_sideways_v1",
+                                "recover_lg_v1",
                             )
-                            or "recover_lcp_sideways_v1"
+                            or "recover_lg_v1"
                         )
                         guidance_buffers[product_jid] = operator_guidance
                         bridge_feedback_buffers[product_jid] = bridge_feedback
@@ -1193,6 +1120,9 @@ def render(bridge: SystemBridge) -> None:
                             if isinstance(action_feedback_buffers.get(product_jid), dict)
                             else None
                         )
+                        pending_action_label = str(
+                            pending_action_buffers.get(product_jid, "") or ""
+                        ).strip()
                         bridge_proposal = recovery.get("bridge_proposal")
                         bridge_debug = (
                             recovery.get("bridge_debug")
@@ -1250,54 +1180,15 @@ def render(bridge: SystemBridge) -> None:
                                 ui.label(str(action_feedback.get("text", "")).strip()).classes(
                                     f"w-full mt-2 px-3 py-2 rounded text-xs {tone}"
                                 )
+                            if pending_action_label:
+                                ui.label(f"Pending action: {pending_action_label}").classes(
+                                    "w-full mt-2 px-3 py-2 rounded text-xs bg-amber-50 text-amber-700"
+                                )
 
                             if status == "bridge_ready":
                                 ui.label(
-                                    "Bridge request is prepared. Review the prompt and context below, then click "
-                                    "`Run LLM Explore States + Events` to send it, or load a deterministic "
-                                    "preprogrammed recovery scenario for operator review."
+                                    "Bridge request is prepared. Preprogrammed recovery will auto-load and auto-approve."
                                 ).classes("text-xs text-orange-700 mt-2")
-                                preprogrammed_select = ui.select(
-                                    {
-                                        "recover_lcp_sideways_v1": "recover_lcp_sideways_v1",
-                                    },
-                                    value=selected_preprogrammed,
-                                    label="Preprogrammed scenario",
-                                ).props("outlined dense").classes("min-w-64 mt-2")
-                                preprogrammed_select.on_value_change(
-                                    lambda e, jid=product_jid: preprogrammed_bridge_buffers.__setitem__(
-                                        jid,
-                                        str(e.value or "recover_lcp_sideways_v1"),
-                                    )
-                                )
-                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
-                                    ui.button(
-                                        "Run LLM Explore States + Events",
-                                        on_click=lambda jid=product_jid: _queue_runtime_action(
-                                            jid,
-                                            action_label="Run LLM Explore States + Events",
-                                            runner=_run_runtime_bridge,
-                                        ),
-                                        icon="play_arrow",
-                                    ).props("color=blue")
-                                    ui.button(
-                                        "Load Preprogrammed Recovery",
-                                        on_click=lambda jid=product_jid: _queue_runtime_action(
-                                            jid,
-                                            action_label="Load Preprogrammed Recovery",
-                                            runner=_load_preprogrammed_runtime_bridge,
-                                        ),
-                                        icon="playlist_add_check",
-                                    ).props("color=teal")
-                                    ui.button(
-                                        "Retry DES",
-                                        on_click=lambda jid=product_jid: _queue_runtime_action(
-                                            jid,
-                                            action_label="Retry DES",
-                                            runner=_retry_runtime_des,
-                                        ),
-                                        icon="restart_alt",
-                                    ).props("color=grey")
 
                             if status == "llm_bridge" and isinstance(bridge_proposal, dict):
                                 with ui.expansion("Bridge proposal", icon="alt_route", value=True).classes("w-full mt-2"):
@@ -1351,35 +1242,9 @@ def render(bridge: SystemBridge) -> None:
                                             ui.label(
                                                 f"{idx}. {step.get('function_name', '')}({params_text})"
                                             ).classes("text-xs font-mono text-slate-700")
-                                bridge_feedback_box = ui.textarea(
-                                    label="Rejection feedback",
-                                    value=bridge_feedback,
-                                ).props("outlined autogrow").classes("w-full mt-2")
-                                bridge_feedback_box.on_value_change(
-                                    lambda e, jid=product_jid: bridge_feedback_buffers.__setitem__(
-                                        jid,
-                                        str(e.value or ""),
-                                    )
-                                )
-                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
-                                    ui.button(
-                                        "Approve and Resume",
-                                        on_click=lambda jid=product_jid: _queue_runtime_action(
-                                            jid,
-                                            action_label="Approve and Resume",
-                                            runner=_approve_runtime_bridge,
-                                        ),
-                                        icon="play_arrow",
-                                    ).props("color=green")
-                                    ui.button(
-                                        "Reject and Regenerate",
-                                        on_click=lambda jid=product_jid: _queue_runtime_action(
-                                            jid,
-                                            action_label="Reject and Regenerate",
-                                            runner=_reject_runtime_bridge,
-                                        ),
-                                        icon="refresh",
-                                    ).props("color=orange")
+                                ui.label(
+                                    "Bridge proposals are now auto-approved."
+                                ).classes("text-xs text-green-700 mt-2")
 
                             if bridge_debug:
                                 debug_status = str(bridge_debug.get("status", "") or "n/a").strip()

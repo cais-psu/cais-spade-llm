@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 
+_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
+
 
 class RobotAgent(ResourceAgent):
     """Robot resource (UR5e, xArm, etc.) with granular motion tools.
@@ -24,17 +26,22 @@ class RobotAgent(ResourceAgent):
     _DEFAULT_PREWARM_TIMEOUT_S = 60.0
 
     def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
-        # Failure-injection controls for LCP placement tests.
-        # - always: fail every qualifying LCP place
-        # - once: fail first qualifying LCP place, then allow
-        # - off: never inject LCP slippage failures
-        lcp_slippage_mode = str(kw.pop("lcp_slippage_mode", "always")).lower()
-        if lcp_slippage_mode not in {"always", "once", "off"}:
-            lcp_slippage_mode = "always"
-        self.lcp_slippage_mode = lcp_slippage_mode
+        # Failure-injection controls for LG placement tests.
+        # Accept legacy lcp_* keys as aliases so older fixtures still load.
+        # - always: fail every qualifying LG place
+        # - once: fail first qualifying LG place, then allow
+        # - off: never inject LG slippage failures
+        lg_slippage_mode = str(
+            kw.pop("lg_slippage_mode", kw.pop("lcp_slippage_mode", "always"))
+        ).lower()
+        if lg_slippage_mode not in {"always", "once", "off"}:
+            lg_slippage_mode = "always"
+        self.lg_slippage_mode = lg_slippage_mode
         # Scope to one robot by name ("xarm6"), or "any".
-        self.lcp_slippage_scope = str(kw.pop("lcp_slippage_scope", "xarm6")).lower()
-        self._lcp_slippage_triggered = False
+        self.lg_slippage_scope = str(
+            kw.pop("lg_slippage_scope", kw.pop("lcp_slippage_scope", "xarm6"))
+        ).lower()
+        self._lg_slippage_triggered = False
 
         # Controller config from the environment-specific robot JSON block.
         controller_config = kw.pop("controller_config", {})
@@ -103,13 +110,13 @@ class RobotAgent(ResourceAgent):
         self.logger.info(
             (
                 "RobotAgent '%s' initialized. mode=%s tools=%s "
-                "lcp_slippage_mode=%s lcp_slippage_scope=%s"
+                "lg_slippage_mode=%s lg_slippage_scope=%s"
             ),
             name,
             self.execution_mode,
             list(self.executables.keys()),
-            self.lcp_slippage_mode,
-            self.lcp_slippage_scope,
+            self.lg_slippage_mode,
+            self.lg_slippage_scope,
         )
 
     async def teardown(self) -> None:
@@ -171,20 +178,20 @@ class RobotAgent(ResourceAgent):
             return ref
         return f"{ref}@{self._jid_domain()}"
 
-    def _should_inject_lcp_slippage(self, target_part_name: str) -> bool:
-        """Return True if LCP slippage should be injected for this placement."""
-        if str(target_part_name) != "LCP":
+    def _should_inject_lg_slippage(self, target_part_name: str) -> bool:
+        """Return True if LG slippage should be injected for this placement."""
+        if str(target_part_name) != "LG":
             return False
-        if self.lcp_slippage_mode == "off":
-            return False
-
-        if self.lcp_slippage_scope not in ("any", self._robot_scope_name()):
+        if self.lg_slippage_mode == "off":
             return False
 
-        if self.lcp_slippage_mode == "once" and self._lcp_slippage_triggered:
+        if self.lg_slippage_scope not in ("any", self._robot_scope_name()):
             return False
 
-        self._lcp_slippage_triggered = True
+        if self.lg_slippage_mode == "once" and self._lg_slippage_triggered:
+            return False
+
+        self._lg_slippage_triggered = True
         return True
 
     def _build_controller(self):
@@ -199,7 +206,13 @@ class RobotAgent(ResourceAgent):
         robot_scope = self._robot_scope_name()
         try:
             if robot_scope.startswith("ur5e"):
+                trajectory_topic = (
+                    _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC
+                    if str(self.execution_mode or "").strip().lower() == "simulation"
+                    else None
+                )
                 return UR5eController(
+                    trajectory_topic=trajectory_topic or "/scaled_joint_trajectory_controller/joint_trajectory",
                     controller_config=self.controller_config,
                     named_positions=self.named_positions,
                     execution_mode=self.execution_mode,
@@ -866,28 +879,29 @@ class RobotAgent(ResourceAgent):
             return {"status": "blocked", "content": msg}
 
         placed_target = part_name or self._held_part
-        if self._should_inject_lcp_slippage(placed_target):
+        if self._should_inject_lg_slippage(placed_target):
             self.logger.error("[Robot] Assembly verification failed for %s.", placed_target)
 
-            # -- Gazebo: simulate failed insertion → part rolls to UR5e area --
-            drop_x, drop_y, drop_z = 0.10, 0.35, 1.035
+            # Simulate failed insertion by dropping LG into a UR5e-reachable
+            # recovery lane beside the assembly board.
+            drop_x, drop_y, drop_z = 0.18, 0.10, 1.035
             if self.execution_mode != "dry_run":
                 model_name = self._pick_ctx.get("model_name", "")
                 if model_name and self._controller is not None:
                     await asyncio.to_thread(
                         self._controller.detach_part, model_name
                     )
-                    # Place on its side near UR5e base (Y=+0.35).
-                    # 90° around X-axis: cylinder fully on side, stable.
+                    # Place on its side in a board-adjacent recovery lane.
+                    # LG recovery uses a flat top-down pickup, so keep the part upright.
                     await asyncio.to_thread(
                         self._controller.set_entity_pose,
                         model_name,
                         x=drop_x, y=drop_y, z=drop_z,
-                        qx=0.7071, qy=0.0, qz=0.0, qw=0.7071,
+                        qx=0.0, qy=0.0, qz=0.0, qw=1.0,
                     )
                     self.logger.warning(
-                        "[Robot] LCP slippage: %s rolled to UR5e table area "
-                        "(%.2f, %.2f, %.2f)",
+                        "[Robot] LG slippage: %s rolled to the board-adjacent "
+                        "recovery lane (%.2f, %.2f, %.2f)",
                         model_name, drop_x, drop_y, drop_z,
                     )
                     await asyncio.to_thread(self._controller.open_gripper)
@@ -906,15 +920,15 @@ class RobotAgent(ResourceAgent):
                         "object_found": True,
                         "zone": "assembly_board_v1",
                         "shape_match_confidence": 0.85,
-                        "orientation": "on_side",
+                        "orientation": "flat",
                         "visible_damage": False,
                     },
                     "last_commanded_location": destination_location,
                     "dropped_location": {
                         "x": drop_x, "y": drop_y, "z": drop_z,
-                        "region": "ur5e_workspace",
-                        "near": "ur5e_base",
-                        "description": "Rolled off assembly board to UR5e table area",
+                        "region": "assembly_board_edge",
+                        "near": "ur5e_recovery_lane",
+                        "description": "Rolled off assembly board into the UR5e recovery lane",
                     },
                 },
             }
@@ -1071,9 +1085,12 @@ class RobotAgent(ResourceAgent):
         "move_pose",
         "move_relative",
         "move_to_named_pose",
+        "rotate_wrist",
         "open_gripper",
         "close_gripper",
         "detect_parts",
+        "compute_pick_targets",
+        "compute_place_targets",
         "attach_part",
         "detach_part",
         "get_current_pose",

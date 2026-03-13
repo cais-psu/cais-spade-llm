@@ -275,6 +275,19 @@ class Ros2PickPlaceController:
         self.insertion_depth_m = need_float(
             parts_tuning, "insertion_depth_m", "controller.parts_tuning.insertion_depth_m"
         )
+        raw_pick_z_adjustments = parts_tuning.get("pick_z_adjustments_m", {})
+        self.pick_z_adjustments_m: dict[str, float] = {}
+        if isinstance(raw_pick_z_adjustments, dict):
+            for raw_key, raw_value in raw_pick_z_adjustments.items():
+                key = str(raw_key or "").strip().upper()
+                if not key:
+                    continue
+                try:
+                    self.pick_z_adjustments_m[key] = float(raw_value)
+                except (TypeError, ValueError):
+                    self._config_errors.append(
+                        f"controller.parts_tuning.pick_z_adjustments_m.{key}"
+                    )
 
         if (
             self.pick_tcp_z_bias_min_m > 0.0
@@ -654,6 +667,23 @@ class Ros2PickPlaceController:
             f"move_relative(dx={dx}, dy={dy}, dz={dz})",
             time_scale=time_scale,
         )
+        if (
+            not ok
+            and math.isclose(float(dx), 0.0, abs_tol=1e-9)
+            and math.isclose(float(dy), 0.0, abs_tol=1e-9)
+            and not math.isclose(float(dz), 0.0, abs_tol=1e-9)
+        ):
+            self._log().warn(
+                f"move_relative vertical fallback: retrying no-collision move for dz={float(dz):.4f}"
+            )
+            ok = self._cartesian_move(
+                self._make_pose(target_x, target_y, target_z, ee.orientation),
+                f"move_relative(dx={dx}, dy={dy}, dz={dz}) (no-collision)",
+                avoid_collisions=False,
+                min_fraction=0.70,
+                allow_partial=True,
+                time_scale=time_scale,
+            )
         if not ok:
             return {"success": False, "message": f"failed relative move ({dx}, {dy}, {dz})"}
         return {"success": True, "message": f"moved relative ({dx}, {dy}, {dz})"}
@@ -717,12 +747,13 @@ class Ros2PickPlaceController:
             speed=speed,
         )
 
-    def move_to_named_pose(self, pose_name: str) -> dict[str, Any]:
+    def move_to_named_pose(self, pose_name: str, speed: float | None = None) -> dict[str, Any]:
         """
         ---
         description: Move to a named joint configuration (e.g. 'home').
         params:
           pose_name: {type: string, description: "Name of the joint configuration from robot manifest"}
+          speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
         preconditions: {}
         effects:
           current_pose_ref:
@@ -741,12 +772,84 @@ class Ros2PickPlaceController:
                 "message": f"unknown pose '{pose_name}'; available={available}",
             }
         joint_values = [float(v) for v in positions]
+        duration_sec = self._scaled_joint_duration(4.0, speed)
         # Try trajectory publisher first, then MoveIt fallback.
-        if self._arm_pub and self.move_joints(joint_values, duration_sec=4):
+        if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
+            joint_values,
+            duration_sec=duration_sec,
+        ):
             return {"success": True, "message": f"moved to named pose '{pose_name}'"}
-        if self._exec_client and self._move_joints_via_moveit(joint_values, duration_sec=4):
+        if self._exec_client and self._move_joints_via_moveit(joint_values, duration_sec=duration_sec):
             return {"success": True, "message": f"moved to named pose '{pose_name}' via MoveIt"}
         return {"success": False, "message": f"failed to move to named pose '{pose_name}'"}
+
+    def rotate_wrist(
+        self,
+        delta_degrees: float,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Rotate the UR wrist_3 joint by a relative angle in degrees.
+        params:
+          delta_degrees: {type: number, description: "Relative wrist_3 joint rotation in degrees."}
+          speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
+        preconditions: {}
+        effects:
+          current_pose:
+            set_unknown: true
+          current_pose_ref:
+            set_unknown: true
+        ---
+        """
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        if not self.arm_joint_names:
+            return {"success": False, "message": "arm joint names are not configured"}
+
+        if "wrist_3_joint" not in self.arm_joint_names:
+            return {
+                "success": False,
+                "message": "rotate_wrist requires wrist_3_joint in the configured arm joint names",
+            }
+        wrist_joint_name = "wrist_3_joint"
+
+        joint_values, missing = self._get_arm_joint_positions(timeout_sec=1.0)
+        if joint_values is None:
+            return {
+                "success": False,
+                "message": f"missing joint-state feedback for {missing}",
+            }
+
+        target_positions = list(joint_values)
+        wrist_index = self.arm_joint_names.index(wrist_joint_name)
+        target_positions[wrist_index] += math.radians(float(delta_degrees))
+        duration_sec = self._scaled_joint_duration(1.5, speed)
+        if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
+            target_positions,
+            duration_sec=duration_sec,
+            tolerance_rad=math.radians(5.0),
+        ):
+            return {
+                "success": True,
+                "message": (
+                    f"rotated {wrist_joint_name} by {float(delta_degrees):.1f} degrees"
+                ),
+            }
+        if self._exec_client and self._move_joints_via_moveit(
+            target_positions,
+            duration_sec=duration_sec,
+        ):
+            return {
+                "success": True,
+                "message": (
+                    f"rotated {wrist_joint_name} by {float(delta_degrees):.1f} degrees via MoveIt"
+                ),
+            }
+        return {
+            "success": False,
+            "message": f"failed to rotate {wrist_joint_name} by {float(delta_degrees):.1f} degrees",
+        }
 
     def get_current_pose(self) -> dict[str, Any]:
         """
@@ -798,7 +901,12 @@ class Ros2PickPlaceController:
             return {"success": False, "message": f"failed to attach {model_name}"}
         return {"success": True, "message": f"attached {model_name}"}
 
-    def detach_part(self, model_name: str = "", link: str | None = None) -> dict[str, Any]:
+    def detach_part(
+        self,
+        model_name: str = "",
+        link: str | None = None,
+        assume_released_if_open: bool = False,
+    ) -> dict[str, Any]:
         """
         ---
         description: Detach a part model from the robot gripper (Gazebo link detacher).
@@ -815,15 +923,43 @@ class Ros2PickPlaceController:
         """
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
-        ok = self._detach_part(str(model_name))
+        target_model = str(model_name or "")
+        attempts = max(1, 1 + self.release_detach_retry_count)
+        ok = False
+        for attempt_idx in range(attempts):
+            ok = self._detach_part(
+                target_model,
+                timeout_sec=self.release_detach_timeout_sec,
+                log_failure=(attempt_idx == attempts - 1),
+            )
+            if ok:
+                break
+            if attempt_idx + 1 < attempts:
+                self._log().warn(
+                    f"Detach retry {attempt_idx + 1}/{attempts - 1} for "
+                    f"{target_model or 'held part'}"
+                )
+                time.sleep(self.release_detach_retry_delay_sec)
         if not ok:
+            if assume_released_if_open and self._gripper_is_open_enough():
+                if not target_model and self._attached_model:
+                    target_model = str(self._attached_model)
+                self._attached_model = None
+                self._attached_link = None
+                self._log().warn(
+                    f"Assuming {target_model or 'held part'} was released because the gripper is already open"
+                )
+                return {
+                    "success": True,
+                    "message": f"assumed detached {target_model or 'held part'} after gripper opened",
+                }
             return {"success": False, "message": f"failed to detach {model_name or 'held part'}"}
         return {"success": True, "message": f"detached {model_name or 'held part'}"}
 
     # ------------------------------------------------------------------ #
     # Legacy low-level API (kept for backward compat)
     # ------------------------------------------------------------------ #
-    def move_joints(self, positions: list[float], duration_sec: int = 2) -> bool:
+    def move_joints(self, positions: list[float], duration_sec: float = 2.0) -> bool:
         if not self.wait_for_services():
             return False
         if not self._arm_pub:
@@ -836,13 +972,39 @@ class Ros2PickPlaceController:
             return False
 
         traj = self._JointTrajectory()
-        traj.joint_names = list(self.arm_joint_names)
+        traj.joint_names = self._get_arm_joint_command_names()
         point = self._JointTrajectoryPoint()
         point.positions = [float(v) for v in positions]
-        point.time_from_start = self._Duration(sec=max(1, int(duration_sec)))
+        duration = max(0.1, float(duration_sec))
+        sec = int(duration)
+        nsec = int((duration - sec) * 1_000_000_000)
+        point.time_from_start = self._Duration(sec=sec, nanosec=nsec)
         traj.points = [point]
         self._arm_pub.publish(traj)
         return True
+
+    def _publish_arm_joint_trajectory_and_wait(
+        self,
+        positions: list[float],
+        *,
+        duration_sec: float,
+        tolerance_rad: float = 0.08,
+    ) -> bool:
+        if not self.move_joints(positions, duration_sec=duration_sec):
+            return False
+        timeout_sec = max(2.0, float(duration_sec) + 2.0)
+        if self._wait_for_arm_joint_targets(
+            positions,
+            timeout_sec=timeout_sec,
+            tolerance_rad=tolerance_rad,
+            log_miss=False,
+        ):
+            return True
+        self._log().warn(
+            f"Arm joint trajectory command did not converge within {timeout_sec:.2f}s; "
+            "falling back"
+        )
+        return False
 
     def open_gripper(self) -> bool:
         """
@@ -881,6 +1043,8 @@ class Ros2PickPlaceController:
         self,
         part_name: str = "",
         product_geometry: dict[str, Any] | None = None,
+        approach_height_override_m: float | None = None,
+        ignore_current_height_for_travel_z: bool = False,
     ) -> dict[str, Any]:
         """Compute pick target positions from perception + geometry without moving.
 
@@ -939,13 +1103,17 @@ class Ros2PickPlaceController:
         pick_tcp_z_raw = tz + pick_bias
         pick_tcp_z = max(pick_tcp_z_raw, self.min_pick_tcp_z_m)
         pick_z = pick_tcp_z - ee_tcp_offset_z
+        pick_z += self.pick_z_adjustments_m.get(target_part_name.upper(), 0.0)
 
-        travel_z = max(
-            ee.position.z,
-            tz + self.approach_height_m,
-            board_center_z + self.approach_height_m,
+        approach_height = _as_float(approach_height_override_m, self.approach_height_m)
+        travel_candidates = [
+            tz + approach_height,
+            board_center_z + approach_height,
             pick_z + 0.05,
-        )
+        ]
+        if not bool(ignore_current_height_for_travel_z):
+            travel_candidates.append(ee.position.z)
+        travel_z = max(travel_candidates)
 
         self._log().info(
             "[ComputePickTargets] "
@@ -974,8 +1142,10 @@ class Ros2PickPlaceController:
 
     def compute_place_targets(
         self,
-        pick_ctx: dict[str, Any],
+        pick_ctx: dict[str, Any] | None = None,
         product_geometry: dict[str, Any] | None = None,
+        part_name: str = "",
+        z_adjustment_m: float = 0.0,
     ) -> dict[str, Any]:
         """Compute placement target positions from pick context + geometry without moving.
 
@@ -985,6 +1155,7 @@ class Ros2PickPlaceController:
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
 
+        pick_ctx = dict(pick_ctx or {})
         geo = product_geometry or {}
         board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
         slot_xy = geo.get("slot_xy")
@@ -1000,23 +1171,36 @@ class Ros2PickPlaceController:
             _as_float(board_center.get("z"), 1.025),
         )
         target_height = _as_float(geo.get("part_height_m"), pick_ctx.get("part_height", 0.08))
+        target_part_name = str(part_name or pick_ctx.get("part_name") or "")
 
-        grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
-            pick_ctx.get("tz"), 0.0
-        )
+        if pick_ctx:
+            grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
+                pick_ctx.get("tz"), 0.0
+            )
+            tcp_offset_z = _as_float(pick_ctx.get("tcp_offset_z"), self._get_ee_tcp_world_z_offset())
+        else:
+            # Recovery insert macros may only know the target geometry, not the earlier pick context.
+            grasp_tcp_to_part_origin_z = max(
+                self.pick_tcp_z_bias_min_m,
+                min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
+            )
+            tcp_offset_z = self._get_ee_tcp_world_z_offset()
         place_gap = self.place_surface_gap_m - self.insertion_depth_m
         place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
-        place_z = place_tcp_z - _as_float(pick_ctx.get("tcp_offset_z"), -0.17)
+        place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
 
         return {
             "success": True,
+            "part_name": target_part_name,
             "slot_x": bx,
             "slot_y": by,
             "board_top_z": board_top_z,
             "place_z": place_z,
             "place_tcp_z": place_tcp_z,
             "part_height": target_height,
+            "tcp_offset_z": tcp_offset_z,
+            "grasp_tcp_to_part_origin_z": grasp_tcp_to_part_origin_z,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
 
@@ -1107,13 +1291,13 @@ class Ros2PickPlaceController:
         return {"success": False, "message": "no home pose available"}
 
     def _move_joints_via_moveit(
-        self, positions: list[float], duration_sec: int = 4,
+        self, positions: list[float], duration_sec: float = 4.0,
     ) -> bool:
         """Move to joint positions using the MoveIt execute_trajectory action."""
         if len(positions) != len(self.arm_joint_names):
             self._log().error(
-                "_move_joints_via_moveit expected %d joints, got %d",
-                len(self.arm_joint_names), len(positions),
+                "_move_joints_via_moveit expected "
+                f"{len(self.arm_joint_names)} joints, got {len(positions)}"
             )
             return False
         try:
@@ -1123,10 +1307,13 @@ class Ros2PickPlaceController:
             return False
 
         traj = self._JointTrajectory()
-        traj.joint_names = list(self.arm_joint_names)
+        traj.joint_names = self._get_arm_joint_command_names()
         point = self._JointTrajectoryPoint()
         point.positions = [float(v) for v in positions]
-        point.time_from_start = self._Duration(sec=max(1, int(duration_sec)))
+        duration = max(0.1, float(duration_sec))
+        sec = int(duration)
+        nsec = int((duration - sec) * 1_000_000_000)
+        point.time_from_start = self._Duration(sec=sec, nanosec=nsec)
         traj.points = [point]
 
         robot_traj = RobotTrajectory()
@@ -1145,8 +1332,14 @@ class Ros2PickPlaceController:
         result = self._wait_future(result_future, timeout_sec=30.0, label="result:move_home")
         code = result.result.error_code.val if result else None
         if code != 1:
-            self._log().error("move_home execute_trajectory failed with error_code=%s", code)
+            self._log().error(f"move_home execute_trajectory failed with error_code={code}")
         return code == 1
+
+    def _scaled_joint_duration(self, base_duration_sec: float, speed: float | None) -> float:
+        scale = _as_float(speed, self.trajectory_time_scale)
+        if scale <= 0.0:
+            scale = self.trajectory_time_scale
+        return max(0.5, float(base_duration_sec) * float(scale))
 
     def detach_model(self, model_name: str, *, quiet: bool = False) -> dict[str, Any]:
         if not self.wait_for_services():
@@ -1273,7 +1466,121 @@ class Ros2PickPlaceController:
 
     def _get_joint_position(self, joint_name: str) -> float | None:
         with self._joint_lock:
-            return self._joint_positions.get(joint_name)
+            exact = self._joint_positions.get(joint_name)
+            if exact is not None:
+                return exact
+
+            prefix = f"{self.robot_name}_"
+            prefixed_name = (
+                joint_name
+                if str(joint_name).startswith(prefix)
+                else f"{prefix}{joint_name}"
+            )
+            prefixed = self._joint_positions.get(prefixed_name)
+            if prefixed is not None:
+                return prefixed
+
+            suffix_matches = [
+                value
+                for name, value in self._joint_positions.items()
+                if str(name).endswith(str(joint_name))
+            ]
+            if len(suffix_matches) == 1:
+                return suffix_matches[0]
+            return None
+
+    def _get_arm_joint_positions(
+        self,
+        *,
+        timeout_sec: float = 0.0,
+    ) -> tuple[list[float] | None, list[str]]:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        missing: list[str] = []
+        while True:
+            values: list[float] = []
+            missing = []
+            for joint_name in self.arm_joint_names:
+                value = self._get_joint_position(joint_name)
+                if value is None:
+                    missing.append(joint_name)
+                else:
+                    values.append(float(value))
+            if not missing:
+                return values, []
+            if time.monotonic() >= deadline:
+                return None, missing
+            time.sleep(0.02)
+
+    def _get_arm_joint_command_names(self) -> list[str]:
+        with self._joint_lock:
+            available_names = set(str(name) for name in self._joint_positions.keys())
+
+        if not available_names:
+            return list(self.arm_joint_names)
+
+        resolved: list[str] = []
+        prefix = f"{self.robot_name}_"
+        for joint_name in self.arm_joint_names:
+            exact_name = str(joint_name)
+            prefixed_name = (
+                exact_name if exact_name.startswith(prefix) else f"{prefix}{exact_name}"
+            )
+            if exact_name in available_names:
+                resolved.append(exact_name)
+            elif prefixed_name in available_names:
+                resolved.append(prefixed_name)
+            else:
+                resolved.append(exact_name)
+        return resolved
+
+    @staticmethod
+    def _angular_joint_error(actual: float, target: float) -> float:
+        return abs(math.atan2(math.sin(actual - target), math.cos(actual - target)))
+
+    def _wait_for_arm_joint_targets(
+        self,
+        targets: list[float],
+        timeout_sec: float,
+        *,
+        tolerance_rad: float = 0.08,
+        log_miss: bool = True,
+    ) -> bool:
+        if len(targets) != len(self.arm_joint_names):
+            return False
+
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        saw_feedback = False
+        last_values: list[float] | None = None
+        missing: list[str] = []
+
+        while time.monotonic() < deadline:
+            values, missing = self._get_arm_joint_positions(timeout_sec=0.0)
+            if values is not None:
+                saw_feedback = True
+                last_values = list(values)
+                if all(
+                    self._angular_joint_error(values[index], targets[index]) <= tolerance_rad
+                    for index in range(len(targets))
+                ):
+                    return True
+            time.sleep(0.02)
+
+        if not log_miss:
+            return False
+
+        if not saw_feedback:
+            self._log().warn(f"Timed out waiting for arm joint feedback; missing={missing}")
+            return False
+
+        max_error = max(
+            self._angular_joint_error(last_values[index], targets[index])
+            for index in range(len(targets))
+        )
+        self._log().warn(
+            "Timed out waiting for arm joint target; "
+            f"max_error={max_error:.4f}rad tolerance={tolerance_rad:.4f}rad"
+        )
+        return False
 
     def _wait_for_gripper_target(
         self,
@@ -1311,6 +1618,16 @@ class Ros2PickPlaceController:
                 f"Gripper target not reached: target={target:.3f} current={float(last_pos):.3f}"
             )
         return False
+
+    def _gripper_is_open_enough(self) -> bool:
+        pos = self._get_joint_position(self.gripper_joint)
+        if pos is None:
+            return False
+        midpoint = (float(self.gripper_open) + float(self.gripper_close)) * 0.5
+        tol = max(float(self.gripper_position_tol) * 2.0, 0.01)
+        if self.gripper_open >= self.gripper_close:
+            return float(pos) >= (midpoint - tol)
+        return float(pos) <= (midpoint + tol)
 
     def _gripper_command(
         self,

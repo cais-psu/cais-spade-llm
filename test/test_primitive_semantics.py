@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -31,9 +32,12 @@ class _DummyRobot:
             "move_pose",
             "move_relative",
             "move_to_named_pose",
+            "rotate_wrist",
             "open_gripper",
             "close_gripper",
             "detect_parts",
+            "compute_pick_targets",
+            "compute_place_targets",
             "attach_part",
             "detach_part",
             "get_current_pose",
@@ -260,6 +264,48 @@ def test_validate_and_project_steps_supports_store_as_and_step_output_refs():
     assert ok is True
     assert error is None
     assert projected["current_pose"] == {"x": 0.31, "y": -0.12, "z": 0.15}
+
+
+def test_validate_and_project_steps_supports_compute_place_targets_without_pick_ctx():
+    robot = _DummyRobot()
+    ok, projected, error = validate_and_project_steps(
+        [
+            {
+                "primitive": "compute_place_targets",
+                "params": {
+                    "part_name": "LCP",
+                    "product_geometry": {
+                        "slot_xy": [0.1, -0.08],
+                        "slot_floor_z_m": 1.025,
+                        "board_center": {"z": 1.025},
+                        "part_height_m": 0.1,
+                        "model_name": "circ_pin_large",
+                    },
+                },
+                "store_as": "lcp_place_targets",
+            },
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/lcp_place_targets/slot_x"},
+                    "y": {"context_ref": "/step_outputs/lcp_place_targets/slot_y"},
+                    "z": {"context_ref": "/step_outputs/lcp_place_targets/place_z"},
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
+            },
+        ],
+        build_primitive_catalog(robot),
+        robot.get_bridge_snapshot(),
+    )
+
+    assert ok is True
+    assert error is None
+    assert math.isclose(projected["current_pose"]["x"], 0.1, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(projected["current_pose"]["y"], -0.08, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(projected["current_pose"]["z"], 1.2525, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_detect_parts_store_as():

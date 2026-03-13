@@ -13,8 +13,8 @@
       "place_insert",
       "move_home"
     ],
-    "lcp_slippage_mode": "off",
-    "lcp_slippage_scope": "ur5e",
+    "lg_slippage_mode": "off",
+    "lg_slippage_scope": "ur5e",
     "gazebo": {
       "static_capabilities": {
         "reachability": [
@@ -36,9 +36,9 @@
           "topic": "/ur5e_rg2_gripper_traj_controller/joint_trajectory",
           "open": 0.11,
           "close": 0.02,
-          "move_time_sec": 0.55,
-          "settle_sec": 0.15,
-          "feedback_timeout_pad_sec": 1.5,
+          "move_time_sec": 0.35,
+          "settle_sec": 0.05,
+          "feedback_timeout_pad_sec": 1.0,
           "position_tolerance": 0.01
         },
         "services": {
@@ -67,17 +67,20 @@
           "pick_tcp_z_bias_min_m": 0.003,
           "min_pick_tcp_z_m": 1.07,
           "place_surface_gap_m": -0.01,
-          "release_preopen_settle_sec": 0.25,
-          "release_postopen_settle_sec": 0.9,
-          "release_postdetach_settle_sec": 0.5,
+          "release_preopen_settle_sec": 0.05,
+          "release_postopen_settle_sec": 0.2,
+          "release_postdetach_settle_sec": 0.15,
           "release_descend_time_scale": 1.35,
           "release_detach_retry_count": 3,
-          "release_detach_retry_delay_sec": 0.55,
+          "release_detach_retry_delay_sec": 0.2,
           "release_retry_lift_m": 0.012,
           "trajectory_time_scale": 0.8
         },
         "parts_tuning": {
-          "insertion_depth_m": 0.0025
+          "insertion_depth_m": 0.0025,
+          "pick_z_adjustments_m": {
+            "LG": -0.003
+          }
         }
       },
       "named_positions": {
@@ -101,9 +104,9 @@
           1.637161,
           -2.150816,
           2.028921,
-          -1.452287,
+          -3.023083,
           -1.561075,
-          1.637331
+          3.208127
         ],
         "side_insert_post": [
           1.637161,

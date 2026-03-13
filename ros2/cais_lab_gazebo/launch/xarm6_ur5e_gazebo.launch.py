@@ -19,13 +19,13 @@ from pathlib import Path
 from ament_index_python import get_package_share_directory, get_package_prefix
 from launch import LaunchDescription
 from launch.actions import (
+    AppendEnvironmentVariable,
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
-    SetEnvironmentVariable,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -270,7 +270,7 @@ def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
 
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
-    set_gazebo_plugin_path = None
+    append_gazebo_plugin_path = None
     attacher_candidates = [os.path.expanduser('~/ros2_ws/install/ros2_linkattacher/lib')]
     try:
         attacher_candidates.insert(0, os.path.join(get_package_prefix('ros2_linkattacher'), 'lib'))
@@ -278,14 +278,10 @@ def launch_setup(context, *args, **kwargs):
         pass
     attacher_lib_dir = next((p for p in attacher_candidates if os.path.isdir(p)), None)
     if attacher_lib_dir:
-        current_plugin_path = os.environ.get('GAZEBO_PLUGIN_PATH', '')
-        merged_plugin_path = (
-            attacher_lib_dir if not current_plugin_path
-            else f'{attacher_lib_dir}:{current_plugin_path}'
-        )
-        set_gazebo_plugin_path = SetEnvironmentVariable(
+        append_gazebo_plugin_path = AppendEnvironmentVariable(
             name='GAZEBO_PLUGIN_PATH',
-            value=merged_plugin_path,
+            value=attacher_lib_dir,
+            prepend=True,
         )
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
@@ -614,8 +610,8 @@ def launch_setup(context, *args, **kwargs):
     ]
     if perception_log is not None:
         launch_actions.append(perception_log)
-    if set_gazebo_plugin_path is not None:
-        launch_actions.insert(0, set_gazebo_plugin_path)
+    if append_gazebo_plugin_path is not None:
+        launch_actions.insert(0, append_gazebo_plugin_path)
     return launch_actions
 
 

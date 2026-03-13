@@ -1527,7 +1527,21 @@ class ProcessPlanner:
     ) -> None:
         if not tail_task_id:
             return
+        max_sequence_index = 0
+        for node in self.nodes:
+            try:
+                max_sequence_index = max(max_sequence_index, int(node.get("sequence_index") or 0))
+            except (TypeError, ValueError):
+                continue
+        for node in modified_tasks:
+            try:
+                max_sequence_index = max(max_sequence_index, int(node.get("sequence_index") or 0))
+            except (TypeError, ValueError):
+                continue
+        next_sequence_index = max_sequence_index + 1
         seen: set[str] = set()
+        ordered_task_ids: list[str] = []
+        existing_by_id: dict[str, dict[str, Any]] = {}
         for task_id in before_task_ids or []:
             blocked_task_id = str(task_id or "").strip()
             if not blocked_task_id or blocked_task_id == tail_task_id or blocked_task_id in seen:
@@ -1536,16 +1550,42 @@ class ProcessPlanner:
             existing = self._find_node(blocked_task_id)
             if existing is None:
                 continue
-            preds = list(dict.fromkeys(list(existing.get("predecessors", []) or []) + [tail_task_id]))
+            ordered_task_ids.append(blocked_task_id)
+            existing_by_id[blocked_task_id] = existing
+        resume_task_ids = set(ordered_task_ids)
+
+        def _sort_key(task_id: str) -> tuple[int, str]:
+            existing = existing_by_id.get(task_id) or {}
+            try:
+                sequence_index = int(existing.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                sequence_index = 0
+            return (sequence_index, task_id)
+
+        for blocked_task_id in sorted(ordered_task_ids, key=_sort_key):
+            existing = existing_by_id[blocked_task_id]
+            existing_preds = [
+                str(pred).strip()
+                for pred in (existing.get("predecessors") or [])
+                if str(pred or "").strip()
+            ]
+            gated_by_resume_chain = any(pred in resume_task_ids for pred in existing_preds)
+            preds = (
+                list(existing_preds)
+                if gated_by_resume_chain
+                else list(dict.fromkeys(existing_preds + [tail_task_id]))
+            )
             modified_tasks.append(
                 {
                     "id": blocked_task_id,
                     "predecessors": preds,
+                    "sequence_index": next_sequence_index,
                     "change_reason": (
                         f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
                     ),
                 }
             )
+            next_sequence_index += 1
 
     def apply_bridge_macro_proposal(
         self,
@@ -2606,11 +2646,8 @@ class ProcessPlanner:
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
         """Select the next task whose predecessors are all satisfied."""
         def _pred_satisfied(status: Any) -> bool:
-            # A failed predecessor also unlocks its successor so the successor
-            # can be dispatched and hit the CCA's reactive FSA safety check.
-            # The CCA will block it (FSA not enabled after failure) → replan.
             s = str(status) if status else ""
-            return s == "completed" or s.startswith("failed")
+            return s == "completed"
 
         def _pred_ready(pred_id: str) -> bool:
             pred = self._find_node(pred_id)

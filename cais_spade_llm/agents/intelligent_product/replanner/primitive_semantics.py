@@ -320,6 +320,124 @@ def _preview_get_current_pose_output(
     return pose, None
 
 
+def _preview_compute_pick_targets_output(
+    params: dict[str, Any],
+    snapshot: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    part_name = str(params.get("part_name") or "").strip()
+    if not part_name:
+        return None, "compute_pick_targets with store_as requires params.part_name"
+
+    product_geometry = params.get("product_geometry")
+    if product_geometry is not None and not isinstance(product_geometry, dict):
+        return None, "compute_pick_targets params.product_geometry must be an object when provided"
+
+    part_info = (grounding_context or {}).get("parts", {}).get(part_name, {})
+    observed_pose = _normalized_xyz_pose((part_info or {}).get("observed_pose")) or {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+    }
+    current_pose = (
+        _normalized_xyz_pose((((grounding_context or {}).get("resource") or {}).get("current_pose")))
+        or _normalized_xyz_pose(snapshot.get("current_pose"))
+        or {"x": 0.0, "y": 0.0, "z": 0.0}
+    )
+    geo = dict(product_geometry or {})
+    board_center = dict(geo.get("board_center") or {})
+    board_center_z = float(board_center.get("z", 1.02) or 1.02)
+    part_height = float(geo.get("part_height_m", 0.08) or 0.08)
+    tcp_offset_z = -0.17
+    pick_bias = max(0.003, min(0.02, part_height * 0.25))
+    pick_tcp_z = max(float(observed_pose["z"]) + pick_bias, 1.07)
+    pick_z = pick_tcp_z - tcp_offset_z
+    approach_height = float(params.get("approach_height_override_m", 0.2) or 0.2)
+    travel_candidates = [
+        float(observed_pose["z"]) + approach_height,
+        board_center_z + approach_height,
+        pick_z + 0.05,
+    ]
+    if not bool(params.get("ignore_current_height_for_travel_z", False)):
+        travel_candidates.append(float(current_pose["z"]))
+    travel_z = max(travel_candidates)
+    return {
+        "part_name": part_name,
+        "model_name": str(geo.get("model_name") or ""),
+        "tx": float(observed_pose["x"]),
+        "ty": float(observed_pose["y"]),
+        "tz": float(observed_pose["z"]),
+        "pick_z": pick_z,
+        "travel_z": travel_z,
+        "part_height": part_height,
+        "tcp_offset_z": tcp_offset_z,
+        "pick_tcp_z": pick_tcp_z,
+        "start_x": float(current_pose["x"]),
+        "start_y": float(current_pose["y"]),
+        "start_z": float(current_pose["z"]),
+    }, None
+
+
+def _preview_compute_place_targets_output(
+    params: dict[str, Any],
+    snapshot: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    pick_ctx = params.get("pick_ctx")
+    if pick_ctx is not None and not isinstance(pick_ctx, dict):
+        return None, "compute_place_targets params.pick_ctx must be an object when provided"
+
+    product_geometry = params.get("product_geometry")
+    if product_geometry is not None and not isinstance(product_geometry, dict):
+        return None, "compute_place_targets params.product_geometry must be an object when provided"
+
+    normalized_pick_ctx = dict(pick_ctx or {})
+    part_name = str(params.get("part_name") or normalized_pick_ctx.get("part_name") or "").strip()
+    if not part_name:
+        return None, "compute_place_targets with store_as requires params.part_name or params.pick_ctx.part_name"
+
+    geo = dict(product_geometry or {})
+    board_center = dict(geo.get("board_center") or {})
+    slot_xy = geo.get("slot_xy")
+    if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
+        slot_x = float(board_center.get("x", 0.0) or 0.0) + float(slot_xy[0] or 0.0)
+        slot_y = float(board_center.get("y", 0.0) or 0.0) + float(slot_xy[1] or 0.0)
+    else:
+        slot_x = float(board_center.get("x", normalized_pick_ctx.get("tx", 0.0)) or 0.0)
+        slot_y = float(board_center.get("y", normalized_pick_ctx.get("ty", 0.0)) or 0.0)
+
+    board_top_z = float(
+        geo.get("slot_floor_z_m", board_center.get("z", 1.025)) or 1.025
+    )
+    part_height = float(geo.get("part_height_m", normalized_pick_ctx.get("part_height", 0.08)) or 0.08)
+    if normalized_pick_ctx:
+        grasp_tcp_to_part_origin_z = float(normalized_pick_ctx.get("pick_tcp_z", 0.0) or 0.0) - float(
+            normalized_pick_ctx.get("tz", 0.0) or 0.0
+        )
+        tcp_offset_z = float(normalized_pick_ctx.get("tcp_offset_z", -0.17) or -0.17)
+    else:
+        grasp_tcp_to_part_origin_z = max(0.003, min(0.02, part_height * 0.25))
+        tcp_offset_z = -0.17
+
+    place_gap = -0.0125
+    place_part_origin_z = board_top_z + (part_height * 0.5) + place_gap
+    place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
+    place_z = place_tcp_z - tcp_offset_z + float(params.get("z_adjustment_m", 0.0) or 0.0)
+
+    return {
+        "part_name": part_name,
+        "slot_x": slot_x,
+        "slot_y": slot_y,
+        "board_top_z": board_top_z,
+        "place_z": place_z,
+        "place_tcp_z": place_tcp_z,
+        "part_height": part_height,
+        "tcp_offset_z": tcp_offset_z,
+        "grasp_tcp_to_part_origin_z": grasp_tcp_to_part_origin_z,
+        "model_name": str(geo.get("model_name") or normalized_pick_ctx.get("model_name") or ""),
+    }, None
+
+
 def preview_step_output(
     *,
     primitive: str,
@@ -332,6 +450,10 @@ def preview_step_output(
         return _preview_detect_parts_output(params, grounding_context)
     if primitive == "get_current_pose":
         return _preview_get_current_pose_output(snapshot, grounding_context)
+    if primitive == "compute_pick_targets":
+        return _preview_compute_pick_targets_output(params, snapshot, grounding_context)
+    if primitive == "compute_place_targets":
+        return _preview_compute_place_targets_output(params, snapshot, grounding_context)
     return None, f"primitive '{primitive}' does not support store_as in v1"
 
 
@@ -364,6 +486,69 @@ def extract_step_output(
         if output is None:
             return None, "get_current_pose store_as result did not contain pose x/y/z"
         return output, None
+
+    if primitive == "compute_pick_targets":
+        if not isinstance(step_result, dict) or not step_result.get("success"):
+            return None, "compute_pick_targets store_as expected successful dict result"
+        required_keys = {
+            "part_name",
+            "tx",
+            "ty",
+            "tz",
+            "pick_z",
+            "travel_z",
+            "part_height",
+            "tcp_offset_z",
+            "pick_tcp_z",
+            "start_x",
+            "start_y",
+            "start_z",
+        }
+        if not required_keys <= set(step_result.keys()):
+            return None, "compute_pick_targets store_as result was missing expected keys"
+        return {
+            "part_name": str(step_result.get("part_name") or ""),
+            "model_name": str(step_result.get("model_name") or ""),
+            "tx": float(step_result["tx"]),
+            "ty": float(step_result["ty"]),
+            "tz": float(step_result["tz"]),
+            "pick_z": float(step_result["pick_z"]),
+            "travel_z": float(step_result["travel_z"]),
+            "part_height": float(step_result["part_height"]),
+            "tcp_offset_z": float(step_result["tcp_offset_z"]),
+            "pick_tcp_z": float(step_result["pick_tcp_z"]),
+            "start_x": float(step_result["start_x"]),
+            "start_y": float(step_result["start_y"]),
+            "start_z": float(step_result["start_z"]),
+        }, None
+
+    if primitive == "compute_place_targets":
+        if not isinstance(step_result, dict) or not step_result.get("success"):
+            return None, "compute_place_targets store_as expected successful dict result"
+        required_keys = {
+            "slot_x",
+            "slot_y",
+            "board_top_z",
+            "place_z",
+            "place_tcp_z",
+            "part_height",
+            "tcp_offset_z",
+            "grasp_tcp_to_part_origin_z",
+        }
+        if not required_keys <= set(step_result.keys()):
+            return None, "compute_place_targets store_as result was missing expected keys"
+        return {
+            "part_name": str(step_result.get("part_name") or ""),
+            "slot_x": float(step_result["slot_x"]),
+            "slot_y": float(step_result["slot_y"]),
+            "board_top_z": float(step_result["board_top_z"]),
+            "place_z": float(step_result["place_z"]),
+            "place_tcp_z": float(step_result["place_tcp_z"]),
+            "part_height": float(step_result["part_height"]),
+            "tcp_offset_z": float(step_result["tcp_offset_z"]),
+            "grasp_tcp_to_part_origin_z": float(step_result["grasp_tcp_to_part_origin_z"]),
+            "model_name": str(step_result.get("model_name") or ""),
+        }, None
 
     return None, f"primitive '{primitive}' does not support store_as in v1"
 

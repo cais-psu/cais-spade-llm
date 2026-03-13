@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
-_RECOVER_LCP_SIDEWAYS_V1 = "recover_lcp_sideways_v1"
-_SIDEWAYS_QUATERNION = {
-    "qx": 0.70710678,
-    "qy": 0.0,
-    "qz": 0.0,
-    "qw": 0.70710678,
-}
+_RECOVER_LG_V1 = "recover_lg_v1"
+_FAST_RECOVERY_SPEED = 0.4
+_CAREFUL_RECOVERY_SPEED = 0.6
+_MCP_RETURN_DESCEND_DZ_M = -0.12
+_MCP_RETURN_LIFT_DZ_M = 0.10
+_POST_PICK_LIFT_DZ_M = 0.05
+_POST_PLACE_LIFT_DZ_M = 0.08
+_LG_PICK_FINAL_NUDGE_DZ_M = -0.024
+_LG_INSERT_Z_ADJUSTMENT_M = 0.006
+_LG_RECOVERY_APPROACH_HEIGHT_M = 0.06
 
 
 def build_preprogrammed_bridge_proposal(
@@ -18,22 +21,22 @@ def build_preprogrammed_bridge_proposal(
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any]:
     scenario_key = str(scenario_id or "").strip()
-    if scenario_key != _RECOVER_LCP_SIDEWAYS_V1:
+    if scenario_key != _RECOVER_LG_V1:
         raise ValueError(f"unsupported preprogrammed bridge scenario '{scenario_key}'")
     if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
         raise ValueError("prepared bridge request is missing")
-    return _build_recover_lcp_sideways_v1(prepared_bridge_request)
+    return _build_recover_lg_v1(prepared_bridge_request)
 
 
-def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, Any]:
+def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, Any]:
     grounding_context = dict(prepared_bridge_request.get("grounding_context") or {})
     parts = dict(grounding_context.get("parts") or {})
-    if "MCP" not in parts or "LCP" not in parts:
-        raise ValueError("prepared bridge request is missing MCP/LCP grounding context")
+    if "MCP" not in parts or "LG" not in parts:
+        raise ValueError("prepared bridge request is missing MCP/LG grounding context")
 
     bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
     if "ur5e@localhost" not in bridge_resources or "xarm6@localhost" not in bridge_resources:
-        raise ValueError("recover_lcp_sideways_v1 requires ur5e@localhost and xarm6@localhost")
+        raise ValueError("recover_lg_v1 requires ur5e@localhost and xarm6@localhost")
 
     primary_obligation = _select_primary_obligation(
         prepared_bridge_request,
@@ -44,25 +47,27 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
         part_name="MCP",
         preferred_resource_jid="ur5e@localhost",
     )
-    _part_model_name(grounding_context, "MCP")
-    _part_model_name(grounding_context, "LCP")
-
-    lcp_pick_q = _part_orientation_params(
-        grounding_context,
-        part_name="LCP",
-        alias="detected_lcp",
-        fallback=_SIDEWAYS_QUATERNION,
+    mcp_resume_task_ids = _recover_resume_task_ids(
+        prepared_bridge_request,
+        part_name="MCP",
+        preferred_resource_jid="ur5e@localhost",
     )
+    _part_model_name(grounding_context, "MCP")
+    _part_model_name(grounding_context, "LG")
+
     mcp_pick_q = _current_pose_orientation_params(alias="ur5e_home_pose")
 
-    return {
-        "primary_obligation": primary_obligation,
+    proposal = {
+        "plan_rewrite": {
+            "replace_failed_branch": True,
+            "resume_task_ids": mcp_resume_task_ids,
+        },
         "macro_tasks": [
             {
                 "resource_jid": "xarm6@localhost",
                 "macro_name": "clear_xarm6_zone",
                 "description": "Retreat xarm6 to the recovery-clear pose to free the shared workspace.",
-                "rationale": "Clears the collision zone before ur5e performs the sideways recovery.",
+                "rationale": "Clears the collision zone before ur5e performs the LG recovery.",
                 "expected_start_state": "recovery_required",
                 "task_params": {
                     "clear_pose": {"context_ref": "/resources/xarm6@localhost/named_poses/home"},
@@ -80,7 +85,8 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                         "params": {
                             "pose_name": {
                                 "context_ref": "/resources/xarm6@localhost/named_poses/home",
-                            }
+                            },
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     }
                 ],
@@ -88,8 +94,8 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
             {
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "return_mcp_to_printer",
-                "description": "Release MCP back to its printer origin so ur5e can recover LCP first.",
-                "rationale": "Unloads MCP and restores ur5e to an empty-gripper state for the sideways LCP pick.",
+                "description": "Release MCP back to its printer origin so ur5e can recover LG first.",
+                "rationale": "Unloads MCP and restores ur5e to an empty-gripper state for the LG pickup.",
                 "expected_start_state": "picked",
                 "part_name": "MCP",
                 "task_params": {
@@ -110,25 +116,44 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                     },
                 },
                 "primitive_steps": [
+                    {
+                        "primitive": "move_relative",
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _MCP_RETURN_DESCEND_DZ_M,
+                            "speed": _CAREFUL_RECOVERY_SPEED,
+                        },
+                    },
                     {"primitive": "open_gripper", "params": {}},
                     {
                         "primitive": "detach_part",
                         "params": {
                             "model_name": {"context_ref": "/parts/MCP/target/model_name"},
+                            "assume_released_if_open": True,
+                        },
+                    },
+                    {
+                        "primitive": "move_to_named_pose",
+                        "params": {
+                            "pose_name": {
+                                "context_ref": "/resources/ur5e@localhost/named_poses/home",
+                            },
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     },
                 ],
             },
             {
                 "resource_jid": "ur5e@localhost",
-                "macro_name": "pick_lcp_sideways",
-                "description": "Approach the tipped LCP from the side and secure it with ur5e.",
-                "rationale": "Transfers LCP recovery to ur5e using an orientation-aware side pickup.",
+                "macro_name": "pick_lg",
+                "description": "Approach the dropped LG from above and secure it with ur5e.",
+                "rationale": "Transfers LG recovery to ur5e using a normal top-down pickup.",
                 "expected_start_state": "idle",
-                "part_name": "LCP",
+                "part_name": "LG",
                 "task_params": {
-                    "origin_resource_location": {"context_ref": "/parts/LCP/location"},
-                    "recovery_style": "sideways",
+                    "origin_resource_location": {"context_ref": "/parts/LG/location"},
+                    "recovery_style": "top_down",
                 },
                 "task_metadata": {
                     "in_state": "idle",
@@ -148,49 +173,83 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                 "primitive_steps": [
                     {
                         "primitive": "detect_parts",
-                        "params": {"part_name": "LCP"},
-                        "store_as": "detected_lcp",
+                        "params": {"part_name": "LG"},
+                        "store_as": "detected_lg",
                     },
                     {
-                        "primitive": "move_to_named_pose",
+                        "primitive": "get_current_pose",
+                        "params": {},
+                        "store_as": "lg_pick_pose",
+                    },
+                    {
+                        "primitive": "compute_pick_targets",
                         "params": {
-                            "pose_name": {
-                                "context_ref": "/resources/ur5e@localhost/named_poses/side_pick_approach",
-                            }
+                            "part_name": "LG",
+                            "product_geometry": _part_pick_geometry(
+                                grounding_context,
+                                part_name="LG",
+                            ),
+                            "approach_height_override_m": _LG_RECOVERY_APPROACH_HEIGHT_M,
+                            "ignore_current_height_for_travel_z": True,
+                        },
+                        "store_as": "lg_pick_targets",
+                    },
+                    {
+                        "primitive": "move_cartesian",
+                        "params": {
+                            "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
+                            "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
+                            "z": {"context_ref": "/step_outputs/lg_pick_targets/travel_z"},
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     },
                     {
                         "primitive": "move_pose",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/detected_lcp/pose/x"},
-                            "y": {"context_ref": "/step_outputs/detected_lcp/pose/y"},
-                            "z": {"context_ref": "/step_outputs/detected_lcp/pose/z"},
-                            **lcp_pick_q,
+                            "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
+                            "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
+                            "z": {"context_ref": "/step_outputs/lg_pick_targets/pick_z"},
+                            **_current_pose_orientation_params(alias="lg_pick_pose"),
+                            "speed": _CAREFUL_RECOVERY_SPEED,
+                        },
+                    },
+                    {
+                        "primitive": "move_relative",
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _LG_PICK_FINAL_NUDGE_DZ_M,
+                            "speed": _CAREFUL_RECOVERY_SPEED,
                         },
                     },
                     {"primitive": "close_gripper", "params": {}},
                     {
                         "primitive": "attach_part",
                         "params": {
-                            "model_name": {"context_ref": "/parts/LCP/target/model_name"},
+                            "model_name": {"context_ref": "/parts/LG/target/model_name"},
                         },
                     },
                     {
                         "primitive": "move_relative",
-                        "params": {"dx": 0.0, "dy": 0.0, "dz": 0.04},
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _POST_PICK_LIFT_DZ_M,
+                            "speed": _CAREFUL_RECOVERY_SPEED,
+                        },
                     },
                 ],
             },
             {
                 "resource_jid": "ur5e@localhost",
-                "macro_name": "insert_lcp_sideways",
-                "description": "Carry the recovered LCP into the board with the sideways insertion posture.",
-                "rationale": "Completes the special-case LCP assembly so the normal MCP suffix can resume.",
+                "macro_name": "insert_lg",
+                "description": "Carry the recovered LG into the board with a normal vertical insertion.",
+                "rationale": "Completes the LG assembly so the normal MCP suffix can resume.",
                 "expected_start_state": "picked",
-                "part_name": "LCP",
+                "part_name": "LG",
                 "task_params": {
                     "destination_location": "assembly_board-v1",
-                    "recovery_style": "sideways",
+                    "recovery_style": "top_down",
                 },
                 "task_metadata": {
                     "in_state": "picked",
@@ -209,35 +268,56 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                 },
                 "primitive_steps": [
                     {
-                        "primitive": "move_to_named_pose",
+                        "primitive": "get_current_pose",
+                        "params": {},
+                        "store_as": "lg_insert_pose",
+                    },
+                    {
+                        "primitive": "compute_place_targets",
                         "params": {
-                            "pose_name": {
-                                "context_ref": "/resources/ur5e@localhost/named_poses/side_insert_pre",
-                            }
+                            "part_name": "LG",
+                            "product_geometry": _part_pick_geometry(
+                                grounding_context,
+                                part_name="LG",
+                            ),
+                            "z_adjustment_m": _LG_INSERT_Z_ADJUSTMENT_M,
+                        },
+                        "store_as": "lg_insert_targets",
+                    },
+                    {
+                        "primitive": "move_cartesian",
+                        "params": {
+                            "x": {"context_ref": "/step_outputs/lg_insert_targets/slot_x"},
+                            "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
+                            "z": {"context_ref": "/step_outputs/lg_insert_pose/pose/z"},
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     },
                     {
                         "primitive": "move_pose",
                         "params": {
-                            "x": {"context_ref": "/parts/LCP/target/slot_pose/x"},
-                            "y": {"context_ref": "/parts/LCP/target/slot_pose/y"},
-                            "z": {"context_ref": "/parts/LCP/target/slot_pose/z"},
-                            **_SIDEWAYS_QUATERNION,
+                            "x": {"context_ref": "/step_outputs/lg_insert_targets/slot_x"},
+                            "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
+                            "z": {"context_ref": "/step_outputs/lg_insert_targets/place_z"},
+                            **_current_pose_orientation_params(alias="lg_insert_pose"),
+                            "speed": _CAREFUL_RECOVERY_SPEED,
                         },
                     },
                     {"primitive": "open_gripper", "params": {}},
                     {
                         "primitive": "detach_part",
                         "params": {
-                            "model_name": {"context_ref": "/parts/LCP/target/model_name"},
+                            "model_name": {"context_ref": "/parts/LG/target/model_name"},
+                            "assume_released_if_open": True,
                         },
                     },
                     {
-                        "primitive": "move_to_named_pose",
+                        "primitive": "move_relative",
                         "params": {
-                            "pose_name": {
-                                "context_ref": "/resources/ur5e@localhost/named_poses/side_insert_post",
-                            }
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _POST_PLACE_LIFT_DZ_M,
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     },
                 ],
@@ -274,7 +354,8 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                         "params": {
                             "pose_name": {
                                 "context_ref": "/resources/ur5e@localhost/named_poses/home",
-                            }
+                            },
+                            "speed": _FAST_RECOVERY_SPEED,
                         },
                     },
                     {
@@ -288,11 +369,31 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                         "store_as": "detected_mcp",
                     },
                     {
+                        "primitive": "compute_pick_targets",
+                        "params": {
+                            "part_name": "MCP",
+                            "product_geometry": _part_pick_geometry(
+                                grounding_context,
+                                part_name="MCP",
+                            ),
+                        },
+                        "store_as": "mcp_pick_targets",
+                    },
+                    {
+                        "primitive": "move_cartesian",
+                        "params": {
+                            "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
+                            "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
+                            "z": {"context_ref": "/step_outputs/ur5e_home_pose/pose/z"},
+                            "speed": _FAST_RECOVERY_SPEED,
+                        },
+                    },
+                    {
                         "primitive": "move_pose",
                         "params": {
                             "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
                             "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
-                            "z": {"context_ref": "/step_outputs/detected_mcp/pose/z"},
+                            "z": {"context_ref": "/step_outputs/mcp_pick_targets/pick_z"},
                             **mcp_pick_q,
                         },
                     },
@@ -305,31 +406,61 @@ def _build_recover_lcp_sideways_v1(prepared_bridge_request: dict[str, Any]) -> d
                     },
                     {
                         "primitive": "move_relative",
-                        "params": {"dx": 0.0, "dy": 0.0, "dz": 0.04},
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _POST_PICK_LIFT_DZ_M,
+                            "speed": _CAREFUL_RECOVERY_SPEED,
+                        },
                     },
                 ],
             },
         ],
     }
+    if primary_obligation:
+        proposal["primary_obligation"] = primary_obligation
+    return proposal
 
 
 def _select_primary_obligation(
     prepared_bridge_request: dict[str, Any],
     *,
     preferred_resource_jid: str,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     targets = prepared_bridge_request.get("obligation_targets") or []
     if not isinstance(targets, list):
         raise ValueError("prepared bridge request is missing obligation_targets")
+    normalized_targets: list[dict[str, Any]] = []
     for target in targets:
-        if (
-            isinstance(target, dict)
-            and str(target.get("resource_jid", "")).strip() == preferred_resource_jid
-        ):
-            return {
-                "rule_id": str(target.get("rule_id", "")).strip(),
-                "resource_jid": preferred_resource_jid,
+        if not isinstance(target, dict):
+            continue
+        rule_id = str(target.get("rule_id", "")).strip()
+        resource_jid = str(target.get("resource_jid", "")).strip()
+        if not rule_id or not resource_jid:
+            continue
+        normalized_targets.append(
+            {
+                "rule_id": rule_id,
+                "resource_jid": resource_jid,
             }
+        )
+
+    if not normalized_targets:
+        return None
+
+    preferred_matches = [
+        target
+        for target in normalized_targets
+        if str(target.get("resource_jid", "")).strip() == preferred_resource_jid
+    ]
+    if len(preferred_matches) == 1:
+        return preferred_matches[0]
+    if len(preferred_matches) > 1:
+        raise ValueError(
+            f"multiple active obligation targets matched required resource '{preferred_resource_jid}'"
+        )
+    if len(normalized_targets) == 1:
+        return normalized_targets[0]
     raise ValueError(
         f"no active obligation target matched required resource '{preferred_resource_jid}'"
     )
@@ -402,6 +533,92 @@ def _recover_part_origin_location(
     )
 
 
+def _recover_resume_task_ids(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    part_name: str,
+    preferred_resource_jid: str,
+) -> list[str]:
+    tracker = dict(prepared_bridge_request.get("part_tracker") or {})
+    part_entry = dict(tracker.get(part_name) or {})
+    last_successful_task = str(part_entry.get("last_successful_task") or "").strip()
+    if not last_successful_task:
+        return _pending_task_ids_for_resource(
+            prepared_bridge_request,
+            resource_jid=preferred_resource_jid,
+        )
+
+    plan_nodes = [
+        dict(node)
+        for node in (prepared_bridge_request.get("plan_nodes") or [])
+        if isinstance(node, dict)
+    ]
+    task_lookup = {
+        str(node.get("id", "")).strip(): node
+        for node in plan_nodes
+        if str(node.get("id", "")).strip()
+    }
+    last_task = task_lookup.get(last_successful_task) or {}
+    requirement_id = _task_requirement_id(last_task) or _task_requirement_id({"id": last_successful_task})
+    try:
+        last_sequence_index = int(last_task.get("sequence_index"))
+    except (TypeError, ValueError):
+        last_sequence_index = -1
+
+    resume_candidates: list[tuple[int, str]] = []
+    for node in plan_nodes:
+        task_id = str(node.get("id", "")).strip()
+        if not task_id or task_id == last_successful_task:
+            continue
+        if str(node.get("resource_jid", "")).strip() != preferred_resource_jid:
+            continue
+        if requirement_id and _task_requirement_id(node) != requirement_id:
+            continue
+        try:
+            sequence_index = int(node.get("sequence_index"))
+        except (TypeError, ValueError):
+            sequence_index = 10**9
+        if last_sequence_index >= 0 and sequence_index <= last_sequence_index:
+            continue
+        resume_candidates.append((sequence_index, task_id))
+
+    deduped = [task_id for _sequence_index, task_id in sorted(resume_candidates)]
+    if deduped:
+        return deduped
+    return _pending_task_ids_for_resource(
+        prepared_bridge_request,
+        resource_jid=preferred_resource_jid,
+    )
+
+
+def _pending_task_ids_for_resource(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    resource_jid: str,
+) -> list[str]:
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    resource_entry = dict(bridge_resources.get(resource_jid) or {})
+    pending_tasks = resource_entry.get("pending_tasks") or []
+    deduped: list[str] = []
+    for task in pending_tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("id", "")).strip()
+        if task_id and task_id not in deduped:
+            deduped.append(task_id)
+    return deduped
+
+
+def _task_requirement_id(task: dict[str, Any]) -> str:
+    requirement_id = str(task.get("requirement_id") or "").strip()
+    if requirement_id:
+        return requirement_id
+    task_id = str(task.get("id", "") or "").strip()
+    if "_T" in task_id:
+        return task_id.rsplit("_T", 1)[0]
+    return ""
+
+
 def _origin_candidates_from_task_lookup(
     task_lookup: dict[str, dict[str, Any]],
     *,
@@ -468,6 +685,43 @@ def _part_model_name(grounding_context: dict[str, Any], part_name: str) -> str:
     if not model_name:
         raise ValueError(f"grounding context is missing target.model_name for {part_name}")
     return model_name
+
+
+def _part_pick_geometry(grounding_context: dict[str, Any], *, part_name: str) -> dict[str, Any]:
+    parts = dict(grounding_context.get("parts") or {})
+    target = dict((parts.get(part_name) or {}).get("target") or {})
+    board_top_z = target.get("board_top_z")
+    slot_pose = dict(target.get("slot_pose") or {})
+    try:
+        board_z = float(
+            board_top_z
+            if board_top_z is not None
+            else slot_pose.get("z", 1.02)
+        )
+    except (TypeError, ValueError):
+        board_z = 1.02
+
+    geometry = {
+        "board_center": {"x": 0.0, "y": 0.0, "z": board_z},
+        "slot_floor_z_m": board_z,
+    }
+    slot_x = slot_pose.get("x")
+    slot_y = slot_pose.get("y")
+    try:
+        if slot_x is not None and slot_y is not None:
+            geometry["slot_xy"] = [float(slot_x), float(slot_y)]
+    except (TypeError, ValueError):
+        pass
+    part_height = target.get("part_height")
+    if part_height is not None:
+        try:
+            geometry["part_height_m"] = float(part_height)
+        except (TypeError, ValueError):
+            pass
+    model_name = str(target.get("model_name") or "").strip()
+    if model_name:
+        geometry["model_name"] = model_name
+    return geometry
 
 
 def _part_orientation_params(
