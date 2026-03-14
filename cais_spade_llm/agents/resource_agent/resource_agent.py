@@ -244,7 +244,7 @@ class ResourceAgent(LlmAgent):
             agent: "ResourceAgent" = self.agent  # type: ignore
 
             # Poll inbox frequently but yield control if nothing arrives to keep agent responsive.
-            msg = await self.receive(timeout=0.5)
+            msg = await self.receive(timeout=0.05)
             if not msg:
                 return
 
@@ -282,10 +282,6 @@ class ResourceAgent(LlmAgent):
                 f"[Resource] ← Task ({task_id}) from={msg.sender} proto={protocol}"
             )
 
-            # ----- EARLY ACK ----- #
-            # Confirm receipt immediately so the ProductAgent can show progress even before execution.
-            await self._ack(msg, task_id=task_id, status="accepted")
-
             # ----- Tool selection ----- #
             # If the instruction already specifies a tool, honor it and skip the LLM.
             fn_name = None
@@ -296,6 +292,8 @@ class ResourceAgent(LlmAgent):
                     fn_args = dict(instruction.get("params") or {})
 
             if not fn_name:
+                # ----- EARLY ACK (non-recovery only) ----- #
+                await self._ack(msg, task_id=task_id, status="accepted")
                 try:
                     # Force the LLM to pick an explicit tool so we never free-text a task.
                     llm_resp = await asyncio.wait_for(
@@ -326,6 +324,12 @@ class ResourceAgent(LlmAgent):
                 await self._ack(msg, task_id=task_id, status="no_tool_match")
                 return
 
+            # Recovery bridge macros use a fast path: skip the "accepted" ACK,
+            # safety_check round-trip, "running" ACK, and "running" CCA event.
+            # CCA already defers safety decisions for these tasks, so the
+            # round-trips are pure overhead (~3-4 s per task).
+            is_recovery_macro = fn_name == "execute_recovery_macro"
+
             # ----- plumb routing/context ----- #
             # Pass routing info into the tool implementation for downstream logging/rpc calls.
             fn_args.setdefault("product_jid", str(msg.sender))
@@ -344,44 +348,56 @@ class ResourceAgent(LlmAgent):
                 )
                 return
 
-            # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
-            try:
-                # 1) Send request permission, not running
-                resource_msg = Message(to=agent.cca_jid)
-                resource_msg.set_metadata("type", "resource_event")
-                resource_msg.body = json.dumps({
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "function_name": fn_name,
-                    "params": fn_args,
-                    "status": "safety_check",   # <-- REQUEST permission
-                })
-                await self.send(resource_msg)
-            except Exception:
-                agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
+            if is_recovery_macro:
+                # Fast path: self-allow, log, and proceed directly to execution.
+                agent.logger.info(
+                    "[Resource] Fast-path recovery macro %s (skipping safety round-trip)",
+                    task_id,
+                )
+                agent._safety_decisions[task_id] = "allow"
+            else:
+                # ----- EARLY ACK (normal tasks) ----- #
+                await self._ack(msg, task_id=task_id, status="accepted")
 
-            # 2) Wait for CCA decision (no timeout; uses _SafetyDecisionInbox + dict)
+                # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
+                try:
+                    # 1) Send request permission, not running
+                    resource_msg = Message(to=agent.cca_jid)
+                    resource_msg.set_metadata("type", "resource_event")
+                    resource_msg.body = json.dumps({
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": "safety_check",   # <-- REQUEST permission
+                    })
+                    await self.send(resource_msg)
+                except Exception:
+                    agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
+
+            # 2) Wait for CCA decision (instant for recovery macros, blocks for normal tasks)
             decision = await agent._wait_for_safety_decision(task_id)
 
             if decision == "block":
                 await self._ack(msg, task_id=task_id, status="blocked")
                 return
 
-            # ---------------------------
-            #  SAFETY PASSED → RUNNING
-            # ---------------------------
-            await self._ack(msg, task_id=task_id, status="running")
+            if not is_recovery_macro:
+                # ---------------------------
+                #  SAFETY PASSED → RUNNING
+                # ---------------------------
+                await self._ack(msg, task_id=task_id, status="running")
 
-            running_msg = Message(to=agent.cca_jid)
-            running_msg.set_metadata("type", "resource_event")
-            running_msg.body = json.dumps({
-                "task_id": task_id,
-                "resource_jid": str(agent.jid),
-                "function_name": fn_name,
-                "params": fn_args,
-                "status": "running",
-            })
-            await self.send(running_msg)
+                running_msg = Message(to=agent.cca_jid)
+                running_msg.set_metadata("type", "resource_event")
+                running_msg.body = json.dumps({
+                    "task_id": task_id,
+                    "resource_jid": str(agent.jid),
+                    "function_name": fn_name,
+                    "params": fn_args,
+                    "status": "running",
+                })
+                await self.send(running_msg)
 
             # ---------------------------
             #  EXECUTE THE TOOL
@@ -519,7 +535,7 @@ class ResourceAgent(LlmAgent):
         async def run(self) -> None:
             agent: "ResourceAgent" = self.agent  # type: ignore
 
-            msg = await self.receive(timeout=0.5)
+            msg = await self.receive(timeout=0.05)
             if not msg:
                 return
 

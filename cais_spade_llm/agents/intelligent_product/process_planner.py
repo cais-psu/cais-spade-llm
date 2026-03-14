@@ -2078,7 +2078,12 @@ class ProcessPlanner:
                     "resource_state": default_resource_state,
                 }
 
-            path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
+            # If we know the product agent will auto-load a preprogrammed scenario,
+            # skip the 8s BFS search entirely.
+            if bridge_generation_mode == "manual":
+                self.logger.info("[Planner] Fast-tracking to bridge request (skipping DES search for preprogrammed scenarios).")
+            else:
+                path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
         elif path is None and not P_id and not obligation_targets:
             x_c = self._build_resource_search_state(
                 resource_jid=stuck_ra_jid,

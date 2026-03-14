@@ -20,20 +20,24 @@ class BaseSafetyChecker:
 
     def __init__(
         self,
-        dfa_map: Dict[str, str],
-        safety_rules: List[Dict[str, Any]],
-        tools_catalog: Optional[List[Dict[str, Any]]] = None,
+        dfa_dots: Dict[str, str],
+        safety_rules: list[dict],
+        tools_catalog: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         """Load safety rules and parse DFA DOT sources into transition tables."""
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.safety_rules = safety_rules
-        self.tools_catalog: List[Dict[str, Any]] = list(tools_catalog or [])
+        self.logger = logging.getLogger("BaseSafetyChecker")
+        self.safety_rules = safety_rules or []
+        self.tools_catalog = tools_catalog or []
         
+        # Performance optimization caches
+        self._compiled_expr_cache: Dict[str, Any] = {}
+        self._eval_result_cache: Dict[Tuple[str, FrozenSet[str]], bool] = {}
+
         # Internal DFA storage: { rule_id: { "initial": "1", "transitions": {...} } }
         self.dfas: Dict[str, Dict[str, Any]] = {}
 
         # Parse all DOT strings immediately
-        for rule_id, dot_str in dfa_map.items():
+        for rule_id, dot_str in dfa_dots.items():
             self.dfas[rule_id] = self._parse_dot(rule_id, dot_str)
 
     @staticmethod
@@ -366,18 +370,38 @@ class BaseSafetyChecker:
         if not label or label.lower() == "false":
             return False
 
-        # Prepare expression for Python eval
-        expr = label.replace("&", " and ").replace("|", " or ").replace("~", " not ").replace("!", " not ")
-        expr = re.sub(r"\btrue\b", "True", expr, flags=re.IGNORECASE)
-        expr = re.sub(r"\bfalse\b", "False", expr, flags=re.IGNORECASE)
+        # Fast path 1: check result cache for exact inputs
+        active_aps = frozenset([ap for ap in rule_aps if ap in sigma])
+        cache_key = (label, active_aps)
+        if cache_key in self._eval_result_cache:
+            return self._eval_result_cache[cache_key]
+
+        # Fast path 2: parse and compile expression only once
+        if label not in self._compiled_expr_cache:
+            expr = label.replace("&", " and ").replace("|", " or ").replace("~", " not ").replace("!", " not ")
+            expr = re.sub(r"\btrue\b", "True", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bfalse\b", "False", expr, flags=re.IGNORECASE)
+            try:
+                self._compiled_expr_cache[label] = compile(expr, "<string>", "eval")
+            except Exception:
+                self.logger.error(f"Failed to compile label expression: {label}")
+                self._compiled_expr_cache[label] = None
+        
+        compiled_expr = self._compiled_expr_cache.get(label)
+        if compiled_expr is None:
+            self._eval_result_cache[cache_key] = False
+            return False
 
         # Build environment: apNNN is True only if it is in sigma
-        env = {ap: (ap in sigma) for ap in rule_aps}
+        env = {ap: (ap in active_aps) for ap in rule_aps}
 
         try:
-            return bool(eval(expr, {"__builtins__": {}}, env))
+            val = bool(eval(compiled_expr, {"__builtins__": {}}, env))
+            self._eval_result_cache[cache_key] = val
+            return val
         except Exception:
             self.logger.error(f"Failed to evaluate label: {label}")
+            self._eval_result_cache[cache_key] = False
             return False
 
     # ------------------------------------------------------------------ #

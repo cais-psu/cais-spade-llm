@@ -1,27 +1,31 @@
 """SPADe entry point that collects initialization data, spins up agents, and keeps them running."""
 
 from __future__ import annotations
+
+import os
 import sys
-import os, asyncio, logging, shutil
-from datetime import datetime, timezone
-from pathlib import Path
-from spade import run as spade_run
 
 _repo_root = os.path.dirname(os.path.dirname(__file__))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+from cais_spade_llm.logging_setup import install_startup_logging_filters
+from cais_spade_llm.xmpp_runtime import install_xmpp_runtime_patches
+
+install_startup_logging_filters()
+install_xmpp_runtime_patches()
+
+import asyncio
+import logging
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+from spade import run as spade_run
+
 from cais_spade_llm import agent_creator, utils
-from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.agent_creator import ALLOWED_FUNCS
-
-# Silence third‑party loggers that otherwise spam the console during development.
-for n in ("pyjabber", "winloop", "asyncio"):
-    logging.getLogger(n).setLevel(logging.CRITICAL)
-
-# Suppress SPADE/slixmpp stanza warnings (harmless "Unknown stanza interface: id")
-import warnings
-warnings.filterwarnings("ignore", message="Unknown stanza interface")
+from cais_spade_llm.function_analyzer import FunctionAnalyzer
 
 # Static filesystem locations for initialization payloads and generated tool catalogues.
 PRODUCT_DIR  = "cais_spade_llm/initialization/products/"

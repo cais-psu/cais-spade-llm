@@ -350,7 +350,8 @@ def _preview_compute_pick_targets_output(
     part_height = float(geo.get("part_height_m", 0.08) or 0.08)
     tcp_offset_z = -0.17
     pick_bias = max(0.003, min(0.02, part_height * 0.25))
-    pick_tcp_z = max(float(observed_pose["z"]) + pick_bias, 1.07)
+    min_tcp_z = float(params.get("min_pick_tcp_z_override_m") or 1.07)
+    pick_tcp_z = max(float(observed_pose["z"]) + pick_bias, min_tcp_z)
     pick_z = pick_tcp_z - tcp_offset_z
     approach_height = float(params.get("approach_height_override_m", 0.2) or 0.2)
     travel_candidates = [

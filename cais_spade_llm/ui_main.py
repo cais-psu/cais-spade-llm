@@ -19,19 +19,18 @@ import os
 import signal
 import subprocess
 import sys
-import warnings
+
+from cais_spade_llm.logging_setup import install_startup_logging_filters
+from cais_spade_llm.xmpp_runtime import install_xmpp_runtime_patches
+
+install_startup_logging_filters()
+install_xmpp_runtime_patches()
 
 # Ensure the cais_spade_llm package directory is on sys.path so that
 # agent_creator, utils, etc. can be imported the same way spade_main.py does.
 _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
-
-# Silence noisy third-party loggers.
-for _name in ("pyjabber", "winloop", "asyncio"):
-    logging.getLogger(_name).setLevel(logging.CRITICAL)
-warnings.filterwarnings("ignore", message="Unknown stanza interface")
-
 
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""

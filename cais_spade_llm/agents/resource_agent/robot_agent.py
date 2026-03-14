@@ -106,6 +106,7 @@ class RobotAgent(ResourceAgent):
         self._controller_prewarm_attempted = False
         self._controller_prewarm_lock = asyncio.Lock()
         self._controller_prewarm_task: asyncio.Task | None = None
+        self._primitive_catalog_cache: list | None = None
 
         self.logger.info(
             (
@@ -330,7 +331,7 @@ class RobotAgent(ResourceAgent):
     ) -> Dict[str, Any]:
         """Execute a controller-only helper that is not exposed as a bridge primitive."""
         if self.execution_mode == "dry_run":
-            await self._simulate_action(f"helper:{helper_name}({params})", duration=1.0)
+            self.logger.debug("[Robot] dry_run helper: %s", helper_name)
             return {"success": True, "message": f"Simulated helper: {helper_name}"}
 
         await self._ensure_controller_prewarmed()
@@ -883,15 +884,15 @@ class RobotAgent(ResourceAgent):
             self.logger.error("[Robot] Assembly verification failed for %s.", placed_target)
 
             # Simulate failed insertion by dropping LG into a UR5e-reachable
-            # recovery lane beside the assembly board.
-            drop_x, drop_y, drop_z = 0.18, 0.10, 1.035
+            # recovery lane near the UR5e base, out of xArm6 reach.
+            drop_x, drop_y, drop_z = 0.0, 0.20, 1.035
             if self.execution_mode != "dry_run":
                 model_name = self._pick_ctx.get("model_name", "")
                 if model_name and self._controller is not None:
                     await asyncio.to_thread(
                         self._controller.detach_part, model_name
                     )
-                    # Place on its side in a board-adjacent recovery lane.
+                    # Place near the UR5e base, away from the board.
                     # LG recovery uses a flat top-down pickup, so keep the part upright.
                     await asyncio.to_thread(
                         self._controller.set_entity_pose,
@@ -900,7 +901,7 @@ class RobotAgent(ResourceAgent):
                         qx=0.0, qy=0.0, qz=0.0, qw=1.0,
                     )
                     self.logger.warning(
-                        "[Robot] LG slippage: %s rolled to the board-adjacent "
+                        "[Robot] LG slippage: %s rolled to the ur5e-side "
                         "recovery lane (%.2f, %.2f, %.2f)",
                         model_name, drop_x, drop_y, drop_z,
                     )
@@ -926,9 +927,9 @@ class RobotAgent(ResourceAgent):
                     "last_commanded_location": destination_location,
                     "dropped_location": {
                         "x": drop_x, "y": drop_y, "z": drop_z,
-                        "region": "assembly_board_edge",
+                        "region": "ur5e_base_area",
                         "near": "ur5e_recovery_lane",
-                        "description": "Rolled off assembly board into the UR5e recovery lane",
+                        "description": "Rolled toward UR5e base into the ur5e-only recovery lane",
                     },
                 },
             }
@@ -1117,7 +1118,6 @@ class RobotAgent(ResourceAgent):
         """
         from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
             apply_effects_to_snapshot,
-            build_primitive_catalog,
             extract_step_output,
             get_robot_bridge_snapshot,
             resolve_param_refs,
@@ -1152,6 +1152,10 @@ class RobotAgent(ResourceAgent):
                 },
             }
 
+        # Eagerly ensure the controller is prewarmed once for the entire
+        # macro so individual primitive steps can skip the async-lock check.
+        await self._ensure_controller_prewarmed()
+
         runtime_snapshot = get_robot_bridge_snapshot(self)
         if expected_snapshot:
             matches, mismatch_message = snapshot_matches_expected(runtime_snapshot, expected_snapshot)
@@ -1178,7 +1182,7 @@ class RobotAgent(ResourceAgent):
                 "content": f"Recovery macro '{macro_name}' has no primitive steps",
             }
 
-        primitive_catalog = build_primitive_catalog(self)
+        primitive_catalog = self._cached_primitive_catalog()
         primitive_meta_by_name = {
             str(entry.get("name", "")).strip(): entry
             for entry in primitive_catalog
@@ -1341,17 +1345,26 @@ class RobotAgent(ResourceAgent):
             },
         }
 
+    def _cached_primitive_catalog(self) -> list:
+        """Return the cached primitive catalog, building it on first access."""
+        if self._primitive_catalog_cache is None:
+            from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+                build_primitive_catalog,
+            )
+
+            self._primitive_catalog_cache = build_primitive_catalog(self)
+        return self._primitive_catalog_cache
+
     async def _execute_primitive(
         self, primitive: str, params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
         if self.execution_mode == "dry_run":
-            await self._simulate_action(
-                f"primitive:{primitive}({params})", duration=1.0
-            )
+            self.logger.debug("[Robot] dry_run primitive: %s", primitive)
             return {"success": True, "message": f"Simulated: {primitive}"}
 
-        await self._ensure_controller_prewarmed()
+        if not self._controller_prewarm_done:
+            await self._ensure_controller_prewarmed()
 
         if self._controller is None:
             return {"success": False, "message": "controller is not initialized"}
@@ -1437,7 +1450,7 @@ class RobotAgent(ResourceAgent):
 
         self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
 
-        interval = 2.0   # print every 5 seconds
+        interval = 2.0   # progress tick interval
         elapsed = 0.0
 
         while elapsed < duration:

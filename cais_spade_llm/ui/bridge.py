@@ -3329,13 +3329,15 @@ class SystemBridge:
 
             # Start agents in order: resources → CCA → user → products.
             self._set_startup_phase("start_resource_agents")
+            ra_tasks = []
             for ra in self.resource_agents:
-                name = getattr(ra, "agent_name", str(getattr(ra, "jid", "?")))
+                ra_tasks.append(ra.start(auto_register=True))
+            if ra_tasks:
                 t_ra = time.monotonic()
-                self._diag_emit(f"startup#{startup_id} starting resource {name}")
-                await ra.start(auto_register=True)
+                self._diag_emit(f"startup#{startup_id} starting {len(ra_tasks)} resource agents")
+                await asyncio.gather(*ra_tasks)
                 self._diag_emit(
-                    f"startup#{startup_id} resource {name} started in {time.monotonic() - t_ra:.2f}s"
+                    f"startup#{startup_id} resource agents started in {time.monotonic() - t_ra:.2f}s"
                 )
 
             self._set_startup_phase("start_cca")
@@ -3355,14 +3357,15 @@ class SystemBridge:
                 )
 
             self._set_startup_phase("start_product_agents")
-            for i, pa in enumerate(self.product_agents):
-                await asyncio.sleep(0.2 * i)
-                name = getattr(pa, "agent_name", str(getattr(pa, "jid", "?")))
+            pa_tasks = []
+            for pa in self.product_agents:
+                pa_tasks.append(pa.start(auto_register=True))
+            if pa_tasks:
                 t_pa = time.monotonic()
-                self._diag_emit(f"startup#{startup_id} starting product {name}")
-                await pa.start(auto_register=True)
+                self._diag_emit(f"startup#{startup_id} starting {len(pa_tasks)} product agents")
+                await asyncio.gather(*pa_tasks)
                 self._diag_emit(
-                    f"startup#{startup_id} product {name} started in {time.monotonic() - t_pa:.2f}s"
+                    f"startup#{startup_id} product agents started in {time.monotonic() - t_pa:.2f}s"
                 )
 
             self._set_startup_phase("wait_product_kickoff")

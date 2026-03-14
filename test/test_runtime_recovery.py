@@ -410,8 +410,8 @@ def _build_preprogrammed_bridge_request() -> tuple[dict[str, Any], _DummyBridgeR
             "state": "in_transit",
             "location": "assembly_board-v1_recovery_lane",
             "observed_pose": {
-                "x": 0.12,
-                "y": 0.18,
+                "x": 0.0,
+                "y": 0.20,
                 "z": 1.035,
                 "qx": 0.0,
                 "qy": 0.0,
@@ -2105,7 +2105,7 @@ def test_build_preprogrammed_bridge_proposal_returns_valid_lg_scenario(tmp_path)
         "move_relative",
     ]
     assert "rotate_wrist" not in [step["primitive"] for step in pick_steps]
-    assert pick_steps[5]["params"]["dz"] == -0.024
+    assert pick_steps[5]["params"]["dz"] == 0.0
     assert pick_steps[2]["params"]["approach_height_override_m"] == 0.06
     assert pick_steps[2]["params"]["ignore_current_height_for_travel_z"] is True
     assert [step["primitive"] for step in insert_steps] == [
@@ -2115,7 +2115,7 @@ def test_build_preprogrammed_bridge_proposal_returns_valid_lg_scenario(tmp_path)
         "move_pose",
         "open_gripper",
         "detach_part",
-        "move_relative",
+        "move_to_named_pose",
     ]
     assert "rotate_wrist" not in [step["primitive"] for step in insert_steps]
     assert insert_steps[1]["params"]["z_adjustment_m"] == 0.006

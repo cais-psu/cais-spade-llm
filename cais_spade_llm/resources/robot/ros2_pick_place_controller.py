@@ -934,6 +934,11 @@ class Ros2PickPlaceController:
             )
             if ok:
                 break
+            
+            if not ok and assume_released_if_open and self._gripper_is_open_enough():
+                # Avoid massive delays retrying if the gripper is already open
+                break
+
             if attempt_idx + 1 < attempts:
                 self._log().warn(
                     f"Detach retry {attempt_idx + 1}/{attempts - 1} for "
@@ -1045,6 +1050,7 @@ class Ros2PickPlaceController:
         product_geometry: dict[str, Any] | None = None,
         approach_height_override_m: float | None = None,
         ignore_current_height_for_travel_z: bool = False,
+        min_pick_tcp_z_override_m: float | None = None,
     ) -> dict[str, Any]:
         """Compute pick target positions from perception + geometry without moving.
 
@@ -1101,7 +1107,12 @@ class Ros2PickPlaceController:
             min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
         )
         pick_tcp_z_raw = tz + pick_bias
-        pick_tcp_z = max(pick_tcp_z_raw, self.min_pick_tcp_z_m)
+        effective_min_tcp_z = (
+            min_pick_tcp_z_override_m
+            if min_pick_tcp_z_override_m is not None
+            else self.min_pick_tcp_z_m
+        )
+        pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
         pick_z = pick_tcp_z - ee_tcp_offset_z
         pick_z += self.pick_z_adjustments_m.get(target_part_name.upper(), 0.0)
 
@@ -1832,6 +1843,13 @@ class Ros2PickPlaceController:
                 self._attached_model = None
                 self._attached_link = None
                 return True
+            
+            # If the service timed out (no response), subsequent links will likely time out too. 
+            # We fail fast instead of waiting 5s * N links = 15s.
+            if response is None:
+                if log_failure:
+                    self._log().error(f"Detach service timed out on {link_name}, skipping remaining links")
+                break
 
         if log_failure:
             self._log().error(f"Failed to detach {target_model}")

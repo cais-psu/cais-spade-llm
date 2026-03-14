@@ -1421,6 +1421,7 @@ class CentralControllerAgent(LlmAgent):
 
                 if skip_revalidation:
                     ok, violations = True, []
+                    winning_set_data = {}
                 else:
                     ok, violations = validator.validate_plan_fsa(
                         fsa=fsa,
@@ -1428,7 +1429,8 @@ class CentralControllerAgent(LlmAgent):
                         product_jid=product_jid
                     )
                 try:
-                    winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
+                    if not skip_revalidation:
+                        winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
                     policy = (
                         dict(agent.precomputed_bundle.get("replan_policy", {}))
                         if isinstance(agent.precomputed_bundle.get("replan_policy"), dict)

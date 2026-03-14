@@ -6,13 +6,15 @@ from typing import Any
 _RECOVER_LG_V1 = "recover_lg_v1"
 _FAST_RECOVERY_SPEED = 0.4
 _CAREFUL_RECOVERY_SPEED = 0.6
-_MCP_RETURN_DESCEND_DZ_M = -0.12
+_MCP_RETURN_SHIFT_DY_M = 0.20
+_MCP_RETURN_DESCEND_DZ_M = -0.08
 _MCP_RETURN_LIFT_DZ_M = 0.10
 _POST_PICK_LIFT_DZ_M = 0.05
 _POST_PLACE_LIFT_DZ_M = 0.08
-_LG_PICK_FINAL_NUDGE_DZ_M = -0.024
+_LG_PICK_FINAL_NUDGE_DZ_M = 0.0
 _LG_INSERT_Z_ADJUSTMENT_M = 0.006
 _LG_RECOVERY_APPROACH_HEIGHT_M = 0.06
+_LG_RECOVERY_MIN_PICK_TCP_Z_M = 1.032
 
 
 def build_preprogrammed_bridge_proposal(
@@ -121,7 +123,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         "params": {
                             "dx": 0.0,
                             "dy": 0.0,
-                            "dz": _MCP_RETURN_DESCEND_DZ_M,
+                            "dz": -0.135,
                             "speed": _CAREFUL_RECOVERY_SPEED,
                         },
                     },
@@ -191,6 +193,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             ),
                             "approach_height_override_m": _LG_RECOVERY_APPROACH_HEIGHT_M,
                             "ignore_current_height_for_travel_z": True,
+                            "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
                         },
                         "store_as": "lg_pick_targets",
                     },
@@ -312,11 +315,11 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         },
                     },
                     {
-                        "primitive": "move_relative",
+                        "primitive": "move_to_named_pose",
                         "params": {
-                            "dx": 0.0,
-                            "dy": 0.0,
-                            "dz": _POST_PLACE_LIFT_DZ_M,
+                            "pose_name": {
+                                "context_ref": "/resources/ur5e@localhost/named_poses/home",
+                            },
                             "speed": _FAST_RECOVERY_SPEED,
                         },
                     },

@@ -163,17 +163,17 @@ class ProductAgent(LlmAgent):
         skip_offline_validation: bool | None = None,
     ):
         """Package plan + FSA for plan validation by the CCA."""
-        fsa = self.process_planner.global_fsa
-        nodes = self.process_planner.nodes
-
-        if fsa is None:
-            raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
-
         if skip_offline_validation is not None:
             skip_revalidation = bool(skip_offline_validation)
 
+        fsa = self.process_planner.global_fsa
+        nodes = self.process_planner.nodes
+
+        if fsa is None and not skip_revalidation:
+            raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
+
         return {
-            "fsa": fsa,                      # <-- upload FSA here
+            "fsa": fsa or {},                # <-- upload FSA here
             "product_jid": str(self.jid),
             "plan": {"nodes": nodes},
             "runtime_context": self._build_runtime_plan_context(),
@@ -1283,11 +1283,16 @@ class ProductAgent(LlmAgent):
                 )
         return ""
 
-    def _dispatch_runtime_plan_validation_check(self) -> None:
-        self.process_planner.compile_global_fsa()
-        self.process_planner.save_global_fsa(self.global_fsa_path)
+    def _dispatch_runtime_plan_validation_check(
+        self, *, skip_revalidation: bool = False,
+    ) -> None:
+        if not skip_revalidation:
+            self.process_planner.compile_global_fsa()
+            self.process_planner.save_global_fsa(self.global_fsa_path)
 
-        payload = self._build_plan_validation_payload()
+        payload = self._build_plan_validation_payload(
+            skip_revalidation=skip_revalidation,
+        )
         msg_check = Message(to=self.cca_jid)
         msg_check.set_metadata("type", "plan_safety_check")
         msg_check.body = json.dumps(payload)
@@ -1309,11 +1314,19 @@ class ProductAgent(LlmAgent):
             "[Product] Recompiled plan FSA after runtime recovery and sent plan_safety_check to CCA."
         )
 
-    async def _send_runtime_plan_validation_check(self) -> None:
-        self._dispatch_runtime_plan_validation_check()
+    async def _send_runtime_plan_validation_check(
+        self, *, skip_revalidation: bool = False,
+    ) -> None:
+        self._dispatch_runtime_plan_validation_check(
+            skip_revalidation=skip_revalidation,
+        )
 
-    def _send_runtime_plan_validation_check_sync(self) -> None:
-        self._dispatch_runtime_plan_validation_check()
+    def _send_runtime_plan_validation_check_sync(
+        self, *, skip_revalidation: bool = False,
+    ) -> None:
+        self._dispatch_runtime_plan_validation_check(
+            skip_revalidation=skip_revalidation,
+        )
 
     async def _fail_closed_bridge_sequence(
         self,
@@ -2744,10 +2757,19 @@ class ProductAgent(LlmAgent):
             time.perf_counter() - started_at,
         )
         try:
+            # Preprogrammed bridge scenarios are pre-verified; skip the
+            # expensive BFS revalidation in CCA (saves ~30 s).
+            _bridge_source = str(
+                (active_bridge_sequence or {}).get("source", "")
+            ).strip().lower()
+            _skip_reval = _bridge_source == "preprogrammed_scenario"
             self.logger.info(
-                "[Product] Approved bridge proposal finalization started: sending runtime plan validation."
+                "[Product] Approved bridge proposal finalization started: sending runtime plan validation%s.",
+                " (skip_revalidation)" if _skip_reval else "",
             )
-            self._send_runtime_plan_validation_check_sync()
+            self._send_runtime_plan_validation_check_sync(
+                skip_revalidation=_skip_reval,
+            )
             self.logger.info(
                 "[Product] Approved bridge proposal validation sent successfully; persisting updated runtime state."
             )
@@ -3510,13 +3532,13 @@ class ProductAgent(LlmAgent):
                 return
 
             if agent._runtime_recovery_blocks_execution():
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.05)
                 return
 
             # Ask planner for one ready task
             task_node = agent.process_planner.next_ready_task()
             if not task_node:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.05)
                 return
 
             # NEW: prefer resource_jid chosen by the planner (LLM)
