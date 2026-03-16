@@ -98,6 +98,7 @@ MAIN_V2_SCENARIO_ID = "recover_lg_main_v2_mirror"
 BOTH_REACHABLE_SCENARIO_ID = "recover_lg_both_reachable"
 MCP_SWAP_SCENARIO_ID = "recover_mcp_swap"
 NO_GRIPPER_CONFLICT_SCENARIO_ID = "recover_lg_no_gripper_conflict"
+LIVE_LLM_VARIANT = "live-llm"
 FAILED_TASK_ID = "REQ_2_T4"
 ANCHOR_TASK_ID = "REQ_2_T3"
 GOAL_STATE = "assembled"
@@ -1414,12 +1415,21 @@ def _main_v2_scenario_overrides() -> dict[str, Any]:
 
 def _case3_variant_config(variant: str) -> dict[str, Any]:
     token = str(variant or MAIN_V1_VARIANT).strip() or MAIN_V1_VARIANT
+    if token == LIVE_LLM_VARIANT:
+        return {
+            "variant": LIVE_LLM_VARIANT,
+            "scenario_id": SCENARIO_ID,
+            "scenario_overrides": {},
+            "scripted_final_plan_builder": None,
+            "hint_level": "minimal",
+        }
     if token == MAIN_V2_VARIANT:
         return {
             "variant": MAIN_V2_VARIANT,
             "scenario_id": MAIN_V2_SCENARIO_ID,
             "scenario_overrides": _main_v2_scenario_overrides(),
             "scripted_final_plan_builder": None,
+            "hint_level": "full",
         }
     if token == BOTH_REACHABLE_VARIANT:
         return {
@@ -1427,6 +1437,7 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": BOTH_REACHABLE_SCENARIO_ID,
             "scenario_overrides": _both_reachable_scenario_overrides(),
             "scripted_final_plan_builder": None,
+            "hint_level": "full",
         }
     if token == MCP_SWAP_VARIANT:
         return {
@@ -1434,6 +1445,7 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": MCP_SWAP_SCENARIO_ID,
             "scenario_overrides": _mcp_swap_scenario_overrides(),
             "scripted_final_plan_builder": None,
+            "hint_level": "full",
         }
     if token == NO_GRIPPER_CONFLICT_VARIANT:
         return {
@@ -1441,6 +1453,7 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": NO_GRIPPER_CONFLICT_SCENARIO_ID,
             "scenario_overrides": _no_gripper_conflict_scenario_overrides(),
             "scripted_final_plan_builder": None,
+            "hint_level": "full",
         }
     return {
         "variant": MAIN_V1_VARIANT,
@@ -1450,6 +1463,7 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             scenario_id=SCENARIO_ID,
             prepared_bridge_request=prepared_bridge_request,
         ),
+        "hint_level": "full",
     }
 
 
@@ -1843,6 +1857,7 @@ def _prepare_case3_harness_state(
     scenario_overrides: dict[str, Any] | None = None,
     variant: str = MAIN_V1_VARIANT,
     extra_resources: list[Any] | None = None,
+    hint_level: str | None = None,
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any], list[dict[str, Any]]]:
     paths = _case3_paths()
     tools_catalog = _load_json(paths["tools"])
@@ -1942,6 +1957,14 @@ def _prepare_case3_harness_state(
     if llm_mode == "live":
         _configure_live_bridge_session(prepared_bridge_request)
 
+    # Inject hint_level: CLI override > variant config > default "full".
+    effective_hint_level = (
+        hint_level
+        or str(variant_config.get("hint_level") or "").strip()
+        or "full"
+    )
+    prepared_bridge_request["hint_level"] = effective_hint_level
+
     return fixture, product_agent, planner, prepared_bridge_request, deepcopy(tools_catalog)
 
 
@@ -1949,12 +1972,14 @@ def run_case3_recovery_dry_run(
     write_debug: bool = True,
     *,
     variant: str = MAIN_V1_VARIANT,
+    hint_level: str | None = None,
 ) -> dict[str, Any]:
     return _run_case3_recovery_harness(
         write_debug=write_debug,
         llm_mode="scripted",
         llm_model=None,
         variant=variant,
+        hint_level=hint_level,
     )
 
 
@@ -1963,12 +1988,14 @@ def run_case3_recovery_live_react(
     *,
     llm_model: str | None = None,
     variant: str = MAIN_V1_VARIANT,
+    hint_level: str | None = None,
 ) -> dict[str, Any]:
     return _run_case3_recovery_harness(
         write_debug=write_debug,
         llm_mode="live",
         llm_model=llm_model,
         variant=variant,
+        hint_level=hint_level,
     )
 
 
@@ -1986,11 +2013,13 @@ def _run_case3_recovery_harness(
     llm_mode: str,
     llm_model: str | None,
     variant: str = MAIN_V1_VARIANT,
+    hint_level: str | None = None,
 ) -> dict[str, Any]:
     fixture, product_agent, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode=llm_mode,
         llm_model=llm_model,
         variant=variant,
+        hint_level=hint_level,
     )
     proposal: dict[str, Any] | None = None
     compiled_tasks: list[dict[str, Any]] = []
@@ -2098,15 +2127,19 @@ def run_test(
     llm_model: str | None = None,
     write_debug: bool = True,
     variant: str = MAIN_V1_VARIANT,
+    hint_level: str | None = None,
 ) -> dict[str, Any]:
     if llm_mode == "live":
         result = run_case3_recovery_live_react(
             write_debug=write_debug,
             llm_model=llm_model,
             variant=variant,
+            hint_level=hint_level,
         )
     else:
-        result = run_case3_recovery_dry_run(write_debug=write_debug, variant=variant)
+        result = run_case3_recovery_dry_run(
+            write_debug=write_debug, variant=variant, hint_level=hint_level,
+        )
     proposal = result["proposal"]
     compiled_tasks = result["compiled_tasks"]
     bridge_debug = result["bridge_debug"]
@@ -3721,11 +3754,23 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--variant",
-        choices=[MAIN_V1_VARIANT, MAIN_V2_VARIANT],
+        choices=[MAIN_V1_VARIANT, MAIN_V2_VARIANT, LIVE_LLM_VARIANT],
         default=MAIN_V1_VARIANT,
         help=(
             f"Scenario variant to run: {MAIN_V1_VARIANT} is the original baseline, "
-            f"{MAIN_V2_VARIANT} mirrors the recovery to xarm6."
+            f"{MAIN_V2_VARIANT} mirrors the recovery to xarm6, "
+            f"{LIVE_LLM_VARIANT} uses minimal hints for genuine LLM evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--hint-level",
+        choices=["full", "minimal", "none"],
+        default=None,
+        help=(
+            "Control how much pre-computed reasoning is injected into the bridge "
+            "prompt. 'full' = current behaviour (regression baseline), "
+            "'minimal' = raw facts only, 'none' = no hints. "
+            "Overrides the variant default when set."
         ),
     )
     parser.add_argument(
@@ -3755,4 +3800,5 @@ if __name__ == "__main__":
         llm_model=args.model,
         write_debug=not args.no_debug,
         variant=args.variant,
+        hint_level=getattr(args, "hint_level", None),
     )

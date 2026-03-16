@@ -1,9 +1,26 @@
 """Prompt templates and builders for the LLM-facing planning/safety flows."""
 
 # prompts.py
+import enum
 import json
 from textwrap import dedent
 from typing import Any, Dict
+
+
+class BridgeHintLevel(enum.Enum):
+    """Controls how much pre-computed reasoning is injected into bridge prompts.
+
+    FULL    – current behaviour: pre-computed reachability verdicts, state-
+              transition suggestions, gripper-conflict resolution, and
+              ordering directives (regression baseline).
+    MINIMAL – raw facts only (resource states, observed poses, workspace
+              bounds as numbers).  The LLM must derive conclusions itself.
+    NONE    – no hints block at all; maximum LLM autonomy.
+    """
+
+    FULL = "full"
+    MINIMAL = "minimal"
+    NONE = "none"
 
 from cais_spade_llm.resources.resource_profile import (
     ResourceProfile,
@@ -1693,6 +1710,7 @@ def _generate_bridge_event_hints(
     unmet_reentry_conditions: list[dict[str, Any]] | None = None,
     validation_feedback: list[dict[str, Any]] | None = None,
     bridge_safety_context: dict[str, Any] | None = None,
+    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> list[str]:
     hints: list[str] = []
     resources = {
@@ -1705,6 +1723,13 @@ def _generate_bridge_event_hints(
         for condition in (unmet_reentry_conditions or [])
         if isinstance(condition, dict)
     ]
+
+    # --- feasibility feedback is always included (genuine runtime feedback) ---
+    if hint_level is not BridgeHintLevel.NONE:
+        _append_feasibility_feedback_hints(hints, validation_feedback)
+
+    if hint_level is BridgeHintLevel.NONE:
+        return hints
 
     relevant_parts = {
         str(condition.get("entity", "") or "").strip()
@@ -1735,6 +1760,9 @@ def _generate_bridge_event_hints(
         if str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
     }
 
+    # -----------------------------------------------------------------
+    # STATE TRANSITION HINTS
+    # -----------------------------------------------------------------
     for resource_jid, entry in resources.items():
         resource_core = _bridge_resource_core(entry)
         current_state = str(
@@ -1761,30 +1789,47 @@ def _generate_bridge_event_hints(
         if current_state in blocked_states or (
             expected_state and current_state != expected_state
         ):
-            unblocking_primitive = _bridge_unblocking_primitive(entry)
-            transition_target = expected_state or "idle"
-            primitive_suffix = (
-                f" (for example, {unblocking_primitive})" if unblocking_primitive else ""
-            )
-            hints.append(
-                f"Resource {resource_jid} is in state '{current_state}'. Bring it toward "
-                f"'{transition_target}' before proposing pick/place actions{primitive_suffix}."
-            )
+            if hint_level is BridgeHintLevel.MINIMAL:
+                # Raw fact only — no target state, no primitive suggestion.
+                hints.append(
+                    f"Resource {resource_jid} is in state '{current_state}'."
+                )
+            else:
+                unblocking_primitive = _bridge_unblocking_primitive(entry)
+                transition_target = expected_state or "idle"
+                primitive_suffix = (
+                    f" (for example, {unblocking_primitive})" if unblocking_primitive else ""
+                )
+                hints.append(
+                    f"Resource {resource_jid} is in state '{current_state}'. Bring it toward "
+                    f"'{transition_target}' before proposing pick/place actions{primitive_suffix}."
+                )
 
+    # -----------------------------------------------------------------
+    # GRIPPER OCCUPANCY HINTS
+    # -----------------------------------------------------------------
     for resource_jid, entry in resources.items():
         held_part = str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
         if not held_part:
             continue
         if not _bridge_resource_has_operation(entry, {"pick"}):
             continue
-        other_goal_parts = sorted(part for part in bridge_goal_parts if part and part != held_part)
-        if other_goal_parts:
+        if hint_level is BridgeHintLevel.MINIMAL:
+            # Raw fact only — no resolution instruction.
             hints.append(
-                f"Resource {resource_jid} currently holds '{held_part}'. To pick a different "
-                f"part such as '{other_goal_parts[0]}', it must first release '{held_part}'."
+                f"Resource {resource_jid} currently holds '{held_part}'."
             )
+        else:
+            other_goal_parts = sorted(part for part in bridge_goal_parts if part and part != held_part)
+            if other_goal_parts:
+                hints.append(
+                    f"Resource {resource_jid} currently holds '{held_part}'. To pick a different "
+                    f"part such as '{other_goal_parts[0]}', it must first release '{held_part}'."
+                )
 
-    # --- reachability verdicts ---
+    # -----------------------------------------------------------------
+    # REACHABILITY
+    # -----------------------------------------------------------------
     parts_ctx = dict((grounding_context or {}).get("parts") or {})
     for part_name in sorted(relevant_parts & set(parts_ctx.keys())):
         part_info = dict(parts_ctx.get(part_name) or {})
@@ -1793,66 +1838,84 @@ def _generate_bridge_event_hints(
             observed_pose.get(a) is not None for a in ("x", "y", "z")
         ):
             continue
-        reachable_by: list[str] = []
-        unreachable_by: list[tuple[str, str]] = []
-        for resource_jid, entry in resources.items():
-            bounds = dict(
-                dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
+
+        if hint_level is BridgeHintLevel.MINIMAL:
+            # Raw pose + raw workspace bounds — LLM computes reachability.
+            pose_str = ", ".join(
+                f"{a}={observed_pose[a]}" for a in ("x", "y", "z")
+                if observed_pose.get(a) is not None
             )
-            if not bounds:
-                continue
-            inside, reason = _check_pose_in_bounds(observed_pose, bounds)
-            if inside:
-                reachable_by.append(resource_jid)
-            else:
-                unreachable_by.append((resource_jid, reason))
-        if unreachable_by:
-            reachable_text = ", ".join(reachable_by) if reachable_by else "no resource"
-            parts_list = [
-                f"NOT reachable by {jid} ({reason})" for jid, reason in unreachable_by
-            ]
+            bounds_parts: list[str] = []
+            for resource_jid, entry in resources.items():
+                bounds = dict(
+                    dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
+                )
+                if not bounds:
+                    continue
+                axes = []
+                for a in ("x", "y", "z"):
+                    lo = bounds.get(f"{a}_min_m")
+                    hi = bounds.get(f"{a}_max_m")
+                    if lo is not None and hi is not None:
+                        axes.append(f"{a}=[{lo}, {hi}]")
+                if axes:
+                    bounds_parts.append(f"{resource_jid} workspace: {', '.join(axes)}")
+            hint_text = f"Part '{part_name}' observed at ({pose_str})."
+            if bounds_parts:
+                hint_text += " " + ". ".join(bounds_parts) + "."
+            hints.append(hint_text)
+        else:
+            # FULL: pre-computed reachability verdict.
+            reachable_by: list[str] = []
+            unreachable_by: list[tuple[str, str]] = []
+            for resource_jid, entry in resources.items():
+                bounds = dict(
+                    dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
+                )
+                if not bounds:
+                    continue
+                inside, reason = _check_pose_in_bounds(observed_pose, bounds)
+                if inside:
+                    reachable_by.append(resource_jid)
+                else:
+                    unreachable_by.append((resource_jid, reason))
+            if unreachable_by:
+                reachable_text = ", ".join(reachable_by) if reachable_by else "no resource"
+                parts_list = [
+                    f"NOT reachable by {jid} ({reason})" for jid, reason in unreachable_by
+                ]
+                hints.append(
+                    f"Part '{part_name}' at observed pose: reachable by {reachable_text}; "
+                    + "; ".join(parts_list)
+                    + "."
+                )
+
+    # -----------------------------------------------------------------
+    # SAFETY CONSTRAINTS
+    # -----------------------------------------------------------------
+    if hint_level is BridgeHintLevel.MINIMAL:
+        # Point to the raw JSON already in the prompt; no pre-filtering.
+        constraints = (bridge_safety_context or {}).get("constraints") or []
+        if any(isinstance(c, dict) for c in constraints):
             hints.append(
-                f"Part '{part_name}' at observed pose: reachable by {reachable_text}; "
-                + "; ".join(parts_list)
-                + "."
+                "Consult the BRIDGE SAFETY CONTEXT section for all applicable safety rules."
             )
-
-    emitted_safety_hints = 0
-    for constraint in (bridge_safety_context or {}).get("constraints") or []:
-        if not isinstance(constraint, dict):
-            continue
-        if not _relevant_bridge_safety_constraint(
-            constraint,
-            relevant_parts=relevant_parts,
-            relevant_resources=relevant_resources,
-            held_parts=held_parts,
-        ):
-            continue
-        hints.append(_summarize_bridge_safety_constraint(constraint))
-        emitted_safety_hints += 1
-        if emitted_safety_hints >= 2:
-            break
-
-    emitted_feedback_hints = 0
-    for feedback in reversed(list(validation_feedback or [])):
-        if not isinstance(feedback, dict):
-            continue
-        message = str(feedback.get("message", "") or "").strip()
-        if not message:
-            continue
-        lowered = message.lower()
-        if not any(
-            token in lowered
-            for token in ("infeasible", "workspace", "pose outside", "feasibility")
-        ):
-            continue
-        hints.append(
-            f"Prior proposal rejected: '{message}'. Do not re-propose the same resource "
-            "for that operation unless the state or target pose has changed."
-        )
-        emitted_feedback_hints += 1
-        if emitted_feedback_hints >= 2:
-            break
+    else:
+        emitted_safety_hints = 0
+        for constraint in (bridge_safety_context or {}).get("constraints") or []:
+            if not isinstance(constraint, dict):
+                continue
+            if not _relevant_bridge_safety_constraint(
+                constraint,
+                relevant_parts=relevant_parts,
+                relevant_resources=relevant_resources,
+                held_parts=held_parts,
+            ):
+                continue
+            hints.append(_summarize_bridge_safety_constraint(constraint))
+            emitted_safety_hints += 1
+            if emitted_safety_hints >= 2:
+                break
 
     deduped_hints: list[str] = []
     seen_hints: set[str] = set()
@@ -1871,6 +1934,33 @@ def _generate_bridge_event_hints(
     return deduped_hints
 
 
+def _append_feasibility_feedback_hints(
+    hints: list[str],
+    validation_feedback: list[dict[str, Any]] | None,
+) -> None:
+    """Append feasibility feedback hints (genuine runtime feedback, not bias)."""
+    emitted = 0
+    for feedback in reversed(list(validation_feedback or [])):
+        if not isinstance(feedback, dict):
+            continue
+        message = str(feedback.get("message", "") or "").strip()
+        if not message:
+            continue
+        lowered = message.lower()
+        if not any(
+            token in lowered
+            for token in ("infeasible", "workspace", "pose outside", "feasibility")
+        ):
+            continue
+        hints.append(
+            f"Prior proposal rejected: '{message}'. Do not re-propose the same resource "
+            "for that operation unless the state or target pose has changed."
+        )
+        emitted += 1
+        if emitted >= 2:
+            break
+
+
 def _bridge_events_domain_context(
     *,
     bridge_resources: dict[str, Any] | None = None,
@@ -1878,6 +1968,7 @@ def _bridge_events_domain_context(
     unmet_reentry_conditions: list[dict[str, Any]] | None = None,
     validation_feedback: list[dict[str, Any]] | None = None,
     bridge_safety_context: dict[str, Any] | None = None,
+    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> str:
     """Domain context injected only in the bridge_events phase."""
     hints = _generate_bridge_event_hints(
@@ -1886,10 +1977,9 @@ def _bridge_events_domain_context(
         unmet_reentry_conditions=unmet_reentry_conditions,
         validation_feedback=validation_feedback,
         bridge_safety_context=bridge_safety_context,
+        hint_level=hint_level,
     )
-    dynamic_block = "Constraints detected in current state:\n" + "\n".join(
-        f"- {hint}" for hint in hints
-    )
+
     # Determine which resource types participate in this bridge.
     participating_types: set[str] = set()
     for _jid, entry in (bridge_resources or {}).items():
@@ -1916,6 +2006,33 @@ def _bridge_events_domain_context(
         """
     ).strip()
 
+    if hint_level is BridgeHintLevel.NONE:
+        # Only part states — no reasoning constraints, no hints, no ordering.
+        return part_states_section
+
+    # Build the dynamic constraints/facts block.
+    dynamic_block = ""
+    if hints:
+        header = (
+            "Constraints detected in current state:"
+            if hint_level is BridgeHintLevel.FULL
+            else "Current state facts:"
+        )
+        dynamic_block = header + "\n" + "\n".join(f"- {hint}" for hint in hints)
+
+    if hint_level is BridgeHintLevel.MINIMAL:
+        # Neutral reasoning prompt — no prescribed strategy or ordering.
+        reasoning_header = (
+            "BRIDGE EVENT PLANNING:\n\n"
+            "Analyze the current system state and determine a recovery sequence."
+        )
+        return "\n\n".join(
+            section
+            for section in (reasoning_header, dynamic_block, part_states_section)
+            if section
+        )
+
+    # FULL: current behaviour — prescriptive reasoning + ordering directive.
     return "\n\n".join(
         section
         for section in (
@@ -2272,6 +2389,7 @@ def build_bridge_turn_prompt(
     bridge_safety_context: dict[str, Any] | None = None,
     draft_final_plan: dict[str, Any] | None = None,
     draft_final_plan_status: dict[str, Any] | None = None,
+    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> str:
     """Build one compact ReAct turn prompt for the bridge session."""
     from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
@@ -2355,6 +2473,7 @@ def build_bridge_turn_prompt(
             unmet_reentry_conditions=unmet_reentry_conditions,
             validation_feedback=validation_feedback,
             bridge_safety_context=bridge_safety_context,
+            hint_level=hint_level,
         )
     else:
         domain_context = _bridge_final_plan_domain_context(

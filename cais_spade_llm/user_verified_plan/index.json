@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case3_llm_bridge",
+  "active_bundle_id": null,
   "bundles": [
     {
       "bundle_id": "case1_move_home_not_included",

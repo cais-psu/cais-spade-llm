@@ -3,48 +3,55 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "ur5e and xarm6 must not both be in the assembly board destination area at the same time",
-      "constraint_type": "no_simultaneous_presence_in_destination_area",
+      "raw_text": "xarm move_home should be done after its place_insert.",
+      "constraint_type": "ordering_after_event",
       "process": "assembly",
       "product": [],
       "resources": [
-        "ur5e",
         "xarm6"
       ],
       "resource_types": [
         "robot"
       ],
-      "event": null,
-      "context": {
-        "destination": "assembly_board-v1"
-      },
+      "event": "move_home",
+      "context": null,
       "aps": [
         {
-          "label": "ap001",
-          "full": "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+          "label": "ap003",
+          "full": "ap_event/assembly/any/xarm6/move_home/any=true"
         },
         {
           "label": "ap004",
-          "full": "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1"
-        },
+          "full": "ap_event/assembly/any/xarm6/place_insert/any=true"
+        }
+      ],
+      "ltlf": "(!(ap003) U ap004)"
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "ur5e move_home should be done after its place_insert.",
+      "constraint_type": "ordering_after_event",
+      "process": "assembly",
+      "product": [],
+      "resources": [
+        "ur5e"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": "move_home",
+      "context": null,
+      "aps": [
         {
-          "label": "ap003",
-          "full": "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1"
+          "label": "ap001",
+          "full": "ap_event/assembly/any/ur5e/move_home/any=true"
         },
         {
           "label": "ap002",
-          "full": "ap_event/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
-        },
-        {
-          "label": "ap006",
-          "full": "ap_state/assembly/any/xarm6/positioned/destination=assembly_board-v1"
-        },
-        {
-          "label": "ap005",
-          "full": "ap_state/assembly/any/xarm6/placed/destination=assembly_board-v1"
+          "full": "ap_event/assembly/any/ur5e/place_insert/any=true"
         }
       ],
-      "ltlf": "G (!(((ap001 | ap004 | ap003) & (ap002 | ap006 | ap005))))"
+      "ltlf": "(!(ap001) U ap002)"
     }
   ]
 }
