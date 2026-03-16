@@ -5,6 +5,11 @@ import json
 from textwrap import dedent
 from typing import Any, Dict
 
+from cais_spade_llm.resources.resource_profile import (
+    ResourceProfile,
+    get_resource_profile,
+)
+
 # ----------------------------------------------------------------------
 # Core agent instructions
 # ----------------------------------------------------------------------
@@ -1241,16 +1246,20 @@ SAFETY CONSTRAINTS (MUST PRESERVE):
         resource_lines = []
         for jid, rs in resource_states.items():
             resource_type = rs.get("resource_type") or "resource"
-            held = rs.get("held_part") or "nothing"
             state = rs.get("current_state", "unknown")
             extras = []
+            held = rs.get("held_part")
+            if held not in (None, ""):
+                extras.append(f"held_part={held}")
             if rs.get("gripper_state") is not None:
                 extras.append(f"gripper={rs.get('gripper_state')}")
             if rs.get("active_job") is not None:
                 extras.append(f"active_job={rs.get('active_job')}")
+            if rs.get("current_location") not in (None, ""):
+                extras.append(f"location={rs.get('current_location')}")
             extra_text = f", {', '.join(extras)}" if extras else ""
             resource_lines.append(
-                f"  {jid}: type={resource_type}, holding={held}, state={state}{extra_text}"
+                f"  {jid}: type={resource_type}, state={state}{extra_text}"
             )
 
         part_lines = []
@@ -1460,4 +1469,1126 @@ def build_state_exploration_prompt(
         "  ]\n"
         "}\n\n"
         "Return ONLY the JSON object, no explanation."
+    )
+
+
+def _bridge_observe_domain_context() -> str:
+    """Domain context injected only in the observe_required phase."""
+    return dedent(
+        """\
+        OBSERVATION OUTPUT SHAPES (stored under /step_outputs/<store_as>/...):
+        - detect_parts(part_name) -> {part_name, pose: {x, y, z, qx?, qy?, qz?, qw?}, model_name?}
+          Reference: /step_outputs/<alias>/pose/x, .../pose/y, .../pose/z
+        - get_current_pose() -> {pose: {x, y, z, qx, qy, qz, qw}}
+          Reference: /step_outputs/<alias>/pose/qx, .../pose/qy, etc.
+
+        CONTEXT_REF SYNTAX FOR store_as:
+        - Use {"context_ref": "/step_outputs/<alias>/..."} in later primitives to reference stored values.
+        - Example: {"context_ref": "/step_outputs/detected_part/pose/x"} resolves to the x coordinate.
+        """
+    ).strip()
+
+
+def _bridge_operation_kind(catalog_entry: dict[str, Any]) -> str:
+    semantics = dict(catalog_entry.get("bridge_semantics") or {})
+    return str(semantics.get("operation_kind", "") or "").strip().lower()
+
+
+def _bridge_resource_has_operation(
+    resource_entry: dict[str, Any],
+    operation_kinds: set[str],
+) -> bool:
+    return any(
+        _bridge_operation_kind(catalog_entry) in operation_kinds
+        for catalog_entry in (resource_entry.get("primitive_catalog") or [])
+        if isinstance(catalog_entry, dict)
+    )
+
+
+def _bridge_resource_core(resource_entry: dict[str, Any]) -> dict[str, Any]:
+    return dict(resource_entry.get("resource_core") or {})
+
+
+def _bridge_resource_facets(resource_entry: dict[str, Any]) -> dict[str, Any]:
+    return dict(resource_entry.get("resource_facets") or {})
+
+
+def _bridge_manipulator_facet(resource_entry: dict[str, Any]) -> dict[str, Any]:
+    return dict(_bridge_resource_facets(resource_entry).get("manipulator") or {})
+
+
+def _check_pose_in_bounds(
+    pose: dict[str, Any],
+    bounds: dict[str, Any],
+) -> tuple[bool, str]:
+    """Check if a Cartesian pose falls within workspace bounds.
+
+    Pure-function equivalent of ``RobotAgent._is_pose_in_workspace``.
+    Returns ``(is_inside, reason)``.
+    """
+    violations: list[str] = []
+    for axis in ("x", "y", "z"):
+        val = pose.get(axis)
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        lo_key, hi_key = f"{axis}_min_m", f"{axis}_max_m"
+        lo = bounds.get(lo_key)
+        hi = bounds.get(hi_key)
+        if lo is not None and val < float(lo):
+            violations.append(f"{axis}={val:.4f} < {lo_key}={float(lo):.4f}")
+        if hi is not None and val > float(hi):
+            violations.append(f"{axis}={val:.4f} > {hi_key}={float(hi):.4f}")
+    if violations:
+        return False, "pose outside workspace: " + ", ".join(violations)
+    return True, "pose within workspace"
+
+
+def _bridge_blocked_states(resource_entry: dict[str, Any]) -> set[str]:
+    """Return states explicitly declared as blocked by any primitive's preconditions."""
+    blocked: set[str] = set()
+    for entry in (resource_entry.get("primitive_catalog") or []):
+        if not isinstance(entry, dict):
+            continue
+        preconditions = dict(entry.get("preconditions") or {})
+        state_rule = dict(preconditions.get("current_state") or {})
+        not_equals = state_rule.get("not_equals")
+        if isinstance(not_equals, str) and not_equals.strip():
+            blocked.add(not_equals.strip())
+    return blocked
+
+
+def _bridge_unblocking_primitive(resource_entry: dict[str, Any]) -> str:
+    catalog = [
+        entry
+        for entry in (resource_entry.get("primitive_catalog") or [])
+        if isinstance(entry, dict)
+    ]
+    for preferred_name in ("move_to_named_pose", "move_home", "move_to_safe_pose"):
+        for entry in catalog:
+            if str(entry.get("name", "") or "").strip() == preferred_name:
+                return preferred_name
+    for operation_kind in ("home", "clear", "motion"):
+        for entry in catalog:
+            if _bridge_operation_kind(entry) == operation_kind:
+                return str(entry.get("name", "") or "").strip()
+    return ""
+
+
+def _format_bridge_condition_hint(condition: dict[str, Any]) -> str:
+    entity = str(condition.get("entity", "") or "").strip()
+    field = str(condition.get("field", "") or "").strip()
+    expected = condition.get("expected")
+    if entity and field:
+        return f"{entity}.{field}={expected!r}"
+    if entity:
+        return entity
+    return str(expected)
+
+
+def _relevant_bridge_safety_constraint(
+    constraint: dict[str, Any],
+    *,
+    relevant_parts: set[str],
+    relevant_resources: set[str],
+    held_parts: set[str],
+) -> bool:
+    part_name = str(constraint.get("part_name", "") or "").strip()
+    resource_jid = str(constraint.get("resource_jid", "") or "").strip()
+    if part_name and part_name in (relevant_parts | held_parts):
+        return True
+    if resource_jid and resource_jid in relevant_resources:
+        return True
+    for until_condition in (constraint.get("until_conditions") or []):
+        if not isinstance(until_condition, dict):
+            continue
+        entity = str(until_condition.get("entity", "") or "").strip()
+        entity_kind = str(until_condition.get("entity_kind", "") or "").strip().lower()
+        if entity_kind == "part" and entity in relevant_parts:
+            return True
+        if entity_kind == "resource" and entity in relevant_resources:
+            return True
+    return False
+
+
+def _summarize_bridge_safety_constraint(constraint: dict[str, Any]) -> str:
+    part_name = str(constraint.get("part_name", "") or "").strip()
+    resource_jid = str(constraint.get("resource_jid", "") or "").strip()
+    forbidden_location = str(constraint.get("forbidden_location", "") or "").strip()
+    location = str(constraint.get("location", "") or "").strip()
+    resource_jids = [
+        str(item).strip()
+        for item in (constraint.get("resource_jids") or [])
+        if str(item).strip()
+    ]
+    after_event_kind = str(constraint.get("after_event_kind", "") or "").strip()
+    after_part_name = str(constraint.get("after_part_name", "") or "").strip()
+    constraint_type = str(constraint.get("constraint_type", "") or "").strip()
+    rule_id = str(constraint.get("rule_id", "") or "").strip()
+    until_conditions = [
+        _format_bridge_condition_hint(condition)
+        for condition in (constraint.get("until_conditions") or [])
+        if isinstance(condition, dict)
+    ]
+    until_text = ""
+    if until_conditions:
+        until_text = f" until {' and '.join(until_conditions[:2])}"
+    if part_name and forbidden_location:
+        return (
+            f"Safety constraint: part '{part_name}' must not be placed at "
+            f"'{forbidden_location}'{until_text}."
+        )
+    if location and resource_jids:
+        return (
+            f"Safety constraint: resources {', '.join(resource_jids)} "
+            f"must not occupy '{location}' at the same time."
+        )
+    before_conditions = [
+        _format_bridge_condition_hint(condition)
+        for condition in (constraint.get("before_conditions") or [])
+        if isinstance(condition, dict)
+    ]
+    if not before_conditions:
+        before_condition = constraint.get("before_condition")
+        if isinstance(before_condition, dict):
+            before_conditions = [_format_bridge_condition_hint(before_condition)]
+    if after_event_kind and before_conditions:
+        target = after_part_name or part_name or "the targeted entity"
+        return (
+            f"Safety constraint: before {after_event_kind} of {target}, "
+            + " and ".join(before_conditions[:2])
+            + " must hold."
+        )
+    details: list[str] = []
+    if part_name:
+        details.append(f"part='{part_name}'")
+    if resource_jid:
+        details.append(f"resource='{resource_jid}'")
+    if forbidden_location:
+        details.append(f"forbidden_location='{forbidden_location}'")
+    if location:
+        details.append(f"location='{location}'")
+    if resource_jids:
+        details.append(f"resources={resource_jids}")
+    if constraint_type:
+        details.append(f"constraint_type='{constraint_type}'")
+    if rule_id:
+        details.append(f"rule_id='{rule_id}'")
+    if not details:
+        reason = str(constraint.get("reason", "") or "").strip()
+        if reason:
+            details.append(reason)
+    if until_text:
+        details.append(until_text.strip())
+    return f"Safety constraint: {', '.join(details)}."
+
+
+def _generate_bridge_event_hints(
+    *,
+    bridge_resources: dict[str, Any] | None = None,
+    grounding_context: dict[str, Any] | None = None,
+    unmet_reentry_conditions: list[dict[str, Any]] | None = None,
+    validation_feedback: list[dict[str, Any]] | None = None,
+    bridge_safety_context: dict[str, Any] | None = None,
+) -> list[str]:
+    hints: list[str] = []
+    resources = {
+        str(resource_jid): dict(entry or {})
+        for resource_jid, entry in (bridge_resources or {}).items()
+        if isinstance(entry, dict)
+    }
+    unmet = [
+        condition
+        for condition in (unmet_reentry_conditions or [])
+        if isinstance(condition, dict)
+    ]
+
+    relevant_parts = {
+        str(condition.get("entity", "") or "").strip()
+        for condition in unmet
+        if str(condition.get("entity_kind", "") or "").strip().lower() == "part"
+        and str(condition.get("entity", "") or "").strip()
+    }
+    relevant_resources = {
+        str(condition.get("entity", "") or "").strip()
+        for condition in unmet
+        if str(condition.get("entity_kind", "") or "").strip().lower() == "resource"
+        and str(condition.get("entity", "") or "").strip()
+    }
+    bridge_goal_parts = {
+        str(condition.get("entity", "") or "").strip()
+        for condition in unmet
+        if str(condition.get("entity_kind", "") or "").strip().lower() == "part"
+        and str(condition.get("entity", "") or "").strip()
+        and (
+            str(condition.get("field", "") or "").strip() == "location"
+            or str(condition.get("expected", "") or "").strip().lower()
+            in {"assembled", "in_gripper"}
+        )
+    }
+    held_parts = {
+        str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
+        for entry in resources.values()
+        if str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
+    }
+
+    for resource_jid, entry in resources.items():
+        resource_core = _bridge_resource_core(entry)
+        current_state = str(
+            resource_core.get("current_state")
+            or dict(entry.get("bridge_snapshot") or {}).get("current_state")
+            or ""
+        ).strip()
+        if not current_state:
+            continue
+        if not _bridge_resource_has_operation(entry, {"pick", "place"}):
+            continue
+        expected_state = next(
+            (
+                str(condition.get("expected", "") or "").strip()
+                for condition in unmet
+                if str(condition.get("entity_kind", "") or "").strip().lower() == "resource"
+                and str(condition.get("entity", "") or "").strip() == resource_jid
+                and str(condition.get("field", "") or "").strip() == "current_state"
+                and str(condition.get("expected", "") or "").strip()
+            ),
+            "",
+        )
+        blocked_states = _bridge_blocked_states(entry)
+        if current_state in blocked_states or (
+            expected_state and current_state != expected_state
+        ):
+            unblocking_primitive = _bridge_unblocking_primitive(entry)
+            transition_target = expected_state or "idle"
+            primitive_suffix = (
+                f" (for example, {unblocking_primitive})" if unblocking_primitive else ""
+            )
+            hints.append(
+                f"Resource {resource_jid} is in state '{current_state}'. Bring it toward "
+                f"'{transition_target}' before proposing pick/place actions{primitive_suffix}."
+            )
+
+    for resource_jid, entry in resources.items():
+        held_part = str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
+        if not held_part:
+            continue
+        if not _bridge_resource_has_operation(entry, {"pick"}):
+            continue
+        other_goal_parts = sorted(part for part in bridge_goal_parts if part and part != held_part)
+        if other_goal_parts:
+            hints.append(
+                f"Resource {resource_jid} currently holds '{held_part}'. To pick a different "
+                f"part such as '{other_goal_parts[0]}', it must first release '{held_part}'."
+            )
+
+    # --- reachability verdicts ---
+    parts_ctx = dict((grounding_context or {}).get("parts") or {})
+    for part_name in sorted(relevant_parts & set(parts_ctx.keys())):
+        part_info = dict(parts_ctx.get(part_name) or {})
+        observed_pose = dict(part_info.get("observed_pose") or {})
+        if not observed_pose or not any(
+            observed_pose.get(a) is not None for a in ("x", "y", "z")
+        ):
+            continue
+        reachable_by: list[str] = []
+        unreachable_by: list[tuple[str, str]] = []
+        for resource_jid, entry in resources.items():
+            bounds = dict(
+                dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
+            )
+            if not bounds:
+                continue
+            inside, reason = _check_pose_in_bounds(observed_pose, bounds)
+            if inside:
+                reachable_by.append(resource_jid)
+            else:
+                unreachable_by.append((resource_jid, reason))
+        if unreachable_by:
+            reachable_text = ", ".join(reachable_by) if reachable_by else "no resource"
+            parts_list = [
+                f"NOT reachable by {jid} ({reason})" for jid, reason in unreachable_by
+            ]
+            hints.append(
+                f"Part '{part_name}' at observed pose: reachable by {reachable_text}; "
+                + "; ".join(parts_list)
+                + "."
+            )
+
+    emitted_safety_hints = 0
+    for constraint in (bridge_safety_context or {}).get("constraints") or []:
+        if not isinstance(constraint, dict):
+            continue
+        if not _relevant_bridge_safety_constraint(
+            constraint,
+            relevant_parts=relevant_parts,
+            relevant_resources=relevant_resources,
+            held_parts=held_parts,
+        ):
+            continue
+        hints.append(_summarize_bridge_safety_constraint(constraint))
+        emitted_safety_hints += 1
+        if emitted_safety_hints >= 2:
+            break
+
+    emitted_feedback_hints = 0
+    for feedback in reversed(list(validation_feedback or [])):
+        if not isinstance(feedback, dict):
+            continue
+        message = str(feedback.get("message", "") or "").strip()
+        if not message:
+            continue
+        lowered = message.lower()
+        if not any(
+            token in lowered
+            for token in ("infeasible", "workspace", "pose outside", "feasibility")
+        ):
+            continue
+        hints.append(
+            f"Prior proposal rejected: '{message}'. Do not re-propose the same resource "
+            "for that operation unless the state or target pose has changed."
+        )
+        emitted_feedback_hints += 1
+        if emitted_feedback_hints >= 2:
+            break
+
+    deduped_hints: list[str] = []
+    seen_hints: set[str] = set()
+    for hint in hints:
+        normalized_hint = " ".join(str(hint or "").split())
+        if not normalized_hint or normalized_hint in seen_hints:
+            continue
+        seen_hints.add(normalized_hint)
+        deduped_hints.append(hint)
+
+    if not deduped_hints:
+        deduped_hints.append(
+            "Check resource state compatibility, gripper occupancy, active safety "
+            "constraints, and prior feasibility feedback before proposing events."
+        )
+    return deduped_hints
+
+
+def _bridge_events_domain_context(
+    *,
+    bridge_resources: dict[str, Any] | None = None,
+    grounding_context: dict[str, Any] | None = None,
+    unmet_reentry_conditions: list[dict[str, Any]] | None = None,
+    validation_feedback: list[dict[str, Any]] | None = None,
+    bridge_safety_context: dict[str, Any] | None = None,
+) -> str:
+    """Domain context injected only in the bridge_events phase."""
+    hints = _generate_bridge_event_hints(
+        bridge_resources=bridge_resources,
+        grounding_context=grounding_context,
+        unmet_reentry_conditions=unmet_reentry_conditions,
+        validation_feedback=validation_feedback,
+        bridge_safety_context=bridge_safety_context,
+    )
+    dynamic_block = "Constraints detected in current state:\n" + "\n".join(
+        f"- {hint}" for hint in hints
+    )
+    # Determine which resource types participate in this bridge.
+    participating_types: set[str] = set()
+    for _jid, entry in (bridge_resources or {}).items():
+        rtype = str(
+            (entry if isinstance(entry, dict) else {}).get("resource_type", "")
+        ).strip().lower()
+        if rtype:
+            participating_types.add(rtype)
+
+    part_states_section = dedent(
+        """\
+        PART STATES:
+        - Parts track states: unknown, ready, in_gripper, assembled, misplaced.
+        - Picking a part transitions it to in_gripper.
+        - Placing a part at its goal destination transitions it to assembled.
+        - Releasing a part at a non-goal location transitions it to ready.
+        - Use expected_part_delta on each event to declare intended part state changes.
+        """
+    ).strip() if (not participating_types or "robot" in participating_types) else dedent(
+        """\
+        PART STATES:
+        - Parts track states: unknown, ready, assembled, misplaced.
+        - Use expected_part_delta on each event to declare intended part state changes.
+        """
+    ).strip()
+
+    return "\n\n".join(
+        section
+        for section in (
+            dedent(
+                """\
+                REASONING CONSTRAINTS FOR BRIDGE EVENT PLANNING:
+
+                Work backwards from Gamma(x_d, M_bridge). For each unmet condition, determine
+                which resource can achieve it given the current whole-system state.
+                """
+            ).strip(),
+            dynamic_block,
+            dedent(
+                """\
+                Ordering principle:
+                - Events must respect causal dependencies. If event B requires a resource
+                  state that event A produces, A must precede B.
+                - Derive the ordering from the from/to deltas, not from a fixed template.
+                """
+            ).strip(),
+            part_states_section,
+        )
+        if section
+    )
+
+
+def _bridge_catalog_names(entries: list[dict[str, Any]] | None) -> set[str]:
+    names: set[str] = set()
+    for entry in (entries or []):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _catalog_supports_manipulator_pick_place(catalog_names: set[str]) -> bool:
+    required = {
+        "detect_parts",
+        "get_current_pose",
+        "compute_pick_targets",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_pose",
+        "close_gripper",
+        "open_gripper",
+        "attach_part",
+        "detach_part",
+    }
+    return required <= set(catalog_names or set())
+
+
+def _bridge_prompt_profiles(
+    *,
+    bridge_resources: dict[str, Any] | None = None,
+    primitive_catalog: list[dict[str, Any]] | None = None,
+) -> list[ResourceProfile]:
+    profiles: list[ResourceProfile] = []
+    seen_types: set[str] = set()
+
+    def _add_profile(resource_type: Any) -> None:
+        profile = get_resource_profile(str(resource_type or "").strip().lower() or "resource")
+        profile_type = str(profile.resource_type or "resource").strip().lower() or "resource"
+        if profile_type in seen_types:
+            return
+        seen_types.add(profile_type)
+        profiles.append(profile)
+
+    for raw_entry in (bridge_resources or {}).values():
+        if not isinstance(raw_entry, dict):
+            continue
+        adapter = dict(raw_entry.get("bridge_adapter") or {})
+        catalog = list(raw_entry.get("primitive_catalog") or [])
+        if not catalog and not adapter.get("supports_executable_bridge"):
+            continue
+        resource_type = str(
+            raw_entry.get("resource_type")
+            or dict(raw_entry.get("bridge_snapshot") or {}).get("resource_type")
+            or dict(dict(raw_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get("resource_type")
+            or "resource"
+        ).strip().lower() or "resource"
+        _add_profile(resource_type)
+
+    if not bridge_resources:
+        for entry in (primitive_catalog or []):
+            if not isinstance(entry, dict):
+                continue
+            _add_profile(entry.get("resource_type"))
+
+    return profiles
+
+
+def _bridge_final_plan_domain_context(
+    primitive_card: str,
+    *,
+    profiles: list[ResourceProfile] | None = None,
+) -> str:
+    """Domain context injected only in the final_plan phase."""
+    sections = [
+        dedent(
+            """\
+            GENERIC FINAL-PLAN COMPOSITION RULES:
+            - Realize APPROVED BRIDGE EVENTS in the same order unless the planner draft is
+              explicitly wrong about order.
+            - Use only primitives that appear in the PRIMITIVE REFERENCE CARD for the
+              chosen resource.
+            - Chain primitives so that each step's effects satisfy the next step's
+              preconditions.
+            - Use task_metadata to express resource-state transitions, context
+              requirements, and part transitions that the macro is intended to close.
+            - Reuse validated values from GROUNDING CONTEXT via context_ref instead of
+              inventing new coordinates, destinations, or identifiers.
+            - When clearing or relocating a resource, move it only to a validated safe
+              destination that is already present in context or primitive semantics.
+
+            CONTEXT_REF SYNTAX:
+            - Grounding context paths: {"context_ref": "/parts/<PART>/observed_pose/x"}, {"context_ref": "/parts/<PART>/target/model_name"}, {"context_ref": "/resources/<JID>/resource_core/current_location"}.
+            - Step output paths: {"context_ref": "/step_outputs/<alias>/pose/x"}, {"context_ref": "/step_outputs/<alias>/target_pose/x"}.
+            """
+        ).strip(),
+    ]
+    for profile in (profiles or []):
+        addendum = str(getattr(profile, "prompt_addendum", "") or "").strip()
+        if addendum:
+            sections.append(addendum)
+    if primitive_card:
+        sections.append(f"PRIMITIVE REFERENCE CARD:\n{primitive_card}")
+    return "\n\n".join(sections)
+
+
+def _bridge_final_plan_generic_shape_example() -> str:
+    return dedent(
+        """\
+        GENERIC FINAL-PLAN SHAPE EXAMPLE:
+        - Use this only as a schema guide. Replace placeholder primitive names with real
+          primitives from the chosen resource's PRIMITIVE REFERENCE CARD.
+        - Keep bridge_event_summary and macro order aligned with APPROVED BRIDGE EVENTS.
+
+        {
+          "type": "final_plan",
+          "plan": {
+            "primary_obligation": {
+              "rule_id": "<RULE_ID>",
+              "resource_jid": "<RESOURCE_JID>"
+            },
+            "bridge_event_summary": [
+              {
+                "event_name": "<APPROVED_EVENT_NAME>",
+                "resource_jid": "<RESOURCE_JID>",
+                "part_name": "<optional PART>",
+                "closes_conditions": [
+                  {
+                    "entity_kind": "<resource|part>",
+                    "entity": "<ENTITY_ID>",
+                    "field": "<FIELD>",
+                    "expected": "<VALUE>"
+                  }
+                ],
+                "rationale": "<why this event is needed>"
+              }
+            ],
+            "macro_tasks": [
+              {
+                "resource_jid": "<RESOURCE_JID>",
+                "macro_name": "realize_<approved_event>",
+                "description": "Realize one approved bridge event.",
+                "expected_start_state": "<STATE_BEFORE>",
+                "part_name": "<optional PART>",
+                "task_params": {},
+                "task_metadata": {
+                  "in_state": "<STATE_BEFORE>",
+                  "out_state": "<STATE_AFTER>",
+                  "required_context_keys": [],
+                  "context_mapping": {},
+                  "part_transition": null
+                },
+                "primitive_steps": [
+                  {
+                    "primitive": "<primitive_from_reference_card>",
+                    "params": {}
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+    ).strip()
+
+
+def _bridge_final_plan_manipulator_example() -> str:
+    return dedent(
+        """\
+        MANIPULATOR PICK/PLACE REPAIR EXAMPLE:
+        - Use this only when the chosen resource exposes manipulator pick/place primitives.
+        - Adapt resource JIDs, part names, geometry, and states to the current bridge.
+        - Keep macro order aligned with APPROVED BRIDGE EVENTS.
+
+        {
+          "type": "final_plan",
+          "plan": {
+            "macro_tasks": [
+              {
+                "resource_jid": "<RESOURCE_JID>",
+                "macro_name": "pick_<part>",
+                "description": "Acquire <PART> from its observed location.",
+                "expected_start_state": "idle",
+                "part_name": "<PART>",
+                "task_params": {},
+                "task_metadata": {
+                  "in_state": "idle",
+                  "out_state": "picked",
+                  "required_context_keys": [],
+                  "context_mapping": {},
+                  "part_transition": {
+                    "completed": {
+                      "state": "in_gripper",
+                      "location_template": "{resource_jid}_gripper"
+                    }
+                  }
+                },
+                "primitive_steps": [
+                  {"primitive": "detect_parts", "params": {"part_name": "<PART>"}, "store_as": "detected_part"},
+                  {"primitive": "get_current_pose", "params": {}, "store_as": "pre_pick_pose"},
+                  {"primitive": "compute_pick_targets", "params": {"part_name": "<PART>", "product_geometry": {"board_center": {"x": 0.0, "y": 0.0, "z": 1.0}}}, "store_as": "part_pick_targets"},
+                  {"primitive": "move_cartesian", "params": {"x": {"context_ref": "/step_outputs/detected_part/pose/x"}, "y": {"context_ref": "/step_outputs/detected_part/pose/y"}, "z": {"context_ref": "/step_outputs/part_pick_targets/travel_z"}, "speed": 1.2}},
+                  {"primitive": "move_pose", "params": {"x": {"context_ref": "/step_outputs/detected_part/pose/x"}, "y": {"context_ref": "/step_outputs/detected_part/pose/y"}, "z": {"context_ref": "/step_outputs/part_pick_targets/pick_z"}, "qx": {"context_ref": "/step_outputs/pre_pick_pose/pose/qx"}, "qy": {"context_ref": "/step_outputs/pre_pick_pose/pose/qy"}, "qz": {"context_ref": "/step_outputs/pre_pick_pose/pose/qz"}, "qw": {"context_ref": "/step_outputs/pre_pick_pose/pose/qw"}, "speed": 0.8}},
+                  {"primitive": "close_gripper", "params": {}},
+                  {"primitive": "attach_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}}},
+                  {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8}}
+                ]
+              },
+              {
+                "resource_jid": "<RESOURCE_JID>",
+                "macro_name": "place_<part>",
+                "description": "Place <PART> at its destination.",
+                "expected_start_state": "picked",
+                "part_name": "<PART>",
+                "task_params": {"destination_location": "<DESTINATION>"},
+                "task_metadata": {
+                  "in_state": "picked",
+                  "out_state": "idle",
+                  "required_context_keys": ["destination_location"],
+                  "context_mapping": {"location_param": "destination_location"},
+                  "part_transition": {
+                    "completed": {
+                      "state": "assembled",
+                      "location_param": "destination_location"
+                    }
+                  }
+                },
+                "primitive_steps": [
+                  {"primitive": "get_current_pose", "params": {}, "store_as": "pre_place_pose"},
+                  {"primitive": "compute_place_targets", "params": {"part_name": "<PART>", "product_geometry": {"board_center": {"x": 0.0, "y": 0.0, "z": 1.0}}}, "store_as": "part_place_targets"},
+                  {"primitive": "move_cartesian", "params": {"x": {"context_ref": "/step_outputs/part_place_targets/slot_x"}, "y": {"context_ref": "/step_outputs/part_place_targets/slot_y"}, "z": {"context_ref": "/step_outputs/pre_place_pose/pose/z"}, "speed": 1.2}},
+                  {"primitive": "move_pose", "params": {"x": {"context_ref": "/step_outputs/part_place_targets/slot_x"}, "y": {"context_ref": "/step_outputs/part_place_targets/slot_y"}, "z": {"context_ref": "/step_outputs/part_place_targets/place_z"}, "qx": {"context_ref": "/step_outputs/pre_place_pose/pose/qx"}, "qy": {"context_ref": "/step_outputs/pre_place_pose/pose/qy"}, "qz": {"context_ref": "/step_outputs/pre_place_pose/pose/qz"}, "qw": {"context_ref": "/step_outputs/pre_place_pose/pose/qw"}, "speed": 0.8}},
+                  {"primitive": "open_gripper", "params": {}},
+                  {"primitive": "detach_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}, "assume_released_if_open": true}},
+                  {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0}}
+                ]
+              }
+            ]
+          }
+        }
+
+        REPAIR RULES:
+        - Every macro_task MUST have a non-empty primitive_steps array.
+        - compute_pick_targets and compute_place_targets MUST include "part_name" in params.
+        - store_as aliases MUST be lowercase_snake_case and refs must use the exact same alias.
+        - step_outputs are scoped to the current macro_task; do not reference aliases from another macro.
+        - Keep macro count and macro order aligned with APPROVED BRIDGE EVENTS unless the planner draft is explicitly wrong about order.
+        """
+    ).strip()
+
+
+def _bridge_final_plan_printer_job_control_example() -> str:
+    return dedent(
+        """\
+        PRINTER JOB CONTROL EXAMPLE:
+        A printer bridge event that cancels the active job:
+        {
+          "type": "final_plan",
+          "plan": {
+            "bridge_events": [
+              {
+                "event_name": "cancel_active_print",
+                "resource_jid": "printer@localhost",
+                "expected_resource_delta": {"from": "printing", "to": "idle"},
+                "closes_conditions": [],
+                "rationale": "Cancel the print job to free the printer for recovery."
+              }
+            ],
+            "macro_tasks": [
+              {
+                "resource_jid": "printer@localhost",
+                "macro_name": "cancel_active_print",
+                "description": "Cancel the active print job.",
+                "expected_start_state": "printing",
+                "part_name": "",
+                "task_params": {},
+                "task_metadata": {
+                  "in_state": "printing",
+                  "out_state": "idle",
+                  "required_context_keys": [],
+                  "context_mapping": {},
+                  "part_transition": null
+                },
+                "primitive_steps": [
+                  {"primitive": "cancel_job", "params": {}}
+                ]
+              }
+            ]
+          }
+        }
+        """
+    ).strip()
+
+
+def _bridge_final_plan_repair_few_shot(
+    *,
+    profiles: list[ResourceProfile] | None = None,
+) -> str:
+    sections = [_bridge_final_plan_generic_shape_example()]
+    for profile in (profiles or []):
+        repair_example = str(getattr(profile, "repair_example", "") or "").strip()
+        if repair_example:
+            sections.append(repair_example)
+    return "\n\n".join(section for section in sections if section)
+
+
+def build_bridge_turn_prompt(
+    *,
+    session_id: str,
+    turn_index: int,
+    max_turns: int,
+    phase: str,
+    focused_resource_jid: str,
+    stuck_state: dict[str, Any],
+    goal_state: str,
+    pending_parts: list[str],
+    obligation_targets: list[dict[str, Any]] | None,
+    bridge_resources: dict[str, Any] | None,
+    grounding_context: dict[str, Any] | None,
+    observation_history: list[dict[str, Any]] | None,
+    operator_feedback_history: list[str] | None,
+    validation_feedback: list[dict[str, Any]] | None,
+    marked_reentry_conditions: list[dict[str, Any]] | None,
+    unmet_reentry_conditions: list[dict[str, Any]] | None,
+    pending_suffix_summary: list[dict[str, Any]] | None,
+    last_plan_failure: dict[str, Any] | None,
+    allowed_observation_primitives: list[str] | None,
+    approved_bridge_events: list[dict[str, Any]] | None = None,
+    bridge_safety_context: dict[str, Any] | None = None,
+    draft_final_plan: dict[str, Any] | None = None,
+    draft_final_plan_status: dict[str, Any] | None = None,
+) -> str:
+    """Build one compact ReAct turn prompt for the bridge session."""
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        build_primitive_reference_card,
+    )
+
+    # --- strip primitive_catalog from bridge_resources for the prompt copy ---
+    prompt_resources: dict[str, Any] = {}
+    all_catalog_entries: list[dict[str, Any]] = []
+    for resource_jid, raw_entry in (bridge_resources or {}).items():
+        if not isinstance(raw_entry, dict):
+            prompt_resources[resource_jid] = raw_entry
+            continue
+        slimmed = {
+            k: v for k, v in raw_entry.items() if k != "primitive_catalog"
+        }
+        prompt_resources[resource_jid] = slimmed
+        all_catalog_entries.extend(raw_entry.get("primitive_catalog") or [])
+
+    # deduplicate catalog by primitive name for the reference card
+    seen_names: set[str] = set()
+    deduped_catalog: list[dict[str, Any]] = []
+    for entry in all_catalog_entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        if name and name not in seen_names:
+            seen_names.add(name)
+            deduped_catalog.append(entry)
+
+    primitive_card = build_primitive_reference_card(deduped_catalog)
+    prompt_profiles = _bridge_prompt_profiles(
+        bridge_resources=bridge_resources,
+        primitive_catalog=deduped_catalog,
+    )
+
+    obligations_json = json.dumps(obligation_targets or [], indent=2)
+    resources_json = json.dumps(prompt_resources, indent=2)
+    grounding_json = json.dumps(grounding_context or {}, indent=2)
+    observations_json = json.dumps(observation_history or [], indent=2)
+    feedback_json = json.dumps(operator_feedback_history or [], indent=2)
+    validation_json = json.dumps(validation_feedback or [], indent=2)
+    marked_reentry_json = json.dumps(marked_reentry_conditions or [], indent=2)
+    unmet_json = json.dumps(unmet_reentry_conditions or [], indent=2)
+    suffix_json = json.dumps(pending_suffix_summary or [], indent=2)
+    last_failure_json = json.dumps(last_plan_failure or {}, indent=2)
+    allowed_json = json.dumps(list(allowed_observation_primitives or []), indent=2)
+    approved_events_json = json.dumps(approved_bridge_events or [], indent=2)
+    bridge_safety_json = json.dumps(bridge_safety_context or {}, indent=2)
+    draft_final_plan_json = json.dumps(draft_final_plan or {}, indent=2)
+    draft_status_json = json.dumps(draft_final_plan_status or {}, indent=2)
+    phase_token = str(phase or "").strip().lower() or "observe_required"
+    repair_mode = (
+        phase_token == "final_plan"
+        and isinstance(draft_final_plan_status, dict)
+        and str(draft_final_plan_status.get("compile_path", "")).strip() == "llm_repair"
+    )
+    repair_draft_section = (
+        f"PLANNER-GENERATED FINAL PLAN DRAFT:\n{draft_final_plan_json}"
+        if repair_mode
+        else ""
+    )
+    repair_status_section = (
+        f"DRAFT FINAL PLAN STATUS:\n{draft_status_json}"
+        if repair_mode
+        else ""
+    )
+    repair_few_shot_section = _bridge_final_plan_repair_few_shot() if repair_mode else ""
+    if repair_mode:
+        repair_few_shot_section = _bridge_final_plan_repair_few_shot(
+            profiles=prompt_profiles
+        )
+
+    # --- phase-specific domain context ---
+    if phase_token == "observe_required":
+        domain_context = _bridge_observe_domain_context()
+    elif phase_token == "bridge_events":
+        domain_context = _bridge_events_domain_context(
+            bridge_resources=bridge_resources,
+            grounding_context=grounding_context,
+            unmet_reentry_conditions=unmet_reentry_conditions,
+            validation_feedback=validation_feedback,
+            bridge_safety_context=bridge_safety_context,
+        )
+    else:
+        domain_context = _bridge_final_plan_domain_context(
+            primitive_card,
+            profiles=prompt_profiles,
+        )
+
+    if phase_token == "observe_required":
+        phase_rules = dedent(
+            """\
+            - Current planner phase: observe_required.
+            - You must return ONE observe request.
+            - Do not return bridge_events or final_plan in this phase.
+            """
+        ).strip()
+        response_contract = dedent(
+            """\
+            Observation request:
+            {
+              "type": "observe",
+              "resource_jid": "<jid from AVAILABLE BRIDGE RESOURCES>",
+              "primitive": "<one primitive from ALLOWED OBSERVATION PRIMITIVES>",
+              "params": {},
+              "store_as": "<optional alias for storing the normalized result>",
+              "reason_summary": "<optional short rationale>"
+            }
+            """
+        ).strip()
+    elif phase_token == "bridge_events":
+        phase_rules = dedent(
+            """\
+            - Current planner phase: bridge_events.
+            - Fresh observation has been gathered for bridge-critical missing parts.
+            - You must return ONE bridge_events response that closes all current Gamma(x_d, M_bridge) conditions.
+            - Each event MUST include explicit operation_family.
+            - Each event MUST include expected_resource_delta with from/to states.
+            - Include expected_part_delta when the event changes a part's state.
+            - Do not return observe or final_plan in this phase.
+            """
+        ).strip()
+        response_contract = dedent(
+            """\
+            Bridge event proposal:
+            {
+              "type": "bridge_events",
+              "events": [
+                {
+                  "event_name": "<DES-style bridge controllable event name>",
+                  "resource_jid": "<resource that realizes this bridge event>",
+                  "operation_family": "<clear|home|pick|stage|place|assemble|pick_place or other supported family>",
+                  "part_name": "<optional canonical part name>",
+                  "expected_resource_delta": {
+                    "from": "<resource state before this event>",
+                    "to": "<resource state after this event>"
+                  },
+                  "expected_part_delta": {
+                    "part_name": "<canonical part name>",
+                    "from": "<part state before>",
+                    "to": "<part state after>",
+                    "location_to": "<optional destination location>"
+                  },
+                  "closes_conditions": [
+                    {
+                      "entity_kind": "<resource|part>",
+                      "entity": "<entity id>",
+                      "field": "<field name>",
+                      "expected": "<expected value>"
+                    }
+                  ],
+                  "rationale": "<optional short rationale>"
+                }
+              ],
+              "reason_summary": "<optional short rationale>"
+            }
+
+            Notes:
+            - operation_family is required on every event; do not rely on name inference.
+            - expected_resource_delta is required on every event.
+            - expected_part_delta is null for events that do not touch a part.
+            - closes_conditions remains the authoritative bridge-event meaning.
+            """
+        ).strip()
+    else:
+        phase_rules = dedent(
+            """\
+            - Current planner phase: final_plan.
+            - APPROVED BRIDGE EVENTS are authoritative and must be realized in order.
+            - You must return ONE final_plan.
+            - Do not return observe or bridge_events in this phase.
+            """
+        ).strip()
+        if repair_mode:
+            phase_rules += "\n- The planner already produced a draft final_plan. Repair the draft instead of rewriting the bridge from scratch."
+        response_contract = dedent(
+            f"""\
+            Final plan:
+            {{
+              "type": "final_plan",
+              "plan": {{
+                "primary_obligation": {{
+                  "rule_id": "<one rule_id from ACTIVE OBLIGATION TARGETS>",
+                  "resource_jid": "<matching resource_jid>"
+                }},
+                "bridge_event_summary": [
+                  {{
+                    "event_name": "<DES-style bridge controllable event name>",
+                    "resource_jid": "<resource that realizes this bridge event>",
+                    "part_name": "<optional canonical part name>",
+                    "closes_conditions": [
+                      {{
+                        "entity_kind": "<resource|part>",
+                        "entity": "<entity id>",
+                        "field": "<field name>",
+                        "expected": "<expected value>"
+                      }}
+                    ],
+                    "rationale": "<optional short rationale>"
+                  }}
+                ],
+                "macro_tasks": [
+                  {{
+                    "resource_jid": "{focused_resource_jid}",
+                    "macro_name": "<descriptive recovery macro name>",
+                    "description": "<short description>",
+                    "rationale": "<why this helps restore continuation>",
+                    "expected_start_state": "<projected current state for this resource>",
+                    "part_name": "<optional canonical part name>",
+                    "task_params": {{}},
+                    "task_metadata": {{
+                      "in_state": "<resource state before macro>",
+                      "out_state": "<resource state after macro>",
+                      "required_context_keys": [],
+                      "context_mapping": {{}},
+                      "part_transition": null
+                    }},
+                    "primitive_steps": [
+                      {{
+                        "primitive": "<controller primitive name>",
+                        "params": {{}},
+                        "store_as": "<optional alias; observation primitives only>"
+                      }}
+                    ]
+                  }}
+                ]
+              }},
+              "reason_summary": "<optional short rationale>"
+            }}
+            """
+        ).strip()
+
+    return dedent(
+        f"""\
+        You are the bridge recovery planner for a bounded multi-turn ReAct session.
+
+        Session rules:
+        - DES could not find a modeled continuation.
+        - Do not output explanations outside JSON.
+        - Do not invent new primitives, resources, context keys, or coordinates.
+        - Use context_ref objects into GROUNDING CONTEXT when values are already available there.
+        - Prefer string context_ref paths such as "/step_outputs/<alias>/approach_pose/x" or "parts.<PART>.observed_pose.x".
+        - Mid-loop actuation is not allowed in this phase. Only the listed observation/generation primitives may be requested.
+        - Treat the CURRENT DISRUPTED SEARCH STATE as x_d.
+        - Treat MARKED RE-ENTRY CONDITIONS as M_bridge.
+        - Treat UNMET MARKED RE-ENTRY CONDITIONS as Gamma(x_d, M_bridge).
+        - A valid final plan must close Gamma(x_d, M_bridge), not only satisfy the active safety obligation.
+        - For the focused disrupted resource, its pending branch will be replaced by the bridge; touched parts on that branch must reach the goal_state by the end of the bridge.
+        - For other resources, their listed pending suffixes will resume after the bridge; restore the entry requirements of each resumable suffix.
+        - If Gamma(x_d, M_bridge) cannot be closed confidently with current information, request an observation event Sigma_o before returning final_plan.
+        - In final_plan primitive_steps, use "store_as" ONLY on these primitives: detect_parts, get_current_pose, compute_pick_targets, compute_place_targets.
+        - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, open_gripper, close_gripper, attach_part, detach_part, rotate_wrist, pause_job, resume_job, or cancel_job.
+        {phase_rules}
+
+        {domain_context}
+
+        SESSION:
+        - session_id: {session_id}
+        - turn: {turn_index}/{max_turns}
+        - phase: {phase_token}
+        - focused_resource_jid: {focused_resource_jid}
+        - goal_state: {goal_state}
+        - pending_parts: {json.dumps(pending_parts)}
+
+        CURRENT DISRUPTED SEARCH STATE:
+        {json.dumps(stuck_state, indent=2)}
+
+        ACTIVE OBLIGATION TARGETS:
+        {obligations_json}
+
+        AVAILABLE BRIDGE RESOURCES:
+        {resources_json}
+
+        GROUNDING CONTEXT:
+        {grounding_json}
+
+        PRIOR OBSERVATIONS:
+        {observations_json}
+
+        OPERATOR GUIDANCE HISTORY:
+        {feedback_json}
+
+        VALIDATION FEEDBACK FROM PRIOR FINAL PLAN ATTEMPTS:
+        {validation_json}
+
+        PENDING SUFFIX SUMMARY:
+        {suffix_json}
+
+        MARKED RE-ENTRY CONDITIONS (M_bridge):
+        {marked_reentry_json}
+
+        UNMET MARKED RE-ENTRY CONDITIONS (Gamma(x_d, M_bridge)):
+        {unmet_json}
+
+        LAST FINAL-PLAN FAILURE CONTEXT:
+        {last_failure_json}
+
+        APPROVED BRIDGE EVENTS:
+        {approved_events_json}
+
+        BRIDGE SAFETY CONTEXT:
+        {bridge_safety_json}
+
+        ALLOWED OBSERVATION PRIMITIVES:
+        {allowed_json}
+
+        {repair_draft_section}
+
+        {repair_status_section}
+
+        {repair_few_shot_section}
+
+        Return exactly one JSON object in the allowed shape for the current phase.
+
+        {response_contract}
+
+        Return ONLY the JSON object.
+        """
     )

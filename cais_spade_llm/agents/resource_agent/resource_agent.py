@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from spade.behaviour import CyclicBehaviour  # Behaviour base used for our inbox loop.
@@ -69,6 +70,10 @@ class ResourceAgent(LlmAgent):
 
         self._safety_decisions: dict[str, str] = {}
 
+        # Register bridge recovery executor for all resource types.
+        # RobotAgent overrides the method but no longer needs to re-register.
+        self.executables["execute_recovery_macro"] = self.execute_recovery_macro
+
     # ------------------------------------------------------------------ #
     # SPADE lifecycle
     # ------------------------------------------------------------------ #
@@ -91,6 +96,313 @@ class ResourceAgent(LlmAgent):
         Subclasses can override to provide richer state.
         """
         return {}
+
+    def bridge_resource_type(self) -> str:
+        snapshot = self._snapshot_state() if hasattr(self, "_snapshot_state") else {}
+        if isinstance(snapshot, dict):
+            token = str(snapshot.get("resource_type", "") or "").strip().lower()
+            if token:
+                return token
+        token = str(self.static_capabilities.get("resource_type", "") or "").strip().lower()
+        if token:
+            return token
+        return "resource"
+
+    def get_bridge_snapshot(self) -> Dict[str, Any]:
+        """Return the current descriptor-driven bridge snapshot for this resource."""
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+            get_resource_bridge_snapshot,
+        )
+
+        return get_resource_bridge_snapshot(self)
+
+    def bridge_feasibility_oracle(
+        self,
+        *,
+        operation_kind: str = "",
+        part_name: str | None = None,
+        part_context: Dict[str, Any] | None = None,
+        bridge_snapshot: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Default permissive bridge feasibility oracle.
+
+        Subclasses (RobotAgent, PrintingAgent) can override with
+        resource-specific checks.
+        """
+        return {"allowed": True, "reason": "default permissive oracle"}
+
+    async def execute_recovery_macro(
+        self,
+        *,
+        macro_name: str = "",
+        primitive_steps: list | None = None,
+        expected_start_state: str = "",
+        expected_snapshot: Dict[str, Any] | None = None,
+        product_jid: str | None = None,
+        task_id: str | None = None,
+        in_state: str | None = None,
+        out_state: str | None = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Generic bridge recovery macro executor.
+
+        Validates the starting snapshot, semantically validates the primitive
+        sequence, executes each primitive on the resolved owner, and applies
+        projected bridge state back onto the resource agent.
+        """
+        from cais_spade_llm.resources.resource_profile import (
+            get_resource_profile_for_agent,
+        )
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+            apply_effects_to_snapshot,
+            build_primitive_catalog,
+            extract_step_output,
+            get_resource_bridge_snapshot,
+            resolve_param_refs,
+            snapshot_matches_expected,
+            sync_agent_from_bridge_snapshot,
+            validate_and_project_steps,
+        )
+
+        steps = list(primitive_steps or [])
+        runtime_snapshot = get_resource_bridge_snapshot(self)
+        actual_state = str(runtime_snapshot.get("current_state") or getattr(self, "_current_state", "") or "").strip()
+
+        if expected_start_state and actual_state != expected_start_state:
+            msg = (
+                f"Recovery macro '{macro_name}' expected start state "
+                f"'{expected_start_state}' but resource is in '{actual_state}'"
+            )
+            return {
+                "status": "failed",
+                "content": msg,
+                "observations": {
+                    "macro_name": macro_name,
+                    "expected_start_state": expected_start_state,
+                    "actual_state": actual_state,
+                    "step_index": -1,
+                },
+            }
+
+        if expected_snapshot:
+            matches, mismatch_message = snapshot_matches_expected(runtime_snapshot, expected_snapshot)
+            if not matches:
+                msg = (
+                    f"Recovery macro '{macro_name}' expected snapshot mismatch: "
+                    f"{mismatch_message}"
+                )
+                return {
+                    "status": "failed",
+                    "content": msg,
+                    "observations": {
+                        "macro_name": macro_name,
+                        "expected_snapshot": expected_snapshot,
+                        "actual_snapshot": runtime_snapshot,
+                        "step_index": -1,
+                    },
+                }
+
+        if not steps:
+            return {
+                "status": "failed",
+                "content": f"Recovery macro '{macro_name}' has no primitive steps",
+            }
+
+        primitive_catalog = build_primitive_catalog(self)
+        primitive_meta_by_name = {
+            str(entry.get("name", "")).strip(): entry
+            for entry in primitive_catalog
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+        }
+        grounding_context = deepcopy(dict(kwargs or {}))
+        semantic_ok, _projected_runtime_snapshot, semantic_error = validate_and_project_steps(
+            steps,
+            primitive_catalog,
+            runtime_snapshot,
+            grounding_context=grounding_context,
+        )
+        if not semantic_ok:
+            msg = (
+                f"Recovery macro '{macro_name}' failed runtime semantic validation: "
+                f"{semantic_error}"
+            )
+            return {
+                "status": "failed",
+                "content": msg,
+                "observations": {
+                    "macro_name": macro_name,
+                    "expected_snapshot": expected_snapshot,
+                    "actual_snapshot": runtime_snapshot,
+                    "semantic_error": semantic_error,
+                    "step_index": -1,
+                },
+            }
+
+        profile = get_resource_profile_for_agent(self)
+        owner = self
+        if profile.primitive_owner_resolver is not None:
+            owner = profile.primitive_owner_resolver(self) or self
+
+        results: list[Dict[str, Any]] = []
+        step_outputs: dict[str, Any] = {}
+        resource_type = str(
+            dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
+            or runtime_snapshot.get("resource_type")
+            or "resource"
+        ).strip().lower() or "resource"
+        for step_idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            primitive = str(step.get("primitive", "")).strip()
+            raw_params = dict(step.get("params") or {})
+            store_as = str(step.get("store_as", "") or "").strip()
+
+            fn = getattr(owner, primitive, None) or getattr(self, primitive, None)
+            if not callable(fn):
+                msg = (
+                    f"Unknown primitive '{primitive}' at step {step_idx} "
+                    f"in macro '{macro_name}'"
+                )
+                return {
+                    "status": "failed",
+                    "content": msg,
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "completed_steps": len(results),
+                    },
+                }
+
+            try:
+                params = resolve_param_refs(
+                    raw_params,
+                    grounding_context,
+                    step_outputs=step_outputs,
+                )
+            except Exception as exc:
+                msg = (
+                    f"Macro '{macro_name}' could not resolve params at step {step_idx} "
+                    f"({primitive}): {exc}"
+                )
+                return {
+                    "status": "failed",
+                    "content": msg,
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "raw_params": raw_params,
+                        "step_outputs": deepcopy(step_outputs),
+                    },
+                }
+
+            try:
+                maybe_result = fn(**params)
+                step_result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+            except Exception as exc:
+                return {
+                    "status": "failed",
+                    "content": (
+                        f"Macro '{macro_name}' failed at step {step_idx} "
+                        f"({primitive}): {type(exc).__name__}: {exc}"
+                    ),
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "completed_steps": len(results),
+                        "total_steps": len(steps),
+                    },
+                }
+
+            if isinstance(step_result, dict):
+                normalized_result = dict(step_result)
+                normalized_result.setdefault("success", True)
+            elif isinstance(step_result, bool):
+                normalized_result = {
+                    "success": step_result,
+                    "message": f"{primitive} {'ok' if step_result else 'failed'}",
+                }
+            elif isinstance(step_result, list):
+                normalized_result = {
+                    "success": True,
+                    "message": f"{primitive} returned {len(step_result)} items",
+                    "data": step_result,
+                }
+            else:
+                normalized_result = {
+                    "success": True,
+                    "message": f"{primitive} completed",
+                    "data": step_result,
+                }
+
+            results.append({"primitive": primitive, "result": normalized_result})
+            if not normalized_result.get("success", False):
+                return {
+                    "status": "failed",
+                    "content": (
+                        f"Macro '{macro_name}' failed at step {step_idx} "
+                        f"({primitive}): {normalized_result.get('message') or 'unknown failure'}"
+                    ),
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "primitive_result": normalized_result,
+                        "completed_steps": len(results) - 1,
+                        "total_steps": len(steps),
+                    },
+                }
+
+            primitive_meta = primitive_meta_by_name.get(primitive)
+            if primitive_meta is not None:
+                runtime_snapshot = apply_effects_to_snapshot(
+                    {**dict(step), "params": params},
+                    primitive_meta,
+                    runtime_snapshot,
+                )
+                sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+
+            if store_as:
+                step_output, output_error = extract_step_output(
+                    primitive=primitive,
+                    params=params,
+                    step_result=normalized_result,
+                    resource_type=resource_type,
+                )
+                if output_error:
+                    return {
+                        "status": "failed",
+                        "content": (
+                            f"Macro '{macro_name}' could not store output at step {step_idx} "
+                            f"({primitive}): {output_error}"
+                        ),
+                        "observations": {
+                            "macro_name": macro_name,
+                            "step_index": step_idx,
+                            "primitive": primitive,
+                            "primitive_result": normalized_result,
+                            "store_as": store_as,
+                            "completed_steps": len(results),
+                        },
+                    }
+                step_outputs[store_as] = step_output
+
+        if out_state:
+            runtime_snapshot["current_state"] = out_state
+            sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+
+        return {
+            "status": "completed",
+            "content": f"Recovery macro '{macro_name}' completed successfully",
+            "observations": {
+                "macro_name": macro_name,
+                "completed_steps": len(results),
+                "total_steps": len(steps),
+                "step_outputs": deepcopy(step_outputs),
+            },
+        }
 
     def _build_failure_context(
         self,
@@ -350,11 +662,29 @@ class ResourceAgent(LlmAgent):
 
             if is_recovery_macro:
                 # Fast path: self-allow, log, and proceed directly to execution.
+                # Skip the safety_check round-trip but still notify CCA of
+                # the running state so the plan FSA can track .start events.
                 agent.logger.info(
                     "[Resource] Fast-path recovery macro %s (skipping safety round-trip)",
                     task_id,
                 )
                 agent._safety_decisions[task_id] = "allow"
+                try:
+                    running_msg = Message(to=agent.cca_jid)
+                    running_msg.set_metadata("type", "resource_event")
+                    running_msg.body = json.dumps({
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": "running",
+                    })
+                    await self.send(running_msg)
+                except Exception:
+                    agent.logger.exception(
+                        "[Resource] Failed to send running event for recovery macro %s (ignored).",
+                        task_id,
+                    )
             else:
                 # ----- EARLY ACK (normal tasks) ----- #
                 await self._ack(msg, task_id=task_id, status="accepted")

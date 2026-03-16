@@ -1,14 +1,26 @@
-"""Environment model (M_e): compile resource bids and search for recovery paths."""
+"""Bridge turn parsing and proposal normalization for LLM-guided recovery."""
 
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 import logging
-from collections import deque
+import json
 from typing import Any, Callable, Coroutine, Optional
 
-from .resource_bidding import Bid, _tool_signature
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
+    canonical_bridge_event,
+    canonical_bridge_resource,
+)
+from cais_spade_llm.resources.resource_profile import (
+    all_registered_operation_kinds,
+    get_resource_profile,
+    resource_snapshot_field_value,
+    resource_snapshot_fields_map,
+    resource_snapshot_set_field,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
+    _tool_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,111 +54,6 @@ _BRIDGE_TASK_PARAM_RESERVED_KEYS = frozenset(
     }
 )
 
-
-def _state_key(state: dict) -> str:
-    """Stable string key from a state dict."""
-    return json.dumps(state, sort_keys=True)
-
-
-def compile_environment_model(bids: list[Bid]) -> dict:
-    """
-    Fuse RA bids into environment model M_e (Algorithm 1, Kovalenko et al.).
-
-    M_e = {
-        "states":      {state_key: state_dict},
-        "transitions": {state_key: {event_key: next_state_key}},
-        "events":      {event_key: event_dict},   # includes ra_jid
-    }
-    """
-    states: dict[str, dict] = {}
-    transitions: dict[str, dict[str, str]] = {}
-    events: dict[str, dict] = {}
-
-    for bid in bids:
-        if not bid.str_x or not bid.str_e:
-            continue
-        for i, event_dict in enumerate(bid.str_e):
-            from_state = bid.str_x[i]
-            to_state = bid.str_x[i + 1]
-
-            from_key = _state_key(from_state)
-            to_key = _state_key(to_state)
-
-            states.setdefault(from_key, from_state)
-            states.setdefault(to_key, to_state)
-
-            fn_name = event_dict.get("function_name", "")
-            event_key = f"{bid.ra_jid}::{fn_name}::{i}"
-
-            events[event_key] = {**event_dict, "ra_jid": bid.ra_jid}
-            transitions.setdefault(from_key, {})[event_key] = to_key
-
-    return {
-        "states": states,
-        "transitions": transitions,
-        "events": events,
-    }
-
-
-def plan_on_environment_model(
-    M_e: dict,
-    x_c: dict,
-    P_id: list[str],
-    goal_state: str,
-) -> list[dict] | None:
-    """
-    BFS on M_e from x_c to a goal state where all P_id parts are at goal_state.
-    Finds the path with fewest steps.
-
-    Returns ordered list of event dicts (each includes ra_jid and params),
-    or None if no path exists.
-    """
-    states = M_e["states"]
-    transitions = M_e["transitions"]
-    events = M_e["events"]
-
-    start_key = _find_start_state(states, x_c)
-    if start_key is None:
-        logger.warning("[EnvironmentModel] Could not match x_c to any state in M_e.")
-        return None
-
-    def is_goal(state_key: str) -> bool:
-        part_states = states[state_key].get("part_states", {})
-        return all(part_states.get(p) == goal_state for p in P_id)
-
-    # BFS: queue of (state_key, path_as_event_keys)
-    queue: deque = deque([(start_key, [])])
-    visited: set[str] = set([start_key])
-
-    while queue:
-        current_key, path = queue.popleft()
-
-        if is_goal(current_key):
-            return [events[ek] for ek in path]
-
-        for event_key, next_key in transitions.get(current_key, {}).items():
-            if next_key not in visited:
-                visited.add(next_key)
-                queue.append((next_key, path + [event_key]))
-
-    return None
-
-
-def _find_start_state(states: dict, x_c: dict) -> str | None:
-    """Match x_c to a state key in M_e. Exact match first, then partial."""
-    exact = _state_key(x_c)
-    if exact in states:
-        return exact
-
-    # Partial: same resource_state and part_states
-    for key, state in states.items():
-        if (state.get("resource_state") == x_c.get("resource_state") and
-                state.get("part_states") == x_c.get("part_states")):
-            return key
-
-    return None
-
-
 def _bridge_resource_entries(
     *,
     ra_jid: str,
@@ -163,24 +70,49 @@ def _bridge_resource_entries(
             continue
         resources[resource_jid] = {
             "resource_jid": resource_jid,
+            "resource_type": str(
+                raw_entry.get("resource_type")
+                or dict(raw_entry.get("bridge_snapshot") or {}).get("resource_type")
+                or "resource"
+            ).strip(),
             "primitive_catalog": list(raw_entry.get("primitive_catalog") or []),
             "bridge_snapshot": dict(
                 raw_entry.get("bridge_snapshot")
                 or raw_entry.get("primitive_snapshot")
                 or {}
             ),
+            "resource_core": deepcopy(raw_entry.get("resource_core") or {}),
+            "resource_facets": deepcopy(raw_entry.get("resource_facets") or {}),
             "modeled_state": deepcopy(raw_entry.get("modeled_state") or {}),
             "pending_tasks": deepcopy(raw_entry.get("pending_tasks") or []),
             "static_capabilities": deepcopy(raw_entry.get("static_capabilities") or {}),
+            "bridge_adapter": deepcopy(raw_entry.get("bridge_adapter") or {}),
         }
 
     if not resources and primitive_catalog is not None:
         resource_jid = str(ra_jid or "").strip()
         if resource_jid:
+            fallback_snapshot = canonical_bridge_resource(
+                resource_jid=resource_jid,
+                resource_type=str(
+                    dict(bridge_snapshot or {}).get("resource_type")
+                    or dict(dict(bridge_snapshot or {}).get("resource_core") or {}).get("resource_type")
+                    or "resource"
+                ),
+                snapshot=deepcopy(bridge_snapshot or {}),
+                modeled_state={},
+            )
             resources[resource_jid] = {
                 "resource_jid": resource_jid,
+                "resource_type": str(
+                    fallback_snapshot.get("resource_type")
+                    or dict(fallback_snapshot.get("resource_core") or {}).get("resource_type")
+                    or "resource"
+                ).strip(),
                 "primitive_catalog": list(primitive_catalog or []),
-                "bridge_snapshot": dict(bridge_snapshot or {}),
+                "bridge_snapshot": fallback_snapshot,
+                "resource_core": deepcopy(fallback_snapshot.get("resource_core") or {}),
+                "resource_facets": deepcopy(fallback_snapshot.get("resource_facets") or {}),
                 "modeled_state": {},
                 "pending_tasks": [],
                 "static_capabilities": {},
@@ -197,6 +129,137 @@ def _macro_tasks_from_primitive_proposal(parsed: dict[str, Any]) -> list[dict[st
     if isinstance(primitive_steps, list) and primitive_steps:
         return [dict(parsed)]
     return []
+
+
+def _normalize_optional_name(value: Any) -> str:
+    token = str(value or "").strip()
+    if token.lower() in {"", "none", "null", "n/a"}:
+        return ""
+    return token
+
+
+def _normalize_bridge_event_summary(
+    raw_summary: Any,
+    *,
+    bridge_resources: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_summary, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw_event in raw_summary:
+        if not isinstance(raw_event, dict):
+            continue
+        event_name = str(raw_event.get("event_name", "")).strip()
+        resource_jid = str(raw_event.get("resource_jid", "")).strip()
+        part_name = _normalize_optional_name(raw_event.get("part_name", ""))
+        rationale = str(raw_event.get("rationale", "")).strip()
+        raw_closes = raw_event.get("closes_conditions") or []
+        closes_conditions: list[dict[str, Any]] = []
+        if isinstance(raw_closes, list):
+            for raw_condition in raw_closes:
+                if not isinstance(raw_condition, dict):
+                    continue
+                entity_kind = str(raw_condition.get("entity_kind", "")).strip()
+                entity = str(raw_condition.get("entity", "")).strip()
+                field = str(raw_condition.get("field", "")).strip()
+                expected = raw_condition.get("expected")
+                if not entity_kind or not entity or not field or expected in (None, ""):
+                    continue
+                closes_conditions.append(
+                    {
+                        "entity_kind": entity_kind,
+                        "entity": entity,
+                        "field": field,
+                        "expected": deepcopy(expected),
+                    }
+                )
+        if not any((event_name, resource_jid, part_name, closes_conditions, rationale)):
+            continue
+
+        # --- strategic state-delta fields (optional) ---
+        raw_resource_delta = raw_event.get("expected_resource_delta")
+        resource_delta: dict[str, str] | None = None
+        if isinstance(raw_resource_delta, dict):
+            delta_from = str(raw_resource_delta.get("from", "")).strip()
+            delta_to = str(raw_resource_delta.get("to", "")).strip()
+            if delta_from and delta_to:
+                resource_delta = {"from": delta_from, "to": delta_to}
+
+        raw_part_delta = raw_event.get("expected_part_delta")
+        part_delta: dict[str, Any] | None = None
+        if isinstance(raw_part_delta, dict):
+            pd_part = _normalize_optional_name(raw_part_delta.get("part_name", "")) or part_name
+            pd_from = str(raw_part_delta.get("from", "")).strip()
+            pd_to = str(raw_part_delta.get("to", "")).strip()
+            if pd_from and pd_to:
+                part_delta = {"part_name": pd_part, "from": pd_from, "to": pd_to}
+                pd_loc = str(raw_part_delta.get("location_to", "")).strip()
+                if pd_loc:
+                    part_delta["location_to"] = pd_loc
+
+        entry: dict[str, Any] = {
+            "event_name": event_name,
+            "resource_jid": resource_jid,
+            "part_name": part_name,
+            "closes_conditions": closes_conditions,
+            "rationale": rationale,
+        }
+        operation_family = str(raw_event.get("operation_family", "") or "").strip()
+        if operation_family:
+            entry["operation_family"] = operation_family
+        if resource_delta is not None:
+            entry["expected_resource_delta"] = resource_delta
+        if part_delta is not None:
+            entry["expected_part_delta"] = part_delta
+
+        normalized_event = canonical_bridge_event(
+            entry,
+            bridge_resources=bridge_resources,
+        )
+        normalized_event["_operation_family_explicit"] = bool(operation_family)
+        normalized.append(normalized_event)
+    return normalized
+
+
+def _bridge_event_contract_error(event: dict[str, Any]) -> str | None:
+    if not bool(event.get("_operation_family_explicit")):
+        return "bridge_events.events[].operation_family is required"
+
+    operation_family = str(event.get("operation_family", "") or "").strip().lower()
+    if not operation_family:
+        return "bridge_events.events[].operation_family must not be empty"
+    if operation_family not in all_registered_operation_kinds():
+        return (
+            f"bridge_events.events[].operation_family '{operation_family}' "
+            "is not recognized for any registered resource profile"
+        )
+    return None
+
+
+def _bridge_profile_event_contract_error(
+    event: dict[str, Any],
+    *,
+    bridge_resources: dict[str, Any] | None = None,
+) -> str | None:
+    resource_jid = str(event.get("resource_jid", "") or "").strip()
+    resource_entry = dict((bridge_resources or {}).get(resource_jid) or {})
+    resource_type = str(
+        resource_entry.get("resource_type")
+        or dict(resource_entry.get("bridge_snapshot") or {}).get("resource_type")
+        or event.get("resource_type")
+        or ""
+    ).strip()
+    profile = get_resource_profile(resource_type or "resource")
+    if profile.event_contract_validator is None:
+        return None
+    return profile.event_contract_validator(
+        event=deepcopy(event),
+        resource_jid=resource_jid,
+        resource_entry=deepcopy(resource_entry),
+        bridge_resources=deepcopy(bridge_resources or {}),
+        profile=profile,
+    )
 
 
 def _normalize_primary_obligation(
@@ -271,10 +334,39 @@ def _normalize_bridge_task_metadata(raw_task_metadata: Any) -> dict[str, Any]:
         context_mapping = {}
     task_metadata["context_mapping"] = dict(context_mapping)
 
-    part_transition = task_metadata.get("part_transition") or {}
-    if not isinstance(part_transition, dict):
-        part_transition = {}
-    task_metadata["part_transition"] = dict(part_transition)
+    raw_part_transition = task_metadata.get("part_transition")
+    normalized_part_transition: dict[str, Any] = {}
+    if isinstance(raw_part_transition, dict):
+        part_transition = dict(raw_part_transition)
+        completed = part_transition.get("completed")
+        if isinstance(completed, dict):
+            normalized_part_transition["completed"] = dict(completed)
+        else:
+            shorthand_state = (
+                part_transition.get("state")
+                or part_transition.get("to")
+                or part_transition.get("to_state")
+            )
+            if shorthand_state not in (None, ""):
+                normalized_completed: dict[str, Any] = {"state": deepcopy(shorthand_state)}
+                for key in (
+                    "location_param",
+                    "location_template",
+                    "observation_required",
+                    "last_known_param",
+                    "last_known_template",
+                ):
+                    if key in part_transition:
+                        normalized_completed[key] = deepcopy(part_transition[key])
+                normalized_part_transition["completed"] = normalized_completed
+    elif isinstance(raw_part_transition, str):
+        text = raw_part_transition.strip()
+        if "->" in text:
+            _, _, rhs = text.rpartition("->")
+            target_state = rhs.strip()
+            if target_state:
+                normalized_part_transition["completed"] = {"state": target_state}
+    task_metadata["part_transition"] = normalized_part_transition
     return task_metadata
 
 
@@ -294,12 +386,24 @@ def _apply_part_transition_projection(
         return
 
     entry = dict(projected_parts.get(part_name) or {})
+    explicit_location = False
     if "state" in transition:
         entry["state"] = transition["state"]
     if "location_template" in transition:
         entry["location"] = str(transition["location_template"]).format(resource_jid=resource_jid)
+        explicit_location = True
     if "location_param" in transition:
         entry["location"] = deepcopy(task_params.get(str(transition["location_param"])))
+        explicit_location = True
+    if "product_jid" in task_params and entry.get("state") == "assembled" and not explicit_location:
+        product_location = str(task_params.get("product_jid") or "").strip()
+        if product_location:
+            entry["location"] = product_location.split("@", 1)[0]
+    if entry.get("state") == "assembled" and not explicit_location:
+        target = dict(entry.get("target") or {})
+        target_location = str(target.get("location") or "").strip()
+        if target_location:
+            entry["location"] = target_location
     if transition.get("observation_required"):
         entry["observation_required"] = True
         entry["location"] = None
@@ -322,29 +426,58 @@ def _projected_bridge_grounding_context(
     primary_obligation: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Expose the evolving projected whole-system state to later macro_tasks."""
+    def _flat_facet_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
+        flat: dict[str, Any] = {}
+        for facet in (snapshot.get("resource_facets") or {}).values():
+            if not isinstance(facet, dict):
+                continue
+            for key, value in facet.items():
+                flat[str(key)] = deepcopy(value)
+        return flat
+
     context = deepcopy(grounding_context or {})
     context["parts"] = deepcopy(projected_parts)
 
     resources_payload: dict[str, dict[str, Any]] = {}
     for resource_jid, snapshot in (projected_resource_snapshots or {}).items():
         raw_entry = dict(bridge_resources.get(resource_jid) or {})
-        bridge_snapshot = deepcopy(snapshot or {})
+        bridge_snapshot = canonical_bridge_resource(
+            resource_jid=resource_jid,
+            resource_type=str(
+                (dict(snapshot or {}).get("resource_core") or {}).get("resource_type")
+                or raw_entry.get("resource_type")
+                or raw_entry.get("bridge_snapshot", {}).get("resource_type")
+                or "resource"
+            ),
+            snapshot=deepcopy(snapshot or {}),
+            modeled_state=deepcopy(raw_entry.get("modeled_state") or {}),
+        )
+        profile = get_resource_profile(
+            str(
+                (bridge_snapshot.get("resource_core") or {}).get("resource_type")
+                or bridge_snapshot.get("resource_type")
+                or "resource"
+            ).strip().lower()
+            or "resource"
+        )
         resources_payload[resource_jid] = {
             "jid": resource_jid,
+            "resource_core": deepcopy(bridge_snapshot.get("resource_core") or {}),
+            "resource_facets": deepcopy(bridge_snapshot.get("resource_facets") or {}),
+            "resource_type": bridge_snapshot.get("resource_type"),
             "current_state": bridge_snapshot.get("current_state"),
-            "held_part": bridge_snapshot.get("held_part"),
-            "gripper_state": bridge_snapshot.get("gripper_state"),
-            "current_pose": deepcopy(bridge_snapshot.get("current_pose")),
-            "current_pose_ref": bridge_snapshot.get("current_pose_ref"),
-            "named_poses": {
-                str(pose_name): str(pose_name)
-                for pose_name in (bridge_snapshot.get("named_poses") or [])
-                if str(pose_name).strip()
-            },
+            "current_location": deepcopy(bridge_snapshot.get("current_location")),
             "primitive_snapshot": bridge_snapshot,
             "modeled_state": deepcopy(raw_entry.get("modeled_state") or {}),
             "pending_tasks": deepcopy(raw_entry.get("pending_tasks") or []),
             "static_capabilities": deepcopy(raw_entry.get("static_capabilities") or {}),
+            "bridge_adapter": deepcopy(raw_entry.get("bridge_adapter") or {}),
+            **resource_snapshot_fields_map(
+                bridge_snapshot,
+                profile.snapshot_fields,
+                profile=profile,
+            ),
+            **_flat_facet_fields(bridge_snapshot),
         }
 
     context["resources"] = resources_payload
@@ -416,6 +549,109 @@ def _primary_obligation_projection_error(
         f"final projected state for primary obligation resource '{resource_jid}' "
         f"was '{final_state or 'unknown'}', expected one of {sorted(required_out_states)}"
     )
+
+
+def normalize_bridge_turn_response(
+    *,
+    raw: str | dict[str, Any],
+    available_resource_jids: list[str] | set[str],
+    allowed_observation_primitives: list[str] | set[str],
+    bridge_resources: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse one ReAct turn response into a strict observe/bridge_events/final_plan union."""
+    if isinstance(raw, dict):
+        parsed = deepcopy(raw)
+    else:
+        try:
+            parsed = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, "turn response was not valid JSON"
+
+    if not isinstance(parsed, dict):
+        return None, "turn response must be a JSON object"
+
+    response_type = str(parsed.get("type", "")).strip().lower()
+    allowed_resources = {
+        str(resource_jid).strip()
+        for resource_jid in (available_resource_jids or [])
+        if str(resource_jid).strip()
+    }
+    allowed_primitives = {
+        str(name).strip()
+        for name in (allowed_observation_primitives or [])
+        if str(name).strip()
+    }
+
+    if response_type == "observe":
+        resource_jid = str(parsed.get("resource_jid", "")).strip()
+        primitive = str(parsed.get("primitive", "")).strip()
+        params = parsed.get("params") or {}
+        store_as = str(parsed.get("store_as", "") or "").strip()
+        if not resource_jid:
+            return None, "observe.resource_jid is required"
+        if allowed_resources and resource_jid not in allowed_resources:
+            return None, f"observe.resource_jid '{resource_jid}' is not an available bridge resource"
+        if not primitive:
+            return None, "observe.primitive is required"
+        if allowed_primitives and primitive not in allowed_primitives:
+            return None, f"observe.primitive '{primitive}' is not allowed in this phase"
+        if not isinstance(params, dict):
+            return None, "observe.params must be an object"
+        if store_as:
+            if not store_as.replace("_", "").isalnum() or store_as[0].isdigit():
+                return None, "observe.store_as must be a snake_case-like identifier"
+        return {
+            "type": "observe",
+            "resource_jid": resource_jid,
+            "primitive": primitive,
+            "params": deepcopy(params),
+            "store_as": store_as,
+            "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+        }, None
+
+    if response_type == "bridge_events":
+        normalized_events = _normalize_bridge_event_summary(
+            parsed.get("events"),
+            bridge_resources=bridge_resources,
+        )
+        if not normalized_events:
+            return None, "bridge_events.events must contain at least one valid event"
+        for event in normalized_events:
+            contract_error = _bridge_event_contract_error(event)
+            if contract_error:
+                return None, contract_error
+            resource_jid = str(event.get("resource_jid", "")).strip()
+            if not resource_jid:
+                return None, "bridge_events.events[].resource_jid is required"
+            if allowed_resources and resource_jid not in allowed_resources:
+                return None, (
+                    f"bridge_events.events[].resource_jid '{resource_jid}' "
+                    "is not an available bridge resource"
+                )
+            profile_contract_error = _bridge_profile_event_contract_error(
+                event,
+                bridge_resources=bridge_resources,
+            )
+            if profile_contract_error:
+                return None, profile_contract_error
+            event.pop("_operation_family_explicit", None)
+        return {
+            "type": "bridge_events",
+            "events": deepcopy(normalized_events),
+            "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+        }, None
+
+    if response_type == "final_plan":
+        plan = parsed.get("plan")
+        if not isinstance(plan, dict):
+            return None, "final_plan.plan must be an object"
+        return {
+            "type": "final_plan",
+            "plan": deepcopy(plan),
+            "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+        }, None
+
+    return None, "turn response type must be 'observe', 'bridge_events', or 'final_plan'"
 
 
 async def llm_explore_states_and_events(
@@ -567,7 +803,7 @@ def _normalize_primitive_bridge_proposal(
     obligation_targets: list[dict[str, Any]] | None = None,
 ) -> Optional[dict[str, Any]]:
     """Validate and normalize a primitive-based bridge proposal."""
-    from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
         expected_snapshot_from_bridge_snapshot,
         resolve_param_refs,
         resolve_step_param_refs,
@@ -635,6 +871,11 @@ def _normalize_primitive_bridge_proposal(
             return None
 
         validated_steps: list[dict[str, Any]] = []
+        primitive_rows = {
+            str(entry.get("name", "")).strip(): dict(entry)
+            for entry in (resource_entry.get("primitive_catalog") or [])
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+        }
         for step in primitive_steps:
             if not isinstance(step, dict):
                 logger.warning("[EnvironmentModel] Bridge macro_task %d contains a non-object step.", index)
@@ -647,7 +888,16 @@ def _normalize_primitive_bridge_proposal(
             normalized_step = {"primitive": primitive, "params": dict(params)}
             store_as = str(step.get("store_as") or "").strip()
             if store_as:
-                normalized_step["store_as"] = store_as
+                semantics = dict((primitive_rows.get(primitive) or {}).get("bridge_semantics") or {})
+                if bool(semantics.get("produces_observation")):
+                    normalized_step["store_as"] = store_as
+                else:
+                    logger.warning(
+                        "[EnvironmentModel] Bridge macro_task %d step %d ignored unsupported store_as on primitive '%s'.",
+                        index,
+                        len(validated_steps) + 1,
+                        primitive,
+                    )
             validated_steps.append(normalized_step)
 
         dynamic_grounding_context = _projected_bridge_grounding_context(
@@ -670,6 +920,27 @@ def _normalize_primitive_bridge_proposal(
             )
             return None
 
+        _em_profile = get_resource_profile(
+            str(resource_entry.get("resource_type") or "resource").strip().lower() or "resource"
+        )
+        _snap_fields = resource_snapshot_fields_map(
+            current_snapshot, _em_profile.snapshot_fields, profile=_em_profile,
+        )
+        logger.debug(
+            "[EnvironmentModel] macro_task %d (%s) — %d resolved steps, initial snapshot: %s",
+            index,
+            str(raw_task.get("macro_name") or "").strip() or "unnamed",
+            len(resolved_steps),
+            ", ".join(f"{k}={v!r}" for k, v in _snap_fields.items()),
+        )
+        for _si, _step in enumerate(resolved_steps, start=1):
+            logger.debug(
+                "[EnvironmentModel]   step %d: %s params=%s",
+                _si,
+                _step.get("primitive"),
+                {k: v for k, v in (_step.get("params") or {}).items() if k != "product_geometry"},
+            )
+
         semantic_ok, projected_snapshot, semantic_error = validate_and_project_steps(
             resolved_steps,
             resource_entry.get("primitive_catalog") or [],
@@ -677,10 +948,15 @@ def _normalize_primitive_bridge_proposal(
             grounding_context=dynamic_grounding_context,
         )
         if not semantic_ok:
+            _macro_label = str(raw_task.get("macro_name") or "").strip()
             logger.warning(
-                "[EnvironmentModel] Primitive bridge proposal rejected: macro_task %d %s",
+                "[EnvironmentModel] Primitive bridge proposal rejected: macro_task %d (%s on %s) %s "
+                "(initial snapshot: %s)",
                 index,
+                _macro_label or "unnamed",
+                resource_jid,
                 semantic_error,
+                ", ".join(f"{k}={v!r}" for k, v in _snap_fields.items()),
             )
             return None
 
@@ -696,7 +972,13 @@ def _normalize_primitive_bridge_proposal(
             raw_task.get("task_metadata") or parsed.get("task_metadata") or {}
         )
 
-        part_name = str(raw_task.get("part_name") or raw_task.get("touched_part") or parsed.get("part_name") or parsed.get("touched_part") or "").strip()
+        part_name = _normalize_optional_name(
+            raw_task.get("part_name")
+            or raw_task.get("touched_part")
+            or parsed.get("part_name")
+            or parsed.get("touched_part")
+            or ""
+        )
 
         raw_task_params = raw_task.get("task_params")
         if raw_task_params is None:
@@ -729,7 +1011,22 @@ def _normalize_primitive_bridge_proposal(
             return None
 
         if not part_name:
-            part_name = str(task_params.get("part_name") or "").strip()
+            part_name = _normalize_optional_name(task_params.get("part_name") or "")
+
+        filtered_required_context_keys: list[str] = []
+        dropped_required_context_keys: list[str] = []
+        for key in task_metadata.get("required_context_keys", []):
+            if key in task_params:
+                filtered_required_context_keys.append(key)
+            else:
+                dropped_required_context_keys.append(key)
+        if dropped_required_context_keys:
+            logger.warning(
+                "[EnvironmentModel] Bridge macro_task %d ignored unsupported required_context_keys: %s",
+                index,
+                dropped_required_context_keys,
+            )
+        task_metadata["required_context_keys"] = filtered_required_context_keys
 
         missing_context_keys = [
             key for key in task_metadata.get("required_context_keys", []) if key not in task_params
@@ -765,7 +1062,9 @@ def _normalize_primitive_bridge_proposal(
 
         expected_start_state = str(raw_task.get("expected_start_state") or parsed.get("expected_start_state") or "").strip()
         if expected_start_state:
-            actual_state = str((current_snapshot or {}).get("current_state", "")).strip()
+            actual_state = str(
+                resource_snapshot_field_value(current_snapshot, "current_state") or ""
+            ).strip()
             if actual_state and expected_start_state != actual_state:
                 logger.warning(
                     "[EnvironmentModel] Bridge macro_task %d expected_start_state '%s' mismatched actual '%s'.",
@@ -777,9 +1076,25 @@ def _normalize_primitive_bridge_proposal(
 
         projected_snapshot_with_state = deepcopy(projected_snapshot)
         if task_metadata.get("out_state"):
-            projected_snapshot_with_state["current_state"] = str(task_metadata["out_state"])
+            projected_snapshot_with_state = resource_snapshot_set_field(
+                projected_snapshot_with_state,
+                "current_state",
+                str(task_metadata["out_state"]),
+                profile=get_resource_profile(
+                    str(resource_entry.get("resource_type") or "resource")
+                ),
+            )
 
         projected_resource_snapshots[resource_jid] = projected_snapshot_with_state
+        _post_snap = resource_snapshot_fields_map(
+            projected_snapshot_with_state, _em_profile.snapshot_fields, profile=_em_profile,
+        )
+        logger.debug(
+            "[EnvironmentModel] macro_task %d (%s) — projected snapshot after validation: %s",
+            index,
+            str(raw_task.get("macro_name") or "").strip() or "unnamed",
+            ", ".join(f"{k}={v!r}" for k, v in _post_snap.items()),
+        )
         _apply_part_transition_projection(
             projected_parts,
             part_name=part_name,
@@ -798,7 +1113,10 @@ def _normalize_primitive_bridge_proposal(
             "description": str(raw_task.get("description") or parsed.get("description") or "").strip(),
             "rationale": str(raw_task.get("rationale") or parsed.get("rationale") or "").strip(),
             "expected_start_state": expected_start_state,
-            "expected_snapshot": expected_snapshot_from_bridge_snapshot(current_snapshot),
+            "expected_snapshot": expected_snapshot_from_bridge_snapshot(
+                current_snapshot,
+                resource_type=str(resource_entry.get("resource_type") or "resource"),
+            ),
             "projected_snapshot": projected_snapshot_with_state,
             "projected_part_entry": projected_part_entry,
             "task_metadata": task_metadata,
@@ -830,8 +1148,14 @@ def _normalize_primitive_bridge_proposal(
         )
         return None
 
+    bridge_event_summary = _normalize_bridge_event_summary(
+        parsed.get("bridge_event_summary"),
+        bridge_resources=bridge_resources,
+    )
+
     proposal: dict[str, Any] = {
         "primary_obligation": primary_obligation,
+        "bridge_event_summary": bridge_event_summary,
         "macro_tasks": normalized_macro_tasks,
         "projected_resource_snapshots": projected_resource_snapshots,
         "projected_parts": projected_parts,

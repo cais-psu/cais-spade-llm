@@ -1051,17 +1051,100 @@ def render(bridge: SystemBridge) -> None:
                     _set_action_feedback(
                         product_jid,
                         "positive",
-                        "LLM bridge exploration started from the prepared request.",
+                        "Bounded LLM bridge reasoning started from the prepared session.",
                     )
-                    _notify("LLM bridge exploration started from the prepared request.", type="positive")
+                    _notify("Bounded LLM bridge reasoning started.", type="positive")
                     client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
                     _set_action_feedback(
                         product_jid,
                         "negative",
-                        f"Failed to start LLM bridge exploration: {exc}",
+                        f"Failed to start bridge reasoning: {exc}",
                     )
-                    _notify(f"Failed to start LLM bridge exploration: {exc}", type="negative")
+                    _notify(f"Failed to start bridge reasoning: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _approve_runtime_bridge(product_jid: str) -> None:
+                try:
+                    await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Bridge proposal approved. Runtime plan validation started.",
+                    )
+                    _notify("Bridge proposal approved.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to approve bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to approve bridge proposal: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _reject_runtime_bridge(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Bridge rejection feedback is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Bridge rejection feedback is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.reject_runtime_bridge_proposal,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Bridge proposal rejected. Session paused for manual refinement.",
+                    )
+                    _notify("Bridge proposal rejected.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to reject bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to reject bridge proposal: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _refine_runtime_bridge(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Refinement guidance is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Refinement guidance is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.submit_runtime_recovery_guidance,
+                        product_jid,
+                        feedback,
+                    )
+                    await asyncio.to_thread(bridge.generate_runtime_bridge_proposal, product_jid)
+                    bridge_feedback_buffers[product_jid] = ""
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Bridge refinement submitted. Re-running bounded bridge reasoning.",
+                    )
+                    _notify("Bridge refinement submitted.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to refine bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to refine bridge proposal: {exc}", type="negative")
                 finally:
                     _clear_pending_runtime_action(product_jid)
 
@@ -1187,8 +1270,18 @@ def render(bridge: SystemBridge) -> None:
 
                             if status == "bridge_ready":
                                 ui.label(
-                                    "Bridge request is prepared. Preprogrammed recovery will auto-load and auto-approve."
+                                    "Bridge session is prepared. Run bounded bridge reasoning when you are ready."
                                 ).classes("text-xs text-orange-700 mt-2")
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    ui.button(
+                                        "Run bridge reasoning",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Run bridge reasoning",
+                                            runner=_run_runtime_bridge,
+                                        ),
+                                        icon="smart_toy",
+                                    ).props("color=indigo")
 
                             if status == "llm_bridge" and isinstance(bridge_proposal, dict):
                                 with ui.expansion("Bridge proposal", icon="alt_route", value=True).classes("w-full mt-2"):
@@ -1242,9 +1335,48 @@ def render(bridge: SystemBridge) -> None:
                                             ui.label(
                                                 f"{idx}. {step.get('function_name', '')}({params_text})"
                                             ).classes("text-xs font-mono text-slate-700")
-                                ui.label(
-                                    "Bridge proposals are now auto-approved."
-                                ).classes("text-xs text-green-700 mt-2")
+                                if bridge_approval_state == "pending":
+                                    ui.label(
+                                        "This final bridge candidate has already passed deterministic validation and is waiting for operator approval."
+                                    ).classes("text-xs text-indigo-700 mt-2")
+                                    review_box = ui.textarea(
+                                        label="Refinement or rejection feedback",
+                                        value=bridge_feedback,
+                                    ).props("outlined autogrow").classes("w-full mt-2")
+                                    review_box.on_value_change(
+                                        lambda e, jid=product_jid: bridge_feedback_buffers.__setitem__(
+                                            jid,
+                                            str(e.value or ""),
+                                        )
+                                    )
+                                    with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                        ui.button(
+                                            "Approve",
+                                            on_click=lambda jid=product_jid: _queue_runtime_action(
+                                                jid,
+                                                action_label="Approve bridge proposal",
+                                                runner=_approve_runtime_bridge,
+                                            ),
+                                            icon="check_circle",
+                                        ).props("color=green")
+                                        ui.button(
+                                            "Refine",
+                                            on_click=lambda jid=product_jid: _queue_runtime_action(
+                                                jid,
+                                                action_label="Refine bridge proposal",
+                                                runner=_refine_runtime_bridge,
+                                            ),
+                                            icon="tune",
+                                        ).props("color=amber")
+                                        ui.button(
+                                            "Reject",
+                                            on_click=lambda jid=product_jid: _queue_runtime_action(
+                                                jid,
+                                                action_label="Reject bridge proposal",
+                                                runner=_reject_runtime_bridge,
+                                            ),
+                                            icon="cancel",
+                                        ).props("color=red")
 
                             if bridge_debug:
                                 debug_status = str(bridge_debug.get("status", "") or "n/a").strip()
@@ -1274,6 +1406,7 @@ def render(bridge: SystemBridge) -> None:
                                     if isinstance(bridge_debug.get("approval"), dict)
                                     else {}
                                 )
+                                react_turns = list(bridge_debug.get("turns") or [])
                                 debug_prompt = str(bridge_debug.get("prompt", "") or "").strip()
                                 raw_response = str(bridge_debug.get("raw_response", "") or "").strip()
                                 normalized_proposal = bridge_debug.get("normalized_proposal")
@@ -1356,6 +1489,16 @@ def render(bridge: SystemBridge) -> None:
                                             _preview_text(_json_text(normalized_proposal)),
                                             language="json",
                                         ).classes("w-full text-xs")
+                                    if react_turns:
+                                        with ui.expansion(
+                                            "ReAct trace",
+                                            icon="route",
+                                            value=False,
+                                        ).classes("w-full mt-2"):
+                                            ui.code(
+                                                _json_text(react_turns),
+                                                language="json",
+                                            ).classes("w-full text-xs")
                                     if request_payload:
                                         with ui.expansion(
                                             "Bridge request inputs",
@@ -1480,6 +1623,15 @@ def render(bridge: SystemBridge) -> None:
                                         ),
                                         icon="person",
                                     ).props("color=amber")
+                                    ui.button(
+                                        "Run bridge reasoning",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Run bridge reasoning",
+                                            runner=_run_runtime_bridge,
+                                        ),
+                                        icon="smart_toy",
+                                    ).props("color=indigo")
 
             _refresh_runtime_recovery_panel()
             _managed_timer(5.0, _refresh_runtime_recovery_panel)

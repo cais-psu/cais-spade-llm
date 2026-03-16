@@ -754,7 +754,9 @@ class Ros2PickPlaceController:
         params:
           pose_name: {type: string, description: "Name of the joint configuration from robot manifest"}
           speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
-        preconditions: {}
+        preconditions:
+          current_state:
+            not_equals: recovery_required
         effects:
           current_pose_ref:
             set_from_param: pose_name
@@ -857,7 +859,9 @@ class Ros2PickPlaceController:
         description: Return the current end-effector pose in the base frame.
         params: {}
         preconditions: {}
-        effects: {}
+        effects:
+          current_pose_ref:
+            set_unknown: true
         ---
         """
         if not self.wait_for_services():
@@ -879,19 +883,27 @@ class Ros2PickPlaceController:
             },
         }
 
-    def attach_part(self, model_name: str, link: str | None = None) -> dict[str, Any]:
+    def attach_part(
+        self,
+        model_name: str,
+        link: str | None = None,
+        part_name: str = "",
+    ) -> dict[str, Any]:
         """
         ---
         description: Attach a part model to the robot gripper (Gazebo link attacher).
         params:
           model_name: {type: string, description: "Gazebo model name of the part to attach"}
           link: {type: string, description: "Optional specific attach link. Uses default candidates if omitted."}
+          part_name: {type: string, description: "Optional canonical part identifier for semantic state projection."}
         preconditions:
           held_part:
             equals: null
+          gripper_state:
+            equals: closed
         effects:
           held_part:
-            set_from_param: model_name
+            set_from_param_any_of: ["part_name", "model_name"]
         ---
         """
         if not self.wait_for_services():
@@ -916,6 +928,8 @@ class Ros2PickPlaceController:
         preconditions:
           held_part:
             not_equals: null
+          gripper_state:
+            equals: open
         effects:
           held_part:
             set: null
@@ -1026,11 +1040,12 @@ class Ros2PickPlaceController:
             return False
         return self._gripper_command(self.gripper_open, "OPEN")
 
-    def close_gripper(self) -> bool:
+    def close_gripper(self, position: float | None = None) -> bool:
         """
         ---
         description: Close the robot gripper.
-        params: {}
+        params:
+          position: {type: number, description: "Optional custom gripper position override. If omitted, uses the default close position."}
         preconditions: {}
         effects:
           gripper_state:
@@ -1039,7 +1054,8 @@ class Ros2PickPlaceController:
         """
         if not self.wait_for_services():
             return False
-        return self._gripper_command(self.gripper_close, "CLOSE")
+        target = float(position) if position is not None else self.gripper_close
+        return self._gripper_command(target, "CLOSE")
 
     # ------------------------------------------------------------------ #
     # Geometry helpers (agent calls these to compute targets, then moves)
@@ -1052,7 +1068,19 @@ class Ros2PickPlaceController:
         ignore_current_height_for_travel_z: bool = False,
         min_pick_tcp_z_override_m: float | None = None,
     ) -> dict[str, Any]:
-        """Compute pick target positions from perception + geometry without moving.
+        """
+        ---
+        description: Compute pick target positions from perception + geometry without moving.
+        params:
+          part_name: {type: string, description: "Name of the detected part to pick"}
+          product_geometry: {type: object, description: "Optional geometry override dict"}
+          approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
+          ignore_current_height_for_travel_z: {type: boolean}
+          min_pick_tcp_z_override_m: {type: number}
+        preconditions: {}
+        effects: {}
+        ---
+        Compute pick target positions from perception + geometry without moving.
 
         Returns a dict with keys: part_name, model_name, tx, ty, tz, pick_z,
         travel_z, part_height, tcp_offset_z, pick_tcp_z, start_x, start_y,
@@ -1158,7 +1186,18 @@ class Ros2PickPlaceController:
         part_name: str = "",
         z_adjustment_m: float = 0.0,
     ) -> dict[str, Any]:
-        """Compute placement target positions from pick context + geometry without moving.
+        """
+        ---
+        description: Compute placement target positions from pick context + geometry without moving.
+        params:
+          part_name: {type: string, description: "Name of the held part to place"}
+          pick_ctx: {type: object, description: "Optional output context from previous pick"}
+          product_geometry: {type: object, description: "Optional geometry override dict"}
+          z_adjustment_m: {type: number, description: "Extra Z vertical adjustment"}
+        preconditions: {}
+        effects: {}
+        ---
+        Compute placement target positions from pick context + geometry without moving.
 
         Returns a dict with keys: slot_x, slot_y, board_top_z, place_z,
         part_height, or {"success": False, "message": ...} on failure.
@@ -1301,6 +1340,36 @@ class Ros2PickPlaceController:
 
         return {"success": False, "message": "no home pose available"}
 
+    def _format_moveit_error(self, code: int | None) -> str:
+        if code is None:
+            return "unknown error (timeout or action server failure)"
+        mapping = {
+            1: "SUCCESS",
+            -1: "PLANNING_FAILED (No valid trajectory found. Target may be unreachable or in self-collision)",
+            -2: "INVALID_MOTION_PLAN",
+            -3: "MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE",
+            -4: "CONTROL_FAILED",
+            -5: "UNABLE_TO_AQUIRE_SENSOR_DATA",
+            -6: "TIMED_OUT",
+            -7: "PREEMPTED",
+            -10: "START_STATE_IN_COLLISION",
+            -11: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
+            -12: "GOAL_IN_COLLISION (Target pose intersects with an obstacle)",
+            -13: "GOAL_VIOLATES_PATH_CONSTRAINTS",
+            -14: "GOAL_CONSTRAINTS_VIOLATED",
+            -15: "INVALID_GROUP_NAME",
+            -16: "INVALID_GOAL_CONSTRAINTS",
+            -17: "INVALID_ROBOT_STATE (Robot state is outside joint limits)",
+            -18: "INVALID_LINK_NAME",
+            -19: "INVALID_OBJECT_NAME",
+            -21: "FRAME_TRANSFORM_FAILURE",
+            -22: "COLLISION_CHECKING_UNAVAILABLE",
+            -23: "ROBOT_STATE_STALE",
+            -24: "SENSOR_INFO_STALE",
+            -31: "NO_IK_SOLUTION (Inverse Kinematics failed. Target pose is impossible to reach)",
+        }
+        return mapping.get(code, f"error_code={code}")
+
     def _move_joints_via_moveit(
         self, positions: list[float], duration_sec: float = 4.0,
     ) -> bool:
@@ -1343,7 +1412,8 @@ class Ros2PickPlaceController:
         result = self._wait_future(result_future, timeout_sec=30.0, label="result:move_home")
         code = result.result.error_code.val if result else None
         if code != 1:
-            self._log().error(f"move_home execute_trajectory failed with error_code={code}")
+            err_msg = self._format_moveit_error(code)
+            self._log().error(f"move_home execute_trajectory failed: {err_msg}")
         return code == 1
 
     def _scaled_joint_duration(self, base_duration_sec: float, speed: float | None) -> float:
@@ -1940,10 +2010,11 @@ class Ros2PickPlaceController:
         result = self._wait_future(result_future, timeout_sec=30.0, label=f"result:{label}")
         code = result.result.error_code.val if result else None
         if code != 1:
+            err_msg = self._format_moveit_error(code)
             self._last_failure_message = (
-                f"[{label}] execute_trajectory failed with error_code={code}"
+                f"[{label}] execute_trajectory failed: {err_msg}"
             )
-            self._log().error(f"[{label}] execute_trajectory failed with error_code={code}")
+            self._log().error(self._last_failure_message)
             return False
         self._last_failure_message = ""
         return True

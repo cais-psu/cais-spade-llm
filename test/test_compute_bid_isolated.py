@@ -1,4 +1,4 @@
-from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import (
+from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
     _tool_signature,
     compute_bid,
 )

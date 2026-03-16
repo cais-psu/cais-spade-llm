@@ -5,19 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
+from uuid import uuid4
 from cais_spade_llm.prompts import (
     build_requirement_parse_prompt,
     build_replan_prompt,
-    build_state_exploration_prompt,
     build_task_expansion_prompt,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import LlmBridgeReplannerMixin
 from collections import defaultdict, deque
 
-class ProcessPlanner:
+class ProcessPlanner(LlmBridgeReplannerMixin):
     """
     1. NL → structured requirement nodes   (build_high_level)
     2. requirement nodes → executable task DAG   (expand_requirements_to_tasks)
@@ -500,173 +502,6 @@ class ProcessPlanner:
         except (TypeError, ValueError):
             return None
 
-    def _bridge_grounding_context(
-        self,
-        *,
-        focused_resource_jid: str,
-        bridge_snapshot: dict[str, Any] | None,
-        bridge_resources: dict[str, dict[str, Any]] | None,
-        part_tracker: dict[str, Any],
-        goal_state: str,
-        P_id: list[str],
-        obligation_targets: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Build the generic grounding context exposed to primitive bridge prompts."""
-        snapshot = dict(bridge_snapshot or {})
-        context: dict[str, Any] = {
-            "resource": {
-                "jid": str(focused_resource_jid or "").strip(),
-                "current_state": snapshot.get("current_state"),
-                "held_part": snapshot.get("held_part"),
-                "gripper_state": snapshot.get("gripper_state"),
-                "current_pose": deepcopy(snapshot.get("current_pose")),
-                "current_pose_ref": snapshot.get("current_pose_ref"),
-                "named_poses": {
-                    str(pose_name): str(pose_name)
-                    for pose_name in (snapshot.get("named_poses") or [])
-                    if str(pose_name).strip()
-                },
-            },
-            "resources": {},
-            "parts": {},
-            "goal": {
-                "goal_state": str(goal_state or "").strip(),
-                "pending_parts": [str(part_name) for part_name in (P_id or []) if str(part_name).strip()],
-            },
-            "focused_resource_jid": str(focused_resource_jid or "").strip(),
-            "obligation_targets": deepcopy(obligation_targets or []),
-        }
-
-        for resource_jid, raw_entry in (bridge_resources or {}).items():
-            if not isinstance(raw_entry, dict):
-                continue
-            resource_snapshot = dict(raw_entry.get("bridge_snapshot") or raw_entry.get("primitive_snapshot") or {})
-            context["resources"][str(resource_jid)] = {
-                "jid": str(resource_jid),
-                "current_state": resource_snapshot.get("current_state"),
-                "held_part": resource_snapshot.get("held_part"),
-                "gripper_state": resource_snapshot.get("gripper_state"),
-                "current_pose": deepcopy(resource_snapshot.get("current_pose")),
-                "current_pose_ref": resource_snapshot.get("current_pose_ref"),
-                "named_poses": {
-                    str(pose_name): str(pose_name)
-                    for pose_name in (resource_snapshot.get("named_poses") or [])
-                    if str(pose_name).strip()
-                },
-                "modeled_state": deepcopy(raw_entry.get("modeled_state") or {}),
-                "pending_tasks": deepcopy(raw_entry.get("pending_tasks") or []),
-                "static_capabilities": deepcopy(raw_entry.get("static_capabilities") or {}),
-            }
-
-        geometry_lookup = getattr(self.product_agent, "_geometry_for_part", None)
-        for part_name, raw_info in (part_tracker or {}).items():
-            name = str(part_name or "").strip()
-            if not name:
-                continue
-
-            info = raw_info if isinstance(raw_info, dict) else {}
-            observed_pose = None
-            for candidate_key in ("observed_pose", "position", "pose", "location"):
-                observed_pose = self._coerce_xyz_pose(info.get(candidate_key))
-                if observed_pose is not None:
-                    break
-
-            target: dict[str, Any] | None = None
-            if callable(geometry_lookup):
-                try:
-                    geometry = geometry_lookup(name) or {}
-                except Exception:
-                    geometry = {}
-                if isinstance(geometry, dict):
-                    slot_xy = geometry.get("slot_xy")
-                    board_center = geometry.get("board_center") or {}
-                    if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
-                        try:
-                            board_top_z = float(
-                                geometry.get("slot_floor_z_m", board_center.get("z", 0.0))
-                            )
-                            target = {
-                                "slot_pose": {
-                                    "x": float(board_center.get("x", 0.0)) + float(slot_xy[0]),
-                                    "y": float(board_center.get("y", 0.0)) + float(slot_xy[1]),
-                                    "z": board_top_z,
-                                },
-                                "board_top_z": board_top_z,
-                            }
-                            if geometry.get("part_height_m") is not None:
-                                target["part_height"] = float(geometry["part_height_m"])
-                            if geometry.get("model_name"):
-                                target["model_name"] = str(geometry["model_name"])
-                        except (TypeError, ValueError):
-                            target = None
-
-            context["parts"][name] = {
-                "state": info.get("state"),
-                "location": deepcopy(info.get("location")),
-                "last_known_location": deepcopy(info.get("last_known_location")),
-                "observed_pose": observed_pose,
-                "target": target,
-            }
-
-        return context
-
-    async def _bridge_primitive_context(
-        self,
-        *,
-        target_jid: str,
-        resource_states: dict[str, dict[str, Any]],
-        default_resource_state: str,
-        part_states: dict[str, Any],
-        part_locations: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, dict[str, dict[str, Any]]]:
-        focused_resource = self._resource_by_jid(target_jid)
-        if focused_resource is None:
-            return None, None, {}
-
-        from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
-            build_primitive_catalog,
-        )
-
-        focused_primitive_catalog: list[dict[str, Any]] | None = None
-        focused_bridge_snapshot: dict[str, Any] | None = None
-        bridge_resources: dict[str, dict[str, Any]] = {}
-
-        try:
-            for resource in self.resource_agents:
-                resource_jid = str(getattr(resource, "jid", "")).strip()
-                if not resource_jid:
-                    continue
-                if not hasattr(resource, "_BRIDGE_PRIMITIVES") or not hasattr(resource, "get_bridge_snapshot"):
-                    continue
-
-                primitive_catalog = build_primitive_catalog(resource) or []
-                bridge_snapshot = await asyncio.to_thread(resource.get_bridge_snapshot)
-                bridge_resources[resource_jid] = {
-                    "resource_jid": resource_jid,
-                    "primitive_catalog": primitive_catalog,
-                    "bridge_snapshot": bridge_snapshot or {},
-                    "modeled_state": self._build_resource_search_state(
-                        resource_jid=resource_jid,
-                        resource_states=resource_states,
-                        default_resource_state=default_resource_state,
-                        part_states=part_states,
-                        part_locations=part_locations,
-                    ),
-                    "pending_tasks": deepcopy(self._pending_resource_tasks(resource_jid)),
-                    "static_capabilities": deepcopy(getattr(resource, "static_capabilities", {}) or {}),
-                }
-                if resource_jid == target_jid:
-                    focused_primitive_catalog = primitive_catalog or None
-                    focused_bridge_snapshot = bridge_snapshot or None
-
-            return focused_primitive_catalog, focused_bridge_snapshot, bridge_resources
-        except Exception:
-            self.logger.exception(
-                "[Planner] Failed to build whole-system primitive bridge context for %s",
-                target_jid,
-            )
-            return None, None, {}
-
     def _identify_stuck_resource(
         self,
         violations: list[dict[str, Any]],
@@ -723,43 +558,23 @@ class ProcessPlanner:
         part_states: dict[str, Any],
         part_locations: dict[str, Any],
     ) -> dict[str, Any]:
+        from cais_spade_llm.resources.resource_profile import (
+            get_resource_profile,
+        )
+
         rs = resource_states.get(resource_jid, {})
-        current_part = rs.get("held_part")
-        inferred_gripper_part = self._infer_canonical_gripper_part(
-            resource_jid=resource_jid,
-            current_part=current_part,
-            part_states=part_states,
-            part_locations=part_locations,
+        resource_type = str(rs.get("resource_type", "") or "").strip().lower()
+        profile = get_resource_profile(resource_type or "resource")
+        current_part = rs.get(
+            str(profile.carried_entity_field or "current_part")
         )
         return {
             "resource_state": rs.get("current_state", default_resource_state),
-            "current_part": inferred_gripper_part,
+            "current_part": current_part,
             "current_location": rs.get("current_location"),
             "part_states": part_states,
             "part_locations": part_locations,
         }
-
-    @staticmethod
-    def _infer_canonical_gripper_part(
-        *,
-        resource_jid: str,
-        current_part: Any,
-        part_states: dict[str, Any],
-        part_locations: dict[str, Any],
-    ) -> Any:
-        part_key = str(current_part or "").strip()
-        if part_key and part_key in part_states:
-            return current_part
-
-        gripper_location = f"{resource_jid}_gripper"
-        candidates = [
-            name
-            for name, location in (part_locations or {}).items()
-            if str(name or "").strip() and location == gripper_location
-        ]
-        if len(candidates) == 1:
-            return candidates[0]
-        return current_part
 
     def _project_resource_suffix_state(
         self,
@@ -780,7 +595,7 @@ class ProcessPlanner:
         (None, last_successfully_projected_task_id, failure_reason) so callers
         can fall back to the live snapshot.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import (
+        from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
             simulate_catalog_transition,
         )
 
@@ -894,570 +709,6 @@ class ProcessPlanner:
                 targets.append(deepcopy(target))
 
         return targets
-
-    async def prepare_bridge_request(
-        self,
-        *,
-        stuck_state: dict[str, Any],
-        P_id: list[str],
-        ra_jid: str,
-        goal_state: str,
-        tools_catalog: list[dict[str, Any]],
-        part_tracker: dict[str, Any],
-        obligation_targets: list[dict[str, Any]],
-        bridge_feedback: str,
-        resource_states: dict[str, dict[str, Any]],
-        default_resource_state: str,
-        part_states: dict[str, Any],
-        part_locations: dict[str, Any],
-    ) -> dict[str, Any]:
-        bridge_debug: dict[str, Any] = {
-            "requested_at_utc": datetime.now(timezone.utc).isoformat(),
-            "request": {
-                "stuck_state": deepcopy(stuck_state),
-                "P_id": deepcopy(P_id),
-                "ra_jid": str(ra_jid or "").strip(),
-                "goal_state": str(goal_state or "").strip(),
-                "part_tracker": deepcopy(part_tracker),
-                "obligation_targets": deepcopy(obligation_targets),
-                "bridge_feedback": str(bridge_feedback or "").strip(),
-                "resource_states": deepcopy(resource_states),
-                "default_resource_state": str(default_resource_state or "").strip(),
-                "part_states": deepcopy(part_states),
-                "part_locations": deepcopy(part_locations),
-            },
-        }
-        self._set_last_bridge_debug(bridge_debug)
-
-        primitive_catalog, bridge_snapshot, bridge_resources = await self._bridge_primitive_context(
-            target_jid=ra_jid,
-            resource_states=resource_states,
-            default_resource_state=default_resource_state,
-            part_states=part_states,
-            part_locations=part_locations,
-        )
-        grounding_context = self._bridge_grounding_context(
-            focused_resource_jid=ra_jid,
-            bridge_snapshot=bridge_snapshot,
-            bridge_resources=bridge_resources,
-            part_tracker=part_tracker,
-            goal_state=goal_state,
-            P_id=P_id,
-            obligation_targets=obligation_targets,
-        )
-        resource_infos = self._resource_infos()
-        primitive_mode = bool(primitive_catalog or bridge_resources)
-        bridge_debug["primitive_mode"] = primitive_mode
-        bridge_debug["bridge_context"] = {
-            "primitive_mode": primitive_mode,
-            "primitive_catalog": deepcopy(primitive_catalog),
-            "bridge_snapshot": deepcopy(bridge_snapshot),
-            "bridge_resources": deepcopy(bridge_resources),
-            "grounding_context": deepcopy(grounding_context),
-            "resource_infos": deepcopy(resource_infos),
-        }
-        bridge_debug["llm_inputs"] = {
-            "stuck_state": deepcopy(stuck_state),
-            "P_id": deepcopy(P_id),
-            "ra_jid": str(ra_jid or "").strip(),
-            "goal_state": str(goal_state or "").strip(),
-            "part_tracker": deepcopy(part_tracker),
-            "obligation_targets": deepcopy(obligation_targets),
-            "operator_feedback": str(bridge_feedback or "").strip(),
-            "resource_infos": deepcopy(resource_infos),
-            "tools_catalog": deepcopy(tools_catalog),
-            "primitive_catalog": deepcopy(primitive_catalog),
-            "bridge_snapshot": deepcopy(bridge_snapshot),
-            "grounding_context": deepcopy(grounding_context),
-            "bridge_resources": deepcopy(bridge_resources),
-        }
-        bridge_debug["prompt"] = build_state_exploration_prompt(
-            stuck_state=stuck_state,
-            part_tracker=part_tracker,
-            P_id=P_id,
-            goal_state=goal_state,
-            ra_jid=ra_jid,
-            tools_catalog=tools_catalog,
-            resource_infos=resource_infos,
-            obligation_targets=obligation_targets,
-            operator_feedback=bridge_feedback,
-            primitive_catalog=primitive_catalog,
-            bridge_snapshot=bridge_snapshot,
-            grounding_context=grounding_context,
-            bridge_resources=bridge_resources,
-        )
-        bridge_debug["warning_messages"] = []
-        bridge_debug["normalized_proposal"] = None
-        bridge_debug["status"] = "ready"
-        self._set_last_bridge_debug(bridge_debug)
-        return {
-            "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
-            "stuck_state": deepcopy(stuck_state),
-            "P_id": deepcopy(P_id),
-            "ra_jid": str(ra_jid or "").strip(),
-            "goal_state": str(goal_state or "").strip(),
-            "tools_catalog": deepcopy(tools_catalog),
-            "part_tracker": deepcopy(part_tracker),
-            "obligation_targets": deepcopy(obligation_targets),
-            "bridge_feedback": str(bridge_feedback or "").strip(),
-            "resource_states": deepcopy(resource_states),
-            "default_resource_state": str(default_resource_state or "").strip(),
-            "part_states": deepcopy(part_states),
-            "part_locations": deepcopy(part_locations),
-            "primitive_catalog": deepcopy(primitive_catalog),
-            "bridge_snapshot": deepcopy(bridge_snapshot),
-            "grounding_context": deepcopy(grounding_context),
-            "bridge_resources": deepcopy(bridge_resources),
-            "resource_infos": deepcopy(resource_infos),
-            "plan_nodes": deepcopy(self.nodes),
-            "bridge_debug": deepcopy(bridge_debug),
-        }
-
-    def validate_preprogrammed_bridge_proposal(
-        self,
-        *,
-        proposal: dict[str, Any],
-        prepared_bridge_request: dict[str, Any],
-        source: str = "preprogrammed_scenario",
-        scenario_id: str = "",
-    ) -> dict[str, Any]:
-        from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
-            _normalize_primitive_bridge_proposal,
-        )
-
-        if not isinstance(proposal, dict) or not proposal:
-            raise ValueError("preprogrammed bridge proposal is missing")
-        if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
-            raise ValueError("prepared bridge request is missing")
-
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        if not isinstance(bridge_debug, dict):
-            bridge_debug = {}
-        bridge_debug["source"] = str(source or "preprogrammed_scenario")
-        if scenario_id:
-            bridge_debug["scenario_id"] = str(scenario_id)
-        bridge_debug["generation_started_at_utc"] = datetime.now(timezone.utc).isoformat()
-        bridge_debug["status"] = "running"
-        bridge_debug["raw_response"] = json.dumps(proposal, indent=2, default=str)
-        self._set_last_bridge_debug(bridge_debug)
-
-        normalized = _normalize_primitive_bridge_proposal(
-            raw=json.dumps(proposal, default=str),
-            ra_jid=str(prepared_bridge_request.get("ra_jid", "") or "").strip(),
-            primitive_catalog=deepcopy(list(prepared_bridge_request.get("primitive_catalog") or [])),
-            bridge_snapshot=deepcopy(prepared_bridge_request.get("bridge_snapshot") or {}),
-            grounding_context=deepcopy(prepared_bridge_request.get("grounding_context") or {}),
-            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
-            obligation_targets=deepcopy(list(prepared_bridge_request.get("obligation_targets") or [])),
-        )
-        bridge_debug["normalized_proposal"] = deepcopy(normalized) if isinstance(normalized, dict) else None
-        if not isinstance(normalized, dict):
-            bridge_debug["modeled_continuation_check"] = {
-                "accepted": False,
-                "reason": "preprogrammed bridge proposal is not valid",
-            }
-            bridge_debug["status"] = "rejected"
-            self._set_last_bridge_debug(bridge_debug)
-            raise ValueError("preprogrammed bridge proposal is not valid")
-
-        bridge_resources = deepcopy(prepared_bridge_request.get("bridge_resources") or {})
-        if bridge_resources and not self._bridge_restores_modeled_continuation(
-            proposal=normalized,
-            goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
-            tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
-            bridge_resources=bridge_resources,
-            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
-        ):
-            bridge_debug["modeled_continuation_check"] = {
-                "accepted": False,
-                "reason": "final projected state did not restore a modeled continuation",
-            }
-            bridge_debug["status"] = "rejected_modeled_continuation"
-            self._set_last_bridge_debug(bridge_debug)
-            raise ValueError(
-                "preprogrammed bridge proposal did not restore a modeled continuation"
-            )
-
-        bridge_debug["modeled_continuation_check"] = {
-            "accepted": True,
-            "reason": "",
-        }
-        bridge_debug["status"] = "accepted"
-        self._set_last_bridge_debug(bridge_debug)
-        return normalized
-
-    async def execute_prepared_bridge_request(
-        self,
-        prepared_bridge_request: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
-            llm_explore_states_and_events,
-        )
-
-        if not isinstance(prepared_bridge_request, dict):
-            raise ValueError("prepared bridge request is missing")
-
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        if not isinstance(bridge_debug, dict):
-            bridge_debug = {}
-        bridge_debug["generation_started_at_utc"] = datetime.now(timezone.utc).isoformat()
-        bridge_debug["status"] = "running"
-        self._set_last_bridge_debug(bridge_debug)
-
-        try:
-            proposal = await llm_explore_states_and_events(
-                stuck_state=deepcopy(prepared_bridge_request.get("stuck_state") or {}),
-                P_id=deepcopy(list(prepared_bridge_request.get("P_id") or [])),
-                ra_jid=str(prepared_bridge_request.get("ra_jid", "") or "").strip(),
-                ask_llm=self.product_agent.ask_llm,
-                goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
-                tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
-                resource_infos=deepcopy(
-                    list(prepared_bridge_request.get("resource_infos") or self._resource_infos())
-                ),
-                part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
-                obligation_targets=deepcopy(
-                    list(prepared_bridge_request.get("obligation_targets") or [])
-                ),
-                operator_feedback=str(prepared_bridge_request.get("bridge_feedback", "") or "").strip(),
-                primitive_catalog=deepcopy(
-                    list(prepared_bridge_request.get("primitive_catalog") or [])
-                ),
-                bridge_snapshot=deepcopy(prepared_bridge_request.get("bridge_snapshot") or {}),
-                grounding_context=deepcopy(prepared_bridge_request.get("grounding_context") or {}),
-                bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
-                debug_trace=bridge_debug,
-            )
-        except Exception as exc:
-            bridge_debug["status"] = "exception"
-            bridge_debug["exception"] = repr(exc)
-            self._set_last_bridge_debug(bridge_debug)
-            raise
-        bridge_resources = deepcopy(prepared_bridge_request.get("bridge_resources") or {})
-        if proposal and bridge_resources and not self._bridge_restores_modeled_continuation(
-            proposal=proposal,
-            goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
-            tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
-            bridge_resources=bridge_resources,
-            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
-        ):
-            bridge_debug["modeled_continuation_check"] = {
-                "accepted": False,
-                "reason": "final projected state did not restore a modeled continuation",
-            }
-            bridge_debug["status"] = "rejected_modeled_continuation"
-            self._set_last_bridge_debug(bridge_debug)
-            self.logger.warning(
-                "[Planner] Bridge proposal rejected because its final projected state does not restore a modeled continuation."
-            )
-            return None
-        bridge_debug["modeled_continuation_check"] = {
-            "accepted": bool(proposal),
-            "reason": "" if proposal else "bridge proposal unavailable or invalid",
-        }
-        self._set_last_bridge_debug(bridge_debug)
-        return proposal
-
-    async def _request_bridge_proposal(
-        self,
-        *,
-        stuck_state: dict[str, Any],
-        P_id: list[str],
-        ra_jid: str,
-        goal_state: str,
-        tools_catalog: list[dict[str, Any]],
-        part_tracker: dict[str, Any],
-        obligation_targets: list[dict[str, Any]],
-        bridge_feedback: str,
-        resource_states: dict[str, dict[str, Any]],
-        default_resource_state: str,
-        part_states: dict[str, Any],
-        part_locations: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        prepared_bridge_request = await self.prepare_bridge_request(
-            stuck_state=stuck_state,
-            P_id=P_id,
-            ra_jid=ra_jid,
-            goal_state=goal_state,
-            tools_catalog=tools_catalog,
-            part_tracker=part_tracker,
-            obligation_targets=obligation_targets,
-            bridge_feedback=bridge_feedback,
-            resource_states=resource_states,
-            default_resource_state=default_resource_state,
-            part_states=part_states,
-            part_locations=part_locations,
-        )
-        return await self.execute_prepared_bridge_request(prepared_bridge_request)
-
-    def _bridge_summary(self, proposal: dict[str, Any] | None) -> list[str]:
-        if not isinstance(proposal, dict):
-            return []
-        summary: list[str] = []
-        primary_obligation = proposal.get("primary_obligation") or {}
-        rule_id = str(primary_obligation.get("rule_id") or "").strip() if isinstance(primary_obligation, dict) else ""
-        if rule_id:
-            summary.append(f"rule:{rule_id}")
-        for task in proposal.get("macro_tasks") or []:
-            if not isinstance(task, dict):
-                continue
-            macro_name = str(task.get("macro_name", "")).strip()
-            if macro_name:
-                summary.append(macro_name)
-            for step in task.get("primitive_steps") or []:
-                if not isinstance(step, dict):
-                    continue
-                primitive = str(step.get("primitive", "")).strip()
-                if primitive:
-                    summary.append(primitive)
-        macro_name = str(proposal.get("macro_name", "")).strip()
-        if macro_name:
-            summary.append(macro_name)
-        function_name = str(proposal.get("function_name", "")).strip()
-        if function_name:
-            summary.append(function_name)
-        for step in proposal.get("primitive_steps") or []:
-            if not isinstance(step, dict):
-                continue
-            primitive = str(step.get("primitive", "")).strip()
-            if primitive:
-                summary.append(primitive)
-        for step in proposal.get("macro_steps") or []:
-            if not isinstance(step, dict):
-                continue
-            fn = str(step.get("function_name", "")).strip()
-            if fn:
-                summary.append(fn)
-        return summary
-
-    @staticmethod
-    def _primitive_bridge_macro_tasks(proposal: dict[str, Any]) -> list[dict[str, Any]]:
-        raw_tasks = proposal.get("macro_tasks")
-        if isinstance(raw_tasks, list) and raw_tasks:
-            return [dict(task) for task in raw_tasks if isinstance(task, dict)]
-        if proposal.get("primitive_steps"):
-            return [dict(proposal)]
-        return []
-
-    def _bridge_sequence_nodes(self, bridge_sequence_id: str) -> list[dict[str, Any]]:
-        sequence_id = str(bridge_sequence_id or "").strip()
-        if not sequence_id:
-            return []
-        nodes = [
-            node
-            for node in self.nodes
-            if node.get("type") == "task"
-            and str(node.get("bridge_sequence_id", "")).strip() == sequence_id
-        ]
-        nodes.sort(
-            key=lambda node: (
-                int(node.get("bridge_sequence_index") or 0),
-                str(node.get("id", "")),
-            )
-        )
-        return nodes
-
-    def remove_bridge_sequence_tail(
-        self,
-        *,
-        bridge_sequence_id: str,
-        completed_task_id: str = "",
-    ) -> list[dict[str, Any]]:
-        sequence_nodes = self._bridge_sequence_nodes(bridge_sequence_id)
-        if not sequence_nodes:
-            return []
-
-        completed_task_id = str(completed_task_id or "").strip()
-        cutoff_index = -1
-        if completed_task_id:
-            current_node = self._find_node(completed_task_id)
-            if current_node is not None:
-                cutoff_index = int(current_node.get("bridge_sequence_index") or 0)
-
-        deletions: list[dict[str, Any]] = []
-        for node in sequence_nodes:
-            node_id = str(node.get("id", "")).strip()
-            sequence_index = int(node.get("bridge_sequence_index") or 0)
-            if completed_task_id and node_id == completed_task_id:
-                continue
-            if cutoff_index > 0 and sequence_index <= cutoff_index:
-                continue
-            deletions.append(
-                {
-                    "id": node_id,
-                    "delete": True,
-                    "change_reason": (
-                        "DELETION: remove remaining approved bridge tail "
-                        f"for sequence {bridge_sequence_id}"
-                    ),
-                }
-            )
-
-        if deletions:
-            self._apply_replan_patch(deletions)
-        return deletions
-
-    def can_execute_task_from_system_state(
-        self,
-        *,
-        task_id: str,
-        system_coordination_state: dict[str, Any] | None,
-        part_tracker: dict[str, Any] | None,
-    ) -> bool:
-        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import (
-            simulate_catalog_transition,
-        )
-
-        node = self._find_node(task_id)
-        if not isinstance(node, dict) or node.get("type") != "task":
-            return False
-
-        function_name = str(node.get("function_name", "")).strip()
-        resource_jid = str(node.get("resource_jid", "")).strip()
-        if not function_name or not resource_jid or function_name == "execute_recovery_macro":
-            return False
-
-        tools_catalog = getattr(self.product_agent, "tools_catalog", [])
-        default_resource_state = self._default_resource_state(tools_catalog)
-        resource_states = self._extract_resource_states(system_coordination_state or {})
-        part_states: dict[str, Any] = {}
-        part_locations: dict[str, Any] = {}
-        for part_name, raw_info in (part_tracker or {}).items():
-            name = str(part_name or "").strip()
-            if not name:
-                continue
-            info = raw_info if isinstance(raw_info, dict) else {}
-            part_states[name] = info.get("state")
-            part_locations[name] = info.get("location")
-
-        x_c = self._build_resource_search_state(
-            resource_jid=resource_jid,
-            resource_states=resource_states,
-            default_resource_state=default_resource_state,
-            part_states=part_states,
-            part_locations=part_locations,
-        )
-        resource = self._resource_by_jid(resource_jid)
-        reachability = getattr(resource, "static_capabilities", {}).get("reachability", []) if resource else []
-        staging_areas = getattr(resource, "static_capabilities", {}).get("staging_areas", {}) if resource else {}
-        goal_state = self._resolve_goal_part_state(tools_catalog) or ""
-        simulated = simulate_catalog_transition(
-            x_c=x_c,
-            tools=tools_catalog,
-            resource_jid=resource_jid,
-            function_name=function_name,
-            params=dict(node.get("params") or {}),
-            goal_state=goal_state,
-            reachability=reachability,
-            staging_areas=staging_areas,
-        )
-        return simulated is not None
-
-    def _bridge_projected_search_state(
-        self,
-        *,
-        resource_jid: str,
-        bridge_resources: dict[str, dict[str, Any]],
-        projected_resource_snapshots: dict[str, dict[str, Any]],
-        part_states: dict[str, Any],
-        part_locations: dict[str, Any],
-    ) -> dict[str, Any]:
-        resource_entry = dict(bridge_resources.get(resource_jid) or {})
-        modeled_state = dict(resource_entry.get("modeled_state") or {})
-        projected_snapshot = dict(projected_resource_snapshots.get(resource_jid) or {})
-        search_state = {
-            "resource_state": modeled_state.get("resource_state", "idle"),
-            "current_part": modeled_state.get("current_part"),
-            "current_location": modeled_state.get("current_location"),
-            "part_states": dict(part_states),
-            "part_locations": dict(part_locations),
-        }
-        if "current_state" in projected_snapshot:
-            search_state["resource_state"] = projected_snapshot.get("current_state") or search_state["resource_state"]
-        if "held_part" in projected_snapshot:
-            search_state["current_part"] = self._infer_canonical_gripper_part(
-                resource_jid=resource_jid,
-                current_part=projected_snapshot.get("held_part"),
-                part_states=part_states,
-                part_locations=part_locations,
-            )
-        if projected_snapshot.get("current_pose_ref") is not None:
-            search_state["current_location"] = projected_snapshot.get("current_pose_ref")
-        return search_state
-
-    def _bridge_restores_modeled_continuation(
-        self,
-        *,
-        proposal: dict[str, Any],
-        goal_state: str,
-        tools_catalog: list[dict[str, Any]],
-        bridge_resources: dict[str, dict[str, Any]],
-        fallback_part_tracker: dict[str, Any],
-    ) -> bool:
-        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
-
-        if not goal_state:
-            return True
-
-        projected_resource_snapshots = proposal.get("projected_resource_snapshots") or {}
-        if not isinstance(projected_resource_snapshots, dict) or not projected_resource_snapshots:
-            return True
-
-        projected_parts_raw = proposal.get("projected_parts") or {}
-        projected_parts = projected_parts_raw if isinstance(projected_parts_raw, dict) else {}
-        part_states: dict[str, Any] = {}
-        part_locations: dict[str, Any] = {}
-        for part_name, raw_info in (fallback_part_tracker or {}).items():
-            name = str(part_name or "").strip()
-            if not name:
-                continue
-            info = raw_info if isinstance(raw_info, dict) else {}
-            part_states[name] = info.get("state")
-            part_locations[name] = info.get("location")
-        for part_name, raw_info in projected_parts.items():
-            name = str(part_name or "").strip()
-            if not name:
-                continue
-            info = raw_info if isinstance(raw_info, dict) else {}
-            if "state" in info:
-                part_states[name] = info.get("state")
-            if "location" in info:
-                part_locations[name] = info.get("location")
-
-        remaining_parts = [
-            name for name, state in part_states.items()
-            if name and state != goal_state
-        ]
-        if not remaining_parts:
-            return True
-
-        for resource in self.resource_agents:
-            resource_jid = str(getattr(resource, "jid", "")).strip()
-            if not resource_jid:
-                continue
-            if resource_jid not in bridge_resources and resource_jid not in projected_resource_snapshots:
-                continue
-
-            x_c = self._bridge_projected_search_state(
-                resource_jid=resource_jid,
-                bridge_resources=bridge_resources,
-                projected_resource_snapshots=projected_resource_snapshots,
-                part_states=part_states,
-                part_locations=part_locations,
-            )
-            bid = compute_bid(
-                x_c=x_c,
-                P_id=remaining_parts,
-                goal_state=goal_state,
-                tools=tools_catalog,
-                reachability=getattr(resource, "static_capabilities", {}).get("reachability", []),
-                staging_areas=getattr(resource, "static_capabilities", {}).get("staging_areas", {}),
-                resource_jid=resource_jid,
-            )
-            if bid and bid.str_e:
-                return True
-
-        return False
 
     def _node_exists(self, task_id: str) -> bool:
         return any(
@@ -1892,12 +1143,14 @@ class ProcessPlanner:
         DES replanning: PA computes bids per resource, compiles M_e, runs BFS.
         LLM bridge if stuck. Falls back to human intervention if no path found.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
+        from cais_spade_llm.agents.intelligent_product.replanner.des_search.environment_model import (
             compile_environment_model,
             plan_on_environment_model,
         )
-        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import Bid
-        from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import compute_bid
+        from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
+            Bid,
+            compute_bid,
+        )
 
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
         self._set_last_bridge_debug({})
@@ -1930,6 +1183,7 @@ class ProcessPlanner:
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
         default_resource_state = self._default_resource_state(tools_catalog)
         obligation_targets = self._collect_obligation_targets(violations)
+        bridge_safety_context = self._collect_bridge_safety_context(violations)
         used_llm_bridge = False
         bridge_summary: list[str] = []
         path: list[dict[str, Any]] | None = None
@@ -2147,6 +1401,7 @@ class ProcessPlanner:
                 default_resource_state=default_resource_state,
                 part_states=part_states,
                 part_locations=part_locations,
+                bridge_safety_context=bridge_safety_context,
             )
             if str(bridge_generation_mode or "auto").strip().lower() == "manual":
                 message = (

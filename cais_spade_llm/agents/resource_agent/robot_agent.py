@@ -7,6 +7,7 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 
@@ -24,6 +25,7 @@ class RobotAgent(ResourceAgent):
 
     agent_role = "robot"
     _DEFAULT_PREWARM_TIMEOUT_S = 60.0
+    _RESOURCE_PROFILE = ROBOT_PROFILE
 
     def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
         # Failure-injection controls for LG placement tests.
@@ -80,10 +82,6 @@ class RobotAgent(ResourceAgent):
 
         self.agent_name = name
         self._held_part: Optional[str] = None
-
-        # Register bridge-only method in executables for runtime dispatch,
-        # but NOT in function_names / ALLOWED_FUNCS / tools.json.
-        self.executables["execute_recovery_macro"] = self.execute_recovery_macro
 
         # Runtime state tracking for replanning context
         self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed (placed = at destination, part released)
@@ -1096,6 +1094,70 @@ class RobotAgent(ResourceAgent):
         "detach_part",
         "get_current_pose",
     })
+    _BRIDGE_OBSERVATION_PRIMITIVES = frozenset({
+        "detect_parts",
+        "compute_pick_targets",
+        "compute_place_targets",
+        "get_current_pose",
+    })
+
+    async def execute_bridge_observation(
+        self,
+        primitive: str,
+        params: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Execute one planner-approved observation/generation primitive."""
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+            extract_step_output,
+        )
+
+        primitive_name = str(primitive or "").strip()
+        normalized_params = dict(params or {})
+        if primitive_name not in self._BRIDGE_OBSERVATION_PRIMITIVES:
+            return {
+                "success": False,
+                "message": (
+                    f"bridge observation primitive '{primitive_name}' is not allowed; "
+                    f"allowed={sorted(self._BRIDGE_OBSERVATION_PRIMITIVES)}"
+                ),
+            }
+
+        step_result = await self._execute_primitive(primitive_name, normalized_params)
+        snapshot = self.get_bridge_snapshot()
+        if not step_result.get("success", False):
+            return {
+                "success": False,
+                "message": str(step_result.get("message", "") or f"{primitive_name} failed"),
+                "primitive": primitive_name,
+                "params": normalized_params,
+                "primitive_result": step_result,
+                "snapshot": snapshot,
+            }
+
+        observation, output_error = extract_step_output(
+            primitive=primitive_name,
+            params=normalized_params,
+            step_result=step_result,
+        )
+        if output_error:
+            return {
+                "success": False,
+                "message": f"{primitive_name} output could not be normalized: {output_error}",
+                "primitive": primitive_name,
+                "params": normalized_params,
+                "primitive_result": step_result,
+                "snapshot": snapshot,
+            }
+
+        return {
+            "success": True,
+            "message": str(step_result.get("message", "") or f"{primitive_name} observation ok"),
+            "primitive": primitive_name,
+            "params": normalized_params,
+            "observation": observation,
+            "primitive_result": step_result,
+            "snapshot": snapshot,
+        }
 
     async def execute_recovery_macro(
         self,
@@ -1116,10 +1178,10 @@ class RobotAgent(ResourceAgent):
         but is excluded from function_names and the shared tools catalog.
         It is only callable through bridge-approved recovery macro tasks.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
             extract_step_output,
-            get_robot_bridge_snapshot,
+            get_resource_bridge_snapshot,
             resolve_param_refs,
             snapshot_matches_expected,
             sync_agent_from_bridge_snapshot,
@@ -1156,7 +1218,7 @@ class RobotAgent(ResourceAgent):
         # macro so individual primitive steps can skip the async-lock check.
         await self._ensure_controller_prewarmed()
 
-        runtime_snapshot = get_robot_bridge_snapshot(self)
+        runtime_snapshot = get_resource_bridge_snapshot(self)
         if expected_snapshot:
             matches, mismatch_message = snapshot_matches_expected(runtime_snapshot, expected_snapshot)
             if not matches:
@@ -1215,6 +1277,11 @@ class RobotAgent(ResourceAgent):
         # Execute each primitive step sequentially.
         results: list[Dict[str, Any]] = []
         step_outputs: dict[str, Any] = {}
+        resource_type = str(
+            dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
+            or runtime_snapshot.get("resource_type")
+            or "resource"
+        ).strip().lower() or "resource"
         for step_idx, step in enumerate(primitive_steps):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
             raw_params = step.get("params", {}) if isinstance(step, dict) else {}
@@ -1275,11 +1342,30 @@ class RobotAgent(ResourceAgent):
             results.append({"primitive": primitive, "result": step_result})
 
             if not step_result.get("success", False):
+                enhanced_msg = step_result.get('message', '')
+                
+                # Phase 2: Granular Semantic Error Translation
+                # Inject real-time spatial context into the error so the LLM understands WHY it failed.
+                if primitive in (
+                    "move_cartesian", "move_pose", "move_relative", 
+                    "move_to_named_pose", "attach_part", "close_gripper"
+                ):
+                    try:
+                        pose_res = await self._execute_primitive("get_current_pose", {})
+                        if pose_res and pose_res.get("success") and "pose" in pose_res:
+                            pose = pose_res["pose"]
+                            enhanced_msg += (
+                                f". Context: The robot's end-effector is currently trapped at "
+                                f"[x={pose.get('x', 0):.3f}, y={pose.get('y', 0):.3f}, z={pose.get('z', 0):.3f}]."
+                            )
+                    except Exception as e:
+                        self.logger.warning("[Robot] Failed to capture spatial context during error translation: %s", e)
+
                 return {
                     "status": "failed",
                     "content": (
                         f"Macro '{macro_name}' failed at step {step_idx} "
-                        f"({primitive}): {step_result.get('message', '')}"
+                        f"({primitive}): {enhanced_msg}"
                     ),
                     "observations": {
                         "macro_name": macro_name,
@@ -1305,6 +1391,7 @@ class RobotAgent(ResourceAgent):
                     primitive=primitive,
                     params=params,
                     step_result=step_result,
+                    resource_type=resource_type,
                 )
                 if output_error:
                     return {
@@ -1348,7 +1435,7 @@ class RobotAgent(ResourceAgent):
     def _cached_primitive_catalog(self) -> list:
         """Return the cached primitive catalog, building it on first access."""
         if self._primitive_catalog_cache is None:
-            from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
                 build_primitive_catalog,
             )
 
@@ -1418,11 +1505,114 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     def get_bridge_snapshot(self) -> Dict[str, Any]:
         """Return the current primitive-level bridge snapshot for this robot."""
-        from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
-            get_robot_bridge_snapshot,
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+            get_resource_bridge_snapshot,
         )
 
-        return get_robot_bridge_snapshot(self)
+        return get_resource_bridge_snapshot(self)
+
+    # ------------------------------------------------------------------ #
+    # Bridge feasibility oracle
+    # ------------------------------------------------------------------ #
+
+    def _is_pose_in_workspace(
+        self,
+        pose: Dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Check if a Cartesian pose falls within this robot's workspace bounds.
+
+        Returns (is_inside, reason).
+        """
+        bounds = self.static_capabilities.get("workspace_bounds")
+        if not bounds or not isinstance(bounds, dict):
+            return True, "no workspace_bounds configured; defaulting to allowed"
+
+        violations: list[str] = []
+        for axis in ("x", "y", "z"):
+            val = pose.get(axis)
+            if val is None:
+                continue
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+            lo = bounds.get(f"{axis}_min_m")
+            hi = bounds.get(f"{axis}_max_m")
+            if lo is not None and val < float(lo):
+                violations.append(
+                    f"{axis}={val:.4f} < {axis}_min_m={float(lo):.4f}"
+                )
+            if hi is not None and val > float(hi):
+                violations.append(
+                    f"{axis}={val:.4f} > {axis}_max_m={float(hi):.4f}"
+                )
+
+        if violations:
+            return False, f"pose outside workspace: {', '.join(violations)}"
+        return True, "pose within workspace bounds"
+
+    def bridge_feasibility_oracle(
+        self,
+        *,
+        operation_kind: str,
+        part_name: str | None,
+        part_context: Dict[str, Any],
+        bridge_snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Workspace-aware feasibility check for bridge recovery events.
+
+        For clear/home operations: always allowed.
+        For pick/place/pick_place: checks the target pose against workspace bounds.
+        Falls back to allowed if no workspace_bounds are configured.
+        """
+        from copy import deepcopy
+
+        op = str(operation_kind or "").strip().lower()
+        evidence: Dict[str, Any] = {
+            "part_context": deepcopy(part_context),
+            "bridge_snapshot": deepcopy(bridge_snapshot),
+            "resource_jid": str(getattr(self, "jid", "") or ""),
+        }
+
+        # Clear/home: always feasible (robot moves to its own named pose).
+        if op in {"clear", "home"}:
+            return {
+                "allowed": True,
+                "reason": f"{op} operation always feasible for own robot",
+                "evidence": evidence,
+            }
+
+        # For pick/place/pick_place: check target pose against workspace.
+        target_pose: Dict[str, Any] | None = None
+        if op in {"pick", "pick_place"}:
+            # Pick target: observed_pose from part_context
+            target_pose = part_context.get("observed_pose")
+            if target_pose is None:
+                # Try nested under "pose"
+                target_pose = part_context.get("pose")
+        elif op == "place":
+            # Place target: slot_pose from target info
+            target_info = part_context.get("target") or {}
+            target_pose = target_info.get("slot_pose") or target_info.get("pose")
+
+        if target_pose is None:
+            # No pose to check; allow (can't determine infeasibility).
+            return {
+                "allowed": True,
+                "reason": f"no target pose available for {op}; defaulting to allowed",
+                "evidence": evidence,
+            }
+
+        inside, reason = self._is_pose_in_workspace(target_pose)
+        evidence["checked_pose"] = deepcopy(target_pose)
+        evidence["workspace_bounds"] = deepcopy(
+            self.static_capabilities.get("workspace_bounds") or {}
+        )
+        return {
+            "allowed": inside,
+            "reason": reason,
+            "evidence": evidence,
+        }
 
     def _snapshot_state(self) -> Dict[str, Any]:
         """Robot-specific state snapshot (override)."""

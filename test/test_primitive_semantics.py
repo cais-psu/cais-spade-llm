@@ -11,17 +11,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_generation import (
     _normalize_primitive_bridge_proposal,
     llm_explore_states_and_events,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     apply_effects_to_snapshot,
     build_primitive_catalog,
     extract_step_output,
-    get_robot_bridge_snapshot,
+    get_resource_bridge_snapshot,
     sync_agent_from_bridge_snapshot,
     validate_and_project_steps,
+)
+from cais_spade_llm.resources.resource_profile import (
+    resource_snapshot_field_value,
+    resource_snapshot_set_field,
 )
 
 
@@ -59,7 +63,7 @@ class _DummyRobot:
         return "ur5e"
 
     def get_bridge_snapshot(self) -> dict:
-        return get_robot_bridge_snapshot(self)
+        return get_resource_bridge_snapshot(self)
 
 
 def test_build_primitive_catalog_includes_preconditions_and_effects():
@@ -68,7 +72,10 @@ def test_build_primitive_catalog_includes_preconditions_and_effects():
 
     attach = by_name["attach_part"]
     assert attach["preconditions"]["held_part"]["equals"] is None
-    assert attach["effects"]["held_part"]["set_from_param"] == "model_name"
+    assert attach["effects"]["held_part"]["set_from_param_any_of"] == [
+        "part_name",
+        "model_name",
+    ]
     assert "held_part must equal None" in attach["semantic_summary"]
 
     open_gripper = by_name["open_gripper"]
@@ -89,14 +96,14 @@ def test_validate_and_project_steps_rejects_attach_when_holding_part():
     )
 
     assert ok is False
-    assert projected["held_part"] == "MRP"
+    assert resource_snapshot_field_value(projected, "held_part") == "MRP"
     assert "held_part" in str(error)
 
 
 def test_validate_and_project_steps_rejects_move_relative_without_pose():
     robot = _DummyRobot()
     snapshot = robot.get_bridge_snapshot()
-    snapshot["current_pose"] = None
+    snapshot = resource_snapshot_set_field(snapshot, "current_pose", None)
 
     ok, _projected, error = validate_and_project_steps(
         [{"primitive": "move_relative", "params": {"dx": 0.1, "dy": 0.0, "dz": 0.2}}],
@@ -121,8 +128,8 @@ def test_validate_and_project_steps_projects_gripper_and_held_part_state():
 
     assert ok is True
     assert error is None
-    assert projected["gripper_state"] == "open"
-    assert projected["held_part"] is None
+    assert resource_snapshot_field_value(projected, "gripper_state") == "open"
+    assert resource_snapshot_field_value(projected, "held_part") is None
 
 
 def test_validate_and_project_steps_accepts_move_pose_and_projects_xyz_only():
@@ -148,7 +155,11 @@ def test_validate_and_project_steps_accepts_move_pose_and_projects_xyz_only():
 
     assert ok is True
     assert error is None
-    assert projected["current_pose"] == {"x": 0.4, "y": -0.1, "z": 0.8}
+    assert resource_snapshot_field_value(projected, "current_pose") == {
+        "x": 0.4,
+        "y": -0.1,
+        "z": 0.8,
+    }
 
 
 def test_normalize_primitive_bridge_proposal_rejects_semantically_invalid_steps():
@@ -263,7 +274,11 @@ def test_validate_and_project_steps_supports_store_as_and_step_output_refs():
 
     assert ok is True
     assert error is None
-    assert projected["current_pose"] == {"x": 0.31, "y": -0.12, "z": 0.15}
+    assert resource_snapshot_field_value(projected, "current_pose") == {
+        "x": 0.31,
+        "y": -0.12,
+        "z": 0.15,
+    }
 
 
 def test_validate_and_project_steps_supports_compute_place_targets_without_pick_ctx():
@@ -303,9 +318,10 @@ def test_validate_and_project_steps_supports_compute_place_targets_without_pick_
 
     assert ok is True
     assert error is None
-    assert math.isclose(projected["current_pose"]["x"], 0.1, rel_tol=0.0, abs_tol=1e-9)
-    assert math.isclose(projected["current_pose"]["y"], -0.08, rel_tol=0.0, abs_tol=1e-9)
-    assert math.isclose(projected["current_pose"]["z"], 1.2525, rel_tol=0.0, abs_tol=1e-9)
+    projected_pose = resource_snapshot_field_value(projected, "current_pose")
+    assert math.isclose(projected_pose["x"], 0.1, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(projected_pose["y"], -0.08, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(projected_pose["z"], 1.2525, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_detect_parts_store_as():
@@ -359,7 +375,10 @@ def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_detec
     )
 
     assert proposal is not None
-    assert proposal["projected_snapshot"]["current_pose"] == {"x": 0.41, "y": -0.18, "z": 0.12}
+    assert resource_snapshot_field_value(
+        proposal["projected_snapshot"],
+        "current_pose",
+    ) == {"x": 0.41, "y": -0.18, "z": 0.12}
     assert proposal["primitive_steps"][1]["params"]["qx"] == {
         "context_ref": "/step_outputs/detected_lcp/pose/qx"
     }
@@ -401,7 +420,10 @@ def test_normalize_primitive_bridge_proposal_accepts_orientation_refs_from_get_c
     )
 
     assert proposal is not None
-    assert proposal["projected_snapshot"]["current_pose"] == {"x": 0.2, "y": 0.1, "z": 0.5}
+    assert resource_snapshot_field_value(
+        proposal["projected_snapshot"],
+        "current_pose",
+    ) == {"x": 0.2, "y": 0.1, "z": 0.5}
     assert proposal["primitive_steps"][1]["params"]["qw"] == {
         "context_ref": "/step_outputs/home_pose/pose/qw"
     }

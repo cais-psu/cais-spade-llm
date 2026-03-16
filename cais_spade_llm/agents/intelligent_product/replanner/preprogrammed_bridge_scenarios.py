@@ -4,10 +4,12 @@ from typing import Any
 
 
 _RECOVER_LG_V1 = "recover_lg_v1"
-_FAST_RECOVERY_SPEED = 0.4
-_CAREFUL_RECOVERY_SPEED = 0.6
+_XARM6_CLEAR_SPEED = 0.5
+_UR5E_TRAVERSE_SPEED = 1.2
+_UR5E_CAREFUL_SPEED = 1.2
+_UR5E_HOME_SPEED = 0.8
 _MCP_RETURN_SHIFT_DY_M = 0.20
-_MCP_RETURN_DESCEND_DZ_M = -0.08
+_MCP_RETURN_DESCEND_DZ_M = -0.10
 _MCP_RETURN_LIFT_DZ_M = 0.10
 _POST_PICK_LIFT_DZ_M = 0.05
 _POST_PLACE_LIFT_DZ_M = 0.08
@@ -15,6 +17,7 @@ _LG_PICK_FINAL_NUDGE_DZ_M = 0.0
 _LG_INSERT_Z_ADJUSTMENT_M = 0.006
 _LG_RECOVERY_APPROACH_HEIGHT_M = 0.06
 _LG_RECOVERY_MIN_PICK_TCP_Z_M = 1.032
+_UR5E_LG_GRIPPER_POSITION = 0.055
 
 
 def build_preprogrammed_bridge_proposal(
@@ -88,7 +91,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "pose_name": {
                                 "context_ref": "/resources/xarm6@localhost/named_poses/home",
                             },
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _XARM6_CLEAR_SPEED,
                         },
                     }
                 ],
@@ -123,8 +126,8 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         "params": {
                             "dx": 0.0,
                             "dy": 0.0,
-                            "dz": -0.135,
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "dz": _MCP_RETURN_DESCEND_DZ_M,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
                     {"primitive": "open_gripper", "params": {}},
@@ -136,12 +139,21 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         },
                     },
                     {
+                        "primitive": "move_relative",
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _POST_PLACE_LIFT_DZ_M,
+                            "speed": _UR5E_TRAVERSE_SPEED,
+                        },
+                    },
+                    {
                         "primitive": "move_to_named_pose",
                         "params": {
                             "pose_name": {
                                 "context_ref": "/resources/ur5e@localhost/named_poses/home",
                             },
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_HOME_SPEED,
                         },
                     },
                 ],
@@ -203,7 +215,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
                             "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
                             "z": {"context_ref": "/step_outputs/lg_pick_targets/travel_z"},
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
@@ -213,7 +225,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
                             "z": {"context_ref": "/step_outputs/lg_pick_targets/pick_z"},
                             **_current_pose_orientation_params(alias="lg_pick_pose"),
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
                     {
@@ -222,10 +234,13 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": _LG_PICK_FINAL_NUDGE_DZ_M,
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
-                    {"primitive": "close_gripper", "params": {}},
+                    {
+                        "primitive": "close_gripper",
+                        "params": {"position": _UR5E_LG_GRIPPER_POSITION},
+                    },
                     {
                         "primitive": "attach_part",
                         "params": {
@@ -238,7 +253,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": _POST_PICK_LIFT_DZ_M,
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
                 ],
@@ -293,7 +308,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "x": {"context_ref": "/step_outputs/lg_insert_targets/slot_x"},
                             "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
                             "z": {"context_ref": "/step_outputs/lg_insert_pose/pose/z"},
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
@@ -303,7 +318,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
                             "z": {"context_ref": "/step_outputs/lg_insert_targets/place_z"},
                             **_current_pose_orientation_params(alias="lg_insert_pose"),
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
                     {"primitive": "open_gripper", "params": {}},
@@ -315,12 +330,21 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         },
                     },
                     {
+                        "primitive": "move_relative",
+                        "params": {
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "dz": _POST_PLACE_LIFT_DZ_M,
+                            "speed": _UR5E_TRAVERSE_SPEED,
+                        },
+                    },
+                    {
                         "primitive": "move_to_named_pose",
                         "params": {
                             "pose_name": {
                                 "context_ref": "/resources/ur5e@localhost/named_poses/home",
                             },
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_HOME_SPEED,
                         },
                     },
                 ],
@@ -358,7 +382,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "pose_name": {
                                 "context_ref": "/resources/ur5e@localhost/named_poses/home",
                             },
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
@@ -388,7 +412,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
                             "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
                             "z": {"context_ref": "/step_outputs/ur5e_home_pose/pose/z"},
-                            "speed": _FAST_RECOVERY_SPEED,
+                            "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
@@ -413,7 +437,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": _POST_PICK_LIFT_DZ_M,
-                            "speed": _CAREFUL_RECOVERY_SPEED,
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
                 ],

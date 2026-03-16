@@ -22,11 +22,13 @@ from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     build_primitive_catalog,
-    get_robot_bridge_snapshot,
+    get_resource_bridge_snapshot,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import _tool_signature
+from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
+    _tool_signature,
+)
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 from cais_spade_llm.ui.bridge import SystemBridge
 
@@ -193,7 +195,7 @@ class _DummyBridgeRobot:
         return self._scope_name
 
     def get_bridge_snapshot(self) -> dict[str, object]:
-        return get_robot_bridge_snapshot(self)
+        return get_resource_bridge_snapshot(self)
 
 
 def _disconnected_recovery_tools() -> list[dict]:

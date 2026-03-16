@@ -20,9 +20,13 @@ async def mock_ask_llm(prompt: str, **kwargs) -> str:
     return await asyncio.to_thread(_call)
 
 async def run_test():
-    from cais_spade_llm.agents.intelligent_product.replanner.resource_bidding import Bid
-    from cais_spade_llm.agents.intelligent_product.replanner.environment_model import (
+    from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
+        Bid,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.des_search.environment_model import (
         compile_environment_model,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_generation import (
         llm_explore_states_and_events,
     )
 

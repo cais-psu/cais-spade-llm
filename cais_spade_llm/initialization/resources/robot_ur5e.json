@@ -17,11 +17,17 @@
     "lg_slippage_scope": "ur5e",
     "gazebo": {
       "static_capabilities": {
+        "resource_type": "robot",
         "reachability": [
           "prusa-mk4-2",
           "prusa-mk3",
           "assembly_board-v1"
         ],
+        "workspace_bounds": {
+          "x_min_m": -0.70, "x_max_m": 0.70,
+          "y_min_m": -0.15, "y_max_m": 1.10,
+          "z_min_m": 0.85, "z_max_m": 1.60
+        },
         "staging_areas": {}
       },
       "controller": {
@@ -85,30 +91,6 @@
       },
       "named_positions": {
         "home": [
-          1.637161,
-          -2.150816,
-          2.028921,
-          -1.452287,
-          -1.561075,
-          1.637331
-        ],
-        "side_pick_approach": [
-          1.637161,
-          -2.150816,
-          2.028921,
-          -1.452287,
-          -1.561075,
-          1.637331
-        ],
-        "side_insert_pre": [
-          1.637161,
-          -2.150816,
-          2.028921,
-          -3.023083,
-          -1.561075,
-          3.208127
-        ],
-        "side_insert_post": [
           1.637161,
           -2.150816,
           2.028921,

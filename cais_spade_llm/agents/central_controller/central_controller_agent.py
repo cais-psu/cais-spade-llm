@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional, Iterable, Dict, List, Set, Tuple
 
@@ -229,11 +230,75 @@ class CentralControllerAgent(LlmAgent):
         # Collect system coordination state (robot states, running tasks, FSA states)
         system_coordination_state = self._collect_system_coordination_state()
         if safety_ctx:
+            normalized_rule_ids = self._normalize_rule_ids(
+                safety_ctx.get("rule_ids")
+                or safety_ctx.get("violated_rule")
+                or safety_ctx.get("violated_rule_id")
+            )
+            bridge_safety_context = dict(safety_ctx.get("bridge_safety_context") or {})
+            merged_rule_ids: list[str] = []
+            for rule_id in [
+                *self._normalize_rule_ids(bridge_safety_context.get("rule_ids")),
+                *normalized_rule_ids,
+            ]:
+                if rule_id and rule_id not in merged_rule_ids:
+                    merged_rule_ids.append(rule_id)
+            merged_rules = [
+                deepcopy(rule)
+                for rule in (bridge_safety_context.get("safety_rules") or [])
+                if isinstance(rule, dict)
+            ]
+            seen_rule_ids = {
+                str(rule.get("id", "") or "").strip()
+                for rule in merged_rules
+                if str(rule.get("id", "") or "").strip()
+            }
+            for rule in self._bridge_safety_rules_for_ids(merged_rule_ids):
+                rule_id = str(rule.get("id", "") or "").strip()
+                if rule_id and rule_id in seen_rule_ids:
+                    continue
+                if rule_id:
+                    seen_rule_ids.add(rule_id)
+                merged_rules.append(deepcopy(rule))
             safety_ctx["obligation_targets"] = self._build_obligation_targets(
                 event=event,
                 safety_info=safety_ctx,
                 system_coordination_state=system_coordination_state,
             )
+            bridge_safety_context.setdefault("constraints", [])
+            bridge_safety_context["rule_ids"] = merged_rule_ids
+            bridge_safety_context["safe_next_task_ids"] = list(
+                bridge_safety_context.get("safe_next_task_ids")
+                or safety_ctx.get("safe_next_task_ids")
+                or []
+            )
+            bridge_safety_context["running_aps"] = list(
+                bridge_safety_context.get("running_aps")
+                or safety_ctx.get("running_aps")
+                or []
+            )
+            bridge_safety_context["candidate_aps"] = list(
+                bridge_safety_context.get("candidate_aps")
+                or safety_ctx.get("candidate_aps")
+                or []
+            )
+            bridge_safety_context["predicted_state_aps"] = list(
+                bridge_safety_context.get("predicted_state_aps")
+                or safety_ctx.get("predicted_state_aps")
+                or []
+            )
+            bridge_safety_context["status"] = str(
+                bridge_safety_context.get("status")
+                or safety_ctx.get("status")
+                or ""
+            ).strip()
+            bridge_safety_context["reason"] = str(
+                bridge_safety_context.get("reason")
+                or safety_ctx.get("reason")
+                or ""
+            ).strip()
+            bridge_safety_context["safety_rules"] = merged_rules
+            safety_ctx["bridge_safety_context"] = bridge_safety_context
 
         # Debug log: capture the full context we are about to send for replanning.
         # Keep logs bounded to avoid flooding if the context grows large.
@@ -269,6 +334,26 @@ class CentralControllerAgent(LlmAgent):
         else:
             items = [value]
         return [str(item).strip() for item in items if str(item).strip()]
+
+    def _bridge_safety_rules_for_ids(self, rule_ids: list[str]) -> list[dict[str, Any]]:
+        requested_ids = {
+            str(rule_id or "").strip()
+            for rule_id in (rule_ids or [])
+            if str(rule_id or "").strip()
+        }
+        if not requested_ids:
+            return []
+        filtered: list[dict[str, Any]] = []
+        seen_rule_ids: set[str] = set()
+        for rule in self.safety_rules or []:
+            if not isinstance(rule, dict):
+                continue
+            rule_id = str(rule.get("id", "") or "").strip()
+            if not rule_id or rule_id not in requested_ids or rule_id in seen_rule_ids:
+                continue
+            seen_rule_ids.add(rule_id)
+            filtered.append(deepcopy(rule))
+        return filtered
 
     def _resource_jid_by_token(self) -> dict[str, str]:
         if not self.safety_monitor:

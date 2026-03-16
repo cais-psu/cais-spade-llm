@@ -17,11 +17,17 @@
     "lg_slippage_scope": "xarm6",
     "gazebo": {
       "static_capabilities": {
+        "resource_type": "robot",
         "reachability": [
           "prusa-mk4-1",
           "prusa-mk3",
           "assembly_board-v1"
         ],
+        "workspace_bounds": {
+          "x_min_m": -0.60, "x_max_m": 0.60,
+          "y_min_m": -1.00, "y_max_m": 0.10,
+          "z_min_m": 0.90, "z_max_m": 1.50
+        },
         "staging_areas": {}
       },
       "controller": {
@@ -85,14 +91,6 @@
       },
       "named_positions": {
         "home": [
-          -1.572631,
-          -1.054702,
-          -0.385494,
-          0.000322,
-          1.440603,
-          -1.572544
-        ],
-        "recovery_clear": [
           -1.572631,
           -1.054702,
           -0.385494,

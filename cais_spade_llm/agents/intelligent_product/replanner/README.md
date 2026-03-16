@@ -17,12 +17,17 @@ The recovery path was changed from a generic suffix-search plus synthetic LLM to
 
 ## Main Files
 
-- `resource_bidding.py`
-  DES forward search over modeled resource states and tool transitions.
-- `environment_model.py`
-  LLM bridge proposal parsing and normalization.
+- `des_search/`
+  DES forward search and resource bidding over modeled resource states and tool
+  transitions.
+- `llm_bridge/`
+  LLM bridge parsing, primitive semantics, bridge safety, deterministic bridge
+  compilation, and the multi-turn DES-guided bridge loop.
+- `classical_vs_llm_bridge.md`
+  Design note on why the current bridge layer is under-modeled for classical planning alone and why `LLM + ReAct + DES` fits the existing task/primitive split.
 - `../process_planner.py`
-  Recovery orchestration, obligation-driven DES selection, and bridge macro materialization.
+  Top-level DES recovery orchestration, obligation-driven DES selection, and
+  delegation into the extracted bridge replanner module.
 - `../../central_controller/central_controller_agent.py`
   Builds formal `obligation_targets` from structured safety rules and current diagnosis.
 - `../product_agent.py`
@@ -217,7 +222,7 @@ Goal selection comes from the formal obligation target, not from wildcard applic
 
 ### Pure robot-state actions
 
-`resource_bidding.py` now supports tools that do not manipulate parts or locations, such as `move_home`.
+`des_search/resource_bidding.py` now supports tools that do not manipulate parts or locations, such as `move_home`.
 
 This matters for suffix recovery cases where:
 
