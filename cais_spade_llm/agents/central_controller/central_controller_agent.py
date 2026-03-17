@@ -63,7 +63,7 @@ class CentralControllerAgent(LlmAgent):
         # Runtime Plan FSA monitor
         self.plan_fsa_monitor: Optional[OnlineFsaMonitor] = None
         self.online_supervisor: Optional[OnlineSafetySupervisor] = None
-        self.runtime_supervisor_mode: str = "preventive"
+        self.runtime_supervisor_mode: str = "reactive"
         
         # NOTE: self.running_aps is removed; the monitor tracks it now.
         
@@ -690,6 +690,26 @@ class CentralControllerAgent(LlmAgent):
 
         return candidates
 
+    def _ap_discharges_obligation(
+        self,
+        *,
+        rule_id: str,
+        ap_label: str,
+        current_q: str,
+        accepting_states: set[str],
+        violation_state: str,
+    ) -> bool:
+        """Return True if firing ap_label alone moves the DFA toward an accepting state."""
+        if not self.safety_monitor or not ap_label:
+            return False
+        next_q = self.safety_monitor._delta(rule_id, current_q, frozenset([ap_label]))
+        if next_q == violation_state:
+            return False
+        if accepting_states:
+            return next_q in accepting_states
+        # No explicit accepting states — any forward progress counts
+        return next_q != current_q
+
     def _candidate_tools_for_obligation(
         self,
         *,
@@ -802,6 +822,29 @@ class CentralControllerAgent(LlmAgent):
                     required_event_aps.append(payload)
                 elif prefix in {"ap_state", "sp"}:
                     required_state_aps.append(payload)
+
+            # Filter event APs to only those that discharge the obligation
+            # from the current DFA state (transition to a non-pending/accepting state).
+            # This prevents including trigger APs (e.g. place_insert) that already fired.
+            current_q = str(
+                (safety_info.get("current_safety_states") or {}).get(rule_id) or ""
+            ).strip()
+            if current_q and self.safety_monitor and len(required_event_aps) > 1:
+                dfa = self.safety_monitor.dfas.get(rule_id, {})
+                accepting_states = set(str(s) for s in (dfa.get("accepting_states") or []))
+                violation_state = str(dfa.get("violation_state") or "").strip()
+                discharge_aps = [
+                    ap for ap in required_event_aps
+                    if self._ap_discharges_obligation(
+                        rule_id=rule_id,
+                        ap_label=str(ap.get("label", "")),
+                        current_q=current_q,
+                        accepting_states=accepting_states,
+                        violation_state=violation_state,
+                    )
+                ]
+                if discharge_aps:
+                    required_event_aps = discharge_aps
 
             if not required_event_aps and not required_state_aps:
                 fallback_event = str(rule.get("event", "")).strip()
@@ -1506,7 +1549,6 @@ class CentralControllerAgent(LlmAgent):
 
                 if skip_revalidation:
                     ok, violations = True, []
-                    winning_set_data = {}
                 else:
                     ok, violations = validator.validate_plan_fsa(
                         fsa=fsa,
@@ -1514,8 +1556,7 @@ class CentralControllerAgent(LlmAgent):
                         product_jid=product_jid
                     )
                 try:
-                    if not skip_revalidation:
-                        winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
+                    winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
                     policy = (
                         dict(agent.precomputed_bundle.get("replan_policy", {}))
                         if isinstance(agent.precomputed_bundle.get("replan_policy"), dict)

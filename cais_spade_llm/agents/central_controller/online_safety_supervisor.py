@@ -250,6 +250,12 @@ class OnlineSafetySupervisor:
                 edge for edge in (self.graph.get(current, []) or [])
                 if str(edge.get("event") or "").strip() == event_label
             ]
+            if diagnosis["status"] == "safe":
+                return True, {
+                    **diagnosis,
+                    "status": "safe",
+                    "candidate_event": event_label,
+                }
             if diagnosis["status"] == "inevitable_violation" or not matching_safe_edges:
                 return True, {
                     **diagnosis,

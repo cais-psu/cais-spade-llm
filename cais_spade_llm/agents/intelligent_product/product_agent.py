@@ -116,6 +116,7 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
+        self._bridge_generation_mode = "auto"
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
         self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
@@ -147,6 +148,11 @@ class ProductAgent(LlmAgent):
                 )
             except Exception:
                 self._runtime_repair_max_attempts = 3
+            self._bridge_generation_mode = str(
+                precomputed_policy.get("bridge_generation_mode", "auto") or "auto"
+            ).strip().lower()
+            if self._bridge_generation_mode not in {"auto", "manual"}:
+                self._bridge_generation_mode = "auto"
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -1867,7 +1873,7 @@ class ProductAgent(LlmAgent):
                 violations,
                 system_coordination_state=system_coordination_state,
                 bridge_feedback=feedback_text,
-                bridge_generation_mode="manual",
+                bridge_generation_mode=self._bridge_generation_mode,
             )
             if not isinstance(result, dict):
                 result = {}

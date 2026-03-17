@@ -382,7 +382,7 @@ class BaseSafetyChecker:
             expr = re.sub(r"\btrue\b", "True", expr, flags=re.IGNORECASE)
             expr = re.sub(r"\bfalse\b", "False", expr, flags=re.IGNORECASE)
             try:
-                self._compiled_expr_cache[label] = compile(expr, "<string>", "eval")
+                self._compiled_expr_cache[label] = compile(expr.strip(), "<string>", "eval")
             except Exception:
                 self.logger.error(f"Failed to compile label expression: {label}")
                 self._compiled_expr_cache[label] = None

@@ -120,6 +120,12 @@ def create_app() -> None:
     # Serve static assets and set Penn State favicon.
     app.add_static_files("/static", str(_STATIC_DIR))
 
+    # Serve safety preview artifacts (DFA PNGs) so browsers that reject
+    # large base64 data URLs (e.g. Microsoft Edge) can load images via URL.
+    _safety_previews_dir = Path(__file__).resolve().parent.parent / "user_verified_safety" / "previews"
+    _safety_previews_dir.mkdir(parents=True, exist_ok=True)
+    app.add_static_files("/safety-previews", str(_safety_previews_dir))
+
     # Import page renderers.
     from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products
 

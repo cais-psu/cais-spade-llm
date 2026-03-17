@@ -3,8 +3,8 @@
   "rules": [
     {
       "id": "SAFE_1",
-      "raw_text": "xarm move_home should be done after its place_insert.",
-      "constraint_type": "ordering_after_event",
+      "raw_text": "xarm move_home must be done after its place_insert.",
+      "constraint_type": "ordering_after_operation",
       "process": "assembly",
       "product": [],
       "resources": [
@@ -14,7 +14,9 @@
         "robot"
       ],
       "event": "move_home",
-      "context": null,
+      "context": {
+        "predecessor_event": "place_insert"
+      },
       "aps": [
         {
           "label": "ap003",
@@ -25,12 +27,12 @@
           "full": "ap_event/assembly/any/xarm6/place_insert/any=true"
         }
       ],
-      "ltlf": "(!(ap003) U ap004)"
+      "ltlf": "G(ap004 -> F(ap003))"
     },
     {
       "id": "SAFE_2",
-      "raw_text": "ur5e move_home should be done after its place_insert.",
-      "constraint_type": "ordering_after_event",
+      "raw_text": "ur5e move_home must be done after its place_insert.",
+      "constraint_type": "ordering_after_operation",
       "process": "assembly",
       "product": [],
       "resources": [
@@ -40,7 +42,9 @@
         "robot"
       ],
       "event": "move_home",
-      "context": null,
+      "context": {
+        "predecessor_event": "place_insert"
+      },
       "aps": [
         {
           "label": "ap001",
@@ -51,7 +55,7 @@
           "full": "ap_event/assembly/any/ur5e/place_insert/any=true"
         }
       ],
-      "ltlf": "(!(ap001) U ap002)"
+      "ltlf": "G(ap002 -> F(ap001))"
     }
   ]
 }

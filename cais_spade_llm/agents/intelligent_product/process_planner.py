@@ -398,7 +398,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             if str(node.get("resource_jid", "")).strip() != str(resource_jid).strip():
                 continue
             status = str(node.get("status", "")).strip()
-            if status in ("pending", "running", "accepted"):
+            if status in ("pending", "running", "accepted", "dispatched"):
                 pending.append(node)
 
         def sort_key(n: dict[str, Any]) -> tuple[int, str]:
@@ -813,6 +813,18 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 sequence_index = 0
             return (sequence_index, task_id)
 
+        # Resolve the tail task's resource so we only bump sequence_index
+        # for same-resource gating (cross-resource bumps break local ordering).
+        tail_resource_jid = ""
+        for t in modified_tasks:
+            if str(t.get("id", "")).strip() == tail_task_id:
+                tail_resource_jid = str(t.get("resource_jid", "")).strip()
+                break
+        if not tail_resource_jid:
+            existing_tail = self._find_node(tail_task_id)
+            if existing_tail:
+                tail_resource_jid = str(existing_tail.get("resource_jid", "")).strip()
+
         for blocked_task_id in sorted(ordered_task_ids, key=_sort_key):
             existing = existing_by_id[blocked_task_id]
             existing_preds = [
@@ -826,17 +838,23 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 if gated_by_resume_chain
                 else list(dict.fromkeys(existing_preds + [tail_task_id]))
             )
-            modified_tasks.append(
-                {
-                    "id": blocked_task_id,
-                    "predecessors": preds,
-                    "sequence_index": next_sequence_index,
-                    "change_reason": (
-                        f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
-                    ),
-                }
+            blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
+            same_resource = (
+                tail_resource_jid
+                and blocked_resource_jid
+                and tail_resource_jid == blocked_resource_jid
             )
-            next_sequence_index += 1
+            mod: dict[str, Any] = {
+                "id": blocked_task_id,
+                "predecessors": preds,
+                "change_reason": (
+                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
+                ),
+            }
+            if same_resource:
+                mod["sequence_index"] = next_sequence_index
+                next_sequence_index += 1
+            modified_tasks.append(mod)
 
     def apply_bridge_macro_proposal(
         self,
@@ -1243,6 +1261,44 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 else:
                     if projection_reason:
                         if has_pending_suffix:
+                            # Check for in_state="any" tools that bypass projection
+                            any_state_tools = [
+                                tool
+                                for tool in (target.get("candidate_tools") or [])
+                                if isinstance(tool, dict)
+                                and str(tool.get("in_state", "")).strip().lower() == "any"
+                            ]
+                            if any_state_tools:
+                                last_pending_id = str(
+                                    pending_suffix[-1].get("id", "")
+                                ).strip()
+                                direct_tool = any_state_tools[0]
+                                direct_path = [
+                                    {
+                                        "function_name": str(
+                                            direct_tool["function_name"]
+                                        ),
+                                        "ra_jid": target_ra_jid,
+                                        "params": {},
+                                    }
+                                ]
+                                if best_path is None or len(direct_path) < len(
+                                    best_path
+                                ):
+                                    best_target = target
+                                    best_path = direct_path
+                                    stuck_ra_jid = target_ra_jid
+                                    x_c = live_candidate_state
+                                    obligation_anchor_task_id = last_pending_id
+                                self.logger.info(
+                                    "[Planner] Obligation recovery: projection failed "
+                                    "for %s but candidate tool %s has in_state=any; "
+                                    "anchoring after last pending task %s.",
+                                    target_ra_jid,
+                                    direct_tool["function_name"],
+                                    last_pending_id,
+                                )
+                                continue
                             self.logger.info(
                                 "[Planner] Obligation recovery projection skipped for %s: %s. "
                                 "Live-state fallback disabled because %d pending/running task(s) "

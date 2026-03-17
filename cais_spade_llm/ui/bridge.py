@@ -1548,7 +1548,7 @@ class SystemBridge:
         except ImportError:
             from agents.central_controller.base_safety_checker import BaseSafetyChecker
         try:
-            checker = BaseSafetyChecker(dfa_map=dfa_map, safety_rules=rules)
+            checker = BaseSafetyChecker(dfa_dots=dfa_map, safety_rules=rules)
             parsed = getattr(checker, "dfas", {})
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
@@ -4701,6 +4701,35 @@ class SystemBridge:
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
 
+    @staticmethod
+    def _force_kill_gazebo_core() -> None:
+        """Hard-kill gzserver/gzclient and clean DDS shared memory.
+
+        Called after stopping a Gazebo simulation and before starting a new one
+        so that a surviving gzserver from a previous session does not hold port
+        11345 or stale shared memory that would prevent the new simulation from
+        spawning robots.
+        """
+        for cmd in [
+            "killall -9 gzserver gzclient 2>/dev/null",
+            "pkill -9 -f gazebo 2>/dev/null",
+            "pkill -9 -f spawn_entity.py 2>/dev/null",
+            "pkill -9 -f 'spawner' 2>/dev/null",
+        ]:
+            subprocess.run(["bash", "-c", cmd], capture_output=True)
+        for pattern in [
+            "/dev/shm/fastrtps_*",
+            "/dev/shm/cyclonedds_*",
+            "/tmp/gazebo-*",
+            "/tmp/.gazebo-*",
+        ]:
+            subprocess.run(
+                ["bash", "-c", f"rm -rf {pattern} 2>/dev/null"],
+                capture_output=True,
+                timeout=5,
+            )
+        time.sleep(2)
+
     def ros2_start(self, name: str) -> str | None:
         """Start a ROS2 process by name. Returns error string or None on success."""
         if name not in self.ROS2_LAUNCH_CMDS:
@@ -4734,12 +4763,14 @@ class SystemBridge:
         elif name in self._GAZEBO_PROCESS_NAMES:
             self.robot_env = "gazebo"
             self._stop_teleop_server()
-            if not self._any_running(self._GAZEBO_PROCESS_NAMES):
-                # If a prior Gazebo session died outside the normal stop path,
-                # make sure stale helper/controller listeners do not survive
-                # into the next sim-time epoch.
-                self._shutdown_gazebo_prewarm_controllers()
-                self._kill_stale_gazebo_helpers()
+            # Always purge any surviving gzserver/gzclient and stale shared
+            # memory before launching a new simulation.  Without this, a
+            # previous session that was not cleanly stopped leaves gzserver
+            # holding port 11345, causing spawn_entity.py to time out and the
+            # robot to never appear in the new Gazebo window.
+            self._shutdown_gazebo_prewarm_controllers()
+            self._kill_stale_gazebo_helpers()
+            self._force_kill_gazebo_core()
 
         cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
         try:
@@ -4781,6 +4812,7 @@ class SystemBridge:
         if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
+            self._force_kill_gazebo_core()
         return None
 
     def ros2_stop_all(self) -> None:
@@ -4790,6 +4822,7 @@ class SystemBridge:
             self.ros2_stop(name)
         self._shutdown_gazebo_prewarm_controllers()
         self._kill_stale_gazebo_helpers()
+        self._force_kill_gazebo_core()
 
     def ros2_kill_gazebo(self) -> None:
         """Kill any orphan Gazebo / ROS2 processes (cleanup helper)."""
@@ -4819,6 +4852,7 @@ class SystemBridge:
             "killall -9 gzserver gzclient 2>/dev/null",
             "killall -9 move_group rviz2 robot_state_publisher joint_state_publisher static_transform_publisher ros2_control_node 2>/dev/null",
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
+            "pkill -9 -f spawn_entity.py 2>/dev/null",
             "pkill -9 -f xarm_driver_node 2>/dev/null",
             "pkill -9 -f controller_manager 2>/dev/null",
             "pkill -9 -f 'spawner' 2>/dev/null",

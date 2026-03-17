@@ -1,2 +1,0 @@
-- xarm move_home should be done after its place_insert.
-- ur5e move_home should be done after its place_insert.

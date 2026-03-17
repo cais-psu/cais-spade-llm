@@ -522,16 +522,16 @@ Available operators:
 
 Guidelines:
   - **INVARIANTS (Use G):** If the rule describes a state that must ALWAYS hold (e.g., "Robot must never collide", "Temperature < 100"), wrap the formula in G(...).
-  - **ONE-OFF SEQUENCES (No G):** If the rule describes a specific sequence of events that happens once per cycle (e.g., "Place A before B"), **DO NOT use G**.
-    - The sequence is satisfied once the events occur.
-    - Using G(...) for one-off events will cause a violation after the event completes.
-
-  - You must use Example E for ordering constraint.
+  - **RESPONSE / LIVENESS (Use G + F):** If the rule says "whenever X happens, Y must eventually follow" or "after every X, Y must be done" — this is a recurring obligation. Use Example B: G(trigger -> F(consequence)).
+    - Keywords: "must be done after", "must eventually follow", "after every ... must".
+    - This fires every time the trigger event occurs, not just once.
+  - **ONE-OFF SEQUENCE (No G, Use U):** If the rule describes a strict one-time ordering where B is forbidden until A has occurred first (e.g., "A must happen before B in this cycle"), use Example E: (!b) U a.
+    - Keywords: "must happen before", "before ... can happen", "only after".
+    - Use this only when the constraint is a one-shot prerequisite, not a recurring obligation.
 
 CRITICAL FORMATTING RULE:
 - The "ltlf" field must be a valid JSON string.
 - You MUST wrap the entire formula in double quotes.
-- Example: "ltlf": "(!b) U a"  <-- Note: No G for simple ordering
 """).strip()
 
 SAFETY_LTLF_FEWSHOT = dedent("""
@@ -542,20 +542,22 @@ Natural-language: "Two conditions should never hold together."
 APs: p1, p2
 LTLf: G !(p1 & p2)
 
-Example B (Invariant / Triggered Condition):
-Natural-language: "Whenever A occurs, B must eventually follow."
-APs: a, b
+Example B (Response / Liveness — recurring obligation):
+Natural-language: "Whenever A occurs, B must eventually follow." / "B must be done after A." / "After every A, B must happen."
+APs: a (trigger), b (required consequence)
 LTLf: G (a -> F b)
+Note: Use this when the obligation recurs every time the trigger fires.
 
 Example C (Duration):
 Natural-language: "Condition A must hold until condition B becomes true."
 APs: a, b
 LTLf: a U b
 
-Example E (Ordering / Sequence - NO "G"):
-Natural-language: "Event A must happen before Event B."
-APs: a, b   # a = earlier event, b = later event
+Example E (One-off prerequisite ordering — B forbidden until A has occurred):
+Natural-language: "Event A must happen before Event B (one-time constraint)." / "B cannot happen until A has happened first."
+APs: a (prerequisite), b (dependent event)
 LTLf: (!b) U a
+Note: Use ONLY for one-shot prerequisites where B is blocked until A fires. Do NOT use for recurring "must follow" obligations — use Example B instead.
 """).strip()
 
 SAFETY_FORMULA_AST_TEMPLATE_DOC = dedent("""

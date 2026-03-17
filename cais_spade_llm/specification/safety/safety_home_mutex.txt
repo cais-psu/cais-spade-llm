@@ -1,0 +1,4 @@
+[Safety Requirements]
+- xarm6 should move back home after placing its part is done.
+- ur5e should move back home after placing its part is done.
+- ur5e and xarm6 must not be in the assembly board destination area at the same time.

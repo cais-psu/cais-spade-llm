@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import re
 from pathlib import Path
@@ -248,7 +247,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             }
             return mapping.get(str(reason or "").strip(), str(reason or "unknown"))
 
-        def _png_data_url(path_value: str) -> str:
+        def _png_url(path_value: str) -> str:
+            """Return a /safety-previews/... URL for the PNG, avoiding base64 data URLs
+            that some browsers (Edge) refuse to load when they exceed size limits."""
             raw = str(path_value or "").strip()
             if not raw:
                 return ""
@@ -256,8 +257,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if not p.exists():
                 return ""
             try:
-                encoded = base64.b64encode(p.read_bytes()).decode("ascii")
-                return f"data:image/png;base64,{encoded}"
+                # path is like .../user_verified_safety/previews/<id>/<rule>_dfa.png
+                # Serve as /safety-previews/<id>/<rule>_dfa.png
+                previews_root = p.parent.parent
+                rel = p.relative_to(previews_root)
+                return f"/safety-previews/{rel.as_posix()}"
             except Exception:
                 return ""
 
@@ -328,12 +332,12 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     rid = str(rule.get("id", "") or "rule")
                     dfa_status = str(rule.get("dfa_status", "") or "").strip()
                     dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
-                    data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
+                    img_url = _png_url(str(rule.get("dfa_png_path", "")))
                     with ui.card().classes("bg-white border border-slate-200 w-[calc(50%-0.5rem)] min-w-[18rem]"):
                         ui.label(rid).classes("text-sm font-semibold")
-                        if data_url and dfa_status == "ok":
+                        if img_url and dfa_status == "ok":
                             ui.html(
-                                f"<img src='{data_url}' style='max-width:100%;height:auto;"
+                                f"<img src='{img_url}' style='max-width:100%;height:auto;"
                                 "border:1px solid #e2e8f0;border-radius:8px;' />"
                             ).classes("w-full")
                         else:

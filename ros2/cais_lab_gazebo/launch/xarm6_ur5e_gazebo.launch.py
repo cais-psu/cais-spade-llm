@@ -524,6 +524,7 @@ def launch_setup(context, *args, **kwargs):
             '-topic', '/robot_description',
             '-entity', 'dual_robot',
             '-x', '0.0', '-y', '0.0', '-z', '0.0',
+            '-timeout', '120',
         ],
     )
 

@@ -97,6 +97,9 @@ _KILL_CMDS: list[str] = [
         "ros2_control_node 2>/dev/null"
     ),
     "pkill -9 -f gazebo 2>/dev/null",
+    # spawn_entity.py can be mid-spawn when switching simulations; kill it so
+    # it does not hold /spawn_entity calls that block the next Gazebo startup.
+    "pkill -9 -f spawn_entity.py 2>/dev/null",
     "pkill -9 -f keyboard_teleop.py 2>/dev/null",
     "pkill -9 -f 'spawner' 2>/dev/null",
     "pkill -9 -f xarm_driver_node 2>/dev/null",
