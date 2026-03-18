@@ -1,0 +1,2 @@
+[Safety Requirements]
+- ur5e and xarm6 must not place_approach the assembly board area at the same time.
