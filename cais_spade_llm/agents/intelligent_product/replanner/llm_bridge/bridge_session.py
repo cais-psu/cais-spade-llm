@@ -21,7 +21,7 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
 )
-from cais_spade_llm.prompts import BridgeHintLevel, build_bridge_turn_prompt
+from cais_spade_llm.prompts import build_bridge_turn_prompt
 
 
 def _bridge_compact_react_trace(turn_response: dict[str, Any]) -> str:
@@ -178,19 +178,6 @@ class BridgeSessionMixin:
             prepared_bridge_request["bridge_debug"] = bridge_debug
         return grounding_context
 
-    @staticmethod
-    def _bridge_hint_level(
-        prepared_bridge_request: dict[str, Any],
-    ) -> BridgeHintLevel:
-        """Resolve the hint level from the prepared request (default: FULL)."""
-        raw = str(
-            prepared_bridge_request.get("hint_level", "") or ""
-        ).strip().lower()
-        try:
-            return BridgeHintLevel(raw) if raw else BridgeHintLevel.FULL
-        except ValueError:
-            return BridgeHintLevel.FULL
-
     def _build_bridge_turn_prompt_preview(
         self,
         prepared_bridge_request: dict[str, Any],
@@ -267,7 +254,6 @@ class BridgeSessionMixin:
             ),
             draft_final_plan=deepcopy(bridge_session.get("draft_final_plan") or {}),
             draft_final_plan_status=deepcopy(bridge_session.get("draft_final_plan_status") or {}),
-            hint_level=self._bridge_hint_level(prepared_bridge_request),
         )
 
     def _bridge_effective_part_facts(

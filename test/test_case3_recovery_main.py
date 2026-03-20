@@ -813,6 +813,94 @@ def _scripted_turns_none_incremental() -> list[dict[str, Any]]:
     ]
 
 
+def _bridge_outline_from_legacy_events(
+    events: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    normalized = [event for event in (events or []) if isinstance(event, dict)]
+    steps: list[dict[str, Any]] = []
+    operation_families = {
+        str(event.get("operation_family") or "").strip().lower()
+        for event in normalized
+        if str(event.get("operation_family") or "").strip()
+    }
+    touched_parts = {
+        str(event.get("part_name") or "").strip()
+        for event in normalized
+        if str(event.get("part_name") or "").strip()
+    }
+    if operation_families & {"clear", "home"}:
+        steps.append(
+            {
+                "step_name": "restore_blocked_resource",
+                "objective": "Clear the blocked resource and restore a safe controllable state.",
+                "success_signal": "The blocked resource is restored and any protected-region conflict is reduced.",
+            }
+        )
+    if "stage" in operation_families:
+        steps.append(
+            {
+                "step_name": "free_capable_executor",
+                "objective": "Stage carried parts so the feasible recovery executor has a free gripper.",
+                "success_signal": "The chosen recovery executor is free to manipulate the displaced part without violating safety constraints.",
+            }
+        )
+    if operation_families & {"pick", "place", "assemble", "pick_place"}:
+        part_label = sorted(touched_parts)[0] if touched_parts else "the displaced part"
+        steps.append(
+            {
+                "step_name": "recover_goal_part",
+                "objective": f"Recover and assemble {part_label} while preserving resumability.",
+                "success_signal": f"{part_label} reaches its required goal state and location.",
+            }
+        )
+    if not steps:
+        steps.append(
+            {
+                "step_name": "resolve_bridge_gap",
+                "objective": "Resolve the remaining bridge contract and resumability gap.",
+                "success_signal": "The bridge prefix is ready for deterministic final-plan compilation.",
+            }
+        )
+    return steps
+
+
+def _ensure_incremental_scripted_turns(
+    turns: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    scripted = deepcopy(turns or [])
+    if len(scripted) < 2:
+        return scripted
+    first_type = str((scripted[0] or {}).get("type") or "").strip().lower()
+    second_type = str((scripted[1] or {}).get("type") or "").strip().lower()
+    if first_type == "observe" and second_type == "bridge_outline":
+        return scripted
+    if first_type == "observe" and second_type == "bridge_events":
+        return [
+            scripted[0],
+            {
+                "type": "bridge_outline",
+                "steps": _bridge_outline_from_legacy_events(scripted[1].get("events") or []),
+                "reason_summary": "Sketch the recovery milestones before committing exact bridge events.",
+                "react_trace": {
+                    "observed_facts": [
+                        "The displaced part has been localized and the bridge coupling is now grounded."
+                    ],
+                    "gap_to_close": [
+                        "Need a safe high-level recovery sequence before committing exact bridge events."
+                    ],
+                    "decision_basis": [
+                        "Convert the legacy one-shot bridge into an outline plus incremental event flow."
+                    ],
+                    "expected_progress": [
+                        "The following bridge-event turns can extend the approved prefix without restarting the bridge."
+                    ],
+                },
+            },
+            *scripted[1:],
+        ]
+    return scripted
+
+
 def _scripted_turns_main_v2() -> list[dict[str, Any]]:
     return [
         {
@@ -1660,7 +1748,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": SCENARIO_ID,
             "scenario_overrides": {},
             "scripted_final_plan_builder": None,
-            "hint_level": "minimal",
         }
     if token == MAIN_V2_VARIANT:
         return {
@@ -1668,7 +1755,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": MAIN_V2_SCENARIO_ID,
             "scenario_overrides": _main_v2_scenario_overrides(),
             "scripted_final_plan_builder": None,
-            "hint_level": "full",
         }
     if token == BOTH_REACHABLE_VARIANT:
         return {
@@ -1676,7 +1762,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": BOTH_REACHABLE_SCENARIO_ID,
             "scenario_overrides": _both_reachable_scenario_overrides(),
             "scripted_final_plan_builder": None,
-            "hint_level": "full",
         }
     if token == MCP_SWAP_VARIANT:
         return {
@@ -1684,7 +1769,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": MCP_SWAP_SCENARIO_ID,
             "scenario_overrides": _mcp_swap_scenario_overrides(),
             "scripted_final_plan_builder": None,
-            "hint_level": "full",
         }
     if token == NO_GRIPPER_CONFLICT_VARIANT:
         return {
@@ -1692,7 +1776,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             "scenario_id": NO_GRIPPER_CONFLICT_SCENARIO_ID,
             "scenario_overrides": _no_gripper_conflict_scenario_overrides(),
             "scripted_final_plan_builder": None,
-            "hint_level": "full",
         }
     return {
         "variant": MAIN_V1_VARIANT,
@@ -1702,7 +1785,6 @@ def _case3_variant_config(variant: str) -> dict[str, Any]:
             scenario_id=SCENARIO_ID,
             prepared_bridge_request=prepared_bridge_request,
         ),
-        "hint_level": "full",
     }
 
 
@@ -1804,23 +1886,13 @@ def _build_debug_payload(
 
 def _configure_live_bridge_session(prepared_bridge_request: dict[str, Any]) -> None:
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    hint_level = str(prepared_bridge_request.get("hint_level", "") or "").strip().lower()
-    if hint_level == "none":
-        bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 16)
-        bridge_session["max_observations"] = max(
-            int(bridge_session.get("max_observations", 3) or 3), 5
-        )
-        bridge_session["max_final_retries"] = max(
-            int(bridge_session.get("max_final_retries", 2) or 2), 4
-        )
-    else:
-        bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 10)
-        bridge_session["max_observations"] = max(
-            int(bridge_session.get("max_observations", 3) or 3), 4
-        )
-        bridge_session["max_final_retries"] = max(
-            int(bridge_session.get("max_final_retries", 2) or 2), 4
-        )
+    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 16)
+    bridge_session["max_observations"] = max(
+        int(bridge_session.get("max_observations", 3) or 3), 5
+    )
+    bridge_session["max_final_retries"] = max(
+        int(bridge_session.get("max_final_retries", 2) or 2), 4
+    )
     feedback = [
         str(item).strip()
         for item in (bridge_session.get("operator_feedback_history") or [])
@@ -1917,13 +1989,10 @@ def _relax_recovery_clear_precondition(prepared_bridge_request: dict[str, Any]) 
 
 def _assert_expected_output(result: dict[str, Any]) -> None:
     variant = str(result.get("scenario_variant") or MAIN_V1_VARIANT)
-    hint_level = str(
-        (result.get("prepared_bridge_request") or {}).get("hint_level") or ""
-    ).strip().lower()
     if variant == MAIN_V2_VARIANT:
         _assert_expected_output_main_v2(result)
         return
-    if variant == MAIN_V1_VARIANT and hint_level == "none":
+    if variant == MAIN_V1_VARIANT:
         _assert_expected_output_main_v1_none(result)
         return
     if variant in (BOTH_REACHABLE_VARIANT, MCP_SWAP_VARIANT, NO_GRIPPER_CONFLICT_VARIANT):
@@ -2094,7 +2163,12 @@ def _assert_expected_output_main_v2(result: dict[str, Any]) -> None:
     )
     assert bridge_debug.get("status") == "accepted"
     assert bridge_debug.get("compile_path") in {"deterministic", "llm_repair"}
-    assert len(bridge_debug.get("turns") or []) == 3
+    turn_types = [
+        str((turn.get("normalized_response") or {}).get("type") or "").strip()
+        for turn in (bridge_debug.get("turns") or [])
+        if isinstance(turn, dict)
+    ]
+    assert turn_types == ["observe", "bridge_outline", "bridge_events", "final_plan"]
     assert bridge_debug.get("turns", [{}])[0].get("reason_summary")
     assert bridge_debug.get("turns", [{}, {}])[1].get("reason_summary")
     assert bridge_debug.get("turns", [{}])[0].get("react_trace", {}).get("observed_facts")
@@ -2174,7 +2248,6 @@ def _prepare_case3_harness_state(
     scenario_overrides: dict[str, Any] | None = None,
     variant: str = MAIN_V1_VARIANT,
     extra_resources: list[Any] | None = None,
-    hint_level: str | None = None,
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any], list[dict[str, Any]]]:
     paths = _case3_paths()
     tools_catalog = _load_json(paths["tools"])
@@ -2195,11 +2268,6 @@ def _prepare_case3_harness_state(
     combined_overrides = deepcopy(variant_config.get("scenario_overrides") or {})
     if scenario_overrides:
         _deep_merge_dict(combined_overrides, scenario_overrides)
-    effective_hint_level = (
-        hint_level
-        or str(variant_config.get("hint_level") or "").strip()
-        or "full"
-    )
     ra_jid, scripted_turns_override = _apply_case3_scenario_overrides(
         fixture,
         robot_specs,
@@ -2209,13 +2277,9 @@ def _prepare_case3_harness_state(
         tools_catalog=tools_catalog,
         product_geometry=deepcopy(geometry_payload.get("gazebo") or {}),
         scripted_turns=(
-            scripted_turns_override
+            _ensure_incremental_scripted_turns(scripted_turns_override)
             if llm_mode == "scripted" and scripted_turns_override is not None
-            else (
-                _scripted_turns_none_incremental()
-                if llm_mode == "scripted" and str(effective_hint_level).strip().lower() == "none"
-                else _scripted_turns() if llm_mode == "scripted" else None
-            )
+            else (_scripted_turns_none_incremental() if llm_mode == "scripted" else None)
         ),
         llm_mode=llm_mode,
         llm_model=llm_model,
@@ -2283,9 +2347,6 @@ def _prepare_case3_harness_state(
     if llm_mode == "live":
         _configure_live_bridge_session(prepared_bridge_request)
 
-    # Inject hint_level: CLI override > variant config > default "full".
-    prepared_bridge_request["hint_level"] = effective_hint_level
-
     return fixture, product_agent, planner, prepared_bridge_request, deepcopy(tools_catalog)
 
 
@@ -2293,14 +2354,12 @@ def run_case3_recovery_dry_run(
     write_debug: bool = True,
     *,
     variant: str = MAIN_V1_VARIANT,
-    hint_level: str | None = None,
 ) -> dict[str, Any]:
     return _run_case3_recovery_harness(
         write_debug=write_debug,
         llm_mode="scripted",
         llm_model=None,
         variant=variant,
-        hint_level=hint_level,
     )
 
 
@@ -2309,14 +2368,12 @@ def run_case3_recovery_live_react(
     *,
     llm_model: str | None = None,
     variant: str = MAIN_V1_VARIANT,
-    hint_level: str | None = None,
 ) -> dict[str, Any]:
     return _run_case3_recovery_harness(
         write_debug=write_debug,
         llm_mode="live",
         llm_model=llm_model,
         variant=variant,
-        hint_level=hint_level,
     )
 
 
@@ -2334,13 +2391,11 @@ def _run_case3_recovery_harness(
     llm_mode: str,
     llm_model: str | None,
     variant: str = MAIN_V1_VARIANT,
-    hint_level: str | None = None,
 ) -> dict[str, Any]:
     fixture, product_agent, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode=llm_mode,
         llm_model=llm_model,
         variant=variant,
-        hint_level=hint_level,
     )
     proposal: dict[str, Any] | None = None
     compiled_tasks: list[dict[str, Any]] = []
@@ -2448,19 +2503,15 @@ def run_test(
     llm_model: str | None = None,
     write_debug: bool = True,
     variant: str = MAIN_V1_VARIANT,
-    hint_level: str | None = None,
 ) -> dict[str, Any]:
     if llm_mode == "live":
         result = run_case3_recovery_live_react(
             write_debug=write_debug,
             llm_model=llm_model,
             variant=variant,
-            hint_level=hint_level,
         )
     else:
-        result = run_case3_recovery_dry_run(
-            write_debug=write_debug, variant=variant, hint_level=hint_level,
-        )
+        result = run_case3_recovery_dry_run(write_debug=write_debug, variant=variant)
     proposal = result["proposal"]
     compiled_tasks = result["compiled_tasks"]
     bridge_debug = result["bridge_debug"]
@@ -2586,7 +2637,6 @@ def test_case3_recovery_none_mode_supports_outline_then_incremental_bridge_event
     _, product_agent, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
         scenario_overrides={"scripted_turns": scripted_turns},
     )
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
@@ -2706,8 +2756,10 @@ def test_bridge_prompt_exposes_marked_reentry_gap() -> None:
         llm_model=None,
     )
     prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
-    assert "MARKED RE-ENTRY CONDITIONS" in prompt
-    assert "Gamma(x_d, M_bridge)" in prompt
+    assert "BRIDGE CONTRACT TARGETS" in prompt
+    assert "CONTINUATION CONTEXT SUMMARY" in prompt
+    assert "MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "Gamma(x_d, M_bridge)" not in prompt
     assert "named_poses" not in prompt
     assert "side_insert_post" not in prompt
     assert "side_insert_pre" not in prompt
@@ -2732,7 +2784,6 @@ def test_bridge_prompt_none_abstracts_symbolic_locations_and_terminal_targets() 
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
 
     prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
@@ -2766,7 +2817,6 @@ def test_bridge_prompt_none_sanitizes_retry_feedback_in_bridge_events_phase() ->
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -2809,7 +2859,6 @@ def test_bridge_prompt_none_omits_guidance_and_raw_failure_context() -> None:
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -2858,7 +2907,6 @@ def test_bridge_prompt_none_bridge_outline_prefers_abstract_milestones() -> None
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -2881,7 +2929,6 @@ def test_bridge_prompt_none_includes_resource_role_summary_and_ruled_out_assignm
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -2924,7 +2971,6 @@ def test_bridge_prompt_none_includes_contract_targets_and_active_executor_summar
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -2978,7 +3024,6 @@ def test_bridge_prompt_none_final_plan_omits_repair_draft_and_raw_reentry_contex
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -3065,7 +3110,6 @@ def test_bridge_prompt_none_surfaces_modeled_continuation_gap_after_gamma_closes
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -3136,7 +3180,6 @@ def test_bridge_prompt_none_requires_observation_before_bridge_events() -> None:
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
 
     assert planner._bridge_current_phase(prepared_bridge_request) == "observe_required"
@@ -3168,7 +3211,6 @@ def test_configure_live_bridge_session_raises_budget_for_none_hint() -> None:
     _, _, _, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
 
     _configure_live_bridge_session(prepared_bridge_request)
@@ -3183,7 +3225,6 @@ def test_bridge_prompt_none_bridge_events_phase_supports_incremental_prefix_exte
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -3236,6 +3277,12 @@ def test_bridge_events_prompt_uses_dynamic_state_safety_and_retry_hints() -> Non
         pose=LG_DROP_POSE,
     )
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "recover_lg",
+            "objective": "Recover LG after localization and preserve resumability.",
+        }
+    ]
     bridge_session["validation_feedback"] = [
         {
             "kind": "bridge_events_rejected",
@@ -3251,23 +3298,11 @@ def test_bridge_events_prompt_uses_dynamic_state_safety_and_retry_hints() -> Non
     prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
 
     assert "Current planner phase: bridge_events." in prompt
-    assert "Constraints detected in current state:" in prompt
-    assert "Resource xarm6@localhost is in state 'recovery_required'." in prompt
-    assert "Resource ur5e@localhost currently holds 'MCP'." in prompt
-    assert "Safety constraint: part 'MCP' must not be placed at 'assembly_board-v1'" in prompt
-    assert "assembly_board-v1" in prompt
-    assert "Prior proposal rejected:" in prompt
-    assert "pose outside workspace" in prompt
-    assert "Do not re-propose the same resource for that operation" in prompt
-    assert 'A resource in state "recovery_required" cannot perform pick/place actions' not in prompt
-    assert '"safety_rules"' in prompt
-    assert CASE3_BOARD_MUTEX_RULE_ID in prompt
-    assert '"bridge_constraint_family"' not in prompt
-    assert '"constraint_type"' in prompt
-    # Proactive reachability verdict
-    assert "Part 'LG' at observed pose:" in prompt
-    assert "reachable by ur5e@localhost" in prompt
-    assert "NOT reachable by xarm6@localhost" in prompt
+    assert "PART STATES:" in prompt
+    assert "Constraints detected in current state:" not in prompt
+    assert "Prior proposal rejected:" not in prompt
+    assert "pose outside workspace" not in prompt
+    assert '"safety_rules"' not in prompt
 
 
 def test_bridge_prompt_repair_example_only_appears_in_repair_mode() -> None:
@@ -3287,6 +3322,10 @@ def test_bridge_prompt_repair_example_only_appears_in_repair_mode() -> None:
         }
     ]
     bridge_session["approved_bridge_events"] = deepcopy(_scripted_turns()[1]["events"])
+    bridge_session["bridge_outline"] = [
+        {"step_name": "recover_lg", "objective": "Finish the approved bridge."}
+    ]
+    bridge_session["bridge_events_complete"] = True
     bridge_session["draft_final_plan"] = {"macro_tasks": [{"macro_name": "draft_macro"}]}
     bridge_session["draft_final_plan_status"] = {
         "compile_path": "llm_repair",
@@ -3296,10 +3335,9 @@ def test_bridge_prompt_repair_example_only_appears_in_repair_mode() -> None:
     prepared_bridge_request["bridge_session"] = bridge_session
     planner._refresh_bridge_grounding_context(prepared_bridge_request)
     prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
-    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" in prompt
-    assert "MANIPULATOR PICK/PLACE REPAIR EXAMPLE" in prompt
-    assert "<PART>" in prompt
-    assert "<RESOURCE_JID>" in prompt
+    assert "Current planner phase: final_plan." in prompt
+    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" not in prompt
+    assert "MANIPULATOR PICK/PLACE REPAIR EXAMPLE" not in prompt
     assert "named_poses/home" not in prompt
 
 
@@ -3364,6 +3402,10 @@ def test_mixed_robot_printer_repair_prompt_includes_manipulator_example_once() -
         }
     ]
     bridge_session["approved_bridge_events"] = deepcopy(_scripted_turns()[1]["events"])
+    bridge_session["bridge_outline"] = [
+        {"step_name": "recover_lg", "objective": "Finish the approved bridge."}
+    ]
+    bridge_session["bridge_events_complete"] = True
     bridge_session["draft_final_plan"] = {"macro_tasks": [{"macro_name": "draft_macro"}]}
     bridge_session["draft_final_plan_status"] = {
         "compile_path": "llm_repair",
@@ -3373,8 +3415,9 @@ def test_mixed_robot_printer_repair_prompt_includes_manipulator_example_once() -
     prepared_bridge_request["bridge_session"] = bridge_session
     planner._refresh_bridge_grounding_context(prepared_bridge_request)
     prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
-    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" in prompt
-    assert prompt.count("MANIPULATOR PICK/PLACE REPAIR EXAMPLE") == 1
+    assert "Current planner phase: final_plan." in prompt
+    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" not in prompt
+    assert "MANIPULATOR PICK/PLACE REPAIR EXAMPLE" not in prompt
 
 
 def test_printer_only_repair_prompt_omits_manipulator_example() -> None:
@@ -3454,7 +3497,7 @@ def test_printer_only_repair_prompt_omits_manipulator_example() -> None:
             "error": "draft invalid",
         },
     )
-    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" in prompt
+    assert "GENERIC FINAL-PLAN SHAPE EXAMPLE" not in prompt
     assert "MANIPULATOR PICK/PLACE REPAIR EXAMPLE" not in prompt
     assert "Acquire <PART> from its observed location." not in prompt
 
@@ -3591,7 +3634,7 @@ def test_bridge_events_require_phase_order_and_feasible_resource() -> None:
         llm_model=None,
     )
     current_phase = planner._bridge_current_phase(prepared_bridge_request)
-    assert current_phase == "bridge_events"
+    assert current_phase == "observe_required"
 
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     bridge_session["observation_history"] = [
@@ -3602,6 +3645,12 @@ def test_bridge_events_require_phase_order_and_feasible_resource() -> None:
             "params": {"part_name": "LG"},
             "store_as": "detected_lg",
             "observation": {"part_name": "LG", "pose": deepcopy(LG_DROP_POSE)},
+        }
+    ]
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "recover_lg",
+            "objective": "Recover LG after localization and preserve resumability.",
         }
     ]
     prepared_bridge_request["bridge_session"] = bridge_session
@@ -3870,7 +3919,6 @@ def test_symbolic_preview_stage_clears_stale_part_pose() -> None:
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -3906,7 +3954,6 @@ def test_symbolic_preview_assemble_projects_target_pose() -> None:
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -3943,7 +3990,6 @@ def test_bridge_events_reject_executor_switch_without_grounded_handoff() -> None
     _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
         llm_mode="scripted",
         llm_model=None,
-        hint_level="none",
     )
     _record_bridge_observation(
         planner,
@@ -4920,18 +4966,7 @@ if __name__ == "__main__":
         help=(
             f"Scenario variant to run: {MAIN_V1_VARIANT} is the original baseline, "
             f"{MAIN_V2_VARIANT} mirrors the recovery to xarm6, "
-            f"{LIVE_LLM_VARIANT} uses minimal hints for genuine LLM evaluation."
-        ),
-    )
-    parser.add_argument(
-        "--hint-level",
-        choices=["full", "minimal", "none"],
-        default=None,
-        help=(
-            "Control how much pre-computed reasoning is injected into the bridge "
-            "prompt. 'full' = current behaviour (regression baseline), "
-            "'minimal' = raw facts only, 'none' = no hints. "
-            "Overrides the variant default when set."
+            f"{LIVE_LLM_VARIANT} runs the live none-only bridge flow."
         ),
     )
     parser.add_argument(
@@ -4961,5 +4996,4 @@ if __name__ == "__main__":
         llm_model=args.model,
         write_debug=not args.no_debug,
         variant=args.variant,
-        hint_level=getattr(args, "hint_level", None),
     )

@@ -20,8 +20,6 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity,
     resource_snapshot_fields_map,
 )
-from cais_spade_llm.prompts import BridgeHintLevel
-
 
 class BridgeSafetyMixin:
     @staticmethod
@@ -450,10 +448,7 @@ class BridgeSafetyMixin:
     def _bridge_incremental_event_mode(
         prepared_bridge_request: dict[str, Any],
     ) -> bool:
-        raw_hint_level = str(
-            prepared_bridge_request.get("hint_level", "") or ""
-        ).strip().lower()
-        return raw_hint_level == "none"
+        return True
 
     def _bridge_critical_parts(
         self,
@@ -508,28 +503,6 @@ class BridgeSafetyMixin:
             ).strip()
             if observed_part_name == part_token:
                 return True
-
-        raw_hint_level = str(
-            prepared_bridge_request.get("hint_level", "") or ""
-        ).strip().lower()
-        if raw_hint_level == "none":
-            return False
-
-        def _has_usable_pose(value: Any) -> bool:
-            pose = value if isinstance(value, dict) else {}
-            return all(pose.get(axis) is not None for axis in ("x", "y", "z"))
-
-        part_tracker = dict(prepared_bridge_request.get("part_tracker") or {})
-        tracked_part = dict(part_tracker.get(part_token) or {})
-        if _has_usable_pose(tracked_part.get("observed_pose")):
-            return True
-
-        grounding_parts = dict(
-            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
-        )
-        grounded_part = dict(grounding_parts.get(part_token) or {})
-        if _has_usable_pose(grounded_part.get("observed_pose")):
-            return True
 
         return False
 
@@ -668,9 +641,7 @@ class BridgeSafetyMixin:
             )
             decision["evidence"] = evidence
             return decision
-        enforce_low_bias_executor_rules = (
-            self._bridge_hint_level(prepared_bridge_request) is BridgeHintLevel.NONE
-        )
+        enforce_low_bias_executor_rules = True
         if (
             enforce_low_bias_executor_rules
             and oracle_operation_kind in {"pick", "pick_place"}
@@ -885,13 +856,12 @@ class BridgeSafetyMixin:
         if not continuity_ok:
             return None, feasibility_decisions, continuity_error
 
-        if self._bridge_hint_level(prepared_bridge_request) is BridgeHintLevel.NONE:
-            executor_ok, executor_error = self._bridge_validate_executor_assignments(
-                prepared_bridge_request,
-                events=normalized_events,
-            )
-            if not executor_ok:
-                return None, feasibility_decisions, executor_error
+        executor_ok, executor_error = self._bridge_validate_executor_assignments(
+            prepared_bridge_request,
+            events=normalized_events,
+        )
+        if not executor_ok:
+            return None, feasibility_decisions, executor_error
 
         if require_full_gamma_closure and missing_keys:
             missing_lines = [

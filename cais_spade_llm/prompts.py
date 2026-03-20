@@ -1,28 +1,11 @@
 """Prompt templates and builders for the LLM-facing planning/safety flows."""
 
 # prompts.py
-import enum
 import json
 import re
 from copy import deepcopy
 from textwrap import dedent
 from typing import Any, Dict
-
-
-class BridgeHintLevel(enum.Enum):
-    """Controls how much pre-computed reasoning is injected into bridge prompts.
-
-    FULL    – current behaviour: pre-computed reachability verdicts, state-
-              transition suggestions, gripper-conflict resolution, and
-              ordering directives (regression baseline).
-    MINIMAL – raw facts only (resource states, observed poses, workspace
-              bounds as numbers).  The LLM must derive conclusions itself.
-    NONE    – no hints block at all; maximum LLM autonomy.
-    """
-
-    FULL = "full"
-    MINIMAL = "minimal"
-    NONE = "none"
 
 from cais_spade_llm.resources.resource_profile import (
     ResourceProfile,
@@ -1714,228 +1697,8 @@ def _generate_bridge_event_hints(
     unmet_reentry_conditions: list[dict[str, Any]] | None = None,
     validation_feedback: list[dict[str, Any]] | None = None,
     bridge_safety_context: dict[str, Any] | None = None,
-    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> list[str]:
-    hints: list[str] = []
-    resources = {
-        str(resource_jid): dict(entry or {})
-        for resource_jid, entry in (bridge_resources or {}).items()
-        if isinstance(entry, dict)
-    }
-    unmet = [
-        condition
-        for condition in (unmet_reentry_conditions or [])
-        if isinstance(condition, dict)
-    ]
-
-    # --- feasibility feedback is always included (genuine runtime feedback) ---
-    if hint_level is not BridgeHintLevel.NONE:
-        _append_feasibility_feedback_hints(hints, validation_feedback)
-
-    if hint_level is BridgeHintLevel.NONE:
-        return hints
-
-    relevant_parts = {
-        str(condition.get("entity", "") or "").strip()
-        for condition in unmet
-        if str(condition.get("entity_kind", "") or "").strip().lower() == "part"
-        and str(condition.get("entity", "") or "").strip()
-    }
-    relevant_resources = {
-        str(condition.get("entity", "") or "").strip()
-        for condition in unmet
-        if str(condition.get("entity_kind", "") or "").strip().lower() == "resource"
-        and str(condition.get("entity", "") or "").strip()
-    }
-    bridge_goal_parts = {
-        str(condition.get("entity", "") or "").strip()
-        for condition in unmet
-        if str(condition.get("entity_kind", "") or "").strip().lower() == "part"
-        and str(condition.get("entity", "") or "").strip()
-        and (
-            str(condition.get("field", "") or "").strip() == "location"
-            or str(condition.get("expected", "") or "").strip().lower()
-            in {"assembled", "in_gripper"}
-        )
-    }
-    held_parts = {
-        str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
-        for entry in resources.values()
-        if str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
-    }
-
-    # -----------------------------------------------------------------
-    # STATE TRANSITION HINTS
-    # -----------------------------------------------------------------
-    for resource_jid, entry in resources.items():
-        resource_core = _bridge_resource_core(entry)
-        current_state = str(
-            resource_core.get("current_state")
-            or dict(entry.get("bridge_snapshot") or {}).get("current_state")
-            or ""
-        ).strip()
-        if not current_state:
-            continue
-        if not _bridge_resource_has_operation(entry, {"pick", "place"}):
-            continue
-        expected_state = next(
-            (
-                str(condition.get("expected", "") or "").strip()
-                for condition in unmet
-                if str(condition.get("entity_kind", "") or "").strip().lower() == "resource"
-                and str(condition.get("entity", "") or "").strip() == resource_jid
-                and str(condition.get("field", "") or "").strip() == "current_state"
-                and str(condition.get("expected", "") or "").strip()
-            ),
-            "",
-        )
-        blocked_states = _bridge_blocked_states(entry)
-        if current_state in blocked_states or (
-            expected_state and current_state != expected_state
-        ):
-            if hint_level is BridgeHintLevel.MINIMAL:
-                # Raw fact only — no target state, no primitive suggestion.
-                hints.append(
-                    f"Resource {resource_jid} is in state '{current_state}'."
-                )
-            else:
-                unblocking_primitive = _bridge_unblocking_primitive(entry)
-                transition_target = expected_state or "idle"
-                primitive_suffix = (
-                    f" (for example, {unblocking_primitive})" if unblocking_primitive else ""
-                )
-                hints.append(
-                    f"Resource {resource_jid} is in state '{current_state}'. Bring it toward "
-                    f"'{transition_target}' before proposing pick/place actions{primitive_suffix}."
-                )
-
-    # -----------------------------------------------------------------
-    # GRIPPER OCCUPANCY HINTS
-    # -----------------------------------------------------------------
-    for resource_jid, entry in resources.items():
-        held_part = str(_bridge_manipulator_facet(entry).get("held_part", "") or "").strip()
-        if not held_part:
-            continue
-        if not _bridge_resource_has_operation(entry, {"pick"}):
-            continue
-        if hint_level is BridgeHintLevel.MINIMAL:
-            # Raw fact only — no resolution instruction.
-            hints.append(
-                f"Resource {resource_jid} currently holds '{held_part}'."
-            )
-        else:
-            other_goal_parts = sorted(part for part in bridge_goal_parts if part and part != held_part)
-            if other_goal_parts:
-                hints.append(
-                    f"Resource {resource_jid} currently holds '{held_part}'. To pick a different "
-                    f"part such as '{other_goal_parts[0]}', it must first release '{held_part}'."
-                )
-
-    # -----------------------------------------------------------------
-    # REACHABILITY
-    # -----------------------------------------------------------------
-    parts_ctx = dict((grounding_context or {}).get("parts") or {})
-    for part_name in sorted(relevant_parts & set(parts_ctx.keys())):
-        part_info = dict(parts_ctx.get(part_name) or {})
-        observed_pose = dict(part_info.get("observed_pose") or {})
-        if not observed_pose or not any(
-            observed_pose.get(a) is not None for a in ("x", "y", "z")
-        ):
-            continue
-
-        if hint_level is BridgeHintLevel.MINIMAL:
-            # Raw pose + raw workspace bounds — LLM computes reachability.
-            pose_str = ", ".join(
-                f"{a}={observed_pose[a]}" for a in ("x", "y", "z")
-                if observed_pose.get(a) is not None
-            )
-            bounds_parts: list[str] = []
-            for resource_jid, entry in resources.items():
-                bounds = dict(
-                    dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
-                )
-                if not bounds:
-                    continue
-                axes = []
-                for a in ("x", "y", "z"):
-                    lo = bounds.get(f"{a}_min_m")
-                    hi = bounds.get(f"{a}_max_m")
-                    if lo is not None and hi is not None:
-                        axes.append(f"{a}=[{lo}, {hi}]")
-                if axes:
-                    bounds_parts.append(f"{resource_jid} workspace: {', '.join(axes)}")
-            hint_text = f"Part '{part_name}' observed at ({pose_str})."
-            if bounds_parts:
-                hint_text += " " + ". ".join(bounds_parts) + "."
-            hints.append(hint_text)
-        else:
-            # FULL: pre-computed reachability verdict.
-            reachable_by: list[str] = []
-            unreachable_by: list[tuple[str, str]] = []
-            for resource_jid, entry in resources.items():
-                bounds = dict(
-                    dict(entry.get("static_capabilities") or {}).get("workspace_bounds") or {}
-                )
-                if not bounds:
-                    continue
-                inside, reason = _check_pose_in_bounds(observed_pose, bounds)
-                if inside:
-                    reachable_by.append(resource_jid)
-                else:
-                    unreachable_by.append((resource_jid, reason))
-            if unreachable_by:
-                reachable_text = ", ".join(reachable_by) if reachable_by else "no resource"
-                parts_list = [
-                    f"NOT reachable by {jid} ({reason})" for jid, reason in unreachable_by
-                ]
-                hints.append(
-                    f"Part '{part_name}' at observed pose: reachable by {reachable_text}; "
-                    + "; ".join(parts_list)
-                    + "."
-                )
-
-    # -----------------------------------------------------------------
-    # SAFETY CONSTRAINTS
-    # -----------------------------------------------------------------
-    if hint_level is BridgeHintLevel.MINIMAL:
-        # Point to the raw JSON already in the prompt; no pre-filtering.
-        constraints = (bridge_safety_context or {}).get("constraints") or []
-        if any(isinstance(c, dict) for c in constraints):
-            hints.append(
-                "Consult the BRIDGE SAFETY CONTEXT section for all applicable safety rules."
-            )
-    else:
-        emitted_safety_hints = 0
-        for constraint in (bridge_safety_context or {}).get("constraints") or []:
-            if not isinstance(constraint, dict):
-                continue
-            if not _relevant_bridge_safety_constraint(
-                constraint,
-                relevant_parts=relevant_parts,
-                relevant_resources=relevant_resources,
-                held_parts=held_parts,
-            ):
-                continue
-            hints.append(_summarize_bridge_safety_constraint(constraint))
-            emitted_safety_hints += 1
-            if emitted_safety_hints >= 2:
-                break
-
-    deduped_hints: list[str] = []
-    seen_hints: set[str] = set()
-    for hint in hints:
-        normalized_hint = " ".join(str(hint or "").split())
-        if not normalized_hint or normalized_hint in seen_hints:
-            continue
-        seen_hints.add(normalized_hint)
-        deduped_hints.append(hint)
-
-    if not deduped_hints:
-        deduped_hints.append(
-            "Check resource state compatibility, gripper occupancy, active safety "
-            "constraints, and prior feasibility feedback before proposing events."
-        )
-    return deduped_hints
+    return []
 
 
 def _append_feasibility_feedback_hints(
@@ -1972,18 +1735,8 @@ def _bridge_events_domain_context(
     unmet_reentry_conditions: list[dict[str, Any]] | None = None,
     validation_feedback: list[dict[str, Any]] | None = None,
     bridge_safety_context: dict[str, Any] | None = None,
-    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> str:
     """Domain context injected only in the bridge_events phase."""
-    hints = _generate_bridge_event_hints(
-        bridge_resources=bridge_resources,
-        grounding_context=grounding_context,
-        unmet_reentry_conditions=unmet_reentry_conditions,
-        validation_feedback=validation_feedback,
-        bridge_safety_context=bridge_safety_context,
-        hint_level=hint_level,
-    )
-
     # Determine which resource types participate in this bridge.
     participating_types: set[str] = set()
     for _jid, entry in (bridge_resources or {}).items():
@@ -2009,58 +1762,7 @@ def _bridge_events_domain_context(
         - Use expected_part_delta on each event to declare intended part state changes.
         """
     ).strip()
-
-    if hint_level is BridgeHintLevel.NONE:
-        # Only part states — no reasoning constraints, no hints, no ordering.
-        return part_states_section
-
-    # Build the dynamic constraints/facts block.
-    dynamic_block = ""
-    if hints:
-        header = (
-            "Constraints detected in current state:"
-            if hint_level is BridgeHintLevel.FULL
-            else "Current state facts:"
-        )
-        dynamic_block = header + "\n" + "\n".join(f"- {hint}" for hint in hints)
-
-    if hint_level is BridgeHintLevel.MINIMAL:
-        # Neutral reasoning prompt — no prescribed strategy or ordering.
-        reasoning_header = (
-            "BRIDGE EVENT PLANNING:\n\n"
-            "Analyze the current system state and determine a recovery sequence."
-        )
-        return "\n\n".join(
-            section
-            for section in (reasoning_header, dynamic_block, part_states_section)
-            if section
-        )
-
-    # FULL: current behaviour — prescriptive reasoning + ordering directive.
-    return "\n\n".join(
-        section
-        for section in (
-            dedent(
-                """\
-                REASONING CONSTRAINTS FOR BRIDGE EVENT PLANNING:
-
-                Work backwards from Gamma(x_d, M_bridge). For each unmet condition, determine
-                which resource can achieve it given the current whole-system state.
-                """
-            ).strip(),
-            dynamic_block,
-            dedent(
-                """\
-                Ordering principle:
-                - Events must respect causal dependencies. If event B requires a resource
-                  state that event A produces, A must precede B.
-                - Derive the ordering from the from/to deltas, not from a fixed template.
-                """
-            ).strip(),
-            part_states_section,
-        )
-        if section
-    )
+    return part_states_section
 
 
 def _bridge_catalog_names(entries: list[dict[str, Any]] | None) -> set[str]:
@@ -2366,18 +2068,6 @@ def _bridge_final_plan_repair_few_shot(
         if repair_example:
             sections.append(repair_example)
     return "\n\n".join(section for section in sections if section)
-
-
-def _bridge_use_low_bias_prompt_view(
-    *,
-    phase: str,
-    hint_level: BridgeHintLevel,
-) -> bool:
-    phase_token = str(phase or "").strip().lower()
-    return phase_token in {"observe_required", "bridge_events"} and hint_level in {
-        BridgeHintLevel.MINIMAL,
-        BridgeHintLevel.NONE,
-    }
 
 
 def _bridge_generalize_location_summary(value: Any) -> Any:
@@ -3035,7 +2725,6 @@ def build_bridge_turn_prompt(
     bridge_safety_context: dict[str, Any] | None = None,
     draft_final_plan: dict[str, Any] | None = None,
     draft_final_plan_status: dict[str, Any] | None = None,
-    hint_level: BridgeHintLevel = BridgeHintLevel.FULL,
 ) -> str:
     """Build one compact ReAct turn prompt for the bridge session."""
     from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
@@ -3072,11 +2761,6 @@ def build_bridge_turn_prompt(
         primitive_catalog=deduped_catalog,
     )
     phase_token = str(phase or "").strip().lower() or "observe_required"
-    strict_none_prompt_view = hint_level is BridgeHintLevel.NONE
-    low_bias_prompt_view = strict_none_prompt_view or _bridge_use_low_bias_prompt_view(
-        phase=phase_token,
-        hint_level=hint_level,
-    )
 
     prompt_stuck_state: dict[str, Any] = deepcopy(stuck_state or {})
     prompt_obligations = deepcopy(obligation_targets or [])
@@ -3103,70 +2787,68 @@ def build_bridge_turn_prompt(
         observation_history=observation_history,
     )
 
-    if low_bias_prompt_view:
-        prompt_obligations = _bridge_low_bias_prompt_value(
-            prompt_obligations,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_resources = _bridge_low_bias_prompt_value(
-            prompt_resources,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_stuck_state = _bridge_low_bias_prompt_value(
-            prompt_stuck_state,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_grounding_context = _bridge_low_bias_prompt_value(
-            prompt_grounding_context,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_observation_history = _bridge_low_bias_prompt_value(
-            prompt_observation_history,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_marked_reentry = _bridge_low_bias_prompt_conditions(
-            prompt_marked_reentry,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_unmet_reentry = _bridge_low_bias_prompt_conditions(
-            prompt_unmet_reentry,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_suffix_summary = _bridge_low_bias_prompt_value(
-            prompt_suffix_summary,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_infeasible_assignments = _bridge_low_bias_prompt_value(
-            prompt_infeasible_assignments,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_executor_bindings = _bridge_low_bias_prompt_value(
-            prompt_executor_bindings,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_handoff_requirements = _bridge_low_bias_prompt_value(
-            prompt_handoff_requirements,
-            strict_none=strict_none_prompt_view,
-        )
-        prompt_bridge_safety_context = _bridge_low_bias_prompt_value(
-            prompt_bridge_safety_context,
-            strict_none=strict_none_prompt_view,
-        )
-    if strict_none_prompt_view:
-        prompt_operator_feedback = []
-        prompt_validation_feedback = _bridge_none_validation_feedback(prompt_validation_feedback)
-        prompt_last_failure = _bridge_none_last_failure_summary(prompt_last_failure)
-        prompt_draft_final_plan = {}
-        prompt_draft_status = {}
-        if phase_token == "observe_required" and none_observation_targets:
-            parts_payload = dict(prompt_grounding_context.get("parts") or {})
-            for part_name in none_observation_targets:
-                part_entry = dict(parts_payload.get(part_name) or {})
-                if not part_entry:
-                    continue
-                part_entry["observed_pose"] = None
-                parts_payload[part_name] = part_entry
-            prompt_grounding_context["parts"] = parts_payload
+    prompt_obligations = _bridge_low_bias_prompt_value(
+        prompt_obligations,
+        strict_none=True,
+    )
+    prompt_resources = _bridge_low_bias_prompt_value(
+        prompt_resources,
+        strict_none=True,
+    )
+    prompt_stuck_state = _bridge_low_bias_prompt_value(
+        prompt_stuck_state,
+        strict_none=True,
+    )
+    prompt_grounding_context = _bridge_low_bias_prompt_value(
+        prompt_grounding_context,
+        strict_none=True,
+    )
+    prompt_observation_history = _bridge_low_bias_prompt_value(
+        prompt_observation_history,
+        strict_none=True,
+    )
+    prompt_marked_reentry = _bridge_low_bias_prompt_conditions(
+        prompt_marked_reentry,
+        strict_none=True,
+    )
+    prompt_unmet_reentry = _bridge_low_bias_prompt_conditions(
+        prompt_unmet_reentry,
+        strict_none=True,
+    )
+    prompt_suffix_summary = _bridge_low_bias_prompt_value(
+        prompt_suffix_summary,
+        strict_none=True,
+    )
+    prompt_infeasible_assignments = _bridge_low_bias_prompt_value(
+        prompt_infeasible_assignments,
+        strict_none=True,
+    )
+    prompt_executor_bindings = _bridge_low_bias_prompt_value(
+        prompt_executor_bindings,
+        strict_none=True,
+    )
+    prompt_handoff_requirements = _bridge_low_bias_prompt_value(
+        prompt_handoff_requirements,
+        strict_none=True,
+    )
+    prompt_bridge_safety_context = _bridge_low_bias_prompt_value(
+        prompt_bridge_safety_context,
+        strict_none=True,
+    )
+    prompt_operator_feedback = []
+    prompt_validation_feedback = _bridge_none_validation_feedback(prompt_validation_feedback)
+    prompt_last_failure = _bridge_none_last_failure_summary(prompt_last_failure)
+    prompt_draft_final_plan = {}
+    prompt_draft_status = {}
+    if phase_token == "observe_required" and none_observation_targets:
+        parts_payload = dict(prompt_grounding_context.get("parts") or {})
+        for part_name in none_observation_targets:
+            part_entry = dict(parts_payload.get(part_name) or {})
+            if not part_entry:
+                continue
+            part_entry["observed_pose"] = None
+            parts_payload[part_name] = part_entry
+        prompt_grounding_context["parts"] = parts_payload
 
     obligations_json = json.dumps(prompt_obligations, indent=2)
     resources_json = json.dumps(prompt_resources, indent=2)
@@ -3189,7 +2871,7 @@ def build_bridge_turn_prompt(
         and isinstance(draft_final_plan_status, dict)
         and str(draft_final_plan_status.get("compile_path", "")).strip() == "llm_repair"
     )
-    show_repair_context = repair_mode and not strict_none_prompt_view
+    show_repair_context = False
     repair_draft_section = (
         f"PLANNER-GENERATED FINAL PLAN DRAFT:\n{draft_final_plan_json}"
         if show_repair_context
@@ -3218,7 +2900,6 @@ def build_bridge_turn_prompt(
             unmet_reentry_conditions=unmet_reentry_conditions,
             validation_feedback=validation_feedback,
             bridge_safety_context=bridge_safety_context,
-            hint_level=hint_level,
         )
     elif phase_token == "bridge_events":
         domain_context = _bridge_events_domain_context(
@@ -3227,7 +2908,6 @@ def build_bridge_turn_prompt(
             unmet_reentry_conditions=unmet_reentry_conditions,
             validation_feedback=validation_feedback,
             bridge_safety_context=bridge_safety_context,
-            hint_level=hint_level,
         )
     else:
         domain_context = _bridge_final_plan_domain_context(
@@ -3240,19 +2920,11 @@ def build_bridge_turn_prompt(
             """\
             - Current planner phase: observe_required.
             - You must return ONE observe request.
+            - Choose the observation that most reduces uncertainty using the current state, workspace bounds, and observation history.
+            - If any displaced or unknown part still lacks a live part observation, prioritize localizing that part before requesting a resource-pose query.
             - Do not return bridge_events or final_plan in this phase.
             """
         ).strip()
-        if strict_none_prompt_view:
-            phase_rules = dedent(
-                """\
-                - Current planner phase: observe_required.
-                - You must return ONE observe request.
-                - Choose the observation that most reduces uncertainty using the current state, workspace bounds, and observation history.
-                - If any displaced or unknown part still lacks a live part observation, prioritize localizing that part before requesting a resource-pose query.
-                - Do not return bridge_events or final_plan in this phase.
-                """
-            ).strip()
         response_contract = dedent(
             """\
             Observation request:
@@ -3276,118 +2948,69 @@ def build_bridge_turn_prompt(
         phase_rules = dedent(
             """\
             - Current planner phase: bridge_outline.
-            - You must return ONE bridge_outline response.
-            - Sketch the strategic recovery sequence before committing exact bridge events.
+            - Observation history is available in this prompt.
+            - You must return ONE bridge_outline response describing the recovery subproblems and goal milestones that still need to be resolved.
+            - Keep the outline at problem/goal level. Do not describe primitive commands, named poses, target-computation helpers, or low-level motion choices here.
+            - Prefer abstract milestones such as restoring a blocked resource, satisfying a safety precondition, freeing a capable manipulator, recovering a misplaced part, or restoring resumable state.
+            - Do not commit to a specific resource_jid or operation_family unless the current state already makes that choice unavoidable.
+            - Distinguish the resource that must be restored from the resource that should execute part recovery; they may be different.
+            - If a resource/part recovery assignment has already been ruled infeasible, do not anchor the outline around reusing it.
+            - Use BRIDGE CONTRACT TARGETS as the exact closure criteria, but keep the outline abstract and subproblem-oriented.
+            - Use the provided state, safety, workspace, and continuation context to infer the needed sequence.
             - Do not return observe, bridge_events, or final_plan in this phase.
             """
         ).strip()
-        if strict_none_prompt_view:
-            phase_rules = dedent(
-                """\
-                - Current planner phase: bridge_outline.
-                - Observation history is available in this prompt.
-                - You must return ONE bridge_outline response describing the recovery subproblems and goal milestones that still need to be resolved.
-                - Keep the outline at problem/goal level. Do not describe primitive commands, named poses, target-computation helpers, or low-level motion choices here.
-                - Prefer abstract milestones such as restoring a blocked resource, satisfying a safety precondition, freeing a capable manipulator, recovering a misplaced part, or restoring resumable state.
-                - Do not commit to a specific resource_jid or operation_family unless the current state already makes that choice unavoidable.
-                - Distinguish the resource that must be restored from the resource that should execute part recovery; they may be different.
-                - If a resource/part recovery assignment has already been ruled infeasible, do not anchor the outline around reusing it.
-                - Use BRIDGE CONTRACT TARGETS as the exact closure criteria, but keep the outline abstract and subproblem-oriented.
-                - Use the provided state, safety, workspace, and continuation context to infer the needed sequence.
-                - Do not return observe, bridge_events, or final_plan in this phase.
-                """
-            ).strip()
-        if strict_none_prompt_view:
-            response_contract = dedent(
-                """\
-                Bridge outline:
+        response_contract = dedent(
+            """\
+            Bridge outline:
+            {
+              "type": "bridge_outline",
+              "steps": [
                 {
-                  "type": "bridge_outline",
-                  "steps": [
-                    {
-                      "step_name": "<short abstract milestone name>",
-                      "objective": "<which subproblem or goal this milestone resolves>",
-                      "success_signal": "<what should become true after this milestone>",
-                      "rationale": "<optional short rationale>"
-                    }
-                  ],
-                  "reason_summary": "<optional short rationale>",
-                  "react_trace": {
-                    "observed_facts": ["<brief factual observations>"],
-                    "gap_to_close": ["<what the outline must eventually resolve>"],
-                    "decision_basis": ["<why this high-level sequence was chosen>"],
-                    "expected_progress": ["<what the next bridge-event slices should accomplish>"]
-                  }
+                  "step_name": "<short abstract milestone name>",
+                  "objective": "<which subproblem or goal this milestone resolves>",
+                  "success_signal": "<what should become true after this milestone>",
+                  "rationale": "<optional short rationale>"
                 }
+              ],
+              "reason_summary": "<optional short rationale>",
+              "react_trace": {
+                "observed_facts": ["<brief factual observations>"],
+                "gap_to_close": ["<what the outline must eventually resolve>"],
+                "decision_basis": ["<why this high-level sequence was chosen>"],
+                "expected_progress": ["<what the next bridge-event slices should accomplish>"]
+              }
+            }
 
-                Notes:
-                - Outline unresolved problems/goals first; do not pre-commit to exact resource assignments unless they are already forced.
-                - resource_jid, part_name, and operation_family are optional in this phase and may be omitted when still undecided.
-                """
-            ).strip()
-        else:
-            response_contract = dedent(
-                """\
-                Bridge outline:
-                {
-                  "type": "bridge_outline",
-                  "steps": [
-                    {
-                      "step_name": "<short milestone name>",
-                      "objective": "<what this milestone achieves>",
-                      "resource_jid": "<optional resource jid>",
-                      "part_name": "<optional canonical part name>",
-                      "operation_family": "<optional likely operation family>",
-                      "success_signal": "<what should become true after this milestone>",
-                      "rationale": "<optional short rationale>"
-                    }
-                  ],
-                  "reason_summary": "<optional short rationale>",
-                  "react_trace": {
-                    "observed_facts": ["<brief factual observations>"],
-                    "gap_to_close": ["<what the outline must eventually resolve>"],
-                    "decision_basis": ["<why this high-level sequence was chosen>"],
-                    "expected_progress": ["<what the next bridge-event slices should accomplish>"]
-                  }
-                }
-                """
-            ).strip()
+            Notes:
+            - Outline unresolved problems/goals first; do not pre-commit to exact resource assignments unless they are already forced.
+            - resource_jid, part_name, and operation_family are optional in this phase and may be omitted when still undecided.
+            """
+        ).strip()
     elif phase_token == "bridge_events":
         phase_rules = dedent(
             """\
             - Current planner phase: bridge_events.
-            - Fresh observation has been gathered for bridge-critical missing parts.
-            - You must return ONE bridge_events response that closes all current Gamma(x_d, M_bridge) conditions.
+            - Observation history is available in this prompt.
+            - Observation history and the current projected bridge state are available in this prompt.
+            - Extend the approved bridge prefix from the current projected state instead of rewriting it from scratch.
+            - Return only the next bridge-event slice needed to make progress; do not repeat already approved events unless you are explicitly correcting an earlier mistake.
+            - The next slice does not need to close the full bridge in one turn, but it must advance the recovery without regressing previously closed conditions.
+            - Use only literal symbolic values in expected_resource_delta, expected_part_delta, and closes_conditions. Never place context_ref objects in those fields.
+            - Stay at task/event level in this phase. Do not describe primitive commands or primitive-step sequences.
+            - Distinguish the resource that must be restored from the resource that should execute part recovery; they may be different.
+            - If a resource/part recovery assignment is listed under ruled_out_assignments, do not propose it again unless new observation changes feasibility.
+            - Use BRIDGE CONTRACT TARGETS as the exact symbolic closure criteria for this phase.
+            - If ACTIVE EXECUTOR SUMMARY shows that a part is already assigned to an executor, do not switch executors for that part unless a grounded handoff or new observation makes the reassignment valid.
+            - If BRIDGE CONTRACT TARGETS are already closed but MODELED CONTINUATION GAP is still present, do not restart the bridge from scratch; add only the extra bridge events needed to restore a resumable modeled continuation.
+            - If you intend to relocate a resource into or out of a protected/shared region, include projected_effects.occupancy.location so the projected bridge state reflects that move.
+            - You must return ONE bridge_events response that resolves the disruption using only the provided state, safety, workspace, and continuation context.
             - Each event MUST include explicit operation_family.
             - Each event MUST include expected_resource_delta with from/to states.
             - Include expected_part_delta when the event changes a part's state.
-            - Do not return observe or final_plan in this phase.
+            - Do not return observe, bridge_outline, or final_plan in this phase.
             """
         ).strip()
-        if strict_none_prompt_view:
-            phase_rules = dedent(
-                """\
-                - Current planner phase: bridge_events.
-                - Observation history is available in this prompt.
-                - Observation history and the current projected bridge state are available in this prompt.
-                - Extend the approved bridge prefix from the current projected state instead of rewriting it from scratch.
-                - Return only the next bridge-event slice needed to make progress; do not repeat already approved events unless you are explicitly correcting an earlier mistake.
-                - The next slice does not need to close the full bridge in one turn, but it must advance the recovery without regressing previously closed conditions.
-                - Use only literal symbolic values in expected_resource_delta, expected_part_delta, and closes_conditions. Never place context_ref objects in those fields.
-                - Stay at task/event level in this phase. Do not describe primitive commands or primitive-step sequences.
-                - Distinguish the resource that must be restored from the resource that should execute part recovery; they may be different.
-                - If a resource/part recovery assignment is listed under ruled_out_assignments, do not propose it again unless new observation changes feasibility.
-                - Use BRIDGE CONTRACT TARGETS as the exact symbolic closure criteria for this phase.
-                - If ACTIVE EXECUTOR SUMMARY shows that a part is already assigned to an executor, do not switch executors for that part unless a grounded handoff or new observation makes the reassignment valid.
-                - If BRIDGE CONTRACT TARGETS are already closed but MODELED CONTINUATION GAP is still present, do not restart the bridge from scratch; add only the extra bridge events needed to restore a resumable modeled continuation.
-                - If you intend to relocate a resource into or out of a protected/shared region, include projected_effects.occupancy.location so the projected bridge state reflects that move.
-                - You must return ONE bridge_events response that resolves the disruption using only the provided state, safety, workspace, and continuation context.
-                - Each event MUST include explicit operation_family.
-                - Each event MUST include expected_resource_delta with from/to states.
-                - Include expected_part_delta when the event changes a part's state.
-                - Do not return observe, bridge_outline, or final_plan in this phase.
-                """
-            ).strip()
         response_contract = dedent(
             """\
             Bridge event proposal:
@@ -3516,134 +3139,88 @@ def build_bridge_turn_prompt(
             """
         ).strip()
 
-    if strict_none_prompt_view:
-        role_summary_json = json.dumps(
-            _bridge_none_resource_role_summary(
-                focused_resource_jid=focused_resource_jid,
-                bridge_resources=prompt_resources,
-                infeasible_assignments=prompt_infeasible_assignments,
-            ),
-            indent=2,
-        )
-        contract_targets_json = json.dumps(
-            _bridge_none_contract_targets(
-                unmet_reentry_conditions=unmet_reentry_conditions,
-            ),
-            indent=2,
-        )
-        active_executor_json = json.dumps(
-            _bridge_none_active_executor_summary(
-                executor_bindings=prompt_executor_bindings,
-                handoff_requirements=prompt_handoff_requirements,
-            ),
-            indent=2,
-        )
-        session_rules = dedent(
-            """\
-            Session rules:
-            - DES could not find a modeled continuation.
-            - Do not output explanations outside JSON.
-            - Do not invent new primitives, resources, context keys, or coordinates.
-            - Use context_ref objects into GROUNDING CONTEXT when values are already available there.
-            - Prefer string context_ref paths such as "/step_outputs/<alias>/approach_pose/x" or "parts.<PART>.observed_pose.x".
-            - Mid-loop actuation is not allowed in this phase. Only the listed observation/generation primitives may be requested.
-            - This is a low-bias prompt view: symbolic station names, exact continuation targets, and modeled suffix details may be abstracted.
-            - Infer the needed bridge from current state, observation history, workspace limits, resource snapshots, and the continuation context summary.
-            - The bridge must leave the system safe and able to resume continuation.
-            - If current information is insufficient, request an observation before committing to bridge_events.
-            - In final_plan primitive_steps, use "store_as" ONLY on these primitives: detect_parts, get_current_pose, compute_pick_targets, compute_place_targets.
-            - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, open_gripper, close_gripper, attach_part, detach_part, rotate_wrist, pause_job, resume_job, or cancel_job.
-            """
-        ).strip()
-        session_metadata = dedent(
+    role_summary_json = json.dumps(
+        _bridge_none_resource_role_summary(
+            focused_resource_jid=focused_resource_jid,
+            bridge_resources=prompt_resources,
+            infeasible_assignments=prompt_infeasible_assignments,
+        ),
+        indent=2,
+    )
+    contract_targets_json = json.dumps(
+        _bridge_none_contract_targets(
+            unmet_reentry_conditions=unmet_reentry_conditions,
+        ),
+        indent=2,
+    )
+    active_executor_json = json.dumps(
+        _bridge_none_active_executor_summary(
+            executor_bindings=prompt_executor_bindings,
+            handoff_requirements=prompt_handoff_requirements,
+        ),
+        indent=2,
+    )
+    session_rules = dedent(
+        """\
+        Session rules:
+        - DES could not find a modeled continuation.
+        - Do not output explanations outside JSON.
+        - Do not invent new primitives, resources, context keys, or coordinates.
+        - Use context_ref objects into GROUNDING CONTEXT when values are already available there.
+        - Prefer string context_ref paths such as "/step_outputs/<alias>/approach_pose/x" or "parts.<PART>.observed_pose.x".
+        - Mid-loop actuation is not allowed in this phase. Only the listed observation/generation primitives may be requested.
+        - Symbolic station names, exact continuation targets, and modeled suffix details may be abstracted unless surfaced explicitly in the contract/context sections below.
+        - Infer the needed bridge from current state, observation history, workspace limits, resource snapshots, and the continuation context summary.
+        - The bridge must leave the system safe and able to resume continuation.
+        - If current information is insufficient, request an observation before committing to bridge_events.
+        - In final_plan primitive_steps, use "store_as" ONLY on these primitives: detect_parts, get_current_pose, compute_pick_targets, compute_place_targets.
+        - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, open_gripper, close_gripper, attach_part, detach_part, rotate_wrist, pause_job, resume_job, or cancel_job.
+        """
+    ).strip()
+    session_metadata = dedent(
+        f"""\
+        SESSION:
+        - session_id: {session_id}
+        - turn: {turn_index}/{max_turns}
+        - phase: {phase_token}
+        - focused_resource_jid: {focused_resource_jid}
+        """
+    ).strip()
+    continuation_context_json = json.dumps(
+        _bridge_none_continuation_summary(
+            pending_suffix_summary=pending_suffix_summary,
+            unmet_reentry_conditions=unmet_reentry_conditions,
+        ),
+        indent=2,
+    )
+    observation_need_section = ""
+    if phase_token == "observe_required":
+        observation_need_section = dedent(
             f"""\
-            SESSION:
-            - session_id: {session_id}
-            - turn: {turn_index}/{max_turns}
-            - phase: {phase_token}
-            - focused_resource_jid: {focused_resource_jid}
+            OBSERVATION NEED SUMMARY:
+            {json.dumps({
+                "critical_parts_requiring_live_observation": none_observation_targets,
+                "observation_goal": "localize displaced bridge-relevant parts before proposing bridge events",
+            }, indent=2)}
             """
         ).strip()
-        continuation_context_json = json.dumps(
-            _bridge_none_continuation_summary(
-                pending_suffix_summary=pending_suffix_summary,
-                unmet_reentry_conditions=unmet_reentry_conditions,
-            ),
-            indent=2,
-        )
-        observation_need_section = ""
-        if phase_token == "observe_required":
-            observation_need_section = dedent(
-                f"""\
-                OBSERVATION NEED SUMMARY:
-                {json.dumps({
-                    "critical_parts_requiring_live_observation": none_observation_targets,
-                    "observation_goal": "localize displaced bridge-relevant parts before proposing bridge events",
-                }, indent=2)}
-                """
-            ).strip()
-        continuation_sections = dedent(
-            f"""\
-            {observation_need_section}
+    continuation_sections = dedent(
+        f"""\
+        {observation_need_section}
 
-            CONTINUATION CONTEXT SUMMARY:
-            {continuation_context_json}
+        CONTINUATION CONTEXT SUMMARY:
+        {continuation_context_json}
 
-            BRIDGE CONTRACT TARGETS:
-            {contract_targets_json}
+        BRIDGE CONTRACT TARGETS:
+        {contract_targets_json}
 
-            RESOURCE ROLE SUMMARY:
-            {role_summary_json}
+        RESOURCE ROLE SUMMARY:
+        {role_summary_json}
 
-            ACTIVE EXECUTOR SUMMARY:
-            {active_executor_json}
-            """
-        ).strip()
-    else:
-        session_rules = dedent(
-            """\
-            Session rules:
-            - DES could not find a modeled continuation.
-            - Do not output explanations outside JSON.
-            - Do not invent new primitives, resources, context keys, or coordinates.
-            - Use context_ref objects into GROUNDING CONTEXT when values are already available there.
-            - Prefer string context_ref paths such as "/step_outputs/<alias>/approach_pose/x" or "parts.<PART>.observed_pose.x".
-            - Mid-loop actuation is not allowed in this phase. Only the listed observation/generation primitives may be requested.
-            - In low-bias prompt modes, symbolic station/location labels and focused-resource terminal targets may be abstracted; rely on workspace bounds, observed poses, target geometry, and remaining state constraints instead of memorized station names.
-            - Treat the CURRENT DISRUPTED SEARCH STATE as x_d.
-            - Treat MARKED RE-ENTRY CONDITIONS as M_bridge.
-            - Treat UNMET MARKED RE-ENTRY CONDITIONS as Gamma(x_d, M_bridge).
-            - A valid final plan must close Gamma(x_d, M_bridge), not only satisfy the active safety obligation.
-            - For the focused disrupted resource, its pending branch will be replaced by the bridge; touched parts on that branch must reach the goal_state by the end of the bridge.
-            - For other resources, their listed pending suffixes will resume after the bridge; restore the entry requirements of each resumable suffix.
-            - If Gamma(x_d, M_bridge) cannot be closed confidently with current information, request an observation event Sigma_o before returning final_plan.
-            - In final_plan primitive_steps, use "store_as" ONLY on these primitives: detect_parts, get_current_pose, compute_pick_targets, compute_place_targets.
-            - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, open_gripper, close_gripper, attach_part, detach_part, rotate_wrist, pause_job, resume_job, or cancel_job.
-            """
-        ).strip()
-        session_metadata = dedent(
-            f"""\
-            SESSION:
-            - session_id: {session_id}
-            - turn: {turn_index}/{max_turns}
-            - phase: {phase_token}
-            - focused_resource_jid: {focused_resource_jid}
-            - goal_state: {goal_state}
-            - pending_parts: {json.dumps(pending_parts)}
-            """
-        ).strip()
-        continuation_sections = dedent(
-            f"""\
-            PENDING SUFFIX SUMMARY:
-            {suffix_json}
-
-            MARKED RE-ENTRY CONDITIONS (M_bridge):
-            {marked_reentry_json}
-
-            UNMET MARKED RE-ENTRY CONDITIONS (Gamma(x_d, M_bridge)):
-            {unmet_json}
-            """
-        ).strip()
+        ACTIVE EXECUTOR SUMMARY:
+        {active_executor_json}
+        """
+    ).strip()
 
     operator_guidance_section = dedent(
         f"""\
@@ -3651,34 +3228,30 @@ def build_bridge_turn_prompt(
         {feedback_json}
         """
     ).strip()
-    if strict_none_prompt_view:
-        operator_guidance_section = ""
+    operator_guidance_section = ""
 
-    last_failure_heading = (
-        "LAST FAILURE SUMMARY" if strict_none_prompt_view else "LAST FINAL-PLAN FAILURE CONTEXT"
-    )
+    last_failure_heading = "LAST FAILURE SUMMARY"
     last_failure_section = dedent(
         f"""\
         {last_failure_heading}:
         {last_failure_json}
         """
     ).strip()
-    if strict_none_prompt_view and prompt_last_failure == {}:
+    if prompt_last_failure == {}:
         last_failure_section = ""
     modeled_continuation_gap_section = ""
-    if strict_none_prompt_view:
-        modeled_gap = (
-            prompt_last_failure.get("modeled_continuation_gap")
-            if isinstance(prompt_last_failure, dict)
-            else None
-        )
-        if isinstance(modeled_gap, dict) and modeled_gap:
-            modeled_continuation_gap_section = dedent(
-                f"""\
-                MODELED CONTINUATION GAP:
-                {json.dumps(modeled_gap, indent=2)}
-                """
-            ).strip()
+    modeled_gap = (
+        prompt_last_failure.get("modeled_continuation_gap")
+        if isinstance(prompt_last_failure, dict)
+        else None
+    )
+    if isinstance(modeled_gap, dict) and modeled_gap:
+        modeled_continuation_gap_section = dedent(
+            f"""\
+            MODELED CONTINUATION GAP:
+            {json.dumps(modeled_gap, indent=2)}
+            """
+        ).strip()
 
     return dedent(
         f"""\
