@@ -1047,13 +1047,28 @@ def render(bridge: SystemBridge) -> None:
 
             async def _run_runtime_bridge(product_jid: str) -> None:
                 try:
-                    await asyncio.to_thread(bridge.generate_runtime_bridge_proposal, product_jid)
+                    result = await asyncio.to_thread(
+                        bridge.generate_runtime_bridge_proposal,
+                        product_jid,
+                    )
+                    bridge_debug = (
+                        result.get("bridge_debug")
+                        if isinstance(result, dict) and isinstance(result.get("bridge_debug"), dict)
+                        else {}
+                    )
+                    bridge_source = str(bridge_debug.get("source", "") or "").strip().lower()
+                    if bridge_source == "preprogrammed_scenario":
+                        feedback_text = "Preprogrammed recovery scenario loaded and ready for approval."
+                        notify_text = "Preprogrammed recovery scenario loaded."
+                    else:
+                        feedback_text = "Bounded LLM bridge reasoning started from the prepared session."
+                        notify_text = "Bounded LLM bridge reasoning started."
                     _set_action_feedback(
                         product_jid,
                         "positive",
-                        "Bounded LLM bridge reasoning started from the prepared session.",
+                        feedback_text,
                     )
-                    _notify("Bounded LLM bridge reasoning started.", type="positive")
+                    _notify(notify_text, type="positive")
                     client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
                     _set_action_feedback(

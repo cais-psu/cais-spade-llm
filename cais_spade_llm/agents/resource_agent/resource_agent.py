@@ -152,6 +152,7 @@ class ResourceAgent(LlmAgent):
         """
         from cais_spade_llm.resources.resource_profile import (
             get_resource_profile_for_agent,
+            resource_snapshot_set_field,
         )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
@@ -390,7 +391,12 @@ class ResourceAgent(LlmAgent):
                 step_outputs[store_as] = step_output
 
         if out_state:
-            runtime_snapshot["current_state"] = out_state
+            runtime_snapshot = resource_snapshot_set_field(
+                runtime_snapshot,
+                "current_state",
+                out_state,
+                profile=profile,
+            )
             sync_agent_from_bridge_snapshot(self, runtime_snapshot)
 
         return {

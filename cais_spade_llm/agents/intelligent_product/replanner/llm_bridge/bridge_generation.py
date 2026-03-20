@@ -54,6 +54,74 @@ _BRIDGE_TASK_PARAM_RESERVED_KEYS = frozenset(
     }
 )
 
+
+def _normalize_bridge_react_trace(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    normalized: dict[str, Any] = {}
+    for key in (
+        "observed_facts",
+        "gap_to_close",
+        "decision_basis",
+        "expected_progress",
+    ):
+        values = payload.get(key)
+        if not isinstance(values, list):
+            continue
+        cleaned = [
+            str(item).strip()
+            for item in values
+            if str(item).strip()
+        ][:6]
+        if cleaned:
+            normalized[key] = cleaned
+    return normalized
+
+
+def _normalize_bridge_outline_steps(raw_steps: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_steps, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, dict):
+            continue
+        step_name = str(raw_step.get("step_name", "") or "").strip()
+        objective = str(raw_step.get("objective", "") or "").strip()
+        resource_jid = str(raw_step.get("resource_jid", "") or "").strip()
+        part_name = _normalize_optional_name(raw_step.get("part_name", ""))
+        operation_family = str(raw_step.get("operation_family", "") or "").strip()
+        success_signal = str(raw_step.get("success_signal", "") or "").strip()
+        rationale = str(raw_step.get("rationale", "") or "").strip()
+        if not any(
+            (
+                step_name,
+                objective,
+                resource_jid,
+                part_name,
+                operation_family,
+                success_signal,
+                rationale,
+            )
+        ):
+            continue
+        entry: dict[str, str] = {}
+        if step_name:
+            entry["step_name"] = step_name
+        if objective:
+            entry["objective"] = objective
+        if resource_jid:
+            entry["resource_jid"] = resource_jid
+        if part_name:
+            entry["part_name"] = part_name
+        if operation_family:
+            entry["operation_family"] = operation_family
+        if success_signal:
+            entry["success_signal"] = success_signal
+        if rationale:
+            entry["rationale"] = rationale
+        normalized.append(entry)
+    return normalized
+
 def _bridge_resource_entries(
     *,
     ra_jid: str,
@@ -212,6 +280,9 @@ def _normalize_bridge_event_summary(
             entry["expected_resource_delta"] = resource_delta
         if part_delta is not None:
             entry["expected_part_delta"] = part_delta
+        raw_projected_effects = raw_event.get("projected_effects")
+        if isinstance(raw_projected_effects, dict) and raw_projected_effects:
+            entry["projected_effects"] = deepcopy(raw_projected_effects)
 
         normalized_event = canonical_bridge_event(
             entry,
@@ -558,7 +629,7 @@ def normalize_bridge_turn_response(
     allowed_observation_primitives: list[str] | set[str],
     bridge_resources: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Parse one ReAct turn response into a strict observe/bridge_events/final_plan union."""
+    """Parse one ReAct turn response into a strict observe/bridge_outline/bridge_events/final_plan union."""
     if isinstance(raw, dict):
         parsed = deepcopy(raw)
     else:
@@ -607,6 +678,18 @@ def normalize_bridge_turn_response(
             "params": deepcopy(params),
             "store_as": store_as,
             "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+            "react_trace": _normalize_bridge_react_trace(parsed.get("react_trace")),
+        }, None
+
+    if response_type == "bridge_outline":
+        normalized_steps = _normalize_bridge_outline_steps(parsed.get("steps"))
+        if not normalized_steps:
+            return None, "bridge_outline.steps must contain at least one valid step"
+        return {
+            "type": "bridge_outline",
+            "steps": deepcopy(normalized_steps),
+            "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+            "react_trace": _normalize_bridge_react_trace(parsed.get("react_trace")),
         }, None
 
     if response_type == "bridge_events":
@@ -639,6 +722,7 @@ def normalize_bridge_turn_response(
             "type": "bridge_events",
             "events": deepcopy(normalized_events),
             "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+            "react_trace": _normalize_bridge_react_trace(parsed.get("react_trace")),
         }, None
 
     if response_type == "final_plan":
@@ -649,9 +733,10 @@ def normalize_bridge_turn_response(
             "type": "final_plan",
             "plan": deepcopy(plan),
             "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
+            "react_trace": _normalize_bridge_react_trace(parsed.get("react_trace")),
         }, None
 
-    return None, "turn response type must be 'observe', 'bridge_events', or 'final_plan'"
+    return None, "turn response type must be 'observe', 'bridge_outline', 'bridge_events', or 'final_plan'"
 
 
 async def llm_explore_states_and_events(

@@ -24,10 +24,15 @@ from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
+    canonical_preprogrammed_bridge_scenario_id,
 )
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
+_CASE3_PREPROGRAMMED_SCENARIO_ID = "case3_llm_bridge"
+_CASE3_PREPROGRAMMED_REQUIREMENT_FILES = frozenset({"case3_two_arm_llm_bridge.txt"})
+
+
 class ProductAgent(LlmAgent):
     """
     SPADE ProductAgent
@@ -1867,13 +1872,25 @@ class ProductAgent(LlmAgent):
             ),
         )
 
+        scenario_hint = canonical_preprogrammed_bridge_scenario_id(
+            self._auto_runtime_preprogrammed_scenario_id()
+        )
+        bridge_generation_mode = str(self._bridge_generation_mode or "auto").strip().lower()
+        if scenario_hint and bridge_generation_mode != "manual":
+            self.logger.info(
+                "[Product] Forcing manual bridge handoff for preprogrammed scenario: scenario_id=%s mode=%s->manual",
+                scenario_hint,
+                bridge_generation_mode or "auto",
+            )
+            bridge_generation_mode = "manual"
+
         self._runtime_repair_inflight = True
         try:
             result = await self.process_planner.replan_with_feedback_online(
                 violations,
                 system_coordination_state=system_coordination_state,
                 bridge_feedback=feedback_text,
-                bridge_generation_mode=self._bridge_generation_mode,
+                bridge_generation_mode=bridge_generation_mode,
             )
             if not isinstance(result, dict):
                 result = {}
@@ -1892,6 +1909,56 @@ class ProductAgent(LlmAgent):
                 self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                     prepared_bridge_request
                 )
+                if scenario_hint:
+                    self.logger.info(
+                        "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
+                        scenario_hint,
+                    )
+                    try:
+                        (
+                            scenario_key,
+                            normalized,
+                            bridge_debug,
+                            _plan_rewrite,
+                            bridge_summary,
+                        ) = self._resolve_preprogrammed_runtime_bridge_bundle(
+                            scenario_id=scenario_hint,
+                            prepared_bridge_request=prepared_bridge_request,
+                        )
+                        bridge_text = (
+                            ", ".join(str(item) for item in bridge_summary if item)
+                            or scenario_key
+                        )
+                        recovery = self._set_runtime_recovery(
+                            status="llm_bridge",
+                            trigger=trigger,
+                            failed_task_id=failed_task_id,
+                            message="Preprogrammed recovery scenario loaded; auto-approving.",
+                            attempts_used=attempt_number,
+                            attempts_max=self._runtime_repair_max_attempts,
+                            used_llm_bridge=False,
+                            bridge_proposal=normalized,
+                            bridge_debug=bridge_debug,
+                            bridge_approval_state="pending",
+                            active_bridge_sequence=None,
+                            bridge_feedback_history=feedback_history,
+                            violations=violations,
+                            append_history=True,
+                            history_message=(
+                                f"Automatically loaded preprogrammed recovery scenario: {bridge_text}."
+                            ),
+                        )
+                        self._clear_plan_safety_alert()
+                        self.logger.info(
+                            "[Product] Auto-approving preprogrammed recovery scenario after DES handoff: scenario_id=%s",
+                            scenario_key,
+                        )
+                        return self.approve_runtime_bridge_proposal_sync()
+                    except Exception:
+                        self.logger.exception(
+                            "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
+                            scenario_hint,
+                        )
                 message = (
                     base_message
                     or "DES found no modeled continuation. Bridge session is ready for LLM reasoning."
@@ -2284,6 +2351,16 @@ class ProductAgent(LlmAgent):
             raise RuntimeError(
                 "bridge exploration can only be started from bridge_ready, llm_bridge, or human_required"
             )
+        if status == "bridge_ready":
+            scenario_hint = canonical_preprogrammed_bridge_scenario_id(
+                self._auto_runtime_preprogrammed_scenario_id()
+            )
+            if scenario_hint:
+                self.logger.info(
+                    "[Product] Auto-routing runtime bridge generation to preprogrammed scenario: scenario_id=%s",
+                    scenario_hint,
+                )
+                return self.load_preprogrammed_runtime_bridge_scenario_sync(scenario_hint)
 
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
@@ -2426,14 +2503,18 @@ class ProductAgent(LlmAgent):
         scenario_id: str,
         prepared_bridge_request: dict[str, Any],
     ) -> dict[str, Any]:
+        scenario_request = deepcopy(prepared_bridge_request)
+        preprogrammed_part_observations = self._derive_preprogrammed_part_observations()
+        if preprogrammed_part_observations:
+            scenario_request["preprogrammed_part_observations"] = preprogrammed_part_observations
         proposal = build_preprogrammed_bridge_proposal(
             scenario_id=scenario_id,
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_bridge_request=scenario_request,
         )
         plan_rewrite = deepcopy(proposal.get("plan_rewrite") or {})
         normalized = self.process_planner.validate_preprogrammed_bridge_proposal(
             proposal=proposal,
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_bridge_request=scenario_request,
             source="preprogrammed_scenario",
             scenario_id=scenario_id,
         )
@@ -2452,6 +2533,48 @@ class ProductAgent(LlmAgent):
             "plan_rewrite": plan_rewrite,
         }
 
+    def _derive_preprogrammed_part_observations(self) -> dict[str, dict[str, float]]:
+        derived: dict[str, dict[str, float]] = {}
+        violations = list(self._runtime_recovery_context.get("violations") or [])
+        for violation in violations:
+            if not isinstance(violation, dict):
+                continue
+            failure_context = violation.get("failure_context")
+            if not isinstance(failure_context, dict):
+                continue
+            observations = failure_context.get("observations")
+            if not isinstance(observations, dict):
+                continue
+            pose_candidate = None
+            for key in ("observed_pose", "pose", "position", "dropped_location"):
+                raw_pose = observations.get(key)
+                if not isinstance(raw_pose, dict):
+                    continue
+                if not {"x", "y", "z"} <= set(raw_pose.keys()):
+                    continue
+                try:
+                    pose_candidate = {
+                        "x": float(raw_pose["x"]),
+                        "y": float(raw_pose["y"]),
+                        "z": float(raw_pose["z"]),
+                    }
+                except (TypeError, ValueError):
+                    pose_candidate = None
+                if pose_candidate is not None:
+                    break
+            if pose_candidate is None:
+                continue
+            for entity in failure_context.get("affected_entities") or []:
+                if not isinstance(entity, dict):
+                    continue
+                if str(entity.get("entity_type") or "").strip().lower() != "part":
+                    continue
+                part_name = str(entity.get("entity_id") or "").strip()
+                if not part_name or part_name in derived:
+                    continue
+                derived[part_name] = deepcopy(pose_candidate)
+        return derived
+
     def _cache_preprogrammed_runtime_bridge_scenario(
         self,
         *,
@@ -2466,6 +2589,59 @@ class ProductAgent(LlmAgent):
         cache[str(scenario_id)] = deepcopy(bundle)
         self._runtime_recovery_context["preprogrammed_bridge_cache"] = cache
         return bundle
+
+    def _resolve_preprogrammed_runtime_bridge_bundle(
+        self,
+        *,
+        scenario_id: str,
+        prepared_bridge_request: dict[str, Any],
+        started_at: float | None = None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+        scenario_key = str(scenario_id or "").strip()
+        if not scenario_key:
+            raise ValueError("scenario_id is empty")
+
+        elapsed = (
+            time.perf_counter() - started_at
+            if started_at is not None
+            else 0.0
+        )
+        cached_bundle = deepcopy(
+            ((self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(scenario_key) or {})
+        )
+        if isinstance(cached_bundle.get("proposal"), dict):
+            normalized = deepcopy(cached_bundle["proposal"])
+            bridge_debug = deepcopy(cached_bundle.get("bridge_debug") or {})
+            plan_rewrite = deepcopy(cached_bundle.get("plan_rewrite") or {})
+            bridge_summary = list(cached_bundle.get("bridge_summary") or [])
+            self.logger.info(
+                "[Product] Preprogrammed runtime bridge scenario cache hit: scenario_id=%s elapsed=%.3fs",
+                scenario_key,
+                elapsed,
+            )
+        else:
+            bundle = self._cache_preprogrammed_runtime_bridge_scenario(
+                scenario_id=scenario_key,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+            normalized = deepcopy(bundle.get("proposal") or {})
+            bridge_debug = deepcopy(bundle.get("bridge_debug") or {})
+            plan_rewrite = deepcopy(bundle.get("plan_rewrite") or {})
+            bridge_summary = list(bundle.get("bridge_summary") or [])
+            self.logger.info(
+                "[Product] Preprogrammed runtime bridge scenario built+validated: scenario_id=%s elapsed=%.3fs",
+                scenario_key,
+                elapsed,
+            )
+
+        if not isinstance(bridge_debug, dict):
+            bridge_debug = {}
+        bridge_debug["source"] = "preprogrammed_scenario"
+        bridge_debug["scenario_id"] = scenario_key
+        bridge_debug["execution_policy"] = {"complete_full_tail": True}
+        if isinstance(plan_rewrite, dict) and plan_rewrite:
+            bridge_debug["plan_rewrite"] = plan_rewrite
+        return scenario_key, normalized, bridge_debug, plan_rewrite, bridge_summary
 
     def load_preprogrammed_runtime_bridge_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
         started_at = time.perf_counter()
@@ -2494,47 +2670,20 @@ class ProductAgent(LlmAgent):
             scenario_key,
             time.perf_counter() - started_at,
         )
-        cached_bundle = deepcopy(
-            ((self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(scenario_key) or {})
-        )
         try:
-            if isinstance(cached_bundle.get("proposal"), dict):
-                normalized = deepcopy(cached_bundle["proposal"])
-                bridge_debug = deepcopy(cached_bundle.get("bridge_debug") or {})
-                plan_rewrite = deepcopy(cached_bundle.get("plan_rewrite") or {})
-                bridge_summary = list(cached_bundle.get("bridge_summary") or [])
-                self.logger.info(
-                    "[Product] Preprogrammed runtime bridge scenario cache hit: scenario_id=%s elapsed=%.3fs",
-                    scenario_key,
-                    time.perf_counter() - started_at,
-                )
-            else:
-                bundle = self._cache_preprogrammed_runtime_bridge_scenario(
+            scenario_key, normalized, bridge_debug, plan_rewrite, bridge_summary = (
+                self._resolve_preprogrammed_runtime_bridge_bundle(
                     scenario_id=scenario_key,
                     prepared_bridge_request=prepared_bridge_request,
+                    started_at=started_at,
                 )
-                normalized = deepcopy(bundle.get("proposal") or {})
-                bridge_debug = deepcopy(bundle.get("bridge_debug") or {})
-                plan_rewrite = deepcopy(bundle.get("plan_rewrite") or {})
-                bridge_summary = list(bundle.get("bridge_summary") or [])
-                self.logger.info(
-                    "[Product] Preprogrammed runtime bridge scenario built+validated: scenario_id=%s elapsed=%.3fs",
-                    scenario_key,
-                    time.perf_counter() - started_at,
-                )
+            )
         except Exception:
             self.logger.exception(
                 "[Product] Loading preprogrammed runtime bridge scenario failed: scenario_id=%s",
                 scenario_key,
             )
             raise
-        if not isinstance(bridge_debug, dict):
-            bridge_debug = {}
-        bridge_debug["source"] = "preprogrammed_scenario"
-        bridge_debug["scenario_id"] = scenario_key
-        bridge_debug["execution_policy"] = {"complete_full_tail": True}
-        if isinstance(plan_rewrite, dict) and plan_rewrite:
-            bridge_debug["plan_rewrite"] = plan_rewrite
 
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
@@ -2549,7 +2698,7 @@ class ProductAgent(LlmAgent):
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
-            message="Preprogrammed recovery scenario is ready for approval.",
+            message="Preprogrammed recovery scenario loaded; auto-approving.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
             used_llm_bridge=False,
@@ -2570,12 +2719,11 @@ class ProductAgent(LlmAgent):
             scenario_key,
             time.perf_counter() - started_at,
         )
-        threading.Thread(
-            target=self._persist_product_state,
-            name=f"{self.agent_name}-persist-product-state",
-            daemon=True,
-        ).start()
-        return recovery
+        self.logger.info(
+            "[Product] Auto-approving preprogrammed runtime bridge scenario: scenario_id=%s",
+            scenario_key,
+        )
+        return self.approve_runtime_bridge_proposal_sync()
 
     async def load_preprogrammed_runtime_bridge_scenario(self, scenario_id: str) -> dict[str, Any]:
         return self.load_preprogrammed_runtime_bridge_scenario_sync(scenario_id)
@@ -2629,9 +2777,23 @@ class ProductAgent(LlmAgent):
                 set(self._collect_descendants_from_nodes(planner_nodes_snapshot, failed_task_id))
                 | {failed_task_id}
             )
+        explicit_delete_task_ids: list[str] = []
+        if isinstance(plan_rewrite, dict):
+            for task_id in plan_rewrite.get("delete_task_ids") or []:
+                candidate = str(task_id or "").strip()
+                if (
+                    candidate
+                    and candidate not in explicit_delete_task_ids
+                    and candidate != failed_task_id
+                ):
+                    explicit_delete_task_ids.append(candidate)
+        if explicit_delete_task_ids:
+            deleted_task_ids = sorted(set(deleted_task_ids) | set(explicit_delete_task_ids))
 
         resumable_task_ids = []
+        resume_task_ids_explicit = False
         if isinstance(plan_rewrite, dict):
+            resume_task_ids_explicit = "resume_task_ids" in plan_rewrite
             for task_id in plan_rewrite.get("resume_task_ids") or []:
                 candidate = str(task_id or "").strip()
                 if (
@@ -2640,7 +2802,7 @@ class ProductAgent(LlmAgent):
                     and candidate not in deleted_task_ids
                 ):
                     resumable_task_ids.append(candidate)
-        if not resumable_task_ids:
+        if not resumable_task_ids and not resume_task_ids_explicit:
             resumable_task_ids = [
                 str(node.get("id", "")).strip()
                 for node in planner_nodes_snapshot
@@ -3036,6 +3198,27 @@ class ProductAgent(LlmAgent):
             p_fsa,
         )
         return True
+
+    def _auto_runtime_preprogrammed_scenario_id(self) -> str:
+        bundle = dict(self.precomputed_bundle or {})
+        bundle_id = str(bundle.get("bundle_id", "") or "").strip()
+        if (
+            canonical_preprogrammed_bridge_scenario_id(bundle_id)
+            == canonical_preprogrammed_bridge_scenario_id(_CASE3_PREPROGRAMMED_SCENARIO_ID)
+        ):
+            return _CASE3_PREPROGRAMMED_SCENARIO_ID
+
+        requirement_candidates = [
+            self.product_specification_file,
+            bundle.get("product_spec_file"),
+        ]
+        for candidate in requirement_candidates:
+            raw = str(candidate or "").strip()
+            if not raw:
+                continue
+            if Path(raw).name in _CASE3_PREPROGRAMMED_REQUIREMENT_FILES:
+                return _CASE3_PREPROGRAMMED_SCENARIO_ID
+        return ""
 
 
 

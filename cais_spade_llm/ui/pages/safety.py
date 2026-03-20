@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from pathlib import Path
@@ -167,6 +168,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ).classes("w-full")
 
             ui.label("DFA Graphs").classes("text-sm font-semibold mt-2")
+            ui.label("Render mode: embedded PNG debug").classes("text-xs text-amber-700 mb-1")
             preview_dfa_gallery = ui.row().classes("w-full gap-4 items-start flex-wrap")
             ui.label("Generated LTLf").classes("text-sm font-semibold mt-2")
             preview_ltlf = ui.code("No rule selected.", language="text").classes("w-full")
@@ -265,6 +267,19 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             except Exception:
                 return ""
 
+        def _png_data_url(path_value: str) -> str:
+            raw = str(path_value or "").strip()
+            if not raw:
+                return ""
+            p = Path(raw)
+            if not p.exists():
+                return ""
+            try:
+                encoded = base64.b64encode(p.read_bytes()).decode("ascii")
+                return f"data:image/png;base64,{encoded}"
+            except Exception:
+                return ""
+
         def _clear_rule_detail() -> None:
             preview_ltlf.content = "No rule selected."
             preview_ap_map.content = "{}"
@@ -333,13 +348,18 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     dfa_status = str(rule.get("dfa_status", "") or "").strip()
                     dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
                     img_url = _png_url(str(rule.get("dfa_png_path", "")))
+                    data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
                     with ui.card().classes("bg-white border border-slate-200 w-[calc(50%-0.5rem)] min-w-[18rem]"):
                         ui.label(rid).classes("text-sm font-semibold")
-                        if img_url and dfa_status == "ok":
-                            ui.html(
-                                f"<img src='{img_url}' style='max-width:100%;height:auto;"
-                                "border:1px solid #e2e8f0;border-radius:8px;' />"
-                            ).classes("w-full")
+                        if dfa_status == "ok" and (img_url or data_url):
+                            # Prefer the embedded data URL because that was the last
+                            # known-good behavior before the /safety-previews switch.
+                            src = data_url or img_url
+                            ui.image(src).classes("w-full").style(
+                                "max-width:100%;height:auto;"
+                                "border:1px solid #e2e8f0;border-radius:8px;"
+                                "object-fit:contain;"
+                            )
                         else:
                             ui.label(dfa_diagnostic or "DFA image unavailable.").classes(
                                 "text-sm text-slate-500 italic whitespace-pre-wrap"

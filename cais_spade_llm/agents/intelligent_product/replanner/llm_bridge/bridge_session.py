@@ -24,6 +24,30 @@ from cais_spade_llm.resources.resource_profile import (
 from cais_spade_llm.prompts import BridgeHintLevel, build_bridge_turn_prompt
 
 
+def _bridge_compact_react_trace(turn_response: dict[str, Any]) -> str:
+    payload = turn_response if isinstance(turn_response, dict) else {}
+    parts: list[str] = []
+    reason_summary = str(payload.get("reason_summary", "") or "").strip()
+    if reason_summary:
+        parts.append(f"reason={reason_summary}")
+    react_trace = payload.get("react_trace") or {}
+    if isinstance(react_trace, dict):
+        for key, label in (
+            ("observed_facts", "facts"),
+            ("gap_to_close", "gap"),
+            ("decision_basis", "basis"),
+            ("expected_progress", "progress"),
+        ):
+            values = [
+                str(item).strip()
+                for item in (react_trace.get(key) or [])
+                if str(item).strip()
+            ]
+            if values:
+                parts.append(f"{label}=" + " | ".join(values[:2]))
+    return "; ".join(parts[:5])
+
+
 class BridgeSessionMixin:
     def _refresh_bridge_grounding_context(
         self,
@@ -37,16 +61,55 @@ class BridgeSessionMixin:
             or prepared_bridge_request.get("bridge_snapshot")
             or {}
         )
+        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        projected_resource_snapshots = deepcopy(
+            bridge_session.get("projected_resource_snapshots") or {}
+        )
+        projected_parts = deepcopy(bridge_session.get("projected_parts") or {})
+        incremental_mode = self._bridge_incremental_event_mode(prepared_bridge_request)
+        prompt_bridge_resources = deepcopy(bridge_resources)
+        prompt_part_tracker = deepcopy(prepared_bridge_request.get("part_tracker") or {})
+        prompt_bridge_snapshot = deepcopy(bridge_snapshot)
+
+        if incremental_mode and list(bridge_session.get("approved_bridge_events") or []):
+            for resource_jid, raw_snapshot in projected_resource_snapshots.items():
+                jid = str(resource_jid or "").strip()
+                if not jid or not isinstance(raw_snapshot, dict):
+                    continue
+                resource_entry = dict(prompt_bridge_resources.get(jid) or {})
+                if not resource_entry:
+                    continue
+                resource_entry["bridge_snapshot"] = deepcopy(raw_snapshot)
+                prompt_bridge_resources[jid] = resource_entry
+                if jid == focused_resource_jid:
+                    prompt_bridge_snapshot = deepcopy(raw_snapshot)
+
+            for part_name, raw_entry in projected_parts.items():
+                name = str(part_name or "").strip()
+                if not name or not isinstance(raw_entry, dict):
+                    continue
+                part_entry = dict(prompt_part_tracker.get(name) or {})
+                for field in (
+                    "state",
+                    "location",
+                    "last_known_location",
+                    "observed_pose",
+                    "pose",
+                    "pose_status",
+                ):
+                    if raw_entry.get(field) is not None:
+                        part_entry[field] = deepcopy(raw_entry.get(field))
+                prompt_part_tracker[name] = part_entry
+
         grounding_context = self._bridge_grounding_context(
             focused_resource_jid=focused_resource_jid,
-            bridge_snapshot=bridge_snapshot,
-            bridge_resources=bridge_resources,
-            part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+            bridge_snapshot=prompt_bridge_snapshot,
+            bridge_resources=prompt_bridge_resources,
+            part_tracker=prompt_part_tracker,
             goal_state=str(prepared_bridge_request.get("goal_state", "") or "").strip(),
             P_id=deepcopy(list(prepared_bridge_request.get("P_id") or [])),
             obligation_targets=deepcopy(list(prepared_bridge_request.get("obligation_targets") or [])),
         )
-        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
         observation_store = deepcopy(bridge_session.get("observation_store") or {})
         if observation_store:
             grounding_context["step_outputs"] = observation_store
@@ -54,7 +117,19 @@ class BridgeSessionMixin:
         prepared_bridge_request["bridge_snapshot"] = bridge_snapshot
         prepared_bridge_request["grounding_context"] = grounding_context
         prepared_bridge_request["bridge_resources"] = bridge_resources
-        marked_reentry_context = self._bridge_marked_reentry_context(prepared_bridge_request)
+        marked_reentry_context = self._bridge_marked_reentry_context(
+            prepared_bridge_request,
+            projected_resource_snapshots=(
+                projected_resource_snapshots
+                if incremental_mode and list(bridge_session.get("approved_bridge_events") or [])
+                else None
+            ),
+            projected_parts=(
+                projected_parts
+                if incremental_mode and list(bridge_session.get("approved_bridge_events") or [])
+                else None
+            ),
+        )
         prepared_bridge_request["marked_reentry_context"] = marked_reentry_context
         prepared_bridge_request["continuation_context"] = deepcopy(marked_reentry_context)
         prepared_bridge_request["bridge_safety_context"] = self._derive_bridge_safety_constraints(
@@ -93,6 +168,8 @@ class BridgeSessionMixin:
                 "grounding_context": deepcopy(grounding_context),
                 "marked_reentry_context": deepcopy(marked_reentry_context),
                 "continuation_context": deepcopy(marked_reentry_context),
+                "projected_resource_snapshots": deepcopy(projected_resource_snapshots),
+                "projected_parts": deepcopy(projected_parts),
                 "bridge_safety_context": deepcopy(
                     prepared_bridge_request.get("bridge_safety_context") or {}
                 ),
@@ -172,8 +249,18 @@ class BridgeSessionMixin:
                     or self._bridge_turn_observation_primitives()
                 )
             ),
+            bridge_outline=deepcopy(list(bridge_session.get("bridge_outline") or [])),
             approved_bridge_events=deepcopy(
                 list(bridge_session.get("approved_bridge_events") or [])
+            ),
+            infeasible_assignments=deepcopy(
+                list(bridge_session.get("infeasible_assignments") or [])
+            ),
+            executor_bindings=deepcopy(
+                list(bridge_session.get("executor_bindings") or [])
+            ),
+            handoff_requirements=deepcopy(
+                list(bridge_session.get("handoff_requirements") or [])
             ),
             bridge_safety_context=deepcopy(
                 prepared_bridge_request.get("bridge_safety_context") or {}
@@ -701,12 +788,238 @@ class BridgeSessionMixin:
         return BridgeSessionMixin._format_bridge_marked_reentry_feedback(continuation_context)
 
     @staticmethod
+    def _bridge_unmet_condition_lines(
+        unmet_conditions: list[dict[str, Any]] | None,
+        *,
+        limit: int = 4,
+    ) -> list[str]:
+        lines: list[str] = []
+        for entry in (unmet_conditions or [])[:limit]:
+            if not isinstance(entry, dict):
+                continue
+            entity = str(entry.get("entity", "") or "unknown").strip()
+            field = str(entry.get("field", "") or "unknown").strip()
+            expected = entry.get("expected")
+            actual = entry.get("actual")
+            lines.append(f"{entity}.{field} -> expected {expected!r}, actual {actual!r}")
+        return lines
+
+    @staticmethod
     def _marked_reentry_condition_key(condition: dict[str, Any]) -> tuple[str, str, str, str]:
         entity_kind = str(condition.get("entity_kind", "")).strip()
         entity = str(condition.get("entity", "")).strip()
         field = str(condition.get("field", "")).strip()
         expected = json.dumps(condition.get("expected"), sort_keys=True, default=str)
         return (entity_kind, entity, field, expected)
+
+    def _bridge_event_identity(
+        self,
+        event: dict[str, Any],
+    ) -> str:
+        canonical = canonical_bridge_event(
+            event,
+            bridge_resources={},
+        )
+        return json.dumps(canonical, sort_keys=True, default=str)
+
+    def _bridge_new_event_slice(
+        self,
+        *,
+        approved_events: list[dict[str, Any]],
+        proposed_events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        approved = [
+            self._bridge_event_identity(event)
+            for event in (approved_events or [])
+            if isinstance(event, dict)
+        ]
+        proposed = [
+            event for event in (proposed_events or [])
+            if isinstance(event, dict)
+        ]
+        if not approved or not proposed:
+            return proposed
+
+        proposed_keys = [
+            self._bridge_event_identity(event)
+            for event in proposed
+        ]
+        approved_len = len(approved)
+        if proposed_keys[:approved_len] == approved:
+            return proposed[approved_len:]
+        return proposed
+
+    @staticmethod
+    def _bridge_projection_changed(
+        *,
+        previous_resource_snapshots: dict[str, Any] | None,
+        previous_parts: dict[str, Any] | None,
+        next_resource_snapshots: dict[str, Any] | None,
+        next_parts: dict[str, Any] | None,
+    ) -> bool:
+        return (
+            deepcopy(previous_resource_snapshots or {}) != deepcopy(next_resource_snapshots or {})
+            or deepcopy(previous_parts or {}) != deepcopy(next_parts or {})
+        )
+
+    @staticmethod
+    def _bridge_executor_scope(part_name: str) -> str:
+        name = str(part_name or "").strip()
+        return f"recover_part_to_goal:{name}" if name else "recover_part_to_goal"
+
+    def _bridge_part_entry_pose(
+        self,
+        *,
+        part_entry: dict[str, Any] | None,
+        grounding_part: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        entry = dict(part_entry or {})
+        pose = self._coerce_xyz_pose(entry.get("observed_pose") or entry.get("pose"))
+        if pose is not None:
+            return pose
+        pose_status = str(entry.get("pose_status") or "").strip().lower()
+        if pose_status == "projected_target":
+            target = dict((grounding_part or {}).get("target") or {})
+            return self._coerce_xyz_pose(target.get("slot_pose") or target.get("pose"))
+        return None
+
+    def _bridge_part_pose_grounded(
+        self,
+        *,
+        part_entry: dict[str, Any] | None,
+        grounding_part: dict[str, Any] | None,
+    ) -> bool:
+        entry = dict(part_entry or {})
+        pose_status = str(entry.get("pose_status") or "").strip().lower()
+        if pose_status == "carried":
+            return False
+        return self._bridge_part_entry_pose(
+            part_entry=entry,
+            grounding_part=grounding_part,
+        ) is not None
+
+    def _bridge_update_executor_memory_after_event(
+        self,
+        *,
+        normalized_event: dict[str, Any],
+        projected_part_entries: dict[str, dict[str, Any]],
+        grounding_parts: dict[str, Any],
+        executor_bindings: dict[str, dict[str, Any]],
+        handoff_requirements: dict[str, dict[str, Any]],
+    ) -> None:
+        resource_jid = str(normalized_event.get("resource_jid", "") or "").strip()
+        part_name = str(normalized_event.get("part_name", "") or "").strip()
+        if not part_name:
+            return
+        semantic_kind = self._bridge_event_semantic_kind(normalized_event)
+        part_delta = self._bridge_event_expected_part_delta(normalized_event)
+        part_to = str((part_delta or {}).get("to", "") or "").strip().lower()
+        part_entry = dict(projected_part_entries.get(part_name) or {})
+        grounding_part = dict(grounding_parts.get(part_name) or {})
+        grounded_destination = self._bridge_part_pose_grounded(
+            part_entry=part_entry,
+            grounding_part=grounding_part,
+        )
+        scope = self._bridge_executor_scope(part_name)
+        pose_status = str(part_entry.get("pose_status") or "").strip() or (
+            "grounded" if grounded_destination else "unknown"
+        )
+
+        if semantic_kind == "pick":
+            executor_bindings[part_name] = {
+                "part_name": part_name,
+                "scope": scope,
+                "resource_jid": resource_jid,
+                "status": "active",
+            }
+            handoff_requirements[part_name] = {
+                "part_name": part_name,
+                "bound_resource_jid": resource_jid,
+                "required_for_switch": True,
+                "grounded_destination_available": False,
+                "current_location": part_entry.get("location"),
+                "pose_status": pose_status or "carried",
+                "reason": "part is currently carried by the active executor",
+            }
+            return
+
+        if semantic_kind in {"stage", "place", "assemble", "pick_place"}:
+            if part_to == "assembled":
+                executor_bindings.pop(part_name, None)
+                handoff_requirements.pop(part_name, None)
+                return
+            bound_resource_jid = str(
+                (executor_bindings.get(part_name) or {}).get("resource_jid") or resource_jid
+            ).strip()
+            if not bound_resource_jid:
+                return
+            executor_bindings[part_name] = {
+                "part_name": part_name,
+                "scope": scope,
+                "resource_jid": bound_resource_jid,
+                "status": "released_pending_goal",
+            }
+            handoff_requirements[part_name] = {
+                "part_name": part_name,
+                "bound_resource_jid": bound_resource_jid,
+                "required_for_switch": True,
+                "grounded_destination_available": bool(grounded_destination),
+                "current_location": part_entry.get("location"),
+                "pose_status": pose_status,
+                "reason": (
+                    "executor switch allowed because the released part has a grounded destination pose"
+                    if grounded_destination
+                    else "executor switch requires a grounded handoff or new observation"
+                ),
+            }
+
+    def _bridge_executor_memory_from_events(
+        self,
+        prepared_bridge_request: dict[str, Any],
+        *,
+        events: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        projected_resources = self._bridge_effective_resource_facts(
+            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            projected_resource_snapshots=None,
+        )
+        part_states, part_locations, part_entries = self._bridge_effective_part_facts(
+            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+            projected_parts=None,
+        )
+        grounding_parts = dict(
+            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+        )
+        executor_bindings: dict[str, dict[str, Any]] = {}
+        handoff_requirements: dict[str, dict[str, Any]] = {}
+
+        for raw_event in (events or []):
+            if not isinstance(raw_event, dict):
+                continue
+            normalized_event = canonical_bridge_event(
+                raw_event,
+                bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            )
+            self._bridge_apply_event_projection(
+                normalized_event,
+                projected_resources=projected_resources,
+                projected_part_states=part_states,
+                projected_part_locations=part_locations,
+                projected_part_entries=part_entries,
+                grounding_parts=grounding_parts,
+            )
+            self._bridge_update_executor_memory_after_event(
+                normalized_event=normalized_event,
+                projected_part_entries=part_entries,
+                grounding_parts=grounding_parts,
+                executor_bindings=executor_bindings,
+                handoff_requirements=handoff_requirements,
+            )
+
+        return (
+            [deepcopy(executor_bindings[key]) for key in sorted(executor_bindings)],
+            [deepcopy(handoff_requirements[key]) for key in sorted(handoff_requirements)],
+        )
 
     def _bridge_event_summary_from_macro_tasks(
         self,
@@ -943,7 +1256,15 @@ class BridgeSessionMixin:
             "operator_feedback_history": operator_feedback_history,
             "observation_store": {},
             "observation_history": [],
+            "bridge_outline": [],
             "approved_bridge_events": [],
+            "bridge_events_complete": False,
+            "infeasible_assignments": [],
+            "executor_bindings": [],
+            "handoff_requirements": [],
+            "modeled_continuation_gap": {},
+            "projected_resource_snapshots": {},
+            "projected_parts": {},
             "validation_feedback": [],
             "last_plan_failure": {},
             "bridge_safety_context": deepcopy(bridge_safety_context or {}),
@@ -1218,6 +1539,61 @@ class BridgeSessionMixin:
             prepared_bridge_request["bridge_debug"] = bridge_debug
             self._set_last_bridge_debug(bridge_debug)
 
+    def _bridge_remember_infeasible_assignments(
+        self,
+        prepared_bridge_request: dict[str, Any],
+        *,
+        feasibility_decisions: list[dict[str, Any]] | None,
+    ) -> None:
+        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        remembered = [
+            item
+            for item in (bridge_session.get("infeasible_assignments") or [])
+            if isinstance(item, dict)
+        ]
+        seen = {
+            json.dumps(
+                {
+                    "resource_jid": str(item.get("resource_jid") or "").strip(),
+                    "part_name": str(item.get("part_name") or "").strip(),
+                    "operation_kind": str(item.get("operation_kind") or "").strip(),
+                    "scope": str(item.get("scope") or "").strip(),
+                },
+                sort_keys=True,
+            )
+            for item in remembered
+        }
+        for decision in (feasibility_decisions or []):
+            if not isinstance(decision, dict) or decision.get("allowed", True):
+                continue
+            operation_kind = str(decision.get("operation_kind") or "").strip()
+            part_name = str(decision.get("part_name") or "").strip()
+            scope = operation_kind
+            if operation_kind in {"pick", "pick_place"} and part_name:
+                scope = "recover_part_from_current_pose"
+            entry = {
+                "resource_jid": str(decision.get("resource_jid") or "").strip(),
+                "part_name": part_name,
+                "operation_kind": operation_kind,
+                "scope": scope,
+                "reason": str(decision.get("reason") or "").strip(),
+            }
+            signature = json.dumps(
+                {
+                    "resource_jid": entry["resource_jid"],
+                    "part_name": entry["part_name"],
+                    "operation_kind": entry["operation_kind"],
+                    "scope": entry["scope"],
+                },
+                sort_keys=True,
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            remembered.append(entry)
+        bridge_session["infeasible_assignments"] = remembered[-8:]
+        prepared_bridge_request["bridge_session"] = bridge_session
+
     def _normalize_primitive_bridge_plan_with_warnings(
         self,
         *,
@@ -1272,6 +1648,64 @@ class BridgeSessionMixin:
             return compiled_plan, None, preview_error
 
         return compiled_plan, normalized_plan, None
+
+    def _bridge_symbolic_preview_approved_events(
+        self,
+        prepared_bridge_request: dict[str, Any],
+        *,
+        approved_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        projected_resources = self._bridge_effective_resource_facts(
+            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            projected_resource_snapshots=None,
+        )
+        part_states, part_locations, part_entries = self._bridge_effective_part_facts(
+            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+            projected_parts=None,
+        )
+
+        for raw_event in (approved_events or []):
+            if not isinstance(raw_event, dict):
+                continue
+            normalized_event = canonical_bridge_event(
+                raw_event,
+                bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            )
+            self._bridge_apply_event_projection(
+                normalized_event,
+                projected_resources=projected_resources,
+                projected_part_states=part_states,
+                projected_part_locations=part_locations,
+                projected_part_entries=part_entries,
+                grounding_parts=dict(
+                    (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+                ),
+            )
+            part_name = str(normalized_event.get("part_name", "") or "").strip()
+            if part_name:
+                updated_entry = dict(part_entries.get(part_name) or {})
+                if part_name in part_states:
+                    updated_entry["state"] = part_states.get(part_name)
+                if part_name in part_locations:
+                    updated_entry["location"] = part_locations.get(part_name)
+                if updated_entry:
+                    part_entries[part_name] = updated_entry
+
+        projected_resource_snapshots = {
+            str(resource_jid): deepcopy(resource_entry)
+            for resource_jid, resource_entry in projected_resources.items()
+            if str(resource_jid).strip()
+        }
+        projected_parts = {
+            str(part_name): deepcopy(part_entry)
+            for part_name, part_entry in part_entries.items()
+            if str(part_name).strip()
+        }
+        return {
+            "bridge_event_summary": deepcopy(approved_events or []),
+            "projected_resource_snapshots": projected_resource_snapshots,
+            "projected_parts": projected_parts,
+        }
 
     async def _execute_bridge_observation_turn(
         self,
@@ -1410,6 +1844,14 @@ class BridgeSessionMixin:
         max_turns = int(bridge_session.get("max_turns", 6) or 6)
         max_observations = int(bridge_session.get("max_observations", 3) or 3)
         max_final_retries = int(bridge_session.get("max_final_retries", 2) or 2)
+        if self._bridge_incremental_event_mode(prepared_bridge_request):
+            max_turns = max(max_turns, 16)
+            max_observations = max(max_observations, 5)
+            max_final_retries = max(max_final_retries, 4)
+            bridge_session["max_turns"] = max_turns
+            bridge_session["max_observations"] = max_observations
+            bridge_session["max_final_retries"] = max_final_retries
+            prepared_bridge_request["bridge_session"] = bridge_session
         _bridge_t0 = time.monotonic()
         self.logger.info(
             "[Bridge] Session started — max_turns=%d, max_observations=%d, max_final_retries=%d",
@@ -1571,6 +2013,12 @@ class BridgeSessionMixin:
                 continue
 
             turn_debug["normalized_response"] = deepcopy(turn_response)
+            reason_summary = str(turn_response.get("reason_summary", "") or "").strip()
+            if reason_summary:
+                turn_debug["reason_summary"] = reason_summary
+            react_trace = deepcopy(turn_response.get("react_trace") or {})
+            if isinstance(react_trace, dict) and react_trace:
+                turn_debug["react_trace"] = react_trace
             response_type = str(turn_response.get("type", "")).strip().lower()
             if response_source == "planner_compiler":
                 self.logger.info(
@@ -1587,6 +2035,13 @@ class BridgeSessionMixin:
                     response_type,
                     max(llm_latency_s, time.monotonic() - _turn_t0),
                     time.monotonic() - _bridge_t0,
+                )
+            react_trace_line = _bridge_compact_react_trace(turn_response)
+            if react_trace_line:
+                self.logger.info(
+                    "[Bridge] Turn %d — ReAct trace: %s",
+                    _turn_idx,
+                    react_trace_line,
                 )
             allowed_types = self._bridge_phase_allowed_types(phase)
             if response_type not in allowed_types:
@@ -1667,15 +2122,98 @@ class BridgeSessionMixin:
                 self._set_last_bridge_debug(bridge_debug)
                 continue
 
+            if response_type == "bridge_outline":
+                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                bridge_session["bridge_outline"] = deepcopy(turn_response.get("steps") or [])
+                bridge_session["last_plan_failure"] = {}
+                bridge_session["phase"] = self._bridge_current_phase(prepared_bridge_request)
+                prepared_bridge_request["bridge_session"] = bridge_session
+                updated_marked_reentry_context = deepcopy(
+                    prepared_bridge_request.get("marked_reentry_context")
+                    or prepared_bridge_request.get("continuation_context")
+                    or {}
+                )
+                self.logger.info(
+                    "[Bridge] Turn %d — bridge_outline ACCEPTED: %d steps",
+                    _turn_idx,
+                    len(bridge_session.get("bridge_outline") or []),
+                )
+                for _idx, _step in enumerate(bridge_session.get("bridge_outline") or [], start=1):
+                    if not isinstance(_step, dict):
+                        continue
+                    _step_name = str(_step.get("step_name", "") or "").strip() or f"step_{_idx}"
+                    _objective = str(_step.get("objective", "") or "").strip()
+                    _success = str(_step.get("success_signal", "") or "").strip()
+                    _detail = _objective or _success or "no details provided"
+                    if _objective and _success:
+                        _detail = f"{_objective} => {_success}"
+                    self.logger.info(
+                        "[Bridge]   outline step %d: %s — %s",
+                        _idx,
+                        _step_name,
+                        _detail,
+                    )
+                turn_debug["bridge_outline"] = deepcopy(
+                    bridge_session.get("bridge_outline") or []
+                )
+                turn_debug["accepted"] = True
+                turn_debug["phase_after"] = bridge_session.get("phase")
+                turn_debug["unmet_reentry_conditions_after"] = deepcopy(
+                    updated_marked_reentry_context.get("unmet_reentry_conditions") or []
+                )
+                bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+                bridge_debug["turns"].append(turn_debug)
+                bridge_debug["session"] = deepcopy(bridge_session)
+                prepared_bridge_request["bridge_debug"] = bridge_debug
+                self._set_last_bridge_debug(bridge_debug)
+                continue
+
             if response_type == "bridge_events":
+                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                current_approved_events = list(
+                    bridge_session.get("approved_bridge_events") or []
+                )
+                proposed_slice = self._bridge_new_event_slice(
+                    approved_events=current_approved_events,
+                    proposed_events=deepcopy(turn_response.get("events") or []),
+                )
+                if not proposed_slice:
+                    no_progress_error = (
+                        "bridge_events response did not add any new event beyond the approved prefix"
+                    )
+                    self._append_bridge_validation_feedback(
+                        prepared_bridge_request,
+                        kind="bridge_events_invalid",
+                        message=no_progress_error,
+                    )
+                    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                    bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+                    turn_debug["error"] = no_progress_error
+                    bridge_debug["turns"].append(turn_debug)
+                    prepared_bridge_request["bridge_debug"] = bridge_debug
+                    self._set_last_bridge_debug(bridge_debug)
+                    continue
+
+                candidate_events = current_approved_events + proposed_slice
                 approved_events, feasibility_decisions, bridge_events_error = (
                     self._bridge_validate_bridge_events(
                         prepared_bridge_request,
-                        events=deepcopy(turn_response.get("events") or []),
+                        events=deepcopy(candidate_events),
+                        require_full_gamma_closure=(
+                            not self._bridge_incremental_event_mode(prepared_bridge_request)
+                        ),
+                        require_primitive_preview=(
+                            not self._bridge_incremental_event_mode(prepared_bridge_request)
+                        ),
                     )
                 )
                 turn_debug["feasibility_decisions"] = deepcopy(feasibility_decisions)
                 if bridge_events_error:
+                    self._bridge_remember_infeasible_assignments(
+                        prepared_bridge_request,
+                        feasibility_decisions=feasibility_decisions,
+                    )
+                    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
                     self.logger.warning(
                         "[Bridge] Turn %d — bridge_events REJECTED: %s",
                         _turn_idx, bridge_events_error,
@@ -1705,19 +2243,128 @@ class BridgeSessionMixin:
                     self._set_last_bridge_debug(bridge_debug)
                     continue
 
-                bridge_session["approved_bridge_events"] = deepcopy(approved_events or [])
-                preview_plan, preview_normalized, preview_error = self._bridge_preview_approved_events(
+                incremental_mode = self._bridge_incremental_event_mode(prepared_bridge_request)
+                if incremental_mode:
+                    preview_plan = None
+                    preview_normalized = self._bridge_symbolic_preview_approved_events(
+                        prepared_bridge_request,
+                        approved_events=deepcopy(approved_events or []),
+                    )
+                    preview_error = None
+                else:
+                    preview_plan, preview_normalized, preview_error = self._bridge_preview_approved_events(
+                        prepared_bridge_request,
+                        approved_events=deepcopy(approved_events or []),
+                    )
+                    if preview_error:
+                        self.logger.warning(
+                            "[Bridge] Turn %d — bridge_events REJECTED: %s",
+                            _turn_idx, preview_error,
+                        )
+                        bridge_session["last_plan_failure"] = {
+                            "kind": "bridge_events_invalid",
+                            "message": preview_error,
+                            "unmet_reentry_conditions": deepcopy(
+                                current_marked_reentry_context.get("unmet_reentry_conditions")
+                                or []
+                            ),
+                        }
+                        bridge_session["draft_final_plan"] = {}
+                        bridge_session["draft_final_plan_status"] = {}
+                        bridge_session["validated_deterministic_plan"] = {}
+                        prepared_bridge_request["bridge_session"] = bridge_session
+                        self._append_bridge_validation_feedback(
+                            prepared_bridge_request,
+                            kind="bridge_events_invalid",
+                            message=preview_error,
+                        )
+                        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+                        turn_debug["error"] = preview_error
+                        bridge_debug["turns"].append(turn_debug)
+                        prepared_bridge_request["bridge_debug"] = bridge_debug
+                        self._set_last_bridge_debug(bridge_debug)
+                        continue
+
+                projected_marked_reentry_context = self._bridge_marked_reentry_context(
                     prepared_bridge_request,
-                    approved_events=bridge_session["approved_bridge_events"],
+                    projected_resource_snapshots=deepcopy(
+                        (preview_normalized or {}).get("projected_resource_snapshots") or {}
+                    ),
+                    projected_parts=deepcopy(
+                        (preview_normalized or {}).get("projected_parts") or {}
+                    ),
                 )
-                if preview_error:
+                current_unmet_keys = {
+                    self._marked_reentry_condition_key(entry)
+                    for entry in (
+                        current_marked_reentry_context.get("unmet_reentry_conditions") or []
+                    )
+                    if isinstance(entry, dict)
+                }
+                next_unmet_keys = {
+                    self._marked_reentry_condition_key(entry)
+                    for entry in (
+                        projected_marked_reentry_context.get("unmet_reentry_conditions") or []
+                    )
+                    if isinstance(entry, dict)
+                }
+                regressed_keys = next_unmet_keys - current_unmet_keys
+                closed_keys = current_unmet_keys - next_unmet_keys
+                projection_changed = self._bridge_projection_changed(
+                    previous_resource_snapshots=deepcopy(
+                        bridge_session.get("projected_resource_snapshots") or {}
+                    ),
+                    previous_parts=deepcopy(bridge_session.get("projected_parts") or {}),
+                    next_resource_snapshots=deepcopy(
+                        (preview_normalized or {}).get("projected_resource_snapshots") or {}
+                    ),
+                    next_parts=deepcopy((preview_normalized or {}).get("projected_parts") or {}),
+                )
+                if regressed_keys:
+                    regression_error = (
+                        "bridge_events proposal regressed previously satisfied continuation conditions"
+                    )
                     self.logger.warning(
                         "[Bridge] Turn %d — bridge_events REJECTED: %s",
-                        _turn_idx, preview_error,
+                        _turn_idx,
+                        regression_error,
                     )
                     bridge_session["last_plan_failure"] = {
                         "kind": "bridge_events_invalid",
-                        "message": preview_error,
+                        "message": regression_error,
+                        "unmet_reentry_conditions": deepcopy(
+                            projected_marked_reentry_context.get("unmet_reentry_conditions") or []
+                        ),
+                    }
+                    bridge_session["draft_final_plan"] = {}
+                    bridge_session["draft_final_plan_status"] = {}
+                    bridge_session["validated_deterministic_plan"] = {}
+                    prepared_bridge_request["bridge_session"] = bridge_session
+                    self._append_bridge_validation_feedback(
+                        prepared_bridge_request,
+                        kind="bridge_events_invalid",
+                        message=regression_error,
+                    )
+                    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                    bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+                    turn_debug["error"] = regression_error
+                    bridge_debug["turns"].append(turn_debug)
+                    prepared_bridge_request["bridge_debug"] = bridge_debug
+                    self._set_last_bridge_debug(bridge_debug)
+                    continue
+                if not closed_keys and not projection_changed:
+                    no_progress_error = (
+                        "bridge_events proposal did not change the projected bridge state or close any remaining condition"
+                    )
+                    self.logger.warning(
+                        "[Bridge] Turn %d — bridge_events REJECTED: %s",
+                        _turn_idx,
+                        no_progress_error,
+                    )
+                    bridge_session["last_plan_failure"] = {
+                        "kind": "bridge_events_invalid",
+                        "message": no_progress_error,
                         "unmet_reentry_conditions": deepcopy(
                             current_marked_reentry_context.get("unmet_reentry_conditions")
                             or []
@@ -1730,46 +2377,156 @@ class BridgeSessionMixin:
                     self._append_bridge_validation_feedback(
                         prepared_bridge_request,
                         kind="bridge_events_invalid",
-                        message=preview_error,
+                        message=no_progress_error,
                     )
                     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
                     bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-                    turn_debug["error"] = preview_error
+                    turn_debug["error"] = no_progress_error
                     bridge_debug["turns"].append(turn_debug)
                     prepared_bridge_request["bridge_debug"] = bridge_debug
                     self._set_last_bridge_debug(bridge_debug)
                     continue
 
-                bridge_session["phase"] = "final_plan"
-                bridge_session["last_plan_failure"] = {}
-                bridge_session["draft_final_plan"] = deepcopy(preview_plan or {})
-                bridge_session["draft_final_plan_status"] = {
-                    "compile_path": "deterministic",
-                    "status": "preview_validated",
-                }
-                bridge_session["validated_deterministic_plan"] = deepcopy(
-                    preview_normalized or {}
+                modeled_continuation_restored = False
+                if not list(projected_marked_reentry_context.get("unmet_reentry_conditions") or []):
+                    bridge_resources = deepcopy(prepared_bridge_request.get("bridge_resources") or {})
+                    modeled_continuation_restored = (
+                        not bridge_resources
+                        or self._bridge_restores_modeled_continuation(
+                            proposal=deepcopy(preview_normalized or {}),
+                            goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
+                            tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
+                            bridge_resources=bridge_resources,
+                            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+                        )
+                    )
+
+                bridge_events_complete = (
+                    not list(projected_marked_reentry_context.get("unmet_reentry_conditions") or [])
+                    and modeled_continuation_restored
                 )
+                executor_bindings, handoff_requirements = self._bridge_executor_memory_from_events(
+                    prepared_bridge_request,
+                    events=deepcopy(approved_events or []),
+                )
+
+                bridge_session["approved_bridge_events"] = deepcopy(approved_events or [])
+                bridge_session["bridge_events_complete"] = bool(bridge_events_complete)
+                bridge_session["executor_bindings"] = deepcopy(executor_bindings)
+                bridge_session["handoff_requirements"] = deepcopy(handoff_requirements)
+                bridge_session["projected_resource_snapshots"] = deepcopy(
+                    (preview_normalized or {}).get("projected_resource_snapshots") or {}
+                )
+                bridge_session["projected_parts"] = deepcopy(
+                    (preview_normalized or {}).get("projected_parts") or {}
+                )
+                if incremental_mode:
+                    bridge_session["draft_final_plan"] = {}
+                    bridge_session["draft_final_plan_status"] = {
+                        "compile_path": "deterministic",
+                        "status": (
+                            "awaiting_final_compile"
+                            if bridge_events_complete
+                            else "event_prefix_projected"
+                        ),
+                    }
+                    bridge_session["validated_deterministic_plan"] = {}
+                else:
+                    bridge_session["draft_final_plan"] = deepcopy(preview_plan or {})
+                    bridge_session["draft_final_plan_status"] = {
+                        "compile_path": "deterministic",
+                        "status": "preview_validated" if bridge_events_complete else "preview_partial",
+                    }
+                    bridge_session["validated_deterministic_plan"] = deepcopy(
+                        preview_normalized or {}
+                    )
+                if bridge_events_complete:
+                    bridge_session["phase"] = "final_plan"
+                    bridge_session["last_plan_failure"] = {}
+                    bridge_session["modeled_continuation_gap"] = {}
+                elif (
+                    not list(projected_marked_reentry_context.get("unmet_reentry_conditions") or [])
+                    and not modeled_continuation_restored
+                ):
+                    modeled_error = (
+                        "approved bridge prefix closes marked re-entry conditions but does not yet restore a resumable modeled continuation"
+                    )
+                    modeled_gap = self._bridge_modeled_continuation_gap(
+                        proposal=deepcopy(preview_normalized or {}),
+                        goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
+                        tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
+                        bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+                        fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+                    )
+                    bridge_session["phase"] = "bridge_events"
+                    bridge_session["modeled_continuation_gap"] = deepcopy(modeled_gap)
+                    bridge_session["last_plan_failure"] = {
+                        "kind": "modeled_continuation_rejected",
+                        "message": modeled_error,
+                        "unmet_reentry_conditions": [],
+                        "pending_suffix_summary": deepcopy(
+                            projected_marked_reentry_context.get("pending_suffix_summary") or []
+                        ),
+                        "modeled_continuation_gap": deepcopy(modeled_gap),
+                    }
+                    prepared_bridge_request["bridge_session"] = bridge_session
+                    self._append_bridge_validation_feedback(
+                        prepared_bridge_request,
+                        kind="modeled_continuation_rejected",
+                        message=modeled_error,
+                    )
+                    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                else:
+                    bridge_session["phase"] = "bridge_events"
+                    bridge_session["last_plan_failure"] = {}
+                    bridge_session["modeled_continuation_gap"] = {}
                 prepared_bridge_request["bridge_session"] = bridge_session
                 _event_names = [
                     str(e.get("event_name", "")).strip()
-                    for e in (approved_events or []) if isinstance(e, dict)
+                    for e in (proposed_slice or []) if isinstance(e, dict)
                 ]
-                self.logger.info(
-                    "[Bridge] Turn %d — bridge_events ACCEPTED: %d events [%s]",
-                    _turn_idx, len(approved_events or []), ", ".join(_event_names),
-                )
+                if bridge_events_complete:
+                    self.logger.info(
+                        "[Bridge] Turn %d — bridge_events ACCEPTED: %d total events [%s]",
+                        _turn_idx,
+                        len(approved_events or []),
+                        ", ".join(
+                            str(e.get("event_name", "")).strip()
+                            for e in (approved_events or [])
+                            if isinstance(e, dict)
+                        ),
+                    )
+                else:
+                    self.logger.info(
+                        "[Bridge] Turn %d — bridge_events ACCEPTED PARTIAL: +%d events [%s]; %d conditions remain",
+                        _turn_idx,
+                        len(proposed_slice or []),
+                        ", ".join(_event_names),
+                        len(projected_marked_reentry_context.get("unmet_reentry_conditions") or []),
+                    )
+                    for _line in self._bridge_unmet_condition_lines(
+                        projected_marked_reentry_context.get("unmet_reentry_conditions") or []
+                    ):
+                        self.logger.info("[Bridge]   remaining target: %s", _line)
                 bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
                 bridge_debug["approved_bridge_events"] = deepcopy(
                     bridge_session.get("approved_bridge_events") or []
                 )
                 bridge_debug["feasibility_decisions"] = deepcopy(feasibility_decisions)
+                bridge_debug["marked_reentry_context"] = deepcopy(projected_marked_reentry_context)
                 turn_debug["approved_bridge_events"] = deepcopy(
                     bridge_session.get("approved_bridge_events") or []
                 )
-                turn_debug["preview_compiled_plan"] = deepcopy(preview_plan or {})
+                turn_debug["accepted_bridge_event_slice"] = deepcopy(proposed_slice or [])
+                if incremental_mode:
+                    turn_debug["symbolic_projection"] = deepcopy(preview_normalized or {})
+                else:
+                    turn_debug["preview_compiled_plan"] = deepcopy(preview_plan or {})
                 turn_debug["accepted"] = True
-                turn_debug["phase_after"] = "final_plan"
+                turn_debug["phase_after"] = bridge_session.get("phase")
+                turn_debug["unmet_reentry_conditions_after"] = deepcopy(
+                    projected_marked_reentry_context.get("unmet_reentry_conditions") or []
+                )
                 bridge_debug["turns"].append(turn_debug)
                 bridge_debug["session"] = deepcopy(bridge_session)
                 prepared_bridge_request["bridge_debug"] = bridge_debug
@@ -2100,6 +2857,14 @@ class BridgeSessionMixin:
                     "projected bridge state satisfies marked re-entry conditions but DES still found "
                     "no resumable modeled continuation"
                 )
+                modeled_gap = self._bridge_modeled_continuation_gap(
+                    proposal=deepcopy(normalized_proposal),
+                    goal_state=str(prepared_bridge_request.get("goal_state", "") or "unknown"),
+                    tools_catalog=deepcopy(list(prepared_bridge_request.get("tools_catalog") or [])),
+                    bridge_resources=bridge_resources,
+                    fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+                )
+                bridge_session["modeled_continuation_gap"] = deepcopy(modeled_gap)
                 bridge_session["last_plan_failure"] = {
                     "kind": "modeled_continuation_rejected",
                     "message": modeled_error,
@@ -2109,6 +2874,7 @@ class BridgeSessionMixin:
                     "pending_suffix_summary": deepcopy(
                         projected_marked_reentry_context.get("pending_suffix_summary") or []
                     ),
+                    "modeled_continuation_gap": deepcopy(modeled_gap),
                 }
                 bridge_session["draft_final_plan"] = deepcopy(normalized_proposal)
                 bridge_session["draft_final_plan_status"] = {
@@ -2448,16 +3214,34 @@ class BridgeSessionMixin:
         bridge_resources: dict[str, dict[str, Any]],
         fallback_part_tracker: dict[str, Any],
     ) -> bool:
+        diagnostics = self._bridge_modeled_continuation_gap(
+            proposal=proposal,
+            goal_state=goal_state,
+            tools_catalog=tools_catalog,
+            bridge_resources=bridge_resources,
+            fallback_part_tracker=fallback_part_tracker,
+        )
+        return bool(diagnostics.get("restored", False))
+
+    def _bridge_modeled_continuation_gap(
+        self,
+        *,
+        proposal: dict[str, Any],
+        goal_state: str,
+        tools_catalog: list[dict[str, Any]],
+        bridge_resources: dict[str, dict[str, Any]],
+        fallback_part_tracker: dict[str, Any],
+    ) -> dict[str, Any]:
         from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
             compute_bid,
         )
 
         if not goal_state:
-            return True
+            return {"restored": True, "goal_state": goal_state, "remaining_parts": [], "candidate_resources": []}
 
         projected_resource_snapshots = proposal.get("projected_resource_snapshots") or {}
-        if not isinstance(projected_resource_snapshots, dict) or not projected_resource_snapshots:
-            return True
+        if not isinstance(projected_resource_snapshots, dict):
+            projected_resource_snapshots = {}
 
         projected_parts_raw = proposal.get("projected_parts") or {}
         projected_parts = projected_parts_raw if isinstance(projected_parts_raw, dict) else {}
@@ -2485,7 +3269,29 @@ class BridgeSessionMixin:
             if name and state != goal_state
         ]
         if not remaining_parts:
-            return True
+            return {
+                "restored": True,
+                "goal_state": goal_state,
+                "remaining_parts": [],
+                "candidate_resources": [],
+                "pending_suffix_summary": deepcopy(
+                    (proposal.get("pending_suffix_summary") or [])
+                ),
+            }
+
+        diagnostics = {
+            "restored": False,
+            "goal_state": goal_state,
+            "remaining_parts": [
+                {
+                    "part_name": name,
+                    "current_state": part_states.get(name),
+                    "current_location": part_locations.get(name),
+                }
+                for name in remaining_parts
+            ],
+            "candidate_resources": [],
+        }
 
         for resource in self.resource_agents:
             resource_jid = str(getattr(resource, "jid", "")).strip()
@@ -2510,7 +3316,27 @@ class BridgeSessionMixin:
                 staging_areas=getattr(resource, "static_capabilities", {}).get("staging_areas", {}),
                 resource_jid=resource_jid,
             )
+            candidate = {
+                "resource_jid": resource_jid,
+                "resource_state": x_c.get("resource_state"),
+                "current_part": x_c.get("current_part"),
+                "current_location": x_c.get("current_location"),
+                "has_bid": bool(bid and bid.str_e),
+            }
             if bid and bid.str_e:
-                return True
+                candidate["complete"] = bool(getattr(bid, "complete", False))
+                first_event = dict((bid.str_e or [])[0] or {})
+                if first_event:
+                    candidate["next_function_name"] = str(
+                        first_event.get("function_name") or ""
+                    ).strip()
+                    params = dict(first_event.get("params") or {})
+                    if params:
+                        candidate["next_params"] = deepcopy(params)
+                diagnostics["candidate_resources"].append(candidate)
+                diagnostics["restored"] = True
+            else:
+                diagnostics["candidate_resources"].append(candidate)
+        return diagnostics
 
         return False

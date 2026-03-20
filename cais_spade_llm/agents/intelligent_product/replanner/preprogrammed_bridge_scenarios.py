@@ -4,6 +4,13 @@ from typing import Any
 
 
 _RECOVER_LG_V1 = "recover_lg_v1"
+_RECOVER_LG_V1_ALIASES = frozenset(
+    {
+        _RECOVER_LG_V1,
+        "case3_llm_bridge",
+        "case3_two_arm_llm_bridge",
+    }
+)
 _XARM6_CLEAR_SPEED = 0.5
 _UR5E_TRAVERSE_SPEED = 1.2
 _UR5E_CAREFUL_SPEED = 1.2
@@ -20,12 +27,19 @@ _LG_RECOVERY_MIN_PICK_TCP_Z_M = 1.032
 _UR5E_LG_GRIPPER_POSITION = 0.055
 
 
+def canonical_preprogrammed_bridge_scenario_id(scenario_id: str) -> str:
+    scenario_key = str(scenario_id or "").strip()
+    if scenario_key in _RECOVER_LG_V1_ALIASES:
+        return _RECOVER_LG_V1
+    return scenario_key
+
+
 def build_preprogrammed_bridge_proposal(
     *,
     scenario_id: str,
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any]:
-    scenario_key = str(scenario_id or "").strip()
+    scenario_key = canonical_preprogrammed_bridge_scenario_id(scenario_id)
     if scenario_key != _RECOVER_LG_V1:
         raise ValueError(f"unsupported preprogrammed bridge scenario '{scenario_key}'")
     if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
@@ -61,11 +75,298 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
     _part_model_name(grounding_context, "LG")
 
     mcp_pick_q = _current_pose_orientation_params(alias="ur5e_home_pose")
+    lg_observed_pose = _part_observed_pose(
+        prepared_bridge_request,
+        grounding_context=grounding_context,
+        part_name="LG",
+    )
+    mcp_observed_pose = _part_observed_pose(
+        prepared_bridge_request,
+        grounding_context=grounding_context,
+        part_name="MCP",
+    )
+
+    if lg_observed_pose:
+        lg_pick_steps = [
+            {
+                "primitive": "get_current_pose",
+                "params": {},
+                "store_as": "lg_pick_pose",
+            },
+            {
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "LG",
+                    "product_geometry": _part_pick_geometry(
+                        grounding_context,
+                        part_name="LG",
+                    ),
+                    "target_pose": lg_observed_pose,
+                    "approach_height_override_m": _LG_RECOVERY_APPROACH_HEIGHT_M,
+                    "ignore_current_height_for_travel_z": True,
+                    "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
+                },
+                "store_as": "lg_pick_targets",
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/x"},
+                    "y": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/y"},
+                    "z": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/z"},
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/x"},
+                    "y": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/y"},
+                    "z": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/z"},
+                    **_current_pose_orientation_params(alias="lg_pick_pose"),
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _LG_PICK_FINAL_NUDGE_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+            {
+                "primitive": "close_gripper",
+                "params": {"position": _UR5E_LG_GRIPPER_POSITION},
+            },
+            {
+                "primitive": "attach_part",
+                "params": {
+                    "model_name": {"context_ref": "/parts/LG/target/model_name"},
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _POST_PICK_LIFT_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+        ]
+    else:
+        lg_pick_steps = [
+            {
+                "primitive": "detect_parts",
+                "params": {"part_name": "LG"},
+                "store_as": "detected_lg",
+            },
+            {
+                "primitive": "get_current_pose",
+                "params": {},
+                "store_as": "lg_pick_pose",
+            },
+            {
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "LG",
+                    "product_geometry": _part_pick_geometry(
+                        grounding_context,
+                        part_name="LG",
+                    ),
+                    "approach_height_override_m": _LG_RECOVERY_APPROACH_HEIGHT_M,
+                    "ignore_current_height_for_travel_z": True,
+                    "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
+                },
+                "store_as": "lg_pick_targets",
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
+                    "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
+                    "z": {"context_ref": "/step_outputs/lg_pick_targets/travel_z"},
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
+                    "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
+                    "z": {"context_ref": "/step_outputs/lg_pick_targets/pick_z"},
+                    **_current_pose_orientation_params(alias="lg_pick_pose"),
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _LG_PICK_FINAL_NUDGE_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+            {
+                "primitive": "close_gripper",
+                "params": {"position": _UR5E_LG_GRIPPER_POSITION},
+            },
+            {
+                "primitive": "attach_part",
+                "params": {
+                    "model_name": {"context_ref": "/parts/LG/target/model_name"},
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _POST_PICK_LIFT_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+        ]
+
+    if mcp_observed_pose:
+        mcp_resume_steps = [
+            {
+                "primitive": "move_to_named_pose",
+                "params": {
+                    "pose_name": {
+                        "context_ref": "/resources/ur5e@localhost/named_poses/home",
+                    },
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "get_current_pose",
+                "params": {},
+                "store_as": "ur5e_home_pose",
+            },
+            {
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "MCP",
+                    "product_geometry": _part_pick_geometry(
+                        grounding_context,
+                        part_name="MCP",
+                    ),
+                    "target_pose": mcp_observed_pose,
+                },
+                "store_as": "mcp_pick_targets",
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/x"},
+                    "y": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/y"},
+                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/z"},
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/x"},
+                    "y": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/y"},
+                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/z"},
+                    **mcp_pick_q,
+                },
+            },
+            {"primitive": "close_gripper", "params": {}},
+            {
+                "primitive": "attach_part",
+                "params": {
+                    "model_name": {"context_ref": "/parts/MCP/target/model_name"},
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _POST_PICK_LIFT_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+        ]
+    else:
+        mcp_resume_steps = [
+            {
+                "primitive": "move_to_named_pose",
+                "params": {
+                    "pose_name": {
+                        "context_ref": "/resources/ur5e@localhost/named_poses/home",
+                    },
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "get_current_pose",
+                "params": {},
+                "store_as": "ur5e_home_pose",
+            },
+            {
+                "primitive": "detect_parts",
+                "params": {"part_name": "MCP"},
+                "store_as": "detected_mcp",
+            },
+            {
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "MCP",
+                    "product_geometry": _part_pick_geometry(
+                        grounding_context,
+                        part_name="MCP",
+                    ),
+                },
+                "store_as": "mcp_pick_targets",
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
+                    "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
+                    "z": {"context_ref": "/step_outputs/ur5e_home_pose/pose/z"},
+                    "speed": _UR5E_TRAVERSE_SPEED,
+                },
+            },
+            {
+                "primitive": "move_pose",
+                "params": {
+                    "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
+                    "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
+                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/pick_z"},
+                    **mcp_pick_q,
+                },
+            },
+            {"primitive": "close_gripper", "params": {}},
+            {
+                "primitive": "attach_part",
+                "params": {
+                    "model_name": {"context_ref": "/parts/MCP/target/model_name"},
+                },
+            },
+            {
+                "primitive": "move_relative",
+                "params": {
+                    "dx": 0.0,
+                    "dy": 0.0,
+                    "dz": _POST_PICK_LIFT_DZ_M,
+                    "speed": _UR5E_CAREFUL_SPEED,
+                },
+            },
+        ]
 
     proposal = {
         "plan_rewrite": {
             "replace_failed_branch": True,
-            "resume_task_ids": mcp_resume_task_ids,
+            "resume_task_ids": [],
+            "delete_task_ids": mcp_resume_task_ids,
         },
         "macro_tasks": [
             {
@@ -184,79 +485,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         }
                     },
                 },
-                "primitive_steps": [
-                    {
-                        "primitive": "detect_parts",
-                        "params": {"part_name": "LG"},
-                        "store_as": "detected_lg",
-                    },
-                    {
-                        "primitive": "get_current_pose",
-                        "params": {},
-                        "store_as": "lg_pick_pose",
-                    },
-                    {
-                        "primitive": "compute_pick_targets",
-                        "params": {
-                            "part_name": "LG",
-                            "product_geometry": _part_pick_geometry(
-                                grounding_context,
-                                part_name="LG",
-                            ),
-                            "approach_height_override_m": _LG_RECOVERY_APPROACH_HEIGHT_M,
-                            "ignore_current_height_for_travel_z": True,
-                            "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
-                        },
-                        "store_as": "lg_pick_targets",
-                    },
-                    {
-                        "primitive": "move_cartesian",
-                        "params": {
-                            "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
-                            "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
-                            "z": {"context_ref": "/step_outputs/lg_pick_targets/travel_z"},
-                            "speed": _UR5E_TRAVERSE_SPEED,
-                        },
-                    },
-                    {
-                        "primitive": "move_pose",
-                        "params": {
-                            "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
-                            "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
-                            "z": {"context_ref": "/step_outputs/lg_pick_targets/pick_z"},
-                            **_current_pose_orientation_params(alias="lg_pick_pose"),
-                            "speed": _UR5E_CAREFUL_SPEED,
-                        },
-                    },
-                    {
-                        "primitive": "move_relative",
-                        "params": {
-                            "dx": 0.0,
-                            "dy": 0.0,
-                            "dz": _LG_PICK_FINAL_NUDGE_DZ_M,
-                            "speed": _UR5E_CAREFUL_SPEED,
-                        },
-                    },
-                    {
-                        "primitive": "close_gripper",
-                        "params": {"position": _UR5E_LG_GRIPPER_POSITION},
-                    },
-                    {
-                        "primitive": "attach_part",
-                        "params": {
-                            "model_name": {"context_ref": "/parts/LG/target/model_name"},
-                        },
-                    },
-                    {
-                        "primitive": "move_relative",
-                        "params": {
-                            "dx": 0.0,
-                            "dy": 0.0,
-                            "dz": _POST_PICK_LIFT_DZ_M,
-                            "speed": _UR5E_CAREFUL_SPEED,
-                        },
-                    },
-                ],
+                "primitive_steps": lg_pick_steps,
             },
             {
                 "resource_jid": "ur5e@localhost",
@@ -352,13 +581,12 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             {
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "resume_mcp_assembly",
-                "description": "Repick MCP into ur5e so the existing MCP assembly suffix can resume.",
-                "rationale": "Restores the MCP flow to the normal picked state expected by the pending DES tasks.",
+                "description": "Repick MCP into ur5e so the remaining MCP assembly tail can be completed inside the bridge.",
+                "rationale": "Restores MCP to the gripper so the bridge can finish the remaining MCP assembly work end-to-end.",
                 "expected_start_state": "idle",
                 "part_name": "MCP",
                 "task_params": {
                     "origin_resource_location": mcp_origin,
-                    "resume_mode": "normal_suffix",
                 },
                 "task_metadata": {
                     "in_state": "idle",
@@ -375,28 +603,41 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         }
                     },
                 },
-                "primitive_steps": [
-                    {
-                        "primitive": "move_to_named_pose",
-                        "params": {
-                            "pose_name": {
-                                "context_ref": "/resources/ur5e@localhost/named_poses/home",
-                            },
-                            "speed": _UR5E_TRAVERSE_SPEED,
-                        },
+                "primitive_steps": mcp_resume_steps,
+            },
+            {
+                "resource_jid": "ur5e@localhost",
+                "macro_name": "insert_mcp",
+                "description": "Carry MCP into the assembly board and complete the remaining MCP insertion.",
+                "rationale": "Completes the focused MCP suffix inside the bridge so no pending MCP tail remains.",
+                "expected_start_state": "picked",
+                "part_name": "MCP",
+                "task_params": {
+                    "destination_location": "assembly_board-v1",
+                },
+                "task_metadata": {
+                    "in_state": "picked",
+                    "out_state": "idle",
+                    "required_context_keys": ["destination_location"],
+                    "context_mapping": {
+                        "location_param": "destination_location",
+                        "location_type": "current_location",
                     },
+                    "part_transition": {
+                        "completed": {
+                            "state": "assembled",
+                            "location_param": "destination_location",
+                        }
+                    },
+                },
+                "primitive_steps": [
                     {
                         "primitive": "get_current_pose",
                         "params": {},
-                        "store_as": "ur5e_home_pose",
+                        "store_as": "mcp_insert_pose",
                     },
                     {
-                        "primitive": "detect_parts",
-                        "params": {"part_name": "MCP"},
-                        "store_as": "detected_mcp",
-                    },
-                    {
-                        "primitive": "compute_pick_targets",
+                        "primitive": "compute_place_targets",
                         "params": {
                             "part_name": "MCP",
                             "product_geometry": _part_pick_geometry(
@@ -404,31 +645,33 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                                 part_name="MCP",
                             ),
                         },
-                        "store_as": "mcp_pick_targets",
+                        "store_as": "mcp_insert_targets",
                     },
                     {
                         "primitive": "move_cartesian",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
-                            "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
-                            "z": {"context_ref": "/step_outputs/ur5e_home_pose/pose/z"},
+                            "x": {"context_ref": "/step_outputs/mcp_insert_targets/slot_x"},
+                            "y": {"context_ref": "/step_outputs/mcp_insert_targets/slot_y"},
+                            "z": {"context_ref": "/step_outputs/mcp_insert_pose/pose/z"},
                             "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
                         "primitive": "move_pose",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
-                            "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
-                            "z": {"context_ref": "/step_outputs/mcp_pick_targets/pick_z"},
-                            **mcp_pick_q,
+                            "x": {"context_ref": "/step_outputs/mcp_insert_targets/slot_x"},
+                            "y": {"context_ref": "/step_outputs/mcp_insert_targets/slot_y"},
+                            "z": {"context_ref": "/step_outputs/mcp_insert_targets/place_z"},
+                            **_current_pose_orientation_params(alias="mcp_insert_pose"),
+                            "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
-                    {"primitive": "close_gripper", "params": {}},
+                    {"primitive": "open_gripper", "params": {}},
                     {
-                        "primitive": "attach_part",
+                        "primitive": "detach_part",
                         "params": {
                             "model_name": {"context_ref": "/parts/MCP/target/model_name"},
+                            "assume_released_if_open": True,
                         },
                     },
                     {
@@ -436,8 +679,17 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         "params": {
                             "dx": 0.0,
                             "dy": 0.0,
-                            "dz": _POST_PICK_LIFT_DZ_M,
-                            "speed": _UR5E_CAREFUL_SPEED,
+                            "dz": _POST_PLACE_LIFT_DZ_M,
+                            "speed": _UR5E_TRAVERSE_SPEED,
+                        },
+                    },
+                    {
+                        "primitive": "move_to_named_pose",
+                        "params": {
+                            "pose_name": {
+                                "context_ref": "/resources/ur5e@localhost/named_poses/home",
+                            },
+                            "speed": _UR5E_HOME_SPEED,
                         },
                     },
                 ],
@@ -768,6 +1020,40 @@ def _part_orientation_params(
             "qw": {"context_ref": f"/step_outputs/{alias}/pose/qw"},
         }
     return dict(fallback)
+
+
+def _part_observed_pose(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    grounding_context: dict[str, Any],
+    part_name: str,
+) -> dict[str, float] | None:
+    preprogrammed_observations = dict(
+        prepared_bridge_request.get("preprogrammed_part_observations") or {}
+    )
+    preferred_pose = preprogrammed_observations.get(part_name)
+    if isinstance(preferred_pose, dict) and {"x", "y", "z"} <= set(preferred_pose.keys()):
+        try:
+            return {
+                "x": float(preferred_pose["x"]),
+                "y": float(preferred_pose["y"]),
+                "z": float(preferred_pose["z"]),
+            }
+        except (TypeError, ValueError):
+            pass
+
+    parts = dict(grounding_context.get("parts") or {})
+    observed_pose = dict((parts.get(part_name) or {}).get("observed_pose") or {})
+    if {"x", "y", "z"} <= set(observed_pose.keys()):
+        try:
+            return {
+                "x": float(observed_pose["x"]),
+                "y": float(observed_pose["y"]),
+                "z": float(observed_pose["z"]),
+            }
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _current_pose_orientation_params(*, alias: str) -> dict[str, Any]:

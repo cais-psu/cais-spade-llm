@@ -755,8 +755,8 @@ class Ros2PickPlaceController:
           pose_name: {type: string, description: "Name of the joint configuration from robot manifest"}
           speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
         preconditions:
-          current_state:
-            not_equals: recovery_required
+          held_part:
+            equals: null
         effects:
           current_pose_ref:
             set_from_param: pose_name
@@ -1064,6 +1064,7 @@ class Ros2PickPlaceController:
         self,
         part_name: str = "",
         product_geometry: dict[str, Any] | None = None,
+        target_pose: dict[str, Any] | None = None,
         approach_height_override_m: float | None = None,
         ignore_current_height_for_travel_z: bool = False,
         min_pick_tcp_z_override_m: float | None = None,
@@ -1074,6 +1075,7 @@ class Ros2PickPlaceController:
         params:
           part_name: {type: string, description: "Name of the detected part to pick"}
           product_geometry: {type: object, description: "Optional geometry override dict"}
+          target_pose: {type: object, description: "Optional known target pose with x/y/z; skips perception when provided"}
           approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
           ignore_current_height_for_travel_z: {type: boolean}
           min_pick_tcp_z_override_m: {type: number}
@@ -1089,35 +1091,57 @@ class Ros2PickPlaceController:
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
 
-        parts = self.detect_parts()
-        if not parts:
-            return {"success": False, "message": "no parts detected"}
-
         target = None
-        if part_name:
-            target = next((p for p in parts if p.get("part_name") == part_name), None)
-            if target is None:
-                detected_names = sorted(
-                    {str(p.get("part_name")) for p in parts if str(p.get("part_name") or "").strip()}
-                )
-                return {
-                    "success": False,
-                    "message": f"requested part '{part_name}' not detected; detected={detected_names}",
+        normalized_target_pose = None
+        if isinstance(target_pose, dict) and {"x", "y", "z"} <= set(target_pose.keys()):
+            try:
+                normalized_target_pose = {
+                    "x": float(target_pose["x"]),
+                    "y": float(target_pose["y"]),
+                    "z": float(target_pose["z"]),
                 }
-        if target is None:
-            target = parts[0]
+            except (TypeError, ValueError):
+                normalized_target_pose = None
 
-        tx = _as_float(target.get("x"), 0.0)
-        ty = _as_float(target.get("y"), 0.0)
-        tz = _as_float(target.get("z"), 0.0)
-        target_part_name = str(target.get("part_name") or part_name or "")
+        if normalized_target_pose is None:
+            parts = self.detect_parts()
+            if not parts:
+                return {"success": False, "message": "no parts detected"}
+
+            if part_name:
+                target = next((p for p in parts if p.get("part_name") == part_name), None)
+                if target is None:
+                    detected_names = sorted(
+                        {str(p.get("part_name")) for p in parts if str(p.get("part_name") or "").strip()}
+                    )
+                    return {
+                        "success": False,
+                        "message": f"requested part '{part_name}' not detected; detected={detected_names}",
+                    }
+            if target is None:
+                target = parts[0]
+            tx = _as_float(target.get("x"), 0.0)
+            ty = _as_float(target.get("y"), 0.0)
+            tz = _as_float(target.get("z"), 0.0)
+            target_part_name = str(target.get("part_name") or part_name or "")
+        else:
+            tx = float(normalized_target_pose["x"])
+            ty = float(normalized_target_pose["y"])
+            tz = float(normalized_target_pose["z"])
+            target_part_name = str(part_name or target_pose.get("part_name") or "")
 
         geo = product_geometry or {}
         board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
         board_center_z = _as_float(board_center.get("z"), 1.02)
 
         target_height = _as_float(geo.get("part_height_m"), 0.08)
-        target_model = str(geo.get("model_name") or target.get("model_name") or "")
+        pose_model_name = target_pose.get("model_name") if isinstance(target_pose, dict) else ""
+        target_model = str(
+            geo.get("model_name")
+            or (target or {}).get("model_name")
+            or pose_model_name
+            or ""
+        )
 
         ee = self._get_ee_pose()
         if ee is None:

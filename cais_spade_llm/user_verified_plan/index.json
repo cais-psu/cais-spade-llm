@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case2_two_arm_enter_mutex",
+  "active_bundle_id": "case3_llm_bridge",
   "bundles": [
     {
       "bundle_id": "case1_one_arm_no_move_home",
@@ -38,6 +38,32 @@
       "product_name": "assembly_board-v1",
       "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/case2_two_arm_mutex.txt",
       "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_mutex.txt",
+      "execution_mode": "simulation",
+      "robot_env": "gazebo"
+    },
+    {
+      "bundle_id": "case3_llm_bridge",
+      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/case3_llm_bridge/bundle_manifest.json",
+      "display_name": "assembly_board-v1 | simulation/gazebo | invalid | 20260319T050038Z",
+      "created_at_utc": "2026-03-19T05:01:03.802208+00:00",
+      "status": "verified",
+      "verified": true,
+      "product_name": "assembly_board-v1",
+      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/case3_two_arm_llm_bridge.txt",
+      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case_llm_bridge.txt",
+      "execution_mode": "simulation",
+      "robot_env": "gazebo"
+    },
+    {
+      "bundle_id": "case3_two_arm_llm_bridge_old",
+      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/case3_two_arm_llm_bridge_old/bundle_manifest.json",
+      "display_name": "assembly_board-v1 | simulation/gazebo | invalid | 20260319T042045Z",
+      "created_at_utc": "2026-03-19T04:21:09.807204+00:00",
+      "status": "verified",
+      "verified": true,
+      "product_name": "assembly_board-v1",
+      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/case3_two_arm_llm_bridge.txt",
+      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case_llm_bridge.txt",
       "execution_mode": "simulation",
       "robot_env": "gazebo"
     }

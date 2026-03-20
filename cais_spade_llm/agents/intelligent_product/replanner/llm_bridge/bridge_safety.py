@@ -20,6 +20,7 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity,
     resource_snapshot_fields_map,
 )
+from cais_spade_llm.prompts import BridgeHintLevel
 
 
 class BridgeSafetyMixin:
@@ -437,11 +438,22 @@ class BridgeSafetyMixin:
         token = str(phase or "").strip().lower()
         if token == "observe_required":
             return {"observe"}
+        if token == "bridge_outline":
+            return {"bridge_outline"}
         if token == "bridge_events":
             return {"bridge_events"}
         if token == "review":
             return set()
         return {"final_plan"}
+
+    @staticmethod
+    def _bridge_incremental_event_mode(
+        prepared_bridge_request: dict[str, Any],
+    ) -> bool:
+        raw_hint_level = str(
+            prepared_bridge_request.get("hint_level", "") or ""
+        ).strip().lower()
+        return raw_hint_level == "none"
 
     def _bridge_critical_parts(
         self,
@@ -480,6 +492,10 @@ class BridgeSafetyMixin:
         *,
         part_name: str,
     ) -> bool:
+        part_token = str(part_name or "").strip()
+        if not part_token:
+            return False
+
         bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
         for row in (bridge_session.get("observation_history") or []):
             if not isinstance(row, dict):
@@ -490,8 +506,31 @@ class BridgeSafetyMixin:
                 or (row.get("params") or {}).get("part_name")
                 or ""
             ).strip()
-            if observed_part_name == str(part_name or "").strip():
+            if observed_part_name == part_token:
                 return True
+
+        raw_hint_level = str(
+            prepared_bridge_request.get("hint_level", "") or ""
+        ).strip().lower()
+        if raw_hint_level == "none":
+            return False
+
+        def _has_usable_pose(value: Any) -> bool:
+            pose = value if isinstance(value, dict) else {}
+            return all(pose.get(axis) is not None for axis in ("x", "y", "z"))
+
+        part_tracker = dict(prepared_bridge_request.get("part_tracker") or {})
+        tracked_part = dict(part_tracker.get(part_token) or {})
+        if _has_usable_pose(tracked_part.get("observed_pose")):
+            return True
+
+        grounding_parts = dict(
+            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+        )
+        grounded_part = dict(grounding_parts.get(part_token) or {})
+        if _has_usable_pose(grounded_part.get("observed_pose")):
+            return True
+
         return False
 
     def _bridge_requires_live_observation(
@@ -516,6 +555,12 @@ class BridgeSafetyMixin:
             return "review"
         if self._bridge_requires_live_observation(prepared_bridge_request):
             return "observe_required"
+        if self._bridge_incremental_event_mode(prepared_bridge_request):
+            if bridge_session.get("bridge_events_complete"):
+                return "final_plan"
+            if not list(bridge_session.get("bridge_outline") or []):
+                return "bridge_outline"
+            return "bridge_events"
         if bridge_session.get("approved_bridge_events"):
             return "final_plan"
         return "bridge_events"
@@ -548,11 +593,23 @@ class BridgeSafetyMixin:
         prepared_bridge_request: dict[str, Any],
         *,
         part_name: str,
+        projected_part_entries: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         grounding_parts = dict(
             (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
         )
-        return dict(grounding_parts.get(str(part_name or "").strip()) or {})
+        part_context = dict(grounding_parts.get(str(part_name or "").strip()) or {})
+        projected_entry = dict(
+            (projected_part_entries or {}).get(str(part_name or "").strip()) or {}
+        )
+        if projected_entry:
+            part_context.update(deepcopy(projected_entry))
+        target = dict(part_context.get("target") or {})
+        if target:
+            part_context["target"] = target
+        if part_context.get("pose") is None and part_context.get("observed_pose") is not None:
+            part_context["pose"] = deepcopy(part_context.get("observed_pose"))
+        return part_context
 
     def _bridge_feasibility_decision(
         self,
@@ -561,6 +618,8 @@ class BridgeSafetyMixin:
         resource_jid: str,
         operation_kind: str,
         part_name: str | None = None,
+        projected_part_entries: dict[str, dict[str, Any]] | None = None,
+        projected_resource_snapshots: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         decision = {
             "allowed": True,
@@ -575,9 +634,11 @@ class BridgeSafetyMixin:
         part_context = self._bridge_part_context(
             prepared_bridge_request,
             part_name=str(part_name or "").strip(),
+            projected_part_entries=projected_part_entries,
         )
         snapshot = deepcopy(
-            (
+            (projected_resource_snapshots or {}).get(str(resource_jid or "").strip())
+            or (
                 (prepared_bridge_request.get("bridge_resources") or {})
                 .get(str(resource_jid or "").strip(), {})
                 .get("bridge_snapshot")
@@ -607,6 +668,24 @@ class BridgeSafetyMixin:
             )
             decision["evidence"] = evidence
             return decision
+        enforce_low_bias_executor_rules = (
+            self._bridge_hint_level(prepared_bridge_request) is BridgeHintLevel.NONE
+        )
+        if (
+            enforce_low_bias_executor_rules
+            and oracle_operation_kind in {"pick", "pick_place"}
+            and str(part_name or "").strip()
+        ):
+            pose_status = str(part_context.get("pose_status") or "").strip().lower()
+            target_pose = part_context.get("observed_pose") or part_context.get("pose")
+            if target_pose is None and pose_status in {"unknown", "carried", ""}:
+                decision["allowed"] = False
+                decision["reason"] = (
+                    "pick target pose is ungrounded after prior bridge events; "
+                    "request a new observation or use a grounded destination before reassigning pickup"
+                )
+                decision["evidence"] = evidence
+                return decision
         oracle = getattr(resource, "bridge_feasibility_oracle", None) if resource is not None else None
         if callable(oracle):
             try:
@@ -631,11 +710,73 @@ class BridgeSafetyMixin:
         decision["evidence"] = evidence
         return decision
 
+    def _bridge_validate_executor_assignments(
+        self,
+        prepared_bridge_request: dict[str, Any],
+        *,
+        events: list[dict[str, Any]],
+    ) -> tuple[bool, str | None]:
+        projected_resources = self._bridge_effective_resource_facts(
+            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            projected_resource_snapshots=None,
+        )
+        part_states, part_locations, part_entries = self._bridge_effective_part_facts(
+            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+            projected_parts=None,
+        )
+        grounding_parts = dict(
+            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+        )
+        executor_bindings: dict[str, dict[str, Any]] = {}
+        handoff_requirements: dict[str, dict[str, Any]] = {}
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            normalized_event = canonical_bridge_event(
+                event,
+                bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            )
+            resource_jid = str(normalized_event.get("resource_jid", "") or "").strip()
+            part_name = str(normalized_event.get("part_name", "") or "").strip()
+            semantic_kind = self._bridge_event_semantic_kind(normalized_event)
+            event_name = str(normalized_event.get("event_name", "") or resource_jid).strip()
+
+            if part_name and semantic_kind == "pick":
+                current_binding = dict(executor_bindings.get(part_name) or {})
+                if current_binding and str(current_binding.get("resource_jid") or "").strip() != resource_jid:
+                    handoff = dict(handoff_requirements.get(part_name) or {})
+                    if not bool(handoff.get("grounded_destination_available", False)):
+                        return False, (
+                            f"bridge event '{event_name}' switches executor for '{part_name}' "
+                            f"from {current_binding.get('resource_jid')} to {resource_jid} "
+                            "without a grounded handoff or new observation"
+                        )
+
+            self._bridge_apply_event_projection(
+                normalized_event,
+                projected_resources=projected_resources,
+                projected_part_states=part_states,
+                projected_part_locations=part_locations,
+                projected_part_entries=part_entries,
+                grounding_parts=grounding_parts,
+            )
+            self._bridge_update_executor_memory_after_event(
+                normalized_event=normalized_event,
+                projected_part_entries=part_entries,
+                grounding_parts=grounding_parts,
+                executor_bindings=executor_bindings,
+                handoff_requirements=handoff_requirements,
+            )
+        return True, None
+
     def _bridge_validate_bridge_events(
         self,
         prepared_bridge_request: dict[str, Any],
         *,
         events: list[dict[str, Any]],
+        require_full_gamma_closure: bool = True,
+        require_primitive_preview: bool = True,
     ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]], str | None]:
         normalized_events = [
             canonical_bridge_event(
@@ -663,6 +804,17 @@ class BridgeSafetyMixin:
         missing_keys = [condition for condition in unmet_conditions if self._marked_reentry_condition_key(condition) not in covered_keys]
         feasibility_decisions: list[dict[str, Any]] = []
         allowed_operation_kinds = all_registered_operation_kinds()
+        projected_resources = self._bridge_effective_resource_facts(
+            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
+            projected_resource_snapshots=None,
+        )
+        part_states, part_locations, part_entries = self._bridge_effective_part_facts(
+            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
+            projected_parts=None,
+        )
+        grounding_parts = dict(
+            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+        )
 
         for event in normalized_events:
             if not isinstance(event, dict):
@@ -676,6 +828,8 @@ class BridgeSafetyMixin:
                     resource_jid=resource_jid,
                     operation_kind=operation_kind,
                     part_name=part_name or None,
+                    projected_part_entries=part_entries,
+                    projected_resource_snapshots=projected_resources,
                 )
                 feasibility_decisions.append(decision)
                 if not decision.get("allowed", False):
@@ -683,6 +837,14 @@ class BridgeSafetyMixin:
                         f"bridge event '{str(event.get('event_name', '')).strip() or resource_jid}' "
                         f"is infeasible on {resource_jid}: {decision.get('reason') or 'unknown reason'}"
                     )
+            self._bridge_apply_event_projection(
+                event,
+                projected_resources=projected_resources,
+                projected_part_states=part_states,
+                projected_part_locations=part_locations,
+                projected_part_entries=part_entries,
+                grounding_parts=grounding_parts,
+            )
 
         # --- state-delta consistency check ---
         resource_projected_state: dict[str, str] = {}
@@ -723,7 +885,15 @@ class BridgeSafetyMixin:
         if not continuity_ok:
             return None, feasibility_decisions, continuity_error
 
-        if missing_keys:
+        if self._bridge_hint_level(prepared_bridge_request) is BridgeHintLevel.NONE:
+            executor_ok, executor_error = self._bridge_validate_executor_assignments(
+                prepared_bridge_request,
+                events=normalized_events,
+            )
+            if not executor_ok:
+                return None, feasibility_decisions, executor_error
+
+        if require_full_gamma_closure and missing_keys:
             missing_lines = [
                 f"- {condition.get('entity')}.{condition.get('field')} -> {condition.get('expected')!r}"
                 for condition in missing_keys[:6]
@@ -741,7 +911,7 @@ class BridgeSafetyMixin:
             return None, feasibility_decisions, safety_error
 
         preview_bridge_events = getattr(self, "_bridge_preview_approved_events", None)
-        if callable(preview_bridge_events):
+        if require_primitive_preview and callable(preview_bridge_events):
             _preview_plan, _preview_normalized, preview_error = preview_bridge_events(
                 prepared_bridge_request,
                 approved_events=normalized_events,
@@ -1241,6 +1411,8 @@ class BridgeSafetyMixin:
         projected_resources: dict[str, dict[str, Any]],
         projected_part_states: dict[str, Any],
         projected_part_locations: dict[str, Any],
+        projected_part_entries: dict[str, dict[str, Any]] | None = None,
+        grounding_parts: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         raw_resource_jid = str((event or {}).get("resource_jid", "")).strip()
         raw_resource_entry = dict(projected_resources.get(raw_resource_jid) or {})
@@ -1276,6 +1448,8 @@ class BridgeSafetyMixin:
             location_to = part_delta.get("location_to")
             if location_to not in (None, ""):
                 projected_part_locations[part_name] = location_to
+        part_entry = dict((projected_part_entries or {}).get(part_name) or {})
+        grounding_part = dict((grounding_parts or {}).get(part_name) or {})
 
         if profile.state_projector and part_name:
             resource_entry["_target_location"] = self._bridge_event_target_location(normalized_event)
@@ -1289,6 +1463,40 @@ class BridgeSafetyMixin:
                 resource_jid=resource_jid,
             )
             resource_entry.pop("_target_location", None)
+
+        if part_name and projected_part_entries is not None:
+            if part_name in projected_part_states:
+                part_entry["state"] = deepcopy(projected_part_states.get(part_name))
+            if part_name in projected_part_locations:
+                part_entry["location"] = deepcopy(projected_part_locations.get(part_name))
+                part_entry["last_known_location"] = deepcopy(projected_part_locations.get(part_name))
+
+            target = dict(grounding_part.get("target") or {})
+            semantic_kind = self._bridge_event_semantic_kind(normalized_event)
+            if semantic_kind == "pick":
+                part_entry["observed_pose"] = None
+                part_entry["pose"] = None
+                part_entry["pose_status"] = "carried"
+            elif semantic_kind in {"assemble", "place", "pick_place"}:
+                target_location = str(target.get("location") or "").strip()
+                current_location = str(part_entry.get("location") or "").strip()
+                projected_target_pose = self._coerce_xyz_pose(
+                    target.get("slot_pose") or target.get("pose")
+                )
+                if projected_target_pose is not None and current_location and current_location == target_location:
+                    part_entry["observed_pose"] = deepcopy(projected_target_pose)
+                    part_entry["pose"] = deepcopy(projected_target_pose)
+                    part_entry["pose_status"] = "projected_target"
+                elif semantic_kind != "pick_place":
+                    part_entry["observed_pose"] = None
+                    part_entry["pose"] = None
+                    part_entry["pose_status"] = "unknown"
+            elif semantic_kind == "stage":
+                part_entry["observed_pose"] = None
+                part_entry["pose"] = None
+                part_entry["pose_status"] = "unknown"
+
+            projected_part_entries[part_name] = part_entry
         projected_resources[resource_jid] = resource_entry
 
     def _bridge_validate_safety_constraints(

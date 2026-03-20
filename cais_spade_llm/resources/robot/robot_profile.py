@@ -441,8 +441,11 @@ def _preview_pick_targets_output(
     product_geometry = params.get("product_geometry")
     if product_geometry is not None and not isinstance(product_geometry, dict):
         return None, "params.product_geometry must be an object when provided"
+    target_pose = params.get("target_pose")
+    if target_pose is not None and not isinstance(target_pose, dict):
+        return None, "params.target_pose must be an object when provided"
     item_info = (grounding_context or {}).get("parts", {}).get(item_name, {})
-    observed_pose = _normalized_xyz_pose((item_info or {}).get("observed_pose")) or {
+    observed_pose = _normalized_xyz_pose(target_pose) or _normalized_xyz_pose((item_info or {}).get("observed_pose")) or {
         "x": 0.0,
         "y": 0.0,
         "z": 0.0,

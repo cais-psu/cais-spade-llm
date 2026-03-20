@@ -224,7 +224,7 @@ def _case3_paths() -> dict[str, Path]:
     bundle_root = root / "cais_spade_llm" / "user_verified_plan" / "bundles" / CASE_ID
     return {
         "tools": bundle_root / "catalog" / "tools.json",
-        "plan": bundle_root / "plan" / "twopart_assembly_llm_bridge_plan.json",
+        "plan": bundle_root / "plan" / "case3_two_arm_llm_bridge_plan.json",
         "geometry": root / "cais_spade_llm" / "specification" / "products" / "geometry" / "assembly_board-v1.json",
         "ur5e": root / "cais_spade_llm" / "initialization" / "resources" / "robot_ur5e.json",
         "xarm6": root / "cais_spade_llm" / "initialization" / "resources" / "robot_xarm6.json",
@@ -557,6 +557,20 @@ def _scripted_turns() -> list[dict[str, Any]]:
             "params": {"part_name": "LG"},
             "store_as": "detected_lg",
             "reason_summary": "Need the live LG pose before returning a final bridge plan.",
+            "react_trace": {
+                "observed_facts": [
+                    "LG is displaced and its exact live pick pose is required."
+                ],
+                "gap_to_close": [
+                    "Bridge strategy cannot be grounded until the misplaced LG pose is confirmed."
+                ],
+                "decision_basis": [
+                    "detect_parts(LG) directly reduces the key geometric uncertainty."
+                ],
+                "expected_progress": [
+                    "A grounded LG pose will enable feasible bridge-event assignment."
+                ],
+            },
         },
         {
             "type": "bridge_events",
@@ -649,6 +663,22 @@ def _scripted_turns() -> list[dict[str, Any]]:
                 },
             ],
             "reason_summary": "Close all marked re-entry conditions before primitive refinement.",
+            "react_trace": {
+                "observed_facts": [
+                    "xarm6 is blocked in recovery_required.",
+                    "ur5e is already holding MCP while LG remains displaced."
+                ],
+                "gap_to_close": [
+                    "LG must be restored to its goal part state/location.",
+                    "The blocked robot must be cleared so continuation can resume."
+                ],
+                "decision_basis": [
+                    "Clear the blocked robot first, then free ur5e to recover LG."
+                ],
+                "expected_progress": [
+                    "Approved bridge events should deterministically compile into primitive macros."
+                ],
+            },
         },
         {
             "type": "final_plan",
@@ -656,6 +686,129 @@ def _scripted_turns() -> list[dict[str, Any]]:
             "reason_summary": (
                 "UR5e should recover LG while xarm6 clears and MCP is temporarily unloaded."
             ),
+            "react_trace": {
+                "observed_facts": [
+                    "The approved bridge events already define a valid recovery ordering."
+                ],
+                "gap_to_close": [
+                    "Convert the accepted bridge events into executable primitive macros."
+                ],
+                "decision_basis": [
+                    "Use deterministic compilation from the approved bridge-event structure."
+                ],
+                "expected_progress": [
+                    "The final plan should preserve the accepted event order and resume the suffix."
+                ],
+            },
+        },
+    ]
+
+
+def _scripted_turns_none_incremental() -> list[dict[str, Any]]:
+    return [
+        deepcopy(_scripted_turns()[0]),
+        {
+            "type": "bridge_outline",
+            "steps": [
+                {
+                    "step_name": "clear_xarm6",
+                    "objective": "Vacate the protected region and exit recovery.",
+                    "resource_jid": "xarm6@localhost",
+                    "operation_family": "clear",
+                },
+                {
+                    "step_name": "free_ur5e",
+                    "objective": "Stage MCP so ur5e can recover LG safely.",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "MCP",
+                    "operation_family": "stage",
+                },
+                {
+                    "step_name": "recover_lg",
+                    "objective": "Pick and assemble LG.",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "operation_family": "pick_place",
+                },
+            ],
+            "reason_summary": "Sketch the recovery milestones before committing exact bridge events.",
+            "react_trace": {
+                "observed_facts": [
+                    "LG has been localized and the recovery coupling is now visible."
+                ],
+                "gap_to_close": [
+                    "Need a safe event order before committing exact bridge events."
+                ],
+                "decision_basis": [
+                    "Outline the coupled recovery before emitting incremental bridge events."
+                ],
+                "expected_progress": [
+                    "Subsequent bridge-event turns can commit one milestone at a time."
+                ],
+            },
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_clear_event(resource_jid="xarm6@localhost"),
+            ],
+            "reason_summary": "First clear the blocked xarm6 resource.",
+            "react_trace": {
+                "observed_facts": [
+                    "xarm6 is the blocked resource in the protected region."
+                ],
+                "gap_to_close": [
+                    "xarm6 still needs to leave recovery and vacate the protected area."
+                ],
+                "decision_basis": [
+                    "Clearing xarm6 reduces the coordination conflict first."
+                ],
+                "expected_progress": [
+                    "The protected region becomes available for the remaining recovery."
+                ],
+            },
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_stage_event(resource_jid="ur5e@localhost", part_name="MCP"),
+            ],
+            "reason_summary": "Free ur5e by staging MCP.",
+            "react_trace": {
+                "observed_facts": [
+                    "ur5e is carrying MCP while LG still needs recovery."
+                ],
+                "gap_to_close": [
+                    "ur5e needs a free gripper before it can recover LG."
+                ],
+                "decision_basis": [
+                    "Stage MCP at a safe intermediate location before recovering LG."
+                ],
+                "expected_progress": [
+                    "ur5e becomes available for the LG recovery event."
+                ],
+            },
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_pick_place_event(resource_jid="ur5e@localhost", part_name="LG"),
+            ],
+            "reason_summary": "Recover and assemble LG.",
+            "react_trace": {
+                "observed_facts": [
+                    "LG is localized and ur5e is free to act."
+                ],
+                "gap_to_close": [
+                    "LG must still reach its goal state and location."
+                ],
+                "decision_basis": [
+                    "A single pick_place event is the shortest valid recovery for LG."
+                ],
+                "expected_progress": [
+                    "The accumulated bridge prefix should now be resumable."
+                ],
+            },
         },
     ]
 
@@ -669,6 +822,20 @@ def _scripted_turns_main_v2() -> list[dict[str, Any]]:
             "params": {"part_name": "LG"},
             "store_as": "detected_lg",
             "reason_summary": "Confirm the mirrored LG recovery pose before proposing bridge events.",
+            "react_trace": {
+                "observed_facts": [
+                    "The mirrored variant still depends on the live LG pose."
+                ],
+                "gap_to_close": [
+                    "Need the current LG pose before assigning the mirrored recovery."
+                ],
+                "decision_basis": [
+                    "detect_parts(LG) is the most direct localization action."
+                ],
+                "expected_progress": [
+                    "A valid mirrored bridge strategy can be proposed after localization."
+                ],
+            },
         },
         {
             "type": "bridge_events",
@@ -718,11 +885,39 @@ def _scripted_turns_main_v2() -> list[dict[str, Any]]:
                 },
             ],
             "reason_summary": "Mirror the original case by letting xarm6 complete the LG recovery itself.",
+            "react_trace": {
+                "observed_facts": [
+                    "In the mirrored case, xarm6 can both clear and recover LG."
+                ],
+                "gap_to_close": [
+                    "LG must be restored while xarm6 returns to a resumable terminal state."
+                ],
+                "decision_basis": [
+                    "Using one robot avoids unnecessary staging or cross-robot handoff."
+                ],
+                "expected_progress": [
+                    "The planner should be able to deterministically compile this mirrored recovery."
+                ],
+            },
         },
         {
             "type": "final_plan",
             "plan": {},
             "reason_summary": "Planner should deterministically compile the mirrored bridge from approved events.",
+            "react_trace": {
+                "observed_facts": [
+                    "The approved mirrored bridge events already capture the required recovery."
+                ],
+                "gap_to_close": [
+                    "Translate the accepted mirrored bridge events into executable macros."
+                ],
+                "decision_basis": [
+                    "Deterministic compilation is sufficient once the bridge events are approved."
+                ],
+                "expected_progress": [
+                    "The final plan should preserve the mirrored event structure end to end."
+                ],
+            },
         },
     ]
 
@@ -1312,6 +1507,50 @@ def _bridge_pick_place_event(
     }
 
 
+def _bridge_pick_event(
+    *,
+    resource_jid: str,
+    part_name: str,
+    from_state: str = "idle",
+    to_state: str = "picked",
+    part_from: str = "ready",
+    part_to: str = "in_gripper",
+) -> dict[str, Any]:
+    resource_token = str(resource_jid).split("@", 1)[0]
+    return {
+        "event_name": f"{resource_token}_pick_{str(part_name)}",
+        "resource_jid": str(resource_jid),
+        "operation_family": "pick",
+        "part_name": str(part_name),
+        "expected_resource_delta": {"from": str(from_state), "to": str(to_state)},
+        "expected_part_delta": {
+            "part_name": str(part_name),
+            "from": str(part_from),
+            "to": str(part_to),
+        },
+        "closes_conditions": [
+            {
+                "entity_kind": "resource",
+                "entity": str(resource_jid),
+                "field": "current_state",
+                "expected": str(to_state),
+            },
+            {
+                "entity_kind": "part",
+                "entity": str(part_name),
+                "field": "state",
+                "expected": str(part_to),
+            },
+            {
+                "entity_kind": "resource",
+                "entity": str(resource_jid),
+                "field": "held_part",
+                "expected": str(part_name),
+            },
+        ],
+    }
+
+
 def _bridge_stage_event(
     *,
     resource_jid: str,
@@ -1565,13 +1804,23 @@ def _build_debug_payload(
 
 def _configure_live_bridge_session(prepared_bridge_request: dict[str, Any]) -> None:
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 10)
-    bridge_session["max_observations"] = max(
-        int(bridge_session.get("max_observations", 3) or 3), 4
-    )
-    bridge_session["max_final_retries"] = max(
-        int(bridge_session.get("max_final_retries", 2) or 2), 4
-    )
+    hint_level = str(prepared_bridge_request.get("hint_level", "") or "").strip().lower()
+    if hint_level == "none":
+        bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 16)
+        bridge_session["max_observations"] = max(
+            int(bridge_session.get("max_observations", 3) or 3), 5
+        )
+        bridge_session["max_final_retries"] = max(
+            int(bridge_session.get("max_final_retries", 2) or 2), 4
+        )
+    else:
+        bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 10)
+        bridge_session["max_observations"] = max(
+            int(bridge_session.get("max_observations", 3) or 3), 4
+        )
+        bridge_session["max_final_retries"] = max(
+            int(bridge_session.get("max_final_retries", 2) or 2), 4
+        )
     feedback = [
         str(item).strip()
         for item in (bridge_session.get("operator_feedback_history") or [])
@@ -1668,8 +1917,14 @@ def _relax_recovery_clear_precondition(prepared_bridge_request: dict[str, Any]) 
 
 def _assert_expected_output(result: dict[str, Any]) -> None:
     variant = str(result.get("scenario_variant") or MAIN_V1_VARIANT)
+    hint_level = str(
+        (result.get("prepared_bridge_request") or {}).get("hint_level") or ""
+    ).strip().lower()
     if variant == MAIN_V2_VARIANT:
         _assert_expected_output_main_v2(result)
+        return
+    if variant == MAIN_V1_VARIANT and hint_level == "none":
+        _assert_expected_output_main_v1_none(result)
         return
     if variant in (BOTH_REACHABLE_VARIANT, MCP_SWAP_VARIANT, NO_GRIPPER_CONFLICT_VARIANT):
         _assert_expected_output_generic(result)
@@ -1722,10 +1977,21 @@ def _assert_expected_output(result: dict[str, Any]) -> None:
     )
     assert bridge_debug.get("turns", [{}, {}, {}])[1].get("accepted") is True
     assert bridge_debug.get("turns", [{}, {}, {}])[2].get("accepted") is True
-    assert (
-        prepared_bridge_request["grounding_context"]["step_outputs"]["detected_lg"]["pose"]["x"]
-        == 0.002
+    assert bridge_debug.get("turns", [{}])[0].get("reason_summary")
+    assert bridge_debug.get("turns", [{}, {}])[1].get("reason_summary")
+    assert bridge_debug.get("turns", [{}])[0].get("react_trace", {}).get("observed_facts")
+    assert bridge_debug.get("turns", [{}, {}])[1].get("react_trace", {}).get("gap_to_close")
+    step_outputs = (
+        prepared_bridge_request.get("grounding_context", {}).get("step_outputs") or {}
     )
+    detected_lg = dict(step_outputs.get("detected_lg") or {})
+    if detected_lg:
+        assert detected_lg["pose"]["x"] == 0.002
+    else:
+        assert (
+            prepared_bridge_request["grounding_context"]["parts"]["LG"]["observed_pose"]["x"]
+            == 0.002
+        )
     assert marked_reentry_context.get("marked_reentry_conditions")
     assert len(proposal.get("bridge_event_summary") or []) == 5
     assert len(prepared_bridge_request.get("bridge_session", {}).get("approved_bridge_events") or []) == 5
@@ -1740,6 +2006,46 @@ def _assert_expected_output(result: dict[str, Any]) -> None:
     assert len(compiled_tasks) == 5
     assert all(task.get("function_name") == "execute_recovery_macro" for task in compiled_tasks)
     assert compiled_tasks[0].get("predecessors") == [ANCHOR_TASK_ID]
+
+
+def _assert_expected_output_main_v1_none(result: dict[str, Any]) -> None:
+    proposal = result["proposal"]
+    compiled_tasks = result["compiled_tasks"]
+    bridge_debug = result["bridge_debug"]
+    prepared_bridge_request = result["prepared_bridge_request"]
+
+    assert proposal.get("plan_rewrite", {}).get("replace_failed_branch") is True
+    assert proposal.get("primary_obligation", {}).get("rule_id") == CASE3_BOARD_MUTEX_RULE_ID
+    assert proposal.get("primary_obligation", {}).get("resource_jid") == "xarm6@localhost"
+    turn_types = [
+        str((turn.get("normalized_response") or {}).get("type") or "").strip()
+        for turn in (bridge_debug.get("turns") or [])
+        if isinstance(turn, dict)
+    ]
+    assert turn_types[:5] == [
+        "observe",
+        "bridge_outline",
+        "bridge_events",
+        "bridge_events",
+        "bridge_events",
+    ]
+    assert "final_plan" in turn_types
+    macro_names = [
+        str(task.get("macro_name") or "")
+        for task in (proposal.get("macro_tasks") or [])
+        if isinstance(task, dict)
+    ]
+    assert macro_names == [
+        "xarm6_recover_to_idle",
+        "ur5e_stage_MCP",
+        "ur5e_pick_place_LG",
+    ]
+    approved_events = prepared_bridge_request.get("bridge_session", {}).get("approved_bridge_events") or []
+    assert len(approved_events) == 3
+    assert len(compiled_tasks) == 3
+    assert bridge_debug.get("status") == "accepted"
+    assert bridge_debug.get("compile_path") in {"deterministic", "llm_repair"}
+    assert prepared_bridge_request.get("bridge_session", {}).get("phase") == "review"
 
 
 def _assert_expected_output_generic(result: dict[str, Any]) -> None:
@@ -1789,10 +2095,21 @@ def _assert_expected_output_main_v2(result: dict[str, Any]) -> None:
     assert bridge_debug.get("status") == "accepted"
     assert bridge_debug.get("compile_path") in {"deterministic", "llm_repair"}
     assert len(bridge_debug.get("turns") or []) == 3
-    assert (
-        prepared_bridge_request["grounding_context"]["step_outputs"]["detected_lg"]["pose"]["y"]
-        == -0.5
+    assert bridge_debug.get("turns", [{}])[0].get("reason_summary")
+    assert bridge_debug.get("turns", [{}, {}])[1].get("reason_summary")
+    assert bridge_debug.get("turns", [{}])[0].get("react_trace", {}).get("observed_facts")
+    assert bridge_debug.get("turns", [{}, {}])[1].get("react_trace", {}).get("decision_basis")
+    step_outputs = (
+        prepared_bridge_request.get("grounding_context", {}).get("step_outputs") or {}
     )
+    detected_lg = dict(step_outputs.get("detected_lg") or {})
+    if detected_lg:
+        assert detected_lg["pose"]["y"] == -0.5
+    else:
+        assert (
+            prepared_bridge_request["grounding_context"]["parts"]["LG"]["observed_pose"]["y"]
+            == -0.5
+        )
     assert prepared_bridge_request.get("bridge_session", {}).get("phase") == "review"
     assert len(compiled_tasks) == 2
     assert all(task.get("function_name") == "execute_recovery_macro" for task in compiled_tasks)
@@ -1878,6 +2195,11 @@ def _prepare_case3_harness_state(
     combined_overrides = deepcopy(variant_config.get("scenario_overrides") or {})
     if scenario_overrides:
         _deep_merge_dict(combined_overrides, scenario_overrides)
+    effective_hint_level = (
+        hint_level
+        or str(variant_config.get("hint_level") or "").strip()
+        or "full"
+    )
     ra_jid, scripted_turns_override = _apply_case3_scenario_overrides(
         fixture,
         robot_specs,
@@ -1889,7 +2211,11 @@ def _prepare_case3_harness_state(
         scripted_turns=(
             scripted_turns_override
             if llm_mode == "scripted" and scripted_turns_override is not None
-            else _scripted_turns() if llm_mode == "scripted" else None
+            else (
+                _scripted_turns_none_incremental()
+                if llm_mode == "scripted" and str(effective_hint_level).strip().lower() == "none"
+                else _scripted_turns() if llm_mode == "scripted" else None
+            )
         ),
         llm_mode=llm_mode,
         llm_model=llm_model,
@@ -1958,11 +2284,6 @@ def _prepare_case3_harness_state(
         _configure_live_bridge_session(prepared_bridge_request)
 
     # Inject hint_level: CLI override > variant config > default "full".
-    effective_hint_level = (
-        hint_level
-        or str(variant_config.get("hint_level") or "").strip()
-        or "full"
-    )
     prepared_bridge_request["hint_level"] = effective_hint_level
 
     return fixture, product_agent, planner, prepared_bridge_request, deepcopy(tools_catalog)
@@ -2189,6 +2510,123 @@ def test_case3_diverse_variants_compile_successfully(variant: str) -> None:
     assert len(compiled_tasks) >= 1, f"Expected at least 1 compiled task for {variant}"
 
 
+def test_case3_recovery_none_mode_supports_outline_then_incremental_bridge_events() -> None:
+    scripted_turns = [
+        {
+            "type": "observe",
+            "resource_jid": "ur5e@localhost",
+            "primitive": "detect_parts",
+            "params": {"part_name": "LG"},
+            "store_as": "detected_lg",
+            "reason_summary": "Need the live LG pose before planning.",
+        },
+        {
+            "type": "bridge_outline",
+            "steps": [
+                {
+                    "step_name": "clear_xarm6",
+                    "objective": "Vacate the protected region and exit recovery.",
+                    "resource_jid": "xarm6@localhost",
+                    "operation_family": "clear",
+                },
+                {
+                    "step_name": "free_ur5e",
+                    "objective": "Stage MCP so ur5e can recover LG safely.",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "MCP",
+                    "operation_family": "stage",
+                },
+                {
+                    "step_name": "recover_lg",
+                    "objective": "Pick and assemble LG.",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "operation_family": "pick_place",
+                },
+                {
+                    "step_name": "restore_resume_state",
+                    "objective": "Repick MCP so the resumable suffix can continue.",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "MCP",
+                    "operation_family": "pick",
+                },
+            ],
+            "reason_summary": "Sketch the recovery milestones before committing exact bridge events.",
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_clear_event(resource_jid="xarm6@localhost"),
+            ],
+            "reason_summary": "First clear the blocked xarm6 resource.",
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_stage_event(resource_jid="ur5e@localhost", part_name="MCP"),
+            ],
+            "reason_summary": "Free ur5e by staging MCP.",
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_pick_place_event(resource_jid="ur5e@localhost", part_name="LG"),
+            ],
+            "reason_summary": "Recover and assemble LG.",
+        },
+        {
+            "type": "bridge_events",
+            "events": [
+                _bridge_pick_event(resource_jid="ur5e@localhost", part_name="MCP"),
+            ],
+            "reason_summary": "Restore the resumable MCP carry state.",
+        },
+    ]
+
+    _, product_agent, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+        scenario_overrides={"scripted_turns": scripted_turns},
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["max_turns"] = 10
+    prepared_bridge_request["bridge_session"] = bridge_session
+    product_agent.prepared_bridge_request = prepared_bridge_request
+
+    proposal = asyncio.run(planner.run_bridge_react_session(prepared_bridge_request))
+
+    assert proposal is not None
+    turn_types = [
+        str((turn.get("normalized_response") or {}).get("type") or "").strip()
+        for turn in (planner.get_last_bridge_debug().get("turns") or [])
+        if isinstance(turn, dict)
+    ]
+    bridge_event_turns = [
+        turn
+        for turn in (planner.get_last_bridge_debug().get("turns") or [])
+        if isinstance(turn, dict)
+        and str((turn.get("normalized_response") or {}).get("type") or "").strip() == "bridge_events"
+    ]
+    assert turn_types[:5] == [
+        "observe",
+        "bridge_outline",
+        "bridge_events",
+        "bridge_events",
+        "bridge_events",
+    ]
+    assert "final_plan" in turn_types
+    assert bridge_event_turns
+    assert all("symbolic_projection" in turn for turn in bridge_event_turns)
+    assert all("preview_compiled_plan" not in turn for turn in bridge_event_turns)
+    approved_events = prepared_bridge_request.get("bridge_session", {}).get("approved_bridge_events") or []
+    assert [str(event.get("event_name") or "") for event in approved_events] == [
+        "xarm6_recover_to_idle",
+        "ur5e_stage_MCP",
+        "ur5e_pick_place_LG",
+    ]
+
+
 def test_robot_bridge_snapshot_exposes_resource_core_and_manipulator_facet() -> None:
     robot_specs = _case3_robot_specs()["ur5e@localhost"]
     ur5e_config = _load_robot_config(_case3_paths()["ur5e"], "ur5e")
@@ -2288,6 +2726,501 @@ def test_bridge_prompt_exposes_marked_reentry_gap() -> None:
         for cond in (marked_reentry.get("marked_reentry_conditions") or [])
         if isinstance(cond, dict)
     )
+
+
+def test_bridge_prompt_none_abstracts_symbolic_locations_and_terminal_targets() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "fixture_ur5e_recovery_pick_zone" not in prompt
+    assert "prusa-mk4-2" not in prompt
+    assert '"part_location_summary"' in prompt
+    assert "known_non_goal_workspace_region" in prompt
+    assert "recovery_required" in prompt
+    assert "goal_state:" not in prompt
+    assert "pending_parts:" not in prompt
+    assert "PENDING SUFFIX SUMMARY" not in prompt
+    assert "MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "UNMET MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "CONTINUATION CONTEXT SUMMARY" in prompt
+    assert '"reachability_summary"' in prompt
+    assert '"reachability": [' not in prompt
+    assert '"safety_rules"' not in prompt
+    assert "OPERATOR GUIDANCE HISTORY" not in prompt
+    assert "LAST FINAL-PLAN FAILURE CONTEXT" not in prompt
+    assert "OBSERVATION NEED SUMMARY" in prompt
+    assert "BRIDGE CONTRACT TARGETS" in prompt
+    assert '"expected": "assembly_board-v1"' in prompt
+    assert '"actual_summary": "known_non_goal_workspace_region"' in prompt
+    assert '"critical_parts_requiring_live_observation"' in prompt
+    assert '"LG"' in prompt
+    assert '"observed_pose": null' in prompt
+
+
+def test_bridge_prompt_none_sanitizes_retry_feedback_in_bridge_events_phase() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["validation_feedback"] = [
+        {
+            "kind": "bridge_events_rejected",
+            "message": (
+                "bridge event 'BRIDGE_E_PICK_LG_FROM_FIXTURE' is infeasible on "
+                "xarm6@localhost: pose outside workspace: y=0.1980 > y_max_m=0.1000"
+            ),
+        }
+    ]
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "BRIDGE_E_PICK_LG_FROM_FIXTURE" not in prompt
+    assert "bridge-critical missing parts" not in prompt
+    assert "goal_state:" not in prompt
+    assert "pending_parts:" not in prompt
+    assert "MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "CONTINUATION CONTEXT SUMMARY" in prompt
+    assert "OPERATOR GUIDANCE HISTORY" not in prompt
+    assert "LAST FINAL-PLAN FAILURE CONTEXT" not in prompt
+    assert (
+        "a prior proposal was infeasible for the selected resource under current "
+        "workspace limits"
+    ) in prompt
+    assert "pose outside workspace" not in prompt
+
+
+def test_bridge_prompt_none_omits_guidance_and_raw_failure_context() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["operator_feedback_history"] = [
+        "observe the misplaced bridge-critical part first",
+        "close marked re-entry conditions before resuming the suffix",
+    ]
+    bridge_session["last_plan_failure"] = {
+        "kind": "bridge_events_invalid",
+        "message": (
+            "bridge event 'BRIDGE_E_CLEAR_XARM6_FROM_ASSEMBLY' did not restore "
+            "xarm6.current_state expected idle and LG.location expected "
+            "assembly_board-v1 from fixture_ur5e_recovery_pick_zone"
+        ),
+        "compile_path": "llm_repair",
+    }
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "OPERATOR GUIDANCE HISTORY" not in prompt
+    assert "observe the misplaced bridge-critical part first" not in prompt
+    assert "close marked re-entry conditions before resuming the suffix" not in prompt
+    assert "LAST FINAL-PLAN FAILURE CONTEXT" not in prompt
+    assert "LAST FAILURE SUMMARY" in prompt
+    assert "fixture_ur5e_recovery_pick_zone" not in prompt
+    assert '"compile_path": "llm_repair"' in prompt
+    assert (
+        "a prior proposal left required continuation conditions unresolved for:" in prompt
+    )
+    assert "xarm6.current_state" in prompt
+    assert "LG.location" in prompt
+    assert "BRIDGE CONTRACT TARGETS" in prompt
+    assert '"expected": "idle"' in prompt
+    assert '"expected": "assembly_board-v1"' in prompt
+
+
+def test_bridge_prompt_none_bridge_outline_prefers_abstract_milestones() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "Current planner phase: bridge_outline." in prompt
+    assert "describing the recovery subproblems and goal milestones" in prompt
+    assert "Keep the outline at problem/goal level." in prompt
+    assert "Do not commit to a specific resource_jid or operation_family" in prompt
+    assert "resource_jid, part_name, and operation_family are optional in this phase" in prompt
+
+
+def test_bridge_prompt_none_includes_resource_role_summary_and_ruled_out_assignments() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "recover_lg",
+            "objective": "Recover the misplaced part without precommitting the executor.",
+        }
+    ]
+    bridge_session["infeasible_assignments"] = [
+        {
+            "resource_jid": "xarm6@localhost",
+            "part_name": "LG",
+            "operation_kind": "pick",
+            "scope": "recover_part_from_current_pose",
+            "reason": "pose outside workspace: y=0.1980 > y_max_m=0.1000",
+        }
+    ]
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "RESOURCE ROLE SUMMARY" in prompt
+    assert '"resource_to_restore": "xarm6@localhost"' in prompt
+    assert '"restoration_role_is_distinct_from_recovery_executor_choice": true' in prompt
+    assert '"scope": "recover_part_from_current_pose"' in prompt
+    assert '"resource_jid": "xarm6@localhost"' in prompt
+    assert '"part_name": "LG"' in prompt
+    assert "If a resource/part recovery assignment is listed under ruled_out_assignments" in prompt
+
+
+def test_bridge_prompt_none_includes_contract_targets_and_active_executor_summary() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "recover_lg",
+            "objective": "Recover the misplaced part while restoring continuation.",
+        }
+    ]
+    bridge_session["executor_bindings"] = [
+        {
+            "part_name": "LG",
+            "resource_jid": "ur5e@localhost",
+            "scope": "recover_part_to_goal:LG",
+            "status": "released_pending_goal",
+        }
+    ]
+    bridge_session["handoff_requirements"] = [
+        {
+            "part_name": "LG",
+            "bound_resource_jid": "ur5e@localhost",
+            "required_for_switch": True,
+            "grounded_destination_available": False,
+            "current_location": "prusa-mk4-2",
+            "pose_status": "unknown",
+            "reason": "executor switch requires a grounded handoff or new observation",
+        }
+    ]
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "BRIDGE CONTRACT TARGETS" in prompt
+    assert '"expected": "idle"' in prompt
+    assert '"expected": "assembled"' in prompt
+    assert '"expected": "assembly_board-v1"' in prompt
+    assert "ACTIVE EXECUTOR SUMMARY" in prompt
+    assert '"resource_jid": "ur5e@localhost"' in prompt
+    assert '"grounded_destination_available": false' in prompt
+    assert "If ACTIVE EXECUTOR SUMMARY shows that a part is already assigned to an executor" in prompt
+
+
+def test_bridge_prompt_none_final_plan_omits_repair_draft_and_raw_reentry_context() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["operator_feedback_history"] = [
+        "restore the resumable suffix",
+    ]
+    bridge_session["approved_bridge_events"] = [
+        {
+            "event_name": "bridge_move_part",
+            "resource_jid": "ur5e@localhost",
+            "operation_family": "pick_place",
+            "part_name": "LG",
+            "expected_resource_delta": {"from": "idle", "to": "idle"},
+            "expected_part_delta": {
+                "part_name": "LG",
+                "from": "misplaced",
+                "to": "assembled",
+            },
+            "closes_conditions": [
+                {
+                    "entity_kind": "part",
+                    "entity": "LG",
+                    "field": "state",
+                    "expected": "assembled",
+                }
+            ],
+            "rationale": "Complete the remaining part recovery.",
+        }
+    ]
+    bridge_session["bridge_events_complete"] = True
+    bridge_session["draft_final_plan"] = {
+        "plan": {
+            "macro_tasks": [
+                {
+                    "macro_name": "draft_macro",
+                    "task_params": {"destination_location": "assembly_board-v1"},
+                }
+            ]
+        }
+    }
+    bridge_session["draft_final_plan_status"] = {
+        "compile_path": "llm_repair",
+        "status": "compile_failed",
+        "error": (
+            "missing destination location for fixture_ur5e_recovery_pick_zone -> "
+            "assembly_board-v1"
+        ),
+    }
+    bridge_session["last_plan_failure"] = {
+        "kind": "final_plan_invalid",
+        "message": (
+            "projected bridge state satisfies marked re-entry conditions but DES "
+            "still found no resumable modeled continuation at assembly_board-v1"
+        ),
+        "compile_path": "llm_repair",
+    }
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "Current planner phase: final_plan." in prompt
+    assert "PENDING SUFFIX SUMMARY" not in prompt
+    assert "MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "UNMET MARKED RE-ENTRY CONDITIONS" not in prompt
+    assert "OPERATOR GUIDANCE HISTORY" not in prompt
+    assert "restore the resumable suffix" not in prompt
+    assert "LAST FINAL-PLAN FAILURE CONTEXT" not in prompt
+    assert "LAST FAILURE SUMMARY" in prompt
+    assert "PLANNER-GENERATED FINAL PLAN DRAFT" not in prompt
+    assert "DRAFT FINAL PLAN STATUS" not in prompt
+    assert "fixture_ur5e_recovery_pick_zone" not in prompt
+    assert "APPROVED BRIDGE EVENTS" in prompt
+    assert '"event_name": "bridge_move_part"' in prompt
+
+
+def test_bridge_prompt_none_surfaces_modeled_continuation_gap_after_gamma_closes() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "restore_continuation",
+            "objective": "Finish the bridge without restarting from scratch.",
+        }
+    ]
+    bridge_session["last_plan_failure"] = {
+        "kind": "modeled_continuation_rejected",
+        "message": "approved bridge prefix closes marked re-entry conditions but does not yet restore a resumable modeled continuation",
+        "pending_suffix_summary": [
+            {
+                "resource_jid": "ur5e@localhost",
+                "role": "resume_suffix",
+                "entry_task_id": "REQ_1_T1",
+                "entry_function_name": "pick_approach",
+                "entry_part_name": "MCP",
+                "required_resource_state": "idle",
+                "required_part_state": "ready",
+                "required_location": "prusa-mk4-2",
+            }
+        ],
+        "modeled_continuation_gap": {
+            "goal_state": "assembled",
+            "remaining_parts": [
+                {
+                    "part_name": "MCP",
+                    "current_state": "ready",
+                    "current_location": "prusa-mk4-2",
+                }
+            ],
+            "candidate_resources": [
+                {
+                    "resource_jid": "ur5e@localhost",
+                    "resource_state": "idle",
+                    "current_part": "",
+                    "current_location": "ur5e_home",
+                    "has_bid": True,
+                    "next_function_name": "pick_approach",
+                }
+            ],
+        },
+    }
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert "MODELED CONTINUATION GAP" in prompt
+    assert '"part_name": "MCP"' in prompt
+    assert '"next_function_name": "pick_approach"' in prompt
+    assert '"required_part_state": "ready"' in prompt
+    assert (
+        "If BRIDGE CONTRACT TARGETS are already closed but MODELED CONTINUATION GAP is still present"
+        in prompt
+    )
+
+
+def test_bridge_prompt_none_requires_observation_before_bridge_events() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+
+    assert planner._bridge_current_phase(prepared_bridge_request) == "observe_required"
+
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+
+    assert planner._bridge_current_phase(prepared_bridge_request) == "bridge_outline"
+
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "recover_lg",
+            "objective": "Restore LG and clear the blocked manipulator.",
+        }
+    ]
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    assert planner._bridge_current_phase(prepared_bridge_request) == "bridge_events"
+
+
+def test_configure_live_bridge_session_raises_budget_for_none_hint() -> None:
+    _, _, _, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+
+    _configure_live_bridge_session(prepared_bridge_request)
+
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    assert int(bridge_session.get("max_turns", 0) or 0) >= 16
+    assert int(bridge_session.get("max_observations", 0) or 0) >= 5
+    assert int(bridge_session.get("max_final_retries", 0) or 0) >= 4
+
+
+def test_bridge_prompt_none_bridge_events_phase_supports_incremental_prefix_extension() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=LG_DROP_POSE,
+    )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    bridge_session["bridge_outline"] = [
+        {
+            "step_name": "clear_then_recover",
+            "objective": "Clear xarm6, free ur5e, then restore LG and resume MCP.",
+        }
+    ]
+    bridge_session["approved_bridge_events"] = [
+        _bridge_clear_event(resource_jid="xarm6@localhost"),
+    ]
+    bridge_session["bridge_events_complete"] = False
+    bridge_session["projected_resource_snapshots"] = {
+        "xarm6@localhost": {
+            "current_state": "idle",
+            "held_part": None,
+            "gripper_state": "open",
+        }
+    }
+    prepared_bridge_request["bridge_session"] = bridge_session
+    planner._refresh_bridge_grounding_context(prepared_bridge_request)
+
+    prompt = planner._build_bridge_turn_prompt_preview(prepared_bridge_request)
+
+    assert planner._bridge_current_phase(prepared_bridge_request) == "bridge_events"
+    assert "Current planner phase: bridge_events." in prompt
+    assert "Extend the approved bridge prefix from the current projected state" in prompt
+    assert "Return only the next bridge-event slice needed to make progress" in prompt
+    assert "CURRENT BRIDGE OUTLINE" in prompt
+    assert '"step_name": "clear_then_recover"' in prompt
 
 
 def test_bridge_events_prompt_uses_dynamic_state_safety_and_retry_hints() -> None:
@@ -2658,7 +3591,7 @@ def test_bridge_events_require_phase_order_and_feasible_resource() -> None:
         llm_model=None,
     )
     current_phase = planner._bridge_current_phase(prepared_bridge_request)
-    assert current_phase == "observe_required"
+    assert current_phase == "bridge_events"
 
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     bridge_session["observation_history"] = [
@@ -2933,6 +3866,129 @@ def test_bridge_events_reject_semantically_unrealizable_stage_before_final_plan(
     assert "must be carrying 'MCP' before it starts" in str(error)
 
 
+def test_symbolic_preview_stage_clears_stale_part_pose() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=deepcopy(LG_DROP_POSE),
+    )
+
+    preview = planner._bridge_symbolic_preview_approved_events(
+        prepared_bridge_request,
+        approved_events=[
+            _bridge_pick_event(
+                resource_jid="ur5e@localhost",
+                part_name="LG",
+                part_from="misplaced",
+            ),
+            _bridge_stage_event(
+                resource_jid="ur5e@localhost",
+                part_name="LG",
+                location_to="prusa-mk4-2",
+            ),
+        ],
+    )
+
+    projected_lg = dict((preview.get("projected_parts") or {}).get("LG") or {})
+    assert projected_lg.get("location") == "prusa-mk4-2"
+    assert projected_lg.get("observed_pose") is None
+    assert projected_lg.get("pose_status") == "unknown"
+
+
+def test_symbolic_preview_assemble_projects_target_pose() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=deepcopy(LG_DROP_POSE),
+    )
+
+    preview = planner._bridge_symbolic_preview_approved_events(
+        prepared_bridge_request,
+        approved_events=[
+            _bridge_pick_place_event(
+                resource_jid="ur5e@localhost",
+                part_name="LG",
+                from_state="idle",
+            )
+        ],
+    )
+
+    projected_lg = dict((preview.get("projected_parts") or {}).get("LG") or {})
+    target_pose = (
+        ((prepared_bridge_request.get("grounding_context") or {}).get("parts") or {})
+        .get("LG", {})
+        .get("target", {})
+        .get("slot_pose")
+    )
+    assert projected_lg.get("location") == "assembly_board-v1"
+    assert projected_lg.get("pose_status") == "projected_target"
+    assert projected_lg.get("observed_pose") == target_pose
+
+
+def test_bridge_events_reject_executor_switch_without_grounded_handoff() -> None:
+    _, _, planner, prepared_bridge_request, _ = _prepare_case3_harness_state(
+        llm_mode="scripted",
+        llm_model=None,
+        hint_level="none",
+    )
+    _record_bridge_observation(
+        planner,
+        prepared_bridge_request,
+        resource_jid="ur5e@localhost",
+        part_name="LG",
+        pose=deepcopy(LG_DROP_POSE),
+    )
+
+    approved_events, _, error = planner._bridge_validate_bridge_events(
+        prepared_bridge_request,
+        events=[
+            _bridge_clear_event(resource_jid="xarm6@localhost"),
+            _bridge_stage_event(resource_jid="ur5e@localhost", part_name="MCP"),
+            _bridge_pick_event(
+                resource_jid="ur5e@localhost",
+                part_name="LG",
+                part_from="misplaced",
+            ),
+            _bridge_stage_event(
+                resource_jid="ur5e@localhost",
+                part_name="LG",
+                location_to="prusa-mk4-2",
+            ),
+            _bridge_pick_event(
+                resource_jid="xarm6@localhost",
+                part_name="LG",
+                part_from="ready",
+            ),
+        ],
+        require_full_gamma_closure=False,
+        require_primitive_preview=False,
+    )
+
+    assert approved_events is None
+    assert error is not None
+    assert any(
+        marker in str(error)
+        for marker in [
+            "grounded handoff",
+            "ungrounded after prior bridge events",
+        ]
+    )
+
+
 def test_bridge_events_require_explicit_operation_family() -> None:
     response, error = normalize_bridge_turn_response(
         raw=json.dumps(
@@ -2960,6 +4016,111 @@ def test_bridge_events_require_explicit_operation_family() -> None:
 
     assert response is None
     assert error == "bridge_events.events[].operation_family is required"
+
+
+def test_normalize_bridge_turn_response_preserves_react_trace() -> None:
+    response, error = normalize_bridge_turn_response(
+        raw=json.dumps(
+            {
+                "type": "observe",
+                "resource_jid": "ur5e@localhost",
+                "primitive": "detect_parts",
+                "params": {"part_name": "LG"},
+                "store_as": "detected_lg",
+                "reason_summary": "Need the current LG pose.",
+                "react_trace": {
+                    "observed_facts": ["LG is misplaced."],
+                    "gap_to_close": ["LG still needs localization."],
+                    "decision_basis": ["detect_parts(LG) resolves the missing pose."],
+                    "expected_progress": ["The bridge can assign a feasible picker after this."],
+                },
+            }
+        ),
+        available_resource_jids=["ur5e@localhost"],
+        allowed_observation_primitives=["detect_parts"],
+    )
+
+    assert error is None
+    assert response is not None
+    assert response.get("reason_summary") == "Need the current LG pose."
+    assert response.get("react_trace", {}).get("observed_facts") == ["LG is misplaced."]
+    assert response.get("react_trace", {}).get("gap_to_close") == [
+        "LG still needs localization."
+    ]
+
+
+def test_normalize_bridge_turn_response_accepts_bridge_outline() -> None:
+    response, error = normalize_bridge_turn_response(
+        raw=json.dumps(
+            {
+                "type": "bridge_outline",
+                "steps": [
+                    {
+                        "step_name": "clear_xarm6",
+                        "objective": "Vacate the protected region.",
+                        "resource_jid": "xarm6@localhost",
+                        "operation_family": "clear",
+                        "success_signal": "xarm6 is no longer blocking the board",
+                    }
+                ],
+                "reason_summary": "Sketch the recovery before committing exact bridge events.",
+                "react_trace": {
+                    "observed_facts": ["LG has already been localized."],
+                    "gap_to_close": ["A safe high-level recovery sequence is still needed."],
+                    "decision_basis": ["Clearing the blocked robot is the first milestone."],
+                    "expected_progress": ["The next turn can commit the first bridge event."],
+                },
+            }
+        ),
+        available_resource_jids=["xarm6@localhost"],
+        allowed_observation_primitives=["detect_parts"],
+    )
+
+    assert error is None
+    assert response is not None
+    assert response.get("type") == "bridge_outline"
+    assert response.get("steps", [{}])[0].get("step_name") == "clear_xarm6"
+    assert response.get("react_trace", {}).get("decision_basis") == [
+        "Clearing the blocked robot is the first milestone."
+    ]
+
+
+def test_normalize_bridge_turn_response_preserves_projected_occupancy_effects() -> None:
+    response, error = normalize_bridge_turn_response(
+        raw=json.dumps(
+            {
+                "type": "bridge_events",
+                "events": [
+                    {
+                        "event_name": "stage_xarm6_out_of_protected_region",
+                        "resource_jid": "xarm6@localhost",
+                        "operation_family": "clear",
+                        "expected_resource_delta": {"from": "idle", "to": "idle"},
+                        "projected_effects": {
+                            "occupancy": {"location": "validated_staging_region"}
+                        },
+                        "closes_conditions": [
+                            {
+                                "entity_kind": "resource",
+                                "entity": "xarm6@localhost",
+                                "field": "current_state",
+                                "expected": "idle",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        available_resource_jids=["xarm6@localhost"],
+        allowed_observation_primitives=[],
+    )
+
+    assert error is None
+    assert response is not None
+    event = response.get("events", [{}])[0]
+    assert event.get("projected_effects", {}).get("occupancy", {}).get("location") == (
+        "validated_staging_region"
+    )
 
 
 def test_bridge_events_reject_non_executable_printer_resource() -> None:

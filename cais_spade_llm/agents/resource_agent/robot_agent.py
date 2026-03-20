@@ -1178,6 +1178,10 @@ class RobotAgent(ResourceAgent):
         but is excluded from function_names and the shared tools catalog.
         It is only callable through bridge-approved recovery macro tasks.
         """
+        from cais_spade_llm.resources.resource_profile import (
+            get_resource_profile_for_agent,
+            resource_snapshot_set_field,
+        )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
             extract_step_output,
@@ -1413,7 +1417,12 @@ class RobotAgent(ResourceAgent):
 
         # All steps succeeded. Update logical state if out_state specified.
         if out_state:
-            runtime_snapshot["current_state"] = out_state
+            runtime_snapshot = resource_snapshot_set_field(
+                runtime_snapshot,
+                "current_state",
+                out_state,
+                profile=get_resource_profile_for_agent(self),
+            )
             sync_agent_from_bridge_snapshot(self, runtime_snapshot)
         self.logger.info(
             "[Robot] Recovery macro '%s' completed (%d steps). state=%s",

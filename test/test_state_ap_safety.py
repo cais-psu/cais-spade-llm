@@ -26,6 +26,9 @@ from cais_spade_llm.agents.central_controller.online_safety_monitor import (
 from cais_spade_llm.agents.central_controller.online_safety_supervisor import (
     OnlineSafetySupervisor,
 )
+from cais_spade_llm.agents.central_controller.central_controller_agent import (
+    CentralControllerAgent,
+)
 
 
 class _FakeController:
@@ -163,6 +166,8 @@ def _load_case3_llm_bridge_bundle() -> tuple[list[dict], dict[str, str], dict, d
         / "bundles"
         / "case3_llm_bridge"
     )
+    if not bundle_root.exists():
+        pytest.skip("case3_llm_bridge bundle is not present in this workspace")
     safety_logic = json.loads((bundle_root / "safety" / "cca_safety_logic.json").read_text())
     plan = json.loads((bundle_root / "plan" / "twopart_assembly_llm_bridge_plan.json").read_text())
     fsa = json.loads(
@@ -1819,3 +1824,490 @@ def test_supervisor_matches_case3_runtime_state_despite_enriched_finish_params()
     assert diagnosis["status"] == "pending_obligation"
     assert diagnosis["rule_ids"] == ["SAFE_1"]
     assert diagnosis["safe_next_task_ids"] == ["REQ_1_T2"]
+
+
+def test_truly_reactive_reports_pending_obligation_with_exact_bfs_discharge_path() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = _response_plan_fsa_with_move_home()
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "pending_obligation"
+    assert diagnosis["rule_ids"] == ["SAFE_R"]
+    assert diagnosis["safe_next_task_ids"] == ["H1"]
+    assert diagnosis["reachability_basis"] == "on_the_fly_bfs"
+    assert diagnosis["safe_suffix_hint"]
+    assert diagnosis["safe_suffix_hint"][0]["task_id"] == "H1"
+
+
+def test_truly_reactive_reports_inevitable_violation_after_bfs_exhaustion() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = _response_plan_fsa_missing_move_home()
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["rule_ids"] == ["SAFE_R"]
+    assert diagnosis["safe_next_task_ids"] == []
+    assert diagnosis["safe_suffix_hint"] == []
+    assert diagnosis["reachability_basis"] == "on_the_fly_bfs"
+
+
+def test_truly_reactive_blocks_immediately_violating_candidate_in_mutex_case() -> None:
+    rule = _board_mutex_rule()
+    dfa_map = {"SAFE_1": _board_mutex_dot()}
+    fsa = _mutex_waiting_plan_fsa()
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="U1",
+        function_name="place_approach",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_approach",
+            "params": {"destination_location": "assembly_board-v1"},
+            "current_state": "positioned",
+        }
+    )
+
+    diagnosis = supervisor.classify()
+    assert diagnosis["status"] == "safe"
+    assert diagnosis["safe_next_task_ids"] == ["H1"]
+
+    allowed, blocked = supervisor.check_candidate(
+        {
+            "task_id": "X1",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "place_approach",
+            "params": {"destination_location": "assembly_board-v1"},
+        }
+    )
+    assert allowed is False
+    assert blocked["status"] == "blocked_candidate"
+    assert "immediately violate" in blocked["reason"]
+
+
+def test_truly_reactive_blocks_candidate_with_no_reachable_discharge_subtree() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,idle))",
+                "(ur5e@localhost=(k=1,run=H1:move_home))",
+                "(ur5e@localhost=(k=1,run=W1:wait_step))",
+                "(ur5e@localhost=(k=3,idle))",
+                "(ur5e@localhost=(k=3,run=W1:wait_step))",
+                "(ur5e@localhost=(k=2,idle))",
+            ],
+            "E": ["I1.done", "H1.start", "H1.done", "W1.start", "W1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle))",
+                    "event": "H1.start",
+                    "to": "(ur5e@localhost=(k=1,run=H1:move_home))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "idle",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,run=H1:move_home))",
+                    "event": "H1.done",
+                    "to": "(ur5e@localhost=(k=2,idle))",
+                    "task_id": "H1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "move_home",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "idle",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle))",
+                    "event": "W1.start",
+                    "to": "(ur5e@localhost=(k=1,run=W1:wait_step))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,run=W1:wait_step))",
+                    "event": "W1.done",
+                    "to": "(ur5e@localhost=(k=3,idle))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=3,idle))",
+                    "event": "W1.start",
+                    "to": "(ur5e@localhost=(k=3,run=W1:wait_step))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=3,run=W1:wait_step))",
+                    "event": "W1.done",
+                    "to": "(ur5e@localhost=(k=3,idle))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": ["(ur5e@localhost=(k=2,idle))"],
+        }
+    }
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    allowed, diagnosis = supervisor.check_candidate(
+        {
+            "task_id": "W1",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "wait_step",
+            "params": {},
+        }
+    )
+    assert allowed is False
+    assert diagnosis["status"] == "blocked_candidate"
+    assert diagnosis["safe_next_task_ids"] == ["H1"]
+    assert "no discharge path" in diagnosis["reason"]
+
+
+def test_truly_reactive_bfs_exhausts_looping_subgraph_without_nontermination() -> None:
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = {
+        "A": {
+            "X": [
+                "(ur5e@localhost=(k=0,idle))",
+                "(ur5e@localhost=(k=1,idle))",
+                "(ur5e@localhost=(k=1,run=W1:wait_step))",
+            ],
+            "E": ["I1.done", "W1.start", "W1.done"],
+            "Tr": [
+                {
+                    "from": "(ur5e@localhost=(k=0,idle))",
+                    "event": "I1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "I1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "place_insert",
+                    "params": {},
+                    "in_state": "positioned",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,idle))",
+                    "event": "W1.start",
+                    "to": "(ur5e@localhost=(k=1,run=W1:wait_step))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+                {
+                    "from": "(ur5e@localhost=(k=1,run=W1:wait_step))",
+                    "event": "W1.done",
+                    "to": "(ur5e@localhost=(k=1,idle))",
+                    "task_id": "W1",
+                    "resource_jid": "ur5e@localhost",
+                    "function_name": "wait_step",
+                    "params": {},
+                    "in_state": "placed",
+                    "out_state": "placed",
+                },
+            ],
+            "x0": "(ur5e@localhost=(k=0,idle))",
+            "Xm": [],
+        }
+    }
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+    )
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="I1",
+        function_name="place_insert",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "place_insert",
+            "params": {},
+            "current_state": "placed",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "inevitable_violation"
+    assert diagnosis["safe_next_task_ids"] == []
+    assert diagnosis["safe_suffix_hint"] == []
+
+
+def test_truly_reactive_matches_case3_runtime_state() -> None:
+    rules, dfa_map, plan, fsa, tools_catalog = _load_case3_llm_bridge_bundle()
+
+    safety_monitor = OnlineSafetyMonitor(dfa_map, rules, tools_catalog=tools_catalog)
+    safety_monitor.seed_resource_states(
+        {
+            "ur5e@localhost": {"current_state": "idle"},
+            "xarm6@localhost": {"current_state": "idle"},
+        }
+    )
+    fsa_monitor = OnlineFsaMonitor(fsa)
+    supervisor = OnlineSafetySupervisor(
+        fsa_monitor=fsa_monitor,
+        safety_monitor=safety_monitor,
+        enforcement_mode="truly_reactive",
+        plan=plan,
+    )
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="REQ_2_T1",
+        function_name="pick_approach",
+        resource_jid="xarm6@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(
+        {
+            "resource_jid": "xarm6@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-1",
+                "part_name": "LCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_2_T1",
+                "product_geometry": {
+                    "slot_xy": [0.1, -0.08],
+                    "part_height_m": 0.1,
+                    "model_name": "circ_pin_large",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+        }
+    )
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="start",
+        task_id="REQ_1_T1",
+        function_name="pick_approach",
+        resource_jid="ur5e@localhost",
+        status="running",
+    )
+    allowed, _ = safety_monitor.process_start_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-2",
+                "part_name": "MCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_1_T1",
+                "product_geometry": {
+                    "slot_xy": [0.0, -0.08],
+                    "part_height_m": 0.08,
+                    "model_name": "circ_pin_medium",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+        }
+    )
+    assert allowed is True
+
+    fsa_monitor.process_event(
+        event_type="done",
+        task_id="REQ_1_T1",
+        function_name="pick_approach",
+        resource_jid="ur5e@localhost",
+        status="completed",
+    )
+    safety_monitor.process_finish_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "pick_approach",
+            "params": {
+                "origin_resource_location": "prusa-mk4-2",
+                "part_name": "MCP",
+                "speed": None,
+                "product_jid": "assembly_board-v1@localhost",
+                "task_id": "REQ_1_T1",
+                "product_geometry": {
+                    "slot_xy": [0.0, -0.08],
+                    "part_height_m": 0.08,
+                    "model_name": "circ_pin_medium",
+                    "slot_floor_z_m": 1.025,
+                    "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                },
+            },
+            "current_state": "at_pick",
+        }
+    )
+
+    diagnosis = supervisor.classify(event_kind="done")
+    assert diagnosis["status"] == "pending_obligation"
+    assert diagnosis["rule_ids"] == ["SAFE_1"]
+    assert diagnosis["safe_next_task_ids"] == ["REQ_1_T2"]
+    assert diagnosis["reachability_basis"] == "on_the_fly_bfs"
+
+
+def test_cca_truly_reactive_initialization_skips_winning_set_computation() -> None:
+    class _FailingWinningValidator:
+        def compute_winning_set(self, *args: object, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("compute_winning_set should not be called in truly_reactive mode")
+
+    rule = _return_home_rule()
+    dfa_map = {"SAFE_R": _return_home_dot()}
+    fsa = _response_plan_fsa_with_move_home()
+    plan_fsa_monitor = OnlineFsaMonitor(fsa)
+
+    agent = CentralControllerAgent(
+        "cca@localhost",
+        "none",
+        name="cca",
+        precomputed_bundle={
+            "replan_policy": {
+                "runtime_supervisor_mode": "truly_reactive",
+            }
+        },
+    )
+    agent.safety_monitor = OnlineSafetyMonitor(dfa_map, [rule], tools_catalog=_tools_catalog())
+
+    agent._initialize_online_supervisor(
+        validator=_FailingWinningValidator(),  # type: ignore[arg-type]
+        fsa=fsa,
+        plan=None,
+        plan_fsa_monitor=plan_fsa_monitor,
+        runtime_context=None,
+        skip_revalidation=False,
+    )
+
+    assert agent.runtime_supervisor_mode == "truly_reactive"
+    assert agent.online_supervisor is not None
+    assert agent.online_supervisor.enforcement_mode == "truly_reactive"

@@ -21,6 +21,7 @@ if str(PKG_ROOT) not in sys.path:
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
+    canonical_preprogrammed_bridge_scenario_id,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     build_primitive_catalog,
@@ -2139,6 +2140,18 @@ def test_build_preprogrammed_bridge_proposal_returns_valid_lg_scenario(tmp_path)
     assert normalized["projected_parts"]["MCP"]["state"] == "in_gripper"
 
 
+def test_build_preprogrammed_bridge_proposal_accepts_case3_alias(tmp_path):
+    prepared_bridge_request, _ur5e_robot, _xarm6_robot = _build_preprogrammed_bridge_request()
+    proposal = build_preprogrammed_bridge_proposal(
+        scenario_id="case3_llm_bridge",
+        prepared_bridge_request=prepared_bridge_request,
+    )
+
+    assert canonical_preprogrammed_bridge_scenario_id("case3_llm_bridge") == "recover_lg_v1"
+    assert proposal["macro_tasks"][0]["macro_name"] == "clear_xarm6_zone"
+    assert proposal["macro_tasks"][-1]["macro_name"] == "resume_mcp_assembly"
+
+
 def test_build_preprogrammed_bridge_proposal_allows_missing_obligation_targets(tmp_path):
     prepared_bridge_request, ur5e_robot, xarm6_robot = _build_preprogrammed_bridge_request()
     prepared_bridge_request["obligation_targets"] = []
@@ -2537,3 +2550,73 @@ def test_bridge_runtime_recovery_actions_use_product_agent_loop():
         assert loaded["used_llm_bridge"] is False
     finally:
         fake_product.close()
+
+
+def test_generate_runtime_bridge_proposal_auto_routes_case3_to_preprogrammed(tmp_path):
+    prepared_bridge_request, ur5e_robot, xarm6_robot = _build_preprogrammed_bridge_request()
+    agent, _sent_messages = _make_product_agent(
+        tmp_path,
+        resource_agents=[ur5e_robot, xarm6_robot],
+        resource_jids=["ur5e@localhost", "xarm6@localhost"],
+    )
+    agent.product_specification_file = (
+        "cais_spade_llm/specification/products/requirements/case3_two_arm_llm_bridge.txt"
+    )
+    agent._runtime_recovery_context = {
+        "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        "failed_task_id": "REQ_2_T4",
+        "trigger": "safety_block",
+        "violations": [],
+        "bridge_feedback_history": [],
+    }
+    agent.runtime_recovery["status"] = "bridge_ready"
+
+    recovery = asyncio.run(agent.generate_runtime_bridge_proposal())
+
+    assert recovery["status"] == "llm_bridge"
+    assert recovery["used_llm_bridge"] is False
+    assert recovery["bridge_debug"]["source"] == "preprogrammed_scenario"
+    assert recovery["bridge_debug"]["scenario_id"] == "recover_lg_v1"
+
+
+def test_runtime_des_recovery_auto_loads_case3_preprogrammed_bridge(tmp_path):
+    prepared_bridge_request, ur5e_robot, xarm6_robot = _build_preprogrammed_bridge_request()
+    agent, _sent_messages = _make_product_agent(
+        tmp_path,
+        resource_agents=[ur5e_robot, xarm6_robot],
+        resource_jids=["ur5e@localhost", "xarm6@localhost"],
+    )
+    agent.product_specification_file = (
+        "cais_spade_llm/specification/products/requirements/case3_two_arm_llm_bridge.txt"
+    )
+
+    async def _fake_replan_with_feedback_online(*_args, **_kwargs) -> dict[str, object]:
+        return {
+            "plan_changed": False,
+            "used_llm_bridge": False,
+            "human_required": False,
+            "awaiting_bridge_approval": False,
+            "awaiting_bridge_generation": True,
+            "message": "DES found no modeled continuation.",
+            "bridge_summary": [],
+            "bridge_proposal": None,
+            "bridge_debug": {},
+            "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        }
+
+    agent.process_planner.replan_with_feedback_online = _fake_replan_with_feedback_online  # type: ignore[assignment]
+
+    recovery = asyncio.run(
+        agent._handle_runtime_des_replan_request(
+            reason="safety_block",
+            failed_task_id="REQ_2_T4",
+            violations=[],
+            system_coordination_state={"resource_states": {}},
+        )
+    )
+
+    assert recovery["status"] == "llm_bridge"
+    assert recovery["used_llm_bridge"] is False
+    assert recovery["bridge_approval_state"] == "pending"
+    assert recovery["bridge_debug"]["source"] == "preprogrammed_scenario"
+    assert recovery["bridge_debug"]["scenario_id"] == "recover_lg_v1"

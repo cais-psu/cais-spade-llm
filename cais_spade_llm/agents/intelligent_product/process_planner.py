@@ -1180,13 +1180,28 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
         # 1. Build P_id: parts not yet at goal state
         product_state = self.product_agent._build_product_state()
+        derived_part_tracker = self._derive_part_tracker_from_violations(violations)
         part_tracker = product_state.get("parts")
         if not isinstance(part_tracker, dict) or not part_tracker:
             legacy_part_tracker = product_state.get("part_tracker")
             if isinstance(legacy_part_tracker, dict) and legacy_part_tracker:
                 part_tracker = legacy_part_tracker
             else:
-                part_tracker = self._derive_part_tracker_from_violations(violations)
+                part_tracker = derived_part_tracker
+        if isinstance(part_tracker, dict) and derived_part_tracker:
+            merged_part_tracker = deepcopy(part_tracker)
+            for part_name, derived_entry in derived_part_tracker.items():
+                if not isinstance(derived_entry, dict):
+                    continue
+                current_entry = dict(merged_part_tracker.get(part_name) or {})
+                for key, value in derived_entry.items():
+                    if value in (None, "", [], {}):
+                        continue
+                    if key in {"state", "location"} and current_entry.get(key) not in (None, "", "unknown"):
+                        continue
+                    current_entry[key] = deepcopy(value)
+                merged_part_tracker[str(part_name)] = current_entry
+            part_tracker = merged_part_tracker
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
         goal_state = self._resolve_goal_part_state(tools_catalog)
         P_id = [

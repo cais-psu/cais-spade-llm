@@ -198,6 +198,81 @@ class CentralControllerAgent(LlmAgent):
 
         return "plan_stuck_non_accepting"
 
+    def _resolve_runtime_supervisor_settings(
+        self,
+        *,
+        policy: dict[str, Any],
+        runtime_context: Optional[dict[str, Any]],
+        skip_revalidation: bool,
+    ) -> str:
+        supported_modes = {"preventive", "reactive", "truly_reactive"}
+        configured_mode = str(policy.get("runtime_supervisor_mode") or "").strip().lower()
+        verified_bundle_runtime = (
+            str(self.precomputed_bundle.get("status", "")).strip().lower() == "verified"
+        )
+        runtime_validation = (
+            isinstance(runtime_context, dict)
+            and any(
+                runtime_context.get(key)
+                for key in ("completed_task_ids", "running_task_ids", "failed_task_ids")
+            )
+        )
+        prior_mode = str(getattr(self, "runtime_supervisor_mode", "") or "").strip().lower()
+        if prior_mode not in supported_modes:
+            prior_mode = ""
+
+        fallback_mode = (
+            prior_mode
+            if runtime_validation and prior_mode
+            else ("reactive" if skip_revalidation else "preventive")
+        )
+
+        if configured_mode in supported_modes:
+            supervisor_mode = configured_mode
+        elif verified_bundle_runtime:
+            supervisor_mode = "reactive"
+        else:
+            supervisor_mode = fallback_mode
+
+        if supervisor_mode not in supported_modes:
+            supervisor_mode = fallback_mode
+
+        return supervisor_mode
+
+    def _initialize_online_supervisor(
+        self,
+        *,
+        validator: PlanSafetyValidator,
+        fsa: Dict[str, Any],
+        plan: Optional[Dict[str, Any]],
+        plan_fsa_monitor: OnlineFsaMonitor,
+        runtime_context: Optional[dict[str, Any]],
+        skip_revalidation: bool,
+    ) -> None:
+        policy = (
+            dict(self.precomputed_bundle.get("replan_policy", {}))
+            if isinstance(self.precomputed_bundle.get("replan_policy"), dict)
+            else {}
+        )
+        supervisor_mode = self._resolve_runtime_supervisor_settings(
+            policy=policy,
+            runtime_context=runtime_context,
+            skip_revalidation=skip_revalidation,
+        )
+
+        winning_set_data: Optional[Dict[str, Any]] = None
+        if supervisor_mode != "truly_reactive":
+            winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
+
+        self.runtime_supervisor_mode = supervisor_mode
+        self.online_supervisor = OnlineSafetySupervisor(
+            winning_set_data=winning_set_data,
+            fsa_monitor=plan_fsa_monitor,
+            safety_monitor=self.safety_monitor,
+            enforcement_mode=supervisor_mode,
+            plan=plan,
+        ) if self.safety_monitor else None
+
     def _build_replan_message(
         self,
         *,
@@ -1556,47 +1631,14 @@ class CentralControllerAgent(LlmAgent):
                         product_jid=product_jid
                     )
                 try:
-                    winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
-                    policy = (
-                        dict(agent.precomputed_bundle.get("replan_policy", {}))
-                        if isinstance(agent.precomputed_bundle.get("replan_policy"), dict)
-                        else {}
+                    agent._initialize_online_supervisor(
+                        validator=validator,
+                        fsa=fsa,
+                        plan=plan,
+                        plan_fsa_monitor=plan_fsa_monitor,
+                        runtime_context=runtime_context,
+                        skip_revalidation=skip_revalidation,
                     )
-                    verified_bundle_runtime = (
-                        str(agent.precomputed_bundle.get("status", "")).strip().lower() == "verified"
-                    )
-                    runtime_validation = (
-                        isinstance(runtime_context, dict)
-                        and any(
-                            runtime_context.get(key)
-                            for key in ("completed_task_ids", "running_task_ids", "failed_task_ids")
-                        )
-                    )
-                    prior_mode = str(getattr(agent, "runtime_supervisor_mode", "") or "").strip().lower()
-                    if verified_bundle_runtime:
-                        supervisor_mode = "reactive"
-                    else:
-                        supervisor_mode = str(
-                            policy.get("runtime_supervisor_mode")
-                            or (
-                                prior_mode
-                                if runtime_validation and prior_mode in {"preventive", "reactive"}
-                                else ("reactive" if skip_revalidation else "preventive")
-                            )
-                        ).strip().lower()
-                    if supervisor_mode not in {"preventive", "reactive"}:
-                        supervisor_mode = (
-                            prior_mode
-                            if runtime_validation and prior_mode in {"preventive", "reactive"}
-                            else ("reactive" if skip_revalidation else "preventive")
-                        )
-                    agent.runtime_supervisor_mode = supervisor_mode
-                    agent.online_supervisor = OnlineSafetySupervisor(
-                        winning_set_data=winning_set_data,
-                        fsa_monitor=plan_fsa_monitor,
-                        safety_monitor=agent.safety_monitor,
-                        enforcement_mode=supervisor_mode,
-                    ) if agent.safety_monitor else None
                 except Exception:
                     agent.online_supervisor = None
                     agent.logger.exception(
