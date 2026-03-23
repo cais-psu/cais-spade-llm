@@ -129,6 +129,10 @@ def _bridge_resource_entries(
     bridge_snapshot: dict[str, Any] | None,
     bridge_resources: dict[str, Any] | None,
 ) -> dict[str, dict[str, Any]]:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        filter_synthesis_primitive_catalog,
+    )
+
     resources: dict[str, dict[str, Any]] = {}
     for raw_jid, raw_entry in (bridge_resources or {}).items():
         if not isinstance(raw_entry, dict):
@@ -144,6 +148,11 @@ def _bridge_resource_entries(
                 or "resource"
             ).strip(),
             "primitive_catalog": list(raw_entry.get("primitive_catalog") or []),
+            "execution_primitive_catalog": list(
+                raw_entry.get("execution_primitive_catalog")
+                or raw_entry.get("primitive_catalog")
+                or []
+            ),
             "bridge_snapshot": dict(
                 raw_entry.get("bridge_snapshot")
                 or raw_entry.get("primitive_snapshot")
@@ -177,7 +186,8 @@ def _bridge_resource_entries(
                     or dict(fallback_snapshot.get("resource_core") or {}).get("resource_type")
                     or "resource"
                 ).strip(),
-                "primitive_catalog": list(primitive_catalog or []),
+                "primitive_catalog": filter_synthesis_primitive_catalog(primitive_catalog or []),
+                "execution_primitive_catalog": list(primitive_catalog or []),
                 "bridge_snapshot": fallback_snapshot,
                 "resource_core": deepcopy(fallback_snapshot.get("resource_core") or {}),
                 "resource_facets": deepcopy(fallback_snapshot.get("resource_facets") or {}),
@@ -956,9 +966,14 @@ def _normalize_primitive_bridge_proposal(
             return None
 
         validated_steps: list[dict[str, Any]] = []
+        execution_catalog = (
+            resource_entry.get("execution_primitive_catalog")
+            or resource_entry.get("primitive_catalog")
+            or []
+        )
         primitive_rows = {
             str(entry.get("name", "")).strip(): dict(entry)
-            for entry in (resource_entry.get("primitive_catalog") or [])
+            for entry in execution_catalog
             if isinstance(entry, dict) and str(entry.get("name", "")).strip()
         }
         for step in primitive_steps:
@@ -1028,7 +1043,7 @@ def _normalize_primitive_bridge_proposal(
 
         semantic_ok, projected_snapshot, semantic_error = validate_and_project_steps(
             resolved_steps,
-            resource_entry.get("primitive_catalog") or [],
+            execution_catalog,
             current_snapshot,
             grounding_context=dynamic_grounding_context,
         )

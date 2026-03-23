@@ -156,7 +156,8 @@ class ResourceAgent(LlmAgent):
         )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
-            build_primitive_catalog,
+            build_execution_primitive_catalog,
+            expand_composite_steps,
             extract_step_output,
             get_resource_bridge_snapshot,
             resolve_param_refs,
@@ -209,7 +210,20 @@ class ResourceAgent(LlmAgent):
                 "content": f"Recovery macro '{macro_name}' has no primitive steps",
             }
 
-        primitive_catalog = build_primitive_catalog(self)
+        primitive_catalog = build_execution_primitive_catalog(self)
+        try:
+            steps = expand_composite_steps(steps, primitive_catalog)
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "content": (
+                    f"Recovery macro '{macro_name}' could not expand composite primitives: {exc}"
+                ),
+                "observations": {
+                    "macro_name": macro_name,
+                    "step_index": -1,
+                },
+            }
         primitive_meta_by_name = {
             str(entry.get("name", "")).strip(): entry
             for entry in primitive_catalog

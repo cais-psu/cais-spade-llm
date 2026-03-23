@@ -1329,6 +1329,10 @@ def build_state_exploration_prompt(
     recovery macros from controller primitives (the new path).  When absent,
     falls back to the legacy behavior of composing from catalog task functions.
     """
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        filter_synthesis_primitive_catalog,
+    )
+
     part_info = json.dumps(part_tracker, indent=2) if part_tracker else "unavailable"
     resource_info = json.dumps(resource_infos, indent=2)
     obligation_info = json.dumps(obligation_targets or [], indent=2)
@@ -1349,9 +1353,15 @@ def build_state_exploration_prompt(
                 "pending_tasks": raw_entry.get("pending_tasks") or [],
                 "static_capabilities": raw_entry.get("static_capabilities") or {},
             }
-            resource_catalogs[str(resource_jid)] = raw_entry.get("primitive_catalog") or []
+            resource_catalogs[str(resource_jid)] = filter_synthesis_primitive_catalog(
+                raw_entry.get("primitive_catalog")
+                or raw_entry.get("execution_primitive_catalog")
+                or []
+            )
         if not resource_catalogs and primitive_catalog:
-            resource_catalogs[str(ra_jid)] = primitive_catalog
+            resource_catalogs[str(ra_jid)] = filter_synthesis_primitive_catalog(
+                primitive_catalog
+            )
         if not resource_overview and bridge_snapshot:
             resource_overview[str(ra_jid)] = {
                 "primitive_snapshot": bridge_snapshot or {},
@@ -1374,7 +1384,7 @@ def build_state_exploration_prompt(
             "resource is the focused resource and resources/<resource_jid>/... exposes all bridge resources):\n"
             f"{grounding_context_info}\n\n"
             f"TASK-LEVEL TOOLS CATALOG (for reference on normal task semantics):\n{tools_info}\n\n"
-            f"PER-RESOURCE CONTROLLER PRIMITIVES (use the catalog for the specific resource_jid of each macro_task):\n{primitives_info}\n\n"
+            f"PER-RESOURCE BRIDGE PRIMITIVES (LLM-facing synthesis catalog; use grasp_part/release_part instead of raw gripper attach/detach pairs):\n{primitives_info}\n\n"
             f"RESOURCE CAPABILITIES: (Check reachability and staging areas before assigning coordinates)\n{resource_info}\n\n"
             "There is no catalog-valid modeled continuation for the active recovery situation. "
             "Propose exactly one SAFETY-DRIVEN BRIDGE PLAN as JSON.\n"
@@ -1777,19 +1787,21 @@ def _bridge_catalog_names(entries: list[dict[str, Any]] | None) -> set[str]:
 
 
 def _catalog_supports_manipulator_pick_place(catalog_names: set[str]) -> bool:
-    required = {
+    base_required = {
         "detect_parts",
         "get_current_pose",
         "compute_pick_targets",
         "compute_place_targets",
         "move_cartesian",
         "move_pose",
-        "close_gripper",
-        "open_gripper",
-        "attach_part",
-        "detach_part",
     }
-    return required <= set(catalog_names or set())
+    names = set(catalog_names or set())
+    if not base_required <= names:
+        return False
+    return (
+        {"grasp_part", "release_part"} <= names
+        or {"close_gripper", "open_gripper", "attach_part", "detach_part"} <= names
+    )
 
 
 def _bridge_prompt_profiles(
@@ -1967,8 +1979,7 @@ def _bridge_final_plan_manipulator_example() -> str:
                   {"primitive": "compute_pick_targets", "params": {"part_name": "<PART>", "product_geometry": {"board_center": {"x": 0.0, "y": 0.0, "z": 1.0}}}, "store_as": "part_pick_targets"},
                   {"primitive": "move_cartesian", "params": {"x": {"context_ref": "/step_outputs/detected_part/pose/x"}, "y": {"context_ref": "/step_outputs/detected_part/pose/y"}, "z": {"context_ref": "/step_outputs/part_pick_targets/travel_z"}, "speed": 1.2}},
                   {"primitive": "move_pose", "params": {"x": {"context_ref": "/step_outputs/detected_part/pose/x"}, "y": {"context_ref": "/step_outputs/detected_part/pose/y"}, "z": {"context_ref": "/step_outputs/part_pick_targets/pick_z"}, "qx": {"context_ref": "/step_outputs/pre_pick_pose/pose/qx"}, "qy": {"context_ref": "/step_outputs/pre_pick_pose/pose/qy"}, "qz": {"context_ref": "/step_outputs/pre_pick_pose/pose/qz"}, "qw": {"context_ref": "/step_outputs/pre_pick_pose/pose/qw"}, "speed": 0.8}},
-                  {"primitive": "close_gripper", "params": {}},
-                  {"primitive": "attach_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}}},
+                  {"primitive": "grasp_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}, "part_name": "<PART>"}},
                   {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8}}
                 ]
               },
@@ -1996,8 +2007,7 @@ def _bridge_final_plan_manipulator_example() -> str:
                   {"primitive": "compute_place_targets", "params": {"part_name": "<PART>", "product_geometry": {"board_center": {"x": 0.0, "y": 0.0, "z": 1.0}}}, "store_as": "part_place_targets"},
                   {"primitive": "move_cartesian", "params": {"x": {"context_ref": "/step_outputs/part_place_targets/slot_x"}, "y": {"context_ref": "/step_outputs/part_place_targets/slot_y"}, "z": {"context_ref": "/step_outputs/pre_place_pose/pose/z"}, "speed": 1.2}},
                   {"primitive": "move_pose", "params": {"x": {"context_ref": "/step_outputs/part_place_targets/slot_x"}, "y": {"context_ref": "/step_outputs/part_place_targets/slot_y"}, "z": {"context_ref": "/step_outputs/part_place_targets/place_z"}, "qx": {"context_ref": "/step_outputs/pre_place_pose/pose/qx"}, "qy": {"context_ref": "/step_outputs/pre_place_pose/pose/qy"}, "qz": {"context_ref": "/step_outputs/pre_place_pose/pose/qz"}, "qw": {"context_ref": "/step_outputs/pre_place_pose/pose/qw"}, "speed": 0.8}},
-                  {"primitive": "open_gripper", "params": {}},
-                  {"primitive": "detach_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}, "assume_released_if_open": true}},
+                  {"primitive": "release_part", "params": {"model_name": {"context_ref": "/parts/<PART>/target/model_name"}, "assume_released_if_open": true}},
                   {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0}}
                 ]
               }
@@ -2729,9 +2739,10 @@ def build_bridge_turn_prompt(
     """Build one compact ReAct turn prompt for the bridge session."""
     from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
         build_primitive_reference_card,
+        filter_synthesis_primitive_catalog,
     )
 
-    # --- strip primitive_catalog from bridge_resources for the prompt copy ---
+    # --- strip primitive catalogs from bridge_resources for the prompt copy ---
     prompt_resources: dict[str, Any] = {}
     all_catalog_entries: list[dict[str, Any]] = []
     for resource_jid, raw_entry in (bridge_resources or {}).items():
@@ -2739,10 +2750,18 @@ def build_bridge_turn_prompt(
             prompt_resources[resource_jid] = raw_entry
             continue
         slimmed = {
-            k: v for k, v in raw_entry.items() if k != "primitive_catalog"
+            k: v
+            for k, v in raw_entry.items()
+            if k not in {"primitive_catalog", "execution_primitive_catalog"}
         }
         prompt_resources[resource_jid] = slimmed
-        all_catalog_entries.extend(raw_entry.get("primitive_catalog") or [])
+        all_catalog_entries.extend(
+            filter_synthesis_primitive_catalog(
+                raw_entry.get("primitive_catalog")
+                or raw_entry.get("execution_primitive_catalog")
+                or []
+            )
+        )
 
     # deduplicate catalog by primitive name for the reference card
     seen_names: set[str] = set()
@@ -2755,7 +2774,9 @@ def build_bridge_turn_prompt(
             seen_names.add(name)
             deduped_catalog.append(entry)
 
-    primitive_card = build_primitive_reference_card(deduped_catalog)
+    primitive_card = build_primitive_reference_card(
+        filter_synthesis_primitive_catalog(deduped_catalog)
+    )
     prompt_profiles = _bridge_prompt_profiles(
         bridge_resources=bridge_resources,
         primitive_catalog=deduped_catalog,
@@ -3174,7 +3195,7 @@ def build_bridge_turn_prompt(
         - The bridge must leave the system safe and able to resume continuation.
         - If current information is insufficient, request an observation before committing to bridge_events.
         - In final_plan primitive_steps, use "store_as" ONLY on these primitives: detect_parts, get_current_pose, compute_pick_targets, compute_place_targets.
-        - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, open_gripper, close_gripper, attach_part, detach_part, rotate_wrist, pause_job, resume_job, or cancel_job.
+        - Never include "store_as" on action primitives such as move_to_named_pose, move_relative, move_cartesian, move_pose, grasp_part, release_part, pause_job, resume_job, or cancel_job.
         """
     ).strip()
     session_metadata = dedent(

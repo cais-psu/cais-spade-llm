@@ -38,5 +38,8 @@ cais_spade_llm/user_verified_safety/
 cais_spade_llm/specification/safety/intent_previews.json
 cais_spade_llm/specification/safety/intent_approvals.json
 
+# Debug session output
+debug/
+
 # Local environment files
 .env

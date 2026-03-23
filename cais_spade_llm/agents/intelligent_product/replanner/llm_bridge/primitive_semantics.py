@@ -43,6 +43,15 @@ _SUPPORTED_EFFECT_OPS = frozenset(
     }
 )
 
+_SYNTHESIS_HIDDEN_PRIMITIVES = frozenset(
+    {
+        "open_gripper",
+        "close_gripper",
+        "attach_part",
+        "detach_part",
+    }
+)
+
 
 def _is_scalar_json_value(value: Any) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
@@ -499,9 +508,6 @@ def _bridge_semantic_tags(
     elif primitive_name in {"move_cartesian", "move_pose", "move_relative"}:
         operation_kind = "motion"
         location_effect = "cartesian_motion"
-    elif primitive_name == "rotate_wrist":
-        operation_kind = "orient"
-
     return {
         "produces_observation": primitive_name in (profile.preview_output_map if profile is not None else {}),
         "operation_kind": operation_kind,
@@ -533,8 +539,163 @@ def _primitive_owner(resource_agent: Any, resource_type: str) -> Any | None:
     return None
 
 
-def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Build the private primitive catalogue for one bridge-capable resource."""
+def _catalog_params_summary(parameters: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for param_name, schema in (parameters.get("properties") or {}).items():
+        summary[str(param_name)] = {
+            "type": schema.get("type", "string"),
+            "description": schema.get("description", ""),
+        }
+    return summary
+
+
+def _composite_parameter_schema(
+    *,
+    properties: dict[str, dict[str, Any]],
+    required: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": deepcopy(properties),
+        "required": list(required or []),
+    }
+
+
+def _composite_catalog_entries(
+    *,
+    resource_type: str,
+    primitive_names: set[str],
+) -> list[dict[str, Any]]:
+    if resource_type != "robot":
+        return []
+
+    required_robot_primitives = {
+        "open_gripper",
+        "close_gripper",
+        "attach_part",
+        "detach_part",
+    }
+    if not required_robot_primitives <= set(primitive_names or set()):
+        return []
+
+    composites = [
+        {
+            "name": "grasp_part",
+            "description": (
+                "Bridge-only composite primitive that closes the gripper and "
+                "attaches the targeted part to the robot."
+            ),
+            "parameters": _composite_parameter_schema(
+                properties={
+                    "model_name": {
+                        "type": "string",
+                        "description": "Controller model name to attach after grasp.",
+                    },
+                    "part_name": {
+                        "type": "string",
+                        "description": "Canonical part name for held-part tracking.",
+                    },
+                    "position": {
+                        "type": "number",
+                        "description": "Optional gripper closing position.",
+                    },
+                },
+                required=["model_name"],
+            ),
+            "preconditions": {"held_part": {"equals": None}},
+            "effects": {
+                "gripper_state": {"set": "closed"},
+                "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
+            },
+            "composite_expansion": [
+                {"primitive": "close_gripper", "params_from_parent": ["position"]},
+                {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
+            ],
+        },
+        {
+            "name": "release_part",
+            "description": (
+                "Bridge-only composite primitive that opens the gripper and "
+                "detaches the currently held part."
+            ),
+            "parameters": _composite_parameter_schema(
+                properties={
+                    "model_name": {
+                        "type": "string",
+                        "description": "Optional controller model name to detach.",
+                    },
+                    "assume_released_if_open": {
+                        "type": "boolean",
+                        "description": (
+                            "Treat an already-open gripper as an idempotent release when true."
+                        ),
+                    },
+                },
+                required=[],
+            ),
+            "preconditions": {"held_part": {"exists": True}},
+            "effects": {
+                "gripper_state": {"set": "open"},
+                "held_part": {"set": None},
+            },
+            "composite_expansion": [
+                {"primitive": "open_gripper", "params_from_parent": []},
+                {
+                    "primitive": "detach_part",
+                    "params_from_parent": ["model_name", "assume_released_if_open"],
+                },
+            ],
+        },
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for composite in composites:
+        parameters = composite["parameters"]
+        preconditions = deepcopy(composite["preconditions"])
+        effects = deepcopy(composite["effects"])
+        rows.append(
+            {
+                "name": composite["name"],
+                "resource_type": resource_type,
+                "description": composite["description"],
+                "params": _catalog_params_summary(parameters),
+                "parameters": parameters,
+                "required_params": list(parameters.get("required") or []),
+                "preconditions": preconditions,
+                "effects": effects,
+                "semantic_summary": _semantic_summary(preconditions, effects),
+                "bridge_semantics": _bridge_semantic_tags(
+                    composite["name"],
+                    preconditions=preconditions,
+                    effects=effects,
+                    resource_type=resource_type,
+                ),
+                "composite_expansion": deepcopy(composite["composite_expansion"]),
+                "synthesis_hidden": False,
+            }
+        )
+    return rows
+
+
+def filter_synthesis_primitive_catalog(
+    primitive_catalog: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return the LLM-facing primitive catalog from a full execution catalog."""
+    rows: list[dict[str, Any]] = []
+    for entry in (primitive_catalog or []):
+        if not isinstance(entry, dict):
+            continue
+        if bool(entry.get("synthesis_hidden")):
+            continue
+        filtered = deepcopy(entry)
+        filtered.pop("composite_expansion", None)
+        filtered.pop("synthesis_hidden", None)
+        rows.append(filtered)
+    return rows
+
+
+def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
+    """Build the private execution catalogue for one bridge-capable resource."""
     resource_type = bridge_resource_type(
         resource=resource_agent,
         static_capabilities=deepcopy(getattr(resource_agent, "static_capabilities", {}) or {}),
@@ -558,12 +719,7 @@ def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
         preconditions = _normalize_semantics_map(meta.get("preconditions"))
         effects = _normalize_semantics_map(meta.get("effects"))
         params_schema = _param_schema(fn, analyzed)
-        params_summary: dict[str, dict[str, Any]] = {}
-        for param_name, schema in (params_schema.get("properties") or {}).items():
-            params_summary[param_name] = {
-                "type": schema.get("type", "string"),
-                "description": schema.get("description", ""),
-            }
+        params_summary = _catalog_params_summary(params_schema)
 
         rows.append(
             {
@@ -582,14 +738,41 @@ def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
                     effects=effects,
                     resource_type=resource_type,
                 ),
+                "synthesis_hidden": primitive_name in _SYNTHESIS_HIDDEN_PRIMITIVES,
             }
         )
 
+    rows.extend(
+        _composite_catalog_entries(
+            resource_type=resource_type,
+            primitive_names=set(primitive_names),
+        )
+    )
     return rows
+
+
+def build_synthesis_primitive_catalog(
+    resource_agent: Any | None = None,
+    *,
+    primitive_catalog: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the LLM-facing synthesis catalog for one bridge-capable resource."""
+    source_catalog = primitive_catalog
+    if source_catalog is None and resource_agent is not None:
+        source_catalog = build_execution_primitive_catalog(resource_agent)
+    return filter_synthesis_primitive_catalog(source_catalog or [])
+
+
+def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
+    """Backward-compatible alias for the full execution catalog."""
+    return build_execution_primitive_catalog(resource_agent)
 
 
 _OPERATION_KIND_ORDER = [
     "observe",
+    "pick",
+    "place",
+    "release",
     "motion",
     "home",
     "orient",
@@ -691,12 +874,88 @@ def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
         snapshot=raw_snapshot,
         modeled_state={},
     )
-    primitive_catalog = build_primitive_catalog(resource_agent)
+    primitive_catalog = build_execution_primitive_catalog(resource_agent)
     canonical["bridge_adapter"] = bridge_adapter_capabilities(
         resource_type,
         primitive_catalog=primitive_catalog,
     )
     return canonical
+
+
+def expand_composite_steps(
+    steps: list[dict[str, Any]],
+    primitive_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expand bridge-only composite primitives into atomic controller steps."""
+    catalog_by_name = {
+        str(entry.get("name", "")).strip(): entry
+        for entry in (primitive_catalog or [])
+        if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+    }
+
+    expanded_steps: list[dict[str, Any]] = []
+
+    def _expand_one(
+        step: dict[str, Any],
+        *,
+        original_index: int,
+        stack: tuple[str, ...] = (),
+    ) -> None:
+        primitive = str(step.get("primitive", "")).strip()
+        primitive_meta = catalog_by_name.get(primitive)
+        if primitive_meta is None:
+            raise ValueError(f"step {original_index} used unknown primitive '{primitive}'")
+
+        params = step.get("params") or {}
+        params_error = _validate_step_params(params, primitive_meta)
+        if params_error:
+            raise ValueError(f"step {original_index} {primitive}: {params_error}")
+
+        expansion = primitive_meta.get("composite_expansion") or []
+        if not expansion:
+            expanded_steps.append(deepcopy(step))
+            return
+
+        if str(step.get("store_as") or "").strip():
+            raise ValueError(
+                f"step {original_index} {primitive}: store_as is not supported on composite primitives"
+            )
+        if primitive in stack:
+            raise ValueError(
+                f"step {original_index} {primitive}: composite expansion cycle detected"
+            )
+        if not isinstance(params, dict):
+            raise ValueError(f"step {original_index} {primitive}: params must be an object")
+
+        for raw_child in expansion:
+            if not isinstance(raw_child, dict):
+                raise ValueError(
+                    f"step {original_index} {primitive}: composite expansion must contain objects"
+                )
+            child_primitive = str(raw_child.get("primitive", "")).strip()
+            if not child_primitive:
+                raise ValueError(
+                    f"step {original_index} {primitive}: composite expansion primitive is missing"
+                )
+            child_params: dict[str, Any] = {}
+            for raw_param_name in (raw_child.get("params_from_parent") or []):
+                param_name = str(raw_param_name or "").strip()
+                if not param_name:
+                    continue
+                if param_name in params:
+                    child_params[param_name] = deepcopy(params[param_name])
+            _expand_one(
+                {"primitive": child_primitive, "params": child_params},
+                original_index=original_index,
+                stack=(*stack, primitive),
+            )
+
+    for index, step in enumerate(steps or [], start=1):
+        if not isinstance(step, dict):
+            raise ValueError(f"step {index} must be an object")
+        _expand_one(step, original_index=index)
+
+    return expanded_steps
 
 def _validate_step_params(params: Any, primitive_meta: dict[str, Any]) -> str | None:
     if not isinstance(params, dict):
@@ -839,13 +1098,17 @@ def validate_and_project_steps(
     """Validate a primitive sequence and project the resulting snapshot."""
     projected = deepcopy(snapshot or {})
     step_outputs: dict[str, Any] = {}
+    try:
+        normalized_steps = expand_composite_steps(steps, primitive_catalog)
+    except Exception as exc:
+        return False, projected, str(exc)
     catalog_by_name = {
         str(entry.get("name", "")).strip(): entry
         for entry in (primitive_catalog or [])
         if isinstance(entry, dict) and str(entry.get("name", "")).strip()
     }
 
-    for index, step in enumerate(steps, start=1):
+    for index, step in enumerate(normalized_steps, start=1):
         if not isinstance(step, dict):
             return False, projected, f"step {index} must be an object"
 
@@ -901,6 +1164,20 @@ def validate_and_project_steps(
             projected = apply_effects_to_snapshot(preview_step, primitive_meta, projected)
         except Exception as exc:
             return False, projected, f"step {index} {primitive}: failed to apply effects ({exc})"
+
+        # Implicit state transition: "home" operations set current_state to idle.
+        bridge_sem = primitive_meta.get("bridge_semantics") or {}
+        if bridge_sem.get("operation_kind") == "home":
+            _profile = get_resource_profile(
+                str(
+                    dict(projected.get("resource_core") or {}).get("resource_type")
+                    or projected.get("resource_type")
+                    or "resource"
+                ).strip().lower() or "resource"
+            )
+            projected = resource_snapshot_set_field(
+                projected, "current_state", "idle", profile=_profile,
+            )
 
         if store_as:
             preview_output, preview_error = preview_step_output(

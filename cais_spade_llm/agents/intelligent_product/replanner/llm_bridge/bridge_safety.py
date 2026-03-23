@@ -22,14 +22,6 @@ from cais_spade_llm.resources.resource_profile import (
 )
 
 class BridgeSafetyMixin:
-    @staticmethod
-    def _bridge_resource_core_view(entry: dict[str, Any]) -> dict[str, Any]:
-        return deepcopy(dict(entry.get("resource_core") or {}))
-
-    @staticmethod
-    def _bridge_resource_facets_view(entry: dict[str, Any]) -> dict[str, Any]:
-        return deepcopy(dict(entry.get("resource_facets") or {}))
-
     def _bridge_grounding_context(
         self,
         *,
@@ -196,7 +188,8 @@ class BridgeSafetyMixin:
             return None, None, {}
 
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
-            build_primitive_catalog,
+            build_execution_primitive_catalog,
+            build_synthesis_primitive_catalog,
         )
 
         focused_primitive_catalog: list[dict[str, Any]] | None = None
@@ -238,15 +231,19 @@ class BridgeSafetyMixin:
                     snapshot=raw_bridge_snapshot,
                     modeled_state=modeled_state,
                 )
-                primitive_catalog = build_primitive_catalog(resource) or []
+                execution_primitive_catalog = build_execution_primitive_catalog(resource) or []
+                primitive_catalog = build_synthesis_primitive_catalog(
+                    primitive_catalog=execution_primitive_catalog,
+                ) or []
                 adapter_capabilities = bridge_adapter_capabilities(
-                    resource_type, primitive_catalog=primitive_catalog,
+                    resource_type, primitive_catalog=execution_primitive_catalog,
                 )
                 bridge_resources[resource_jid] = {
                     "resource_jid": resource_jid,
                     "resource_type": resource_type,
                     "bridge_adapter": adapter_capabilities,
                     "primitive_catalog": primitive_catalog,
+                    "execution_primitive_catalog": execution_primitive_catalog,
                     "bridge_snapshot": bridge_snapshot or {},
                     "resource_core": deepcopy(bridge_snapshot.get("resource_core") or {}),
                     "resource_facets": deepcopy(bridge_snapshot.get("resource_facets") or {}),
@@ -430,19 +427,6 @@ class BridgeSafetyMixin:
             "detect_parts",
             "get_current_pose",
         ]
-
-    @staticmethod
-    def _bridge_phase_allowed_types(phase: str) -> set[str]:
-        token = str(phase or "").strip().lower()
-        if token == "observe_required":
-            return {"observe"}
-        if token == "bridge_outline":
-            return {"bridge_outline"}
-        if token == "bridge_events":
-            return {"bridge_events"}
-        if token == "review":
-            return set()
-        return {"final_plan"}
 
     @staticmethod
     def _bridge_incremental_event_mode(
@@ -740,156 +724,6 @@ class BridgeSafetyMixin:
                 handoff_requirements=handoff_requirements,
             )
         return True, None
-
-    def _bridge_validate_bridge_events(
-        self,
-        prepared_bridge_request: dict[str, Any],
-        *,
-        events: list[dict[str, Any]],
-        require_full_gamma_closure: bool = True,
-        require_primitive_preview: bool = True,
-    ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]], str | None]:
-        normalized_events = [
-            canonical_bridge_event(
-                event,
-                bridge_resources=prepared_bridge_request.get("bridge_resources") or {},
-            )
-            for event in (events or [])
-            if isinstance(event, dict)
-        ]
-        marked_reentry_context = deepcopy(
-            prepared_bridge_request.get("marked_reentry_context")
-            or prepared_bridge_request.get("continuation_context")
-            or {}
-        )
-        unmet_conditions = [
-            condition
-            for condition in (marked_reentry_context.get("unmet_reentry_conditions") or [])
-            if isinstance(condition, dict)
-        ]
-        unmet_keys = {
-            self._marked_reentry_condition_key(condition)
-            for condition in unmet_conditions
-        }
-        covered_keys = self._bridge_event_condition_keys(normalized_events)
-        missing_keys = [condition for condition in unmet_conditions if self._marked_reentry_condition_key(condition) not in covered_keys]
-        feasibility_decisions: list[dict[str, Any]] = []
-        allowed_operation_kinds = all_registered_operation_kinds()
-        projected_resources = self._bridge_effective_resource_facts(
-            bridge_resources=deepcopy(prepared_bridge_request.get("bridge_resources") or {}),
-            projected_resource_snapshots=None,
-        )
-        part_states, part_locations, part_entries = self._bridge_effective_part_facts(
-            fallback_part_tracker=deepcopy(prepared_bridge_request.get("part_tracker") or {}),
-            projected_parts=None,
-        )
-        grounding_parts = dict(
-            (prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
-        )
-
-        for event in normalized_events:
-            if not isinstance(event, dict):
-                continue
-            resource_jid = str(event.get("resource_jid", "") or "").strip()
-            part_name = str(event.get("part_name", "") or "").strip()
-            operation_kind = self._bridge_event_operation_kind(event)
-            if resource_jid and operation_kind in allowed_operation_kinds:
-                decision = self._bridge_feasibility_decision(
-                    prepared_bridge_request,
-                    resource_jid=resource_jid,
-                    operation_kind=operation_kind,
-                    part_name=part_name or None,
-                    projected_part_entries=part_entries,
-                    projected_resource_snapshots=projected_resources,
-                )
-                feasibility_decisions.append(decision)
-                if not decision.get("allowed", False):
-                    return None, feasibility_decisions, (
-                        f"bridge event '{str(event.get('event_name', '')).strip() or resource_jid}' "
-                        f"is infeasible on {resource_jid}: {decision.get('reason') or 'unknown reason'}"
-                    )
-            self._bridge_apply_event_projection(
-                event,
-                projected_resources=projected_resources,
-                projected_part_states=part_states,
-                projected_part_locations=part_locations,
-                projected_part_entries=part_entries,
-                grounding_parts=grounding_parts,
-            )
-
-        # --- state-delta consistency check ---
-        resource_projected_state: dict[str, str] = {}
-        stuck_state = dict(prepared_bridge_request.get("stuck_state") or {})
-        for jid, raw_entry in (
-            prepared_bridge_request.get("bridge_resources") or {}
-        ).items():
-            if isinstance(raw_entry, dict):
-                snapshot = raw_entry.get("bridge_snapshot") or {}
-                state = str(snapshot.get("current_state") or "").strip()
-                if state:
-                    resource_projected_state[str(jid)] = state
-
-        for event in normalized_events:
-            if not isinstance(event, dict):
-                continue
-            resource_delta = event.get("expected_resource_delta")
-            if not isinstance(resource_delta, dict):
-                continue
-            resource_jid = str(event.get("resource_jid", "")).strip()
-            delta_from = str(resource_delta.get("from", "")).strip()
-            delta_to = str(resource_delta.get("to", "")).strip()
-            if not resource_jid or not delta_from or not delta_to:
-                continue
-            current = resource_projected_state.get(resource_jid, "")
-            if current and current != delta_from:
-                event_name = str(event.get("event_name", "")).strip() or resource_jid
-                return None, feasibility_decisions, (
-                    f"bridge event '{event_name}' declares expected_resource_delta.from='{delta_from}' "
-                    f"but {resource_jid} is projected to be in state '{current}' at that point"
-                )
-            resource_projected_state[resource_jid] = delta_to
-
-        continuity_ok, continuity_error = self._bridge_validate_event_state_continuity(
-            prepared_bridge_request,
-            events=normalized_events,
-        )
-        if not continuity_ok:
-            return None, feasibility_decisions, continuity_error
-
-        executor_ok, executor_error = self._bridge_validate_executor_assignments(
-            prepared_bridge_request,
-            events=normalized_events,
-        )
-        if not executor_ok:
-            return None, feasibility_decisions, executor_error
-
-        if require_full_gamma_closure and missing_keys:
-            missing_lines = [
-                f"- {condition.get('entity')}.{condition.get('field')} -> {condition.get('expected')!r}"
-                for condition in missing_keys[:6]
-            ]
-            return None, feasibility_decisions, (
-                "bridge_events did not close all current Gamma(x_d, M_bridge) conditions:\n"
-                + "\n".join(missing_lines)
-            )
-
-        safety_ok, safety_error = self._bridge_validate_safety_constraints(
-            prepared_bridge_request,
-            events=normalized_events,
-        )
-        if not safety_ok:
-            return None, feasibility_decisions, safety_error
-
-        preview_bridge_events = getattr(self, "_bridge_preview_approved_events", None)
-        if require_primitive_preview and callable(preview_bridge_events):
-            _preview_plan, _preview_normalized, preview_error = preview_bridge_events(
-                prepared_bridge_request,
-                approved_events=normalized_events,
-            )
-            if preview_error:
-                return None, feasibility_decisions, preview_error
-
-        return deepcopy(normalized_events), feasibility_decisions, None
 
     def _bridge_validate_event_state_continuity(
         self,

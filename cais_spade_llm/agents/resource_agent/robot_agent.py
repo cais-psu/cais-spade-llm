@@ -1084,7 +1084,6 @@ class RobotAgent(ResourceAgent):
         "move_pose",
         "move_relative",
         "move_to_named_pose",
-        "rotate_wrist",
         "open_gripper",
         "close_gripper",
         "detect_parts",
@@ -1184,6 +1183,7 @@ class RobotAgent(ResourceAgent):
         )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
+            expand_composite_steps,
             extract_step_output,
             get_resource_bridge_snapshot,
             resolve_param_refs,
@@ -1249,6 +1249,21 @@ class RobotAgent(ResourceAgent):
             }
 
         primitive_catalog = self._cached_primitive_catalog()
+        try:
+            primitive_steps = expand_composite_steps(primitive_steps, primitive_catalog)
+        except Exception as exc:
+            msg = (
+                f"Recovery macro '{macro_name}' could not expand composite primitives: {exc}"
+            )
+            self.logger.error("[Robot] %s", msg)
+            return {
+                "status": "failed",
+                "content": msg,
+                "observations": {
+                    "macro_name": macro_name,
+                    "step_index": -1,
+                },
+            }
         primitive_meta_by_name = {
             str(entry.get("name", "")).strip(): entry
             for entry in primitive_catalog
@@ -1445,10 +1460,10 @@ class RobotAgent(ResourceAgent):
         """Return the cached primitive catalog, building it on first access."""
         if self._primitive_catalog_cache is None:
             from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
-                build_primitive_catalog,
+                build_execution_primitive_catalog,
             )
 
-            self._primitive_catalog_cache = build_primitive_catalog(self)
+            self._primitive_catalog_cache = build_execution_primitive_catalog(self)
         return self._primitive_catalog_cache
 
     async def _execute_primitive(

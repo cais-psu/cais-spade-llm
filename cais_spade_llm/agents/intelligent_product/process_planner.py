@@ -2300,3 +2300,188 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             return
         self.global_fsa = payload
         self.logger.debug(f"[Planner] Loaded global FSA from {p.resolve()}")
+
+    # ------------------------------------------------------------------ #
+    # v2 Universal Repair — apply validated program to live graph
+    # ------------------------------------------------------------------ #
+
+    def apply_repair_program(
+        self,
+        validated_program: dict[str, Any],
+        *,
+        prepared_bridge_request: dict[str, Any] | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Apply a validated RepairProgram to the live task graph.
+
+        This is the execution bridge between the v2 universal repair session
+        and the existing ``_apply_replan_patch()`` + ``compile_global_fsa()``
+        infrastructure.
+
+        Parameters
+        ----------
+        validated_program:
+            Serialized :class:`ValidatedRepairProgram` dict (from
+            ``validated_program_to_dict``).
+        prepared_bridge_request:
+            Optional bridge request for context (resource JIDs, etc.).
+
+        Returns
+        -------
+        tuple:
+            ``(success, errors)`` — if *errors* is non-empty the program
+            was not applied.
+        """
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_compiler import (
+            compile_mutations,
+        )
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+            RepairStepKind,
+            TaskMutationStep,
+            TaskMutationType,
+            repair_program_from_dict,
+        )
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.function_synthesis import (
+            compile_synthesized_function_to_macro,
+        )
+
+        errors: list[str] = []
+        program_dict = validated_program.get("program") or {}
+        if not program_dict:
+            errors.append("validated_program has no 'program' field")
+            return False, errors
+
+        if not validated_program.get("is_valid", False):
+            errors.append("program is not valid (is_valid=False)")
+            return False, errors
+
+        try:
+            program = repair_program_from_dict(program_dict)
+        except Exception as exc:
+            errors.append(f"failed to deserialize repair program: {exc}")
+            return False, errors
+
+        # Build function lookup.
+        fn_defs = {fn.name: fn for fn in program.function_defs}
+
+        # Collect all patches from mutations and function calls.
+        all_patches: list[dict[str, Any]] = []
+        macro_tasks: list[dict[str, Any]] = []
+
+        for step_idx, step in enumerate(program.steps):
+            kind = step.kind
+
+            if kind == RepairStepKind.TASK_MUTATION:
+                mutation_payload = step.payload
+                mutation_type_str = str(
+                    mutation_payload.get("mutation_type", "")
+                ).strip()
+                try:
+                    mutation_type = TaskMutationType(mutation_type_str)
+                except ValueError:
+                    errors.append(
+                        f"step {step_idx}: invalid mutation_type '{mutation_type_str}'"
+                    )
+                    continue
+
+                mutation_step = TaskMutationStep(
+                    mutation_type=mutation_type,
+                    target_task_ids=list(
+                        mutation_payload.get("target_task_ids") or []
+                    ),
+                    payload=dict(mutation_payload.get("payload") or {}),
+                )
+                patches, mut_errors = compile_mutations(
+                    [mutation_step],
+                    self.nodes,
+                )
+                if mut_errors:
+                    errors.extend(
+                        f"step {step_idx} mutation: {e}" for e in mut_errors
+                    )
+                else:
+                    all_patches.extend(patches)
+
+            elif kind == RepairStepKind.CALL_FUNCTION:
+                fn_name = str(step.payload.get("function_name", "")).strip()
+                resource_jid = str(step.payload.get("resource_jid", "")).strip()
+                fn_def = fn_defs.get(fn_name)
+                if fn_def is None:
+                    errors.append(
+                        f"step {step_idx}: function '{fn_name}' not found in function_defs"
+                    )
+                    continue
+
+                macro = compile_synthesized_function_to_macro(
+                    fn_def,
+                    resource_jid=resource_jid,
+                    macro_index=step_idx,
+                )
+                macro_tasks.append(macro)
+
+            elif kind == RepairStepKind.RESUME_SUFFIX:
+                # No action needed — suffix tasks are already in the graph.
+                pass
+
+            elif kind == RepairStepKind.WAIT:
+                # Wait steps are runtime directives, not graph mutations.
+                # They will be handled by the execution engine.
+                pass
+
+        if errors:
+            return False, errors
+
+        # Apply patches to the live graph.
+        if all_patches:
+            try:
+                self._apply_replan_patch(all_patches)
+            except Exception as exc:
+                errors.append(f"failed to apply patches: {exc}")
+                return False, errors
+
+        # Convert macro_tasks to patch format and insert into the graph.
+        if macro_tasks:
+            macro_patches: list[dict[str, Any]] = []
+            for macro in macro_tasks:
+                task_id = f"repair_fn_{uuid4().hex[:8]}"
+                patch = {
+                    "id": task_id,
+                    "type": "task",
+                    "function_name": macro.get("macro_name", ""),
+                    "resource_jid": macro.get("resource_jid", ""),
+                    "params": deepcopy(macro.get("primitive_steps") or []),
+                    "status": "pending",
+                    "change_reason": f"v2 repair: {macro.get('description', '')}",
+                }
+                task_metadata = macro.get("task_metadata") or {}
+                if task_metadata.get("in_state"):
+                    patch["in_state"] = task_metadata["in_state"]
+                if task_metadata.get("out_state"):
+                    patch["out_state"] = task_metadata["out_state"]
+                if task_metadata.get("part_transition"):
+                    patch["part_transition"] = deepcopy(task_metadata["part_transition"])
+                if macro.get("bridge_sequence_id"):
+                    patch["bridge_sequence_id"] = macro["bridge_sequence_id"]
+                    patch["bridge_sequence_index"] = macro.get("bridge_sequence_index", 0)
+                macro_patches.append(patch)
+
+            if macro_patches:
+                try:
+                    self._apply_replan_patch(macro_patches)
+                except Exception as exc:
+                    errors.append(f"failed to apply macro patches: {exc}")
+                    return False, errors
+
+        # Recompile FSA.
+        try:
+            self.compile_global_fsa()
+            if hasattr(self.product_agent, "global_fsa_path"):
+                self.save_global_fsa(self.product_agent.global_fsa_path)
+        except Exception as exc:
+            errors.append(f"FSA recompilation failed: {exc}")
+            return False, errors
+
+        self.logger.info(
+            "[Planner] v2 repair program applied: %d patches, %d macros",
+            len(all_patches), len(macro_tasks),
+        )
+        return True, []

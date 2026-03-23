@@ -380,10 +380,12 @@ def _preview_detect_output(
         "pose": dict(observed_pose),
     }
     orientation = _normalized_orientation((item_info or {}).get("observed_pose"))
-    if orientation is not None:
-        output.update(orientation)
-        output["orientation"] = deepcopy(orientation)
-        output["pose"].update(orientation)
+    if orientation is None:
+        # Default identity quaternion so context_ref paths always resolve.
+        orientation = {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+    output.update(orientation)
+    output["orientation"] = deepcopy(orientation)
+    output["pose"].update(orientation)
     model_name = str(((item_info or {}).get("target") or {}).get("model_name") or "").strip()
     if model_name:
         output["model_name"] = model_name
@@ -1209,16 +1211,16 @@ _MANIPULATOR_PROMPT_ADDENDUM = dedent(
     """\
     MANIPULATOR COMPOSITION ADDENDUM:
     - This addendum applies only when the chosen resource exposes manipulator
-      primitives such as detect_parts, compute_pick_targets, gripper actions,
-      and attach/detach.
+      primitives such as detect_parts, compute_pick_targets, grasp_part, and
+      release_part.
     - To acquire a part: observe it (detect_parts), compute approach geometry
       (compute_pick_targets), move above it, descend to grasp height, close
-      gripper, attach, and lift away.
+      the gripper, attach internally via grasp_part, and lift away.
     - To place a part: compute destination geometry (compute_place_targets),
-      move above the slot, descend to placement height, open gripper, detach,
-      and lift away.
+      move above the slot, descend to placement height, release_part, and lift
+      away.
     - To release a part without placing it at a goal: descend to a safe
-      release height, open gripper, detach, and retract.
+      release height, call release_part, and retract.
     - Use get_current_pose before motion primitives that need orientation
       (qx, qy, qz, qw) to preserve the current end-effector orientation.
     """
@@ -1254,6 +1256,8 @@ ROBOT_PROFILE = ResourceProfile(
         "get_current_pose": "observe",
         "compute_pick_targets": "pick",
         "compute_place_targets": "place",
+        "grasp_part": "pick",
+        "release_part": "release",
         "move_to_named_pose": "home",
         "move_cartesian": "motion",
         "move_pose": "motion",
@@ -1262,7 +1266,6 @@ ROBOT_PROFILE = ResourceProfile(
         "close_gripper": "pick",
         "attach_part": "pick",
         "detach_part": "place",
-        "rotate_wrist": "orient",
     },
     event_family_resolver=_robot_event_family,
     event_contract_validator=_robot_event_contract_validator,
