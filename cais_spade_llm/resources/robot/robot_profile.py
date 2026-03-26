@@ -1234,19 +1234,19 @@ _MANIPULATOR_PROMPT_ADDENDUM = dedent(
       release_part.
     - To acquire a part: observe it (detect_parts), compute approach geometry
       (compute_pick_targets), treat `approach_pose` as the hover pose above the
-      part and `target_pose` as the actual grasp pose, move above it, descend to
-      `target_pose`, close the gripper, attach internally via grasp_part, and
-      lift away.
+      part and `target_pose` as the actual grasp pose, use move_cartesian to
+      reach those absolute poses, call grasp_part at the grasp pose, then use
+      move_by_offset with a positive `dz` to lift away.
     - To place a part: compute destination geometry (compute_place_targets),
       grounding it with `destination_location` only when that symbolic
       destination resolves place geometry for the current part; otherwise use
       explicit `product_geometry`. Then treat `approach_pose` as the hover pose
-      above the destination and `target_pose` as the actual place pose, move
-      above the slot, descend to `target_pose`, release_part, and lift away.
+      above the destination and `target_pose` as the actual place pose, use
+      move_cartesian to reach those absolute poses, call release_part at the
+      place pose, then use move_by_offset with a positive `dz` to retreat.
     - To release a part without placing it at a goal: descend to a safe
-      release height, call release_part, and retract.
-    - Use get_current_pose before motion primitives that need orientation
-      (qx, qy, qz, qw) to preserve the current end-effector orientation.
+      release height via move_by_offset, call release_part, and retract with
+      move_by_offset.
     """
 ).strip()
 

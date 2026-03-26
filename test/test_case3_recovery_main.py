@@ -78,6 +78,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_sc
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     build_primitive_catalog,
+    build_synthesis_primitive_catalog,
     get_resource_bridge_snapshot,
     preview_step_output,
     resolve_context_ref,
@@ -3751,7 +3752,10 @@ def test_live_v3_prompt_switches_to_repair_ready_after_outline_acceptance() -> N
     assert '"name": "move_to_named_pose"' in prompt
     assert '"name": "compute_pick_targets"' in prompt
     assert '"name": "compute_place_targets"' in prompt
-    assert '"name": "get_current_pose"' in prompt
+    assert '"name": "move_by_offset"' in prompt
+    assert '"name": "get_current_pose"' not in prompt
+    assert '"name": "move_pose"' not in prompt
+    assert '"name": "move_relative"' not in prompt
     assert "A grounded pickup normally reaches `target_pose` before `grasp_part`." in prompt
     assert "A grounded place normally reaches `approach_pose`, then `target_pose`, then `release_part`." in prompt
     assert "symbolic destination resolves to place geometry for the current part" in prompt
@@ -5289,6 +5293,29 @@ def test_compute_place_targets_catalog_exposes_destination_location_param() -> N
     entry = next(row for row in catalog if row.get("name") == "compute_place_targets")
     params = dict(entry.get("params") or {})
     assert "destination_location" in params
+
+
+def test_robot_synthesis_catalog_is_limited_to_reduced_llm_surface() -> None:
+    _, _, planner, _, _ = _prepare_case3_harness_state(
+        llm_mode="live",
+        llm_model="fake-model",
+    )
+    ur5e = next(
+        ra for ra in planner.resource_agents
+        if str(getattr(ra, "jid", "")).strip() == "ur5e@localhost"
+    )
+    catalog = build_synthesis_primitive_catalog(ur5e)
+    names = {str(row.get("name") or "") for row in catalog}
+    assert names == {
+        "detect_parts",
+        "compute_pick_targets",
+        "compute_place_targets",
+        "move_to_named_pose",
+        "move_cartesian",
+        "move_by_offset",
+        "grasp_part",
+        "release_part",
+    }
 
 
 def test_safety_only_bridge_is_rejected_by_marked_reentry_gap() -> None:

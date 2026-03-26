@@ -52,6 +52,19 @@ _SYNTHESIS_HIDDEN_PRIMITIVES = frozenset(
     }
 )
 
+_ROBOT_SYNTHESIS_VISIBLE_PRIMITIVES = frozenset(
+    {
+        "detect_parts",
+        "compute_pick_targets",
+        "compute_place_targets",
+        "move_to_named_pose",
+        "move_cartesian",
+        "move_by_offset",
+        "grasp_part",
+        "release_part",
+    }
+)
+
 
 def _is_scalar_json_value(value: Any) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
@@ -570,84 +583,125 @@ def _composite_catalog_entries(
     if resource_type != "robot":
         return []
 
+    composites: list[dict[str, Any]] = []
     required_robot_primitives = {
         "open_gripper",
         "close_gripper",
         "attach_part",
         "detach_part",
     }
-    if not required_robot_primitives <= set(primitive_names or set()):
-        return []
-
-    composites = [
-        {
-            "name": "grasp_part",
-            "description": (
-                "Bridge-only composite primitive that closes the gripper and "
-                "attaches the targeted part to the robot."
-            ),
-            "parameters": _composite_parameter_schema(
-                properties={
-                    "model_name": {
-                        "type": "string",
-                        "description": "Controller model name to attach after grasp.",
-                    },
-                    "part_name": {
-                        "type": "string",
-                        "description": "Canonical part name for held-part tracking.",
-                    },
-                    "position": {
-                        "type": "number",
-                        "description": "Optional gripper closing position.",
-                    },
-                },
-                required=["model_name"],
-            ),
-            "preconditions": {"held_part": {"equals": None}},
-            "effects": {
-                "gripper_state": {"set": "closed"},
-                "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
-            },
-            "composite_expansion": [
-                {"primitive": "close_gripper", "params_from_parent": ["position"]},
-                {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
-            ],
-        },
-        {
-            "name": "release_part",
-            "description": (
-                "Bridge-only composite primitive that opens the gripper and "
-                "detaches the currently held part."
-            ),
-            "parameters": _composite_parameter_schema(
-                properties={
-                    "model_name": {
-                        "type": "string",
-                        "description": "Optional controller model name to detach.",
-                    },
-                    "assume_released_if_open": {
-                        "type": "boolean",
-                        "description": (
-                            "Treat an already-open gripper as an idempotent release when true."
-                        ),
-                    },
-                },
-                required=[],
-            ),
-            "preconditions": {"held_part": {"exists": True}},
-            "effects": {
-                "gripper_state": {"set": "open"},
-                "held_part": {"set": None},
-            },
-            "composite_expansion": [
-                {"primitive": "open_gripper", "params_from_parent": []},
+    if required_robot_primitives <= set(primitive_names or set()):
+        composites.extend(
+            [
                 {
-                    "primitive": "detach_part",
-                    "params_from_parent": ["model_name", "assume_released_if_open"],
+                    "name": "grasp_part",
+                    "description": (
+                        "Bridge-only composite primitive that closes the gripper and "
+                        "attaches the targeted part to the robot."
+                    ),
+                    "parameters": _composite_parameter_schema(
+                        properties={
+                            "model_name": {
+                                "type": "string",
+                                "description": "Controller model name to attach after grasp.",
+                            },
+                            "part_name": {
+                                "type": "string",
+                                "description": "Canonical part name for held-part tracking.",
+                            },
+                            "position": {
+                                "type": "number",
+                                "description": "Optional gripper closing position.",
+                            },
+                        },
+                        required=["model_name"],
+                    ),
+                    "preconditions": {"held_part": {"equals": None}},
+                    "effects": {
+                        "gripper_state": {"set": "closed"},
+                        "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
+                    },
+                    "composite_expansion": [
+                        {"primitive": "close_gripper", "params_from_parent": ["position"]},
+                        {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
+                    ],
                 },
-            ],
-        },
-    ]
+                {
+                    "name": "release_part",
+                    "description": (
+                        "Bridge-only composite primitive that opens the gripper and "
+                        "detaches the currently held part."
+                    ),
+                    "parameters": _composite_parameter_schema(
+                        properties={
+                            "model_name": {
+                                "type": "string",
+                                "description": "Optional controller model name to detach.",
+                            },
+                            "assume_released_if_open": {
+                                "type": "boolean",
+                                "description": (
+                                    "Treat an already-open gripper as an idempotent release when true."
+                                ),
+                            },
+                        },
+                        required=[],
+                    ),
+                    "preconditions": {"held_part": {"exists": True}},
+                    "effects": {
+                        "gripper_state": {"set": "open"},
+                        "held_part": {"set": None},
+                    },
+                    "composite_expansion": [
+                        {"primitive": "open_gripper", "params_from_parent": []},
+                        {
+                            "primitive": "detach_part",
+                            "params_from_parent": ["model_name", "assume_released_if_open"],
+                        },
+                    ],
+                },
+            ]
+        )
+
+    if "move_relative" in set(primitive_names or set()):
+        composites.append(
+            {
+                "name": "move_by_offset",
+                "description": (
+                    "Bridge-only composite primitive that shifts the end-effector by a "
+                    "relative Cartesian offset from its current pose."
+                ),
+                "parameters": _composite_parameter_schema(
+                    properties={
+                        "dx": {
+                            "type": "number",
+                            "description": "Delta X in meters from the current pose.",
+                        },
+                        "dy": {
+                            "type": "number",
+                            "description": "Delta Y in meters from the current pose.",
+                        },
+                        "dz": {
+                            "type": "number",
+                            "description": "Delta Z in meters from the current pose.",
+                        },
+                        "speed": {
+                            "type": "number",
+                            "description": "Optional motion speed scale.",
+                        },
+                    },
+                    required=["dx", "dy", "dz"],
+                ),
+                "preconditions": {"current_pose": {"exists": True}},
+                "effects": {
+                    "current_pose": {"pose_relative_from_params": ["dx", "dy", "dz"]},
+                    "current_pose_ref": {"set_unknown": True},
+                },
+                "composite_expansion": [
+                    {"primitive": "move_relative", "params_from_parent": ["dx", "dy", "dz", "speed"]},
+                ],
+            }
+        )
 
     rows: list[dict[str, Any]] = []
     for composite in composites:
@@ -687,6 +741,10 @@ def filter_synthesis_primitive_catalog(
         if not isinstance(entry, dict):
             continue
         if bool(entry.get("synthesis_hidden")):
+            continue
+        resource_type = str(entry.get("resource_type") or "").strip().lower()
+        name = str(entry.get("name") or "").strip()
+        if resource_type == "robot" and name not in _ROBOT_SYNTHESIS_VISIBLE_PRIMITIVES:
             continue
         filtered = deepcopy(entry)
         filtered.pop("composite_expansion", None)
