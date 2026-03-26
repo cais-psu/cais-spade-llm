@@ -676,6 +676,7 @@ class ProductAgent(LlmAgent):
         resource_jid: str,
         task_id: str,
         task_node: Optional[Dict[str, Any]] = None,
+        observations: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Generic interpreter: applies the part_transition declared in each function's docstring."""
         transition_map = self._get_part_transition(function_name, task_node=task_node)
@@ -764,6 +765,21 @@ class ProductAgent(LlmAgent):
 
         if status == "completed":
             entry["last_successful_task"] = task_id
+
+        # Preserve origin info when a part transitions to in_gripper so
+        # recovery planners know where to return it.
+        if transition.get("state") == "in_gripper":
+            origin = str(params.get("origin_resource_location") or "").strip()
+            if origin:
+                entry["origin_resource_location"] = origin
+            obs = observations or {}
+            origin_pose = obs.get("origin_pose")
+            if isinstance(origin_pose, dict) and {"x", "y", "z"} <= set(origin_pose):
+                entry["origin_pose"] = {
+                    "x": float(origin_pose["x"]),
+                    "y": float(origin_pose["y"]),
+                    "z": float(origin_pose["z"]),
+                }
 
         self.part_tracker[part_name].update(entry)
 
@@ -3491,6 +3507,7 @@ class ProductAgent(LlmAgent):
                         resource_jid=str(msg.sender),
                         task_id=task_id,
                         task_node=task_node,
+                        observations=observations,
                     )
 
             # NOTE: Robot states are NOT cached here - they're collected by CentralControllerAgent

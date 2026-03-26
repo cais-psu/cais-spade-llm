@@ -77,28 +77,55 @@ def resource_snapshot_field_value(
             or dict(raw_snapshot.get("resource_core") or {}).get("resource_type")
         )
     )
+    field_name = str(field or "").strip()
+    if not field_name:
+        return None
+
+    def _nested_get(mapping: dict[str, Any], dotted_field: str) -> Any:
+        current: Any = mapping
+        for token in dotted_field.split("."):
+            if not isinstance(current, dict) or token not in current:
+                return None
+            current = current.get(token)
+        return deepcopy(current)
 
     resource_core = dict(raw_snapshot.get("resource_core") or {})
-    if field in resource_core and resource_core.get(field) is not None:
-        return deepcopy(resource_core.get(field))
+    if "." in field_name:
+        value = _nested_get(resource_core, field_name)
+        if value is not None:
+            return value
+
+        facet_key = str(active_profile.facet_key or "").strip()
+        if facet_key:
+            facet = dict((raw_snapshot.get("resource_facets") or {}).get(facet_key) or {})
+            value = _nested_get(facet, field_name)
+            if value is not None:
+                return value
+
+        value = _nested_get(raw_snapshot, field_name)
+        if value is not None:
+            return value
+
+    if field_name in resource_core and resource_core.get(field_name) is not None:
+        return deepcopy(resource_core.get(field_name))
 
     facet_key = str(active_profile.facet_key or "").strip()
     if facet_key:
         facet = dict((raw_snapshot.get("resource_facets") or {}).get(facet_key) or {})
-        if field in facet and facet.get(field) is not None:
-            return deepcopy(facet.get(field))
+        if field_name in facet and facet.get(field_name) is not None:
+            return deepcopy(facet.get(field_name))
 
-    if field in raw_snapshot and raw_snapshot.get(field) is not None:
-        return deepcopy(raw_snapshot.get(field))
+    if field_name in raw_snapshot and raw_snapshot.get(field_name) is not None:
+        return deepcopy(raw_snapshot.get(field_name))
 
-    if field in resource_core:
-        return deepcopy(resource_core.get(field))
+    if field_name in resource_core:
+        return deepcopy(resource_core.get(field_name))
     if facet_key:
         facet = dict((raw_snapshot.get("resource_facets") or {}).get(facet_key) or {})
-        if field in facet:
-            return deepcopy(facet.get(field))
-    if field in raw_snapshot:
-        return deepcopy(raw_snapshot.get(field))
+        if field_name in facet:
+            return deepcopy(facet.get(field_name))
+    if field_name in raw_snapshot:
+        return deepcopy(raw_snapshot.get(field_name))
     return None
 
 
@@ -120,6 +147,24 @@ def resource_snapshot_set_field(
     if not field_name:
         return raw_snapshot
 
+    def _nested_set(
+        mapping: dict[str, Any],
+        dotted_field: str,
+        next_value: Any,
+    ) -> dict[str, Any]:
+        target = mapping
+        tokens = [token for token in dotted_field.split(".") if token]
+        if not tokens:
+            return target
+        for token in tokens[:-1]:
+            child = target.get(token)
+            if not isinstance(child, dict):
+                child = {}
+            target[token] = child
+            target = child
+        target[tokens[-1]] = deepcopy(next_value)
+        return mapping
+
     core_fields = {
         "resource_jid",
         "resource_type",
@@ -131,6 +176,25 @@ def resource_snapshot_set_field(
     }
     facet_key = str(active_profile.facet_key or "").strip()
     resource_core = dict(raw_snapshot.get("resource_core") or {})
+    root_field = field_name.split(".", 1)[0]
+
+    if "." in field_name:
+        if root_field in core_fields or root_field in resource_core or not facet_key:
+            resource_core = _nested_set(resource_core, field_name, value)
+            raw_snapshot["resource_core"] = resource_core
+            if root_field in core_fields:
+                top_level_value = dict(raw_snapshot.get(root_field) or {})
+                if not isinstance(top_level_value, dict):
+                    top_level_value = {}
+                raw_snapshot[root_field] = _nested_set(top_level_value, field_name.split(".", 1)[1], value)
+            return raw_snapshot
+
+        resource_facets = dict(raw_snapshot.get("resource_facets") or {})
+        facet = dict(resource_facets.get(facet_key) or {})
+        facet = _nested_set(facet, field_name, value)
+        resource_facets[facet_key] = facet
+        raw_snapshot["resource_facets"] = resource_facets
+        return raw_snapshot
 
     if field_name in core_fields or field_name in resource_core or not facet_key:
         resource_core[field_name] = deepcopy(value)

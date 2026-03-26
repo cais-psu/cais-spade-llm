@@ -101,6 +101,10 @@ class RecoveryContext:
     """Constraints extracted from prior validator rejections
     (fresh-prompt constraint accumulation)."""
 
+    grounded_environment_facts: dict[str, Any] = field(default_factory=dict)
+    """Derived neutral environment facts computed from observations,
+    obligations, geometry, and capability state."""
+
 
 # ---------------------------------------------------------------------------
 # SynthesizedTaskFn — LLM-authored recovery function
@@ -205,6 +209,10 @@ class RepairProgram:
 
     rationale: str = ""
     """Optional LLM-provided explanation."""
+
+    reasoning: dict[str, Any] = field(default_factory=dict)
+    """v3 structured planning analysis (current_state_analysis, goal_gap_analysis,
+    transition_plan, safety_check).  Empty dict for v2 programs."""
 
 
 # ---------------------------------------------------------------------------
@@ -316,14 +324,18 @@ def _synthesized_fn_to_dict(fn: SynthesizedTaskFn) -> dict[str, Any]:
 
 def _synthesized_fn_from_dict(d: dict[str, Any]) -> SynthesizedTaskFn:
     """Deserialize a plain dict to :class:`SynthesizedTaskFn`."""
+    resource_constraints = dict(d.get("resource_constraints") or {})
+    resource_jid = str(d.get("resource_jid") or "").strip()
+    if resource_jid and "resource_jid" not in resource_constraints:
+        resource_constraints["resource_jid"] = resource_jid
     return SynthesizedTaskFn(
-        name=str(d.get("name", "")),
-        intent=str(d.get("intent", "")),
-        resource_constraints=dict(d.get("resource_constraints") or {}),
+        name=str(d.get("name") or d.get("function_name") or ""),
+        intent=str(d.get("intent") or d.get("description") or ""),
+        resource_constraints=resource_constraints,
         inputs=dict(d.get("inputs") or {}),
         preconditions=dict(d.get("preconditions") or {}),
         effects=dict(d.get("effects") or {}),
-        primitive_program=list(d.get("primitive_program") or []),
+        primitive_program=list(d.get("primitive_program") or d.get("primitives") or []),
         expected_post_state=dict(d.get("expected_post_state") or {}),
     )
 
@@ -339,14 +351,54 @@ _STEP_KIND_ALIASES: dict[str, str] = {
     "insert": "task_mutation",
     "delete": "task_mutation",
     "reassign": "task_mutation",
+    "repair": "call_function",
+    "run_task_fn": "call_function",
+    "execute_function": "call_function",
+    "execute": "call_function",
+}
+
+_MUTATION_TYPE_ALIASES: dict[str, str] = {
+    "append_action": "insert",
 }
 
 
 def _repair_step_from_dict(d: dict[str, Any]) -> RepairStep:
     """Deserialize a plain dict to :class:`RepairStep`."""
-    raw_kind = str(d.get("kind", "resume_suffix")).strip().lower()
-    resolved_kind = _STEP_KIND_ALIASES.get(raw_kind, raw_kind)
+    if not isinstance(d, dict):
+        raise ValueError("repair step must be an object")
     payload = dict(d.get("payload") or {})
+    raw_kind = str(d.get("kind") or "").strip().lower()
+    if not raw_kind:
+        if d.get("resume_suffix") is True:
+            raw_kind = "resume_suffix"
+            payload = {}
+        elif d.get("fn"):
+            raw_kind = "call_function"
+            payload = {
+                "function_name": d.get("fn"),
+                "resource_jid": d.get("resource_jid"),
+                "args": dict(d.get("args") or {}),
+            }
+        else:
+            raise ValueError("repair step missing kind")
+    resolved_kind = _STEP_KIND_ALIASES.get(raw_kind, raw_kind)
+
+    if resolved_kind == RepairStepKind.CALL_FUNCTION.value:
+        if "function_name" not in payload and d.get("function_name"):
+            payload["function_name"] = d.get("function_name")
+        if "resource_jid" not in payload and d.get("resource_jid"):
+            payload["resource_jid"] = d.get("resource_jid")
+        if "args" not in payload:
+            payload["args"] = dict(d.get("args") or {})
+    elif resolved_kind == RepairStepKind.WAIT.value:
+        if "until" not in payload and isinstance(d.get("until"), dict):
+            payload["until"] = dict(d.get("until") or {})
+    elif resolved_kind == RepairStepKind.RESUME_SUFFIX.value:
+        payload = {}
+
+    mutation_type = str(payload.get("mutation_type") or "").strip().lower()
+    if mutation_type in _MUTATION_TYPE_ALIASES:
+        payload["mutation_type"] = _MUTATION_TYPE_ALIASES[mutation_type]
 
     # If the LLM used a mutation type name as the step kind, wrap it
     # as a task_mutation step with the correct mutation_type in payload.
@@ -362,12 +414,15 @@ def _repair_step_from_dict(d: dict[str, Any]) -> RepairStep:
 
 def repair_program_to_dict(program: RepairProgram) -> dict[str, Any]:
     """Serialize a :class:`RepairProgram` to a plain dict."""
-    return {
+    d: dict[str, Any] = {
         "function_defs": [_synthesized_fn_to_dict(f) for f in program.function_defs],
         "steps": [_repair_step_to_dict(s) for s in program.steps],
         "success_conditions": program.success_conditions,
         "rationale": program.rationale,
     }
+    if program.reasoning:
+        d["reasoning"] = program.reasoning
+    return d
 
 
 def repair_program_from_dict(d: dict[str, Any]) -> RepairProgram:
@@ -383,6 +438,7 @@ def repair_program_from_dict(d: dict[str, Any]) -> RepairProgram:
         ],
         success_conditions=list(d.get("success_conditions") or []),
         rationale=str(d.get("rationale", "")),
+        reasoning=dict(d.get("reasoning") or {}),
     )
 
 
@@ -396,6 +452,18 @@ def validated_program_to_dict(vp: ValidatedRepairProgram) -> dict[str, Any]:
         "rejection_reasons": vp.rejection_reasons,
         "is_valid": vp.is_valid,
     }
+
+
+def validated_program_from_dict(d: dict[str, Any]) -> ValidatedRepairProgram:
+    """Deserialize a plain dict to :class:`ValidatedRepairProgram`."""
+    program_dict = d.get("program") or {}
+    return ValidatedRepairProgram(
+        program=repair_program_from_dict(program_dict),
+        risk_level=RiskLevel(d.get("risk_level", "high")),
+        requires_operator_approval=bool(d.get("requires_operator_approval", True)),
+        continuation_viable=bool(d.get("continuation_viable", False)),
+        rejection_reasons=list(d.get("rejection_reasons") or []),
+    )
 
 
 def library_entry_to_dict(entry: RecoveryLibraryEntry) -> dict[str, Any]:

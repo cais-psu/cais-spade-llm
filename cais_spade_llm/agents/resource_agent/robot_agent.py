@@ -647,7 +647,18 @@ class RobotAgent(ResourceAgent):
         self._held_part = part_name
         self._current_state = "picked"
         self._gripper_state = "closed"
-        return {"status": "completed", "content": f"Picked {part_name}."}
+        return {
+            "status": "completed",
+            "content": f"Picked {part_name}.",
+            "observations": {
+                "part_name": part_name,
+                "origin_pose": {
+                    "x": self._pick_ctx.get("tx", 0.0),
+                    "y": self._pick_ctx.get("ty", 0.0),
+                    "z": self._pick_ctx.get("tz", 0.0),
+                },
+            },
+        }
 
     async def place_approach(
         self,
@@ -737,6 +748,9 @@ class RobotAgent(ResourceAgent):
             self._controller.compute_place_targets,
             self._pick_ctx,
             product_geometry,
+            part_name,
+            0.0,
+            destination_location,
         )
         if not place.get("success"):
             return self._task_failure(

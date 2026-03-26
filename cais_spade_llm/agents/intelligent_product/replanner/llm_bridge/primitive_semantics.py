@@ -510,6 +510,7 @@ def _bridge_semantic_tags(
         location_effect = "cartesian_motion"
     return {
         "produces_observation": primitive_name in (profile.preview_output_map if profile is not None else {}),
+        "top_level_observation_admissible": operation_kind == "observe",
         "operation_kind": operation_kind,
         "operation_family": operation_kind,
         "observation_kind": observation_kind,

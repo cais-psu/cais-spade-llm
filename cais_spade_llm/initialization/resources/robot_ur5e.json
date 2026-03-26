@@ -28,7 +28,20 @@
           "y_min_m": -0.15, "y_max_m": 1.10,
           "z_min_m": 0.85, "z_max_m": 1.60
         },
-        "staging_areas": {}
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {"x": -0.4, "y": 0.0, "z": 1.04},
+            "board_center": {"x": -0.4, "y": 0.0, "z": 1.04},
+            "slot_xy": [0.0, 0.0],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-2": {
+            "anchor_pose": {"x": 0.4, "y": -0.3, "z": 1.04},
+            "board_center": {"x": 0.4, "y": -0.3, "z": 1.04},
+            "slot_xy": [0.0, 0.0],
+            "slot_floor_z_m": 1.04
+          }
+        }
       },
       "controller": {
         "move_group": {

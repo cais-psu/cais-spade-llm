@@ -18,6 +18,12 @@ import threading
 import time
 from typing import Any
 
+from cais_spade_llm.resources.robot.place_geometry_resolution import (
+    destination_token_from_place_inputs,
+    has_place_geometry_fields,
+    resolve_place_geometry,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -762,6 +768,8 @@ class Ros2PickPlaceController:
             set_from_param: pose_name
           current_pose:
             set_unknown: true
+          occupancy.location:
+            set_from_param: pose_name
         ---
         """
         if not self.wait_for_services():
@@ -1141,6 +1149,7 @@ class Ros2PickPlaceController:
         product_geometry: dict[str, Any] | None = None,
         part_name: str = "",
         z_adjustment_m: float = 0.0,
+        destination_location: str = "",
     ) -> dict[str, Any]:
         """
         ---
@@ -1150,6 +1159,7 @@ class Ros2PickPlaceController:
           pick_ctx: {type: object, description: "Optional output context from previous pick"}
           product_geometry: {type: object, description: "Optional geometry override dict"}
           z_adjustment_m: {type: number, description: "Extra Z vertical adjustment"}
+          destination_location: {type: string, description: "Optional symbolic destination token, such as assembly_board-v1, resolved internally to placement geometry when available"}
         preconditions: {}
         effects: {}
         ---
@@ -1162,7 +1172,25 @@ class Ros2PickPlaceController:
             return {"success": False, "message": self._unavailable_message("services not ready")}
 
         pick_ctx = dict(pick_ctx or {})
-        geo = product_geometry or {}
+        target_part_name = str(part_name or pick_ctx.get("part_name") or "")
+        geo = resolve_place_geometry(
+            part_name=target_part_name,
+            destination_location=destination_location,
+            product_geometry=product_geometry,
+            execution_mode=self.execution_mode,
+        )
+        symbolic_destination = destination_token_from_place_inputs(
+            destination_location=destination_location,
+            product_geometry=product_geometry,
+        )
+        if symbolic_destination and not has_place_geometry_fields(geo):
+            return {
+                "success": False,
+                "message": (
+                    f"failed to resolve placement geometry for destination "
+                    f"'{symbolic_destination}' and part '{target_part_name or '?'}'"
+                ),
+            }
         board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
         slot_xy = geo.get("slot_xy")
         if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
@@ -1177,7 +1205,6 @@ class Ros2PickPlaceController:
             _as_float(board_center.get("z"), 1.025),
         )
         target_height = _as_float(geo.get("part_height_m"), pick_ctx.get("part_height", 0.08))
-        target_part_name = str(part_name or pick_ctx.get("part_name") or "")
 
         if pick_ctx:
             grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(

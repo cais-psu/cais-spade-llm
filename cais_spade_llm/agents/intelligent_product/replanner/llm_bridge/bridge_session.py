@@ -976,6 +976,7 @@ class BridgeSessionMixin:
             "turn_index": 0,
             "max_turns": 6,
             "max_observations": 3,
+            "repair_mode": "recover",
             "max_final_retries": 2,
             "observation_count": 0,
             "final_retry_count": 0,

@@ -261,3 +261,106 @@ class LlmAgent(Agent):
 
         # Run the blocking OpenAI call off the event loop so SPADE behaviours stay responsive.
         return await asyncio.to_thread(_call)
+
+    async def ask_llm_structured(
+        self,
+        prompt: str,
+        *,
+        response_format: Dict[str, Any],
+        tools: List[Dict[str, Any]] | None = None,
+        tool_executor: Callable[[str, Dict[str, Any]], Any] | None = None,
+        max_tool_rounds: int = 3,
+    ) -> Dict[str, Any]:
+        """Call LLM with structured output + optional tool use (v3 bridge).
+
+        Parameters
+        ----------
+        prompt:
+            The user-role prompt to send.
+        response_format:
+            OpenAI ``response_format`` dict with ``type: "json_schema"``
+            for constrained decoding.
+        tools:
+            Optional list of tool definitions the LLM may call mid-turn.
+        tool_executor:
+            Callback ``(tool_name, arguments_dict) -> result_dict`` invoked
+            when the LLM emits a tool call.
+        max_tool_rounds:
+            Maximum number of tool-call rounds before raising.
+
+        Returns
+        -------
+        dict:
+            The parsed structured response from the LLM.
+        """
+        def _call() -> Dict[str, Any]:
+            msgs: List[Dict[str, Any]] = []
+            if self.instructions:
+                msgs.append({"role": "system", "content": self.instructions})
+            msgs.append({"role": "user", "content": prompt})
+
+            for _ in range(max_tool_rounds + 1):
+                kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": msgs,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": response_format,
+                    },
+                }
+                if tools:
+                    kwargs["tools"] = tools
+
+                back = 1.0
+                last_err: Exception | None = None
+                for _ in range(5):
+                    try:
+                        r = _client.chat.completions.create(**kwargs)
+                        break
+                    except Exception as e:
+                        time.sleep(back)
+                        back = min(back * 2, 8.0)
+                        last_err = e
+                else:
+                    raise RuntimeError(
+                        f"LLM call failed after retries: "
+                        f"{type(last_err).__name__}"
+                    )
+
+                choice = r.choices[0].message
+
+                # Handle tool calls if the LLM wants to use a tool.
+                if getattr(choice, "tool_calls", None) and tool_executor:
+                    msgs.append({
+                        "role": "assistant",
+                        "content": choice.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in choice.tool_calls
+                        ],
+                    })
+                    for tc in choice.tool_calls:
+                        result = tool_executor(
+                            tc.function.name,
+                            json.loads(tc.function.arguments),
+                        )
+                        msgs.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(result, default=str),
+                        })
+                    continue
+
+                # No tool calls — return the structured response.
+                return json.loads(choice.content or "{}")
+
+            raise RuntimeError("Exceeded max tool rounds")
+
+        return await asyncio.to_thread(_call)

@@ -12,6 +12,11 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity,
     resource_snapshot_field_value,
 )
+from cais_spade_llm.resources.robot.place_geometry_resolution import (
+    destination_token_from_place_inputs,
+    has_place_geometry_fields,
+    resolve_place_geometry,
+)
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 
 
@@ -517,7 +522,21 @@ def _preview_place_targets_output(
     item_name = str(params.get("part_name") or normalized_pick_ctx.get("part_name") or "").strip()
     if not item_name:
         return None, "store_as requires params.part_name or params.pick_ctx.part_name"
-    geometry = dict(product_geometry or {})
+    geometry = resolve_place_geometry(
+        part_name=item_name,
+        destination_location=str(params.get("destination_location") or ""),
+        product_geometry=product_geometry,
+        execution_mode="simulation",
+    )
+    symbolic_destination = destination_token_from_place_inputs(
+        destination_location=str(params.get("destination_location") or ""),
+        product_geometry=product_geometry,
+    )
+    if symbolic_destination and not has_place_geometry_fields(geometry):
+        return None, (
+            f"params.destination_location '{symbolic_destination}' could not be resolved "
+            f"to place geometry for part '{item_name}'"
+        )
     board_center = dict(geometry.get("board_center") or {})
     slot_xy = geometry.get("slot_xy")
     if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
@@ -1214,11 +1233,16 @@ _MANIPULATOR_PROMPT_ADDENDUM = dedent(
       primitives such as detect_parts, compute_pick_targets, grasp_part, and
       release_part.
     - To acquire a part: observe it (detect_parts), compute approach geometry
-      (compute_pick_targets), move above it, descend to grasp height, close
-      the gripper, attach internally via grasp_part, and lift away.
+      (compute_pick_targets), treat `approach_pose` as the hover pose above the
+      part and `target_pose` as the actual grasp pose, move above it, descend to
+      `target_pose`, close the gripper, attach internally via grasp_part, and
+      lift away.
     - To place a part: compute destination geometry (compute_place_targets),
-      move above the slot, descend to placement height, release_part, and lift
-      away.
+      grounding it with `destination_location` only when that symbolic
+      destination resolves place geometry for the current part; otherwise use
+      explicit `product_geometry`. Then treat `approach_pose` as the hover pose
+      above the destination and `target_pose` as the actual place pose, move
+      above the slot, descend to `target_pose`, release_part, and lift away.
     - To release a part without placing it at a goal: descend to a safe
       release height, call release_part, and retract.
     - Use get_current_pose before motion primitives that need orientation

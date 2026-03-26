@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case3_llm_bridge",
+  "active_bundle_id": "case1_one_arm_no_move_home",
   "bundles": [
     {
       "bundle_id": "case1_one_arm_no_move_home",
