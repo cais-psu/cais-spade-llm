@@ -19,7 +19,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     RepairProgram,
     RepairStep,
     RepairStepKind,
@@ -33,21 +33,21 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_typ
     repair_program_from_dict,
     repair_program_to_dict,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.function_synthesis import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.function_synthesis import (
     compile_synthesized_function_to_macro,
     validate_synthesized_function,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_compiler import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_compiler import (
     compile_mutations,
     validate_mutation_step,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.part_state_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.part_state_semantics import (
     part_state_requires_external_localization,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.recovery_context_builder import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.recovery_context_builder import (
     part_observation_status,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
     preview_step_output,
     resolve_param_refs,
 )

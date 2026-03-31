@@ -12,13 +12,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.tss_feedback import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.tss_feedback import (
     BridgeFeedbackSummary,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.recovery_context_builder import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.recovery_context_builder import (
     recovery_context_to_prompt_dict,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     RepairProgram,
     repair_program_to_dict,
 )

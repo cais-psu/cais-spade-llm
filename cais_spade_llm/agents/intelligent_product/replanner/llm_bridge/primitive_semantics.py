@@ -1,275 +1,242 @@
-"""Bridge-only primitive semantics helpers.
+"""Active v4 bridge primitive semantics.
 
-This module turns controller primitive docstrings into a private in-memory
-catalogue that includes preconditions/effects, then uses the same semantics for
-prompt grounding, proposal validation, and runtime state projection.
+This module is the active bridge/runtime semantic layer. It builds primitive
+catalogs directly from live resource methods, projects bridge snapshots using
+resource profiles, and validates primitive step sequences for the current v4
+bridge path.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
-import inspect
-import logging
-import re
 from typing import Any
+import inspect
+import re
 
-logger = logging.getLogger(__name__)
-
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
+    bridge_resource_capabilities,
+    normalize_bridge_resource,
+    resolve_bridge_resource_type,
+)
+from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
+    resource_snapshot_availability,
     resource_snapshot_field_value,
-    resource_snapshot_fields_map,
-    resource_snapshot_has_field,
     resource_snapshot_set_field,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
-    bridge_adapter_capabilities,
-    bridge_resource_type,
-    canonical_bridge_resource,
-)
-from cais_spade_llm.function_analyzer import FunctionAnalyzer
 
 
-_SUPPORTED_PRECONDITION_OPS = frozenset({"equals", "not_equals", "exists"})
-_SUPPORTED_EFFECT_OPS = frozenset(
-    {
-        "set",
-        "set_from_param",
-        "set_from_param_any_of",
-        "pose_absolute_from_params",
-        "pose_relative_from_params",
-        "set_unknown",
-    }
-)
-
-_SYNTHESIS_HIDDEN_PRIMITIVES = frozenset(
-    {
-        "open_gripper",
-        "close_gripper",
-        "attach_part",
-        "detach_part",
-    }
-)
-
-_ROBOT_SYNTHESIS_VISIBLE_PRIMITIVES = frozenset(
-    {
-        "detect_parts",
-        "compute_pick_targets",
-        "compute_place_targets",
-        "move_to_named_pose",
-        "move_cartesian",
-        "move_by_offset",
-        "grasp_part",
-        "release_part",
-    }
-)
+_MISSING = object()
+_KNOWN_CONTEXT_ROOTS = {"resource", "resources", "parts", "bridge_resources", "step_outputs"}
 
 
-def _is_scalar_json_value(value: Any) -> bool:
-    return value is None or isinstance(value, (str, int, float, bool))
-
-
-def _canonicalize_step_output_alias(alias: Any) -> str:
-    raw = str(alias or "").strip()
-    if not raw:
+def _normalized_symbol(value: Any) -> str:
+    token = str(value or "").strip()
+    if not token:
         return ""
-    raw = raw.replace("-", "_").replace(" ", "_")
-    raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw)
-    raw = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", raw)
-    raw = re.sub(r"_+", "_", raw)
-    return raw.strip("_").lower()
+    token = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", token)
+    token = token.replace("-", "_").replace(" ", "_")
+    return token.strip("_").lower()
 
 
-def _context_ref_display(context_ref: Any) -> str:
-    if isinstance(context_ref, (list, tuple)):
-        return repr(list(context_ref))
-    if context_ref is None:
-        return ""
-    return str(context_ref).strip()
+def _mapping_lookup(mapping: dict[str, Any], token: str) -> tuple[Any, bool]:
+    if token in mapping:
+        return mapping[token], True
+    normalized_token = _normalized_symbol(token)
+    for key, value in mapping.items():
+        if _normalized_symbol(key) == normalized_token:
+            return value, True
+    return None, False
 
 
-def _context_ref_tokens(context_ref: Any) -> list[str]:
-    if isinstance(context_ref, (list, tuple)):
-        tokens = [str(token).strip() for token in context_ref if str(token).strip()]
-        if not tokens:
-            raise ValueError("context_ref is empty")
-        return tokens
-
-    if context_ref is None:
-        raise ValueError("context_ref is empty")
-    if not isinstance(context_ref, str):
-        raise ValueError("context_ref must be a string or token list")
-
-    ref = context_ref.strip()
-    if not ref:
-        raise ValueError("context_ref is empty")
-
-    if ref.startswith("/"):
-        return [
-            token.replace("~1", "/").replace("~0", "~")
-            for token in ref.lstrip("/").split("/")
-            if token != ""
-        ]
-
-    tokens = [token for token in ref.split(".") if token]
-    if not tokens:
-        raise ValueError(f"context_ref '{ref}' is invalid")
-    return tokens
-
-
-def _is_step_output_ref(context_ref: Any) -> bool:
-    if context_ref is None or not isinstance(context_ref, (str, list, tuple)):
-        return False
-    tokens = _context_ref_tokens(context_ref)
-    return bool(tokens) and tokens[0] == "step_outputs"
-
-
-def _looks_like_step_output_alias(context_ref: Any, grounding_context: dict[str, Any]) -> bool:
-    if context_ref is None or not isinstance(context_ref, (str, list, tuple)):
-        return False
-    tokens = _context_ref_tokens(context_ref)
-    if not tokens or tokens[0] == "step_outputs" or len(tokens) < 2:
-        return False
-    root_keys = {str(key).strip() for key in (grounding_context or {})}
-    return tokens[0] not in root_keys
-
-
-def _looks_like_context_ref_string(
-    value: Any,
-    grounding_context: dict[str, Any],
-    *,
-    step_outputs: dict[str, Any] | None = None,
-) -> bool:
-    if not isinstance(value, str):
-        return False
-    ref = value.strip()
-    if not ref:
-        return False
-    if ref.startswith("/"):
-        return True
+def _list_index(sequence: list[Any], token: str) -> tuple[Any, bool]:
     try:
-        tokens = _context_ref_tokens(ref)
-    except Exception:
-        return False
-    if not tokens or len(tokens) < 2:
-        return False
-    root_keys = {str(key).strip() for key in (grounding_context or {})}
-    if tokens[0] == "step_outputs":
-        return True
-    if tokens[0] in root_keys:
-        return True
-    if _looks_like_step_output_alias(ref, grounding_context):
-        if isinstance(step_outputs, dict) and tokens[0] in step_outputs:
-            return True
-    return False
+        index = int(token)
+    except (TypeError, ValueError):
+        return None, False
+    if index < 0 or index >= len(sequence):
+        return None, False
+    return sequence[index], True
 
 
-def _walk_context_tokens(root: Any, tokens: list[str], *, context_ref: str) -> Any:
-    current = root
-    for token in tokens:
-        if isinstance(current, dict):
-            if token not in current:
-                raise KeyError(f"context_ref '{context_ref}' could not resolve token '{token}'")
-            current = current[token]
+def _iter_ref_tokens(ref: str) -> list[str]:
+    text = str(ref or "").strip()
+    if not text:
+        return []
+    if text.startswith("/"):
+        return [token for token in text.split("/") if token]
+    return [token for token in text.split(".") if token]
+
+
+def _is_step_output_ref(ref: str, grounding_context: dict[str, Any] | None = None) -> bool:
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if text.startswith("/step_outputs/"):
+        return True
+    tokens = _iter_ref_tokens(text)
+    if not tokens:
+        return False
+    first = _normalized_symbol(tokens[0])
+    if first == "step_outputs":
+        return True
+    roots = {
+        _normalized_symbol(key)
+        for key in dict(grounding_context or {}).keys()
+        if str(key).strip()
+    }
+    return first not in roots and first not in _KNOWN_CONTEXT_ROOTS and len(tokens) > 1
+
+
+def _build_catalog_owner(resource_agent: Any) -> tuple[Any, Any]:
+    profile = get_resource_profile_for_agent(resource_agent)
+    owner = resource_agent
+    if profile.primitive_owner_resolver is not None:
+        try:
+            owner = profile.primitive_owner_resolver(resource_agent) or resource_agent
+        except Exception:
+            owner = resource_agent
+    return owner, profile
+
+
+def _raw_bridge_primitive_names(resource_agent: Any) -> list[str]:
+    raw = getattr(resource_agent, "_BRIDGE_PRIMITIVES", ()) or ()
+    if isinstance(raw, (list, tuple)):
+        names = [str(name or "").strip() for name in raw if str(name or "").strip()]
+    else:
+        names = sorted({str(name or "").strip() for name in raw if str(name or "").strip()})
+    return [name for name in names if name]
+
+
+def _callable_for_primitive(resource_agent: Any, owner: Any, primitive_name: str) -> Any:
+    fn = getattr(resource_agent, primitive_name, None)
+    if callable(fn):
+        return fn
+    fn = getattr(owner, primitive_name, None)
+    if callable(fn):
+        return fn
+    return None
+
+
+def _schema_properties_for_function(fn: Any) -> tuple[dict[str, Any], list[str], str]:
+    analyzer = FunctionAnalyzer()
+    analyzed = analyzer.analyze_function(fn)
+    parameters = dict(analyzed.get("parameters") or {})
+    properties = deepcopy(parameters.get("properties") or {})
+    signature = inspect.signature(fn)
+    required: list[str] = []
+    for param_name, parameter in signature.parameters.items():
+        if str(param_name) == "self":
             continue
-        if isinstance(current, list):
-            try:
-                index = int(token)
-            except (TypeError, ValueError) as exc:
-                raise KeyError(
-                    f"context_ref '{context_ref}' expected list index at token '{token}'"
-                ) from exc
-            if index < 0 or index >= len(current):
-                raise KeyError(
-                    f"context_ref '{context_ref}' list index '{token}' is out of range"
-                )
-            current = current[index]
+        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
-        raise KeyError(
-            f"context_ref '{context_ref}' cannot descend into non-container value at token '{token}'"
-        )
-    return current
+        if parameter.default is inspect._empty:
+            required.append(str(param_name))
+    description = str(analyzed.get("description") or "").strip()
+    return properties, required, description
+
+
+def _primitive_summary(
+    *,
+    description: str,
+    preconditions: dict[str, Any],
+    effects: dict[str, Any],
+) -> str:
+    base = description or "Bridge primitive"
+    pre_keys = ", ".join(sorted(str(key) for key in preconditions.keys())) if preconditions else ""
+    effect_keys = ", ".join(sorted(str(key) for key in effects.keys())) if effects else ""
+    detail_parts: list[str] = []
+    if pre_keys:
+        detail_parts.append(f"pre: {pre_keys}")
+    if effect_keys:
+        detail_parts.append(f"effects: {effect_keys}")
+    if not detail_parts:
+        return base
+    return f"{base} ({'; '.join(detail_parts)})"
+
+
+def _resource_type_for_agent(resource_agent: Any, *, snapshot: dict[str, Any] | None = None) -> str:
+    static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
+    return resolve_bridge_resource_type(
+        resource=resource_agent,
+        snapshot=snapshot or {},
+        modeled_state={},
+        static_capabilities=static_capabilities,
+    )
 
 
 def resolve_context_ref(
-    context_ref: Any,
-    grounding_context: dict[str, Any],
+    ref: str,
+    grounding_context: dict[str, Any] | None = None,
     *,
     step_outputs: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve one context_ref against planner context and optional step outputs.
+    """Resolve a dotted or JSON-pointer-like path against grounding context."""
+    tokens = _iter_ref_tokens(ref)
+    if not tokens:
+        raise KeyError("empty context_ref")
 
-    Supports JSON Pointer (`/parts/SG/observed_pose/x`) and dot paths
-    (`parts.SG.observed_pose.x`) for compatibility with the current bridge TODO.
-    """
-    ref_display = _context_ref_display(context_ref)
-    tokens = _context_ref_tokens(context_ref)
-    root = dict(grounding_context or {})
-    if step_outputs is not None:
-        root["step_outputs"] = deepcopy(step_outputs)
-    available_step_outputs = root.get("step_outputs") if isinstance(root.get("step_outputs"), dict) else {}
+    combined = deepcopy(dict(grounding_context or {}))
+    existing_step_outputs = dict(combined.get("step_outputs") or {})
+    if step_outputs:
+        existing_step_outputs.update(deepcopy(step_outputs))
+    combined["step_outputs"] = existing_step_outputs
 
-    def _resolve_step_output_alias_token(token: str) -> str | None:
-        if not isinstance(available_step_outputs, dict) or not token:
-            return None
-        if token in available_step_outputs:
-            return token
-        canonical = _canonicalize_step_output_alias(token)
-        if not canonical:
-            return None
-        for key in available_step_outputs:
-            if _canonicalize_step_output_alias(key) == canonical:
-                return str(key)
-        return None
+    first = tokens[0]
+    current: Any = _MISSING
+    if _normalized_symbol(first) == "step_outputs":
+        current = combined["step_outputs"]
+        tokens = tokens[1:]
+    else:
+        current, found = _mapping_lookup(combined, first)
+        if not found:
+            current, found = _mapping_lookup(combined["step_outputs"], first)
+            if not found:
+                raise KeyError(f"context_ref root '{first}' was not found")
+        tokens = tokens[1:]
 
-    if (
-        tokens
-        and tokens[0] not in root
-        and isinstance(available_step_outputs, dict)
-    ):
-        resolved_alias = _resolve_step_output_alias_token(tokens[0])
-        if resolved_alias is not None:
-            tokens = ["step_outputs", resolved_alias, *tokens[1:]]
-    elif len(tokens) >= 2 and tokens[0] == "step_outputs":
-        resolved_alias = _resolve_step_output_alias_token(tokens[1])
-        if resolved_alias is not None:
-            tokens = ["step_outputs", resolved_alias, *tokens[2:]]
-    return deepcopy(_walk_context_tokens(root, tokens, context_ref=ref_display))
+    for token in tokens:
+        if isinstance(current, dict):
+            current, found = _mapping_lookup(current, token)
+            if not found:
+                raise KeyError(f"context_ref token '{token}' was not found in object")
+            continue
+        if isinstance(current, list):
+            current, found = _list_index(current, token)
+            if not found:
+                raise KeyError(f"context_ref token '{token}' was not a valid list index")
+            continue
+        raise KeyError(f"context_ref token '{token}' could not be resolved from scalar")
+    return deepcopy(current)
 
 
 def resolve_param_refs(
     value: Any,
-    grounding_context: dict[str, Any],
+    grounding_context: dict[str, Any] | None = None,
     *,
     step_outputs: dict[str, Any] | None = None,
     preserve_step_output_refs: bool = False,
 ) -> Any:
-    """Recursively resolve context_ref wrappers inside a primitive params value."""
+    """Resolve ``context_ref`` dictionaries and reference-like strings."""
     if isinstance(value, dict):
         if set(value.keys()) == {"context_ref"}:
-            raw_context_ref = value.get("context_ref")
-            if preserve_step_output_refs and (
-                _is_step_output_ref(raw_context_ref)
-                or _looks_like_step_output_alias(raw_context_ref, grounding_context)
-            ):
+            ref = str(value.get("context_ref") or "").strip()
+            if not ref:
+                return None
+            if preserve_step_output_refs and _is_step_output_ref(ref, grounding_context):
                 return deepcopy(value)
-            resolved = resolve_context_ref(
-                raw_context_ref,
-                grounding_context,
-                step_outputs=step_outputs,
-            )
-            return resolved
+            return resolve_context_ref(ref, grounding_context, step_outputs=step_outputs)
         return {
             str(key): resolve_param_refs(
-                subvalue,
+                item,
                 grounding_context,
                 step_outputs=step_outputs,
                 preserve_step_output_refs=preserve_step_output_refs,
             )
-            for key, subvalue in value.items()
+            for key, item in value.items()
         }
-
     if isinstance(value, list):
         return [
             resolve_param_refs(
@@ -280,103 +247,474 @@ def resolve_param_refs(
             )
             for item in value
         ]
-
-    if preserve_step_output_refs and (
-        _is_step_output_ref(value)
-        or _looks_like_step_output_alias(value, grounding_context)
-    ):
-        return deepcopy(value)
-
-    if _looks_like_context_ref_string(
-        value,
-        grounding_context,
-        step_outputs=step_outputs,
-    ):
-        resolved = resolve_context_ref(
-            value,
-            grounding_context,
-            step_outputs=step_outputs,
-        )
-        return resolved
-
+    if isinstance(value, str):
+        ref = value.strip()
+        if not ref:
+            return value
+        if preserve_step_output_refs and _is_step_output_ref(ref, grounding_context):
+            return value
+        try:
+            return resolve_context_ref(ref, grounding_context, step_outputs=step_outputs)
+        except Exception:
+            return value
     return deepcopy(value)
 
 
-def resolve_step_param_refs(
-    steps: list[dict[str, Any]],
-    grounding_context: dict[str, Any],
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Resolve planner-known context_ref values while preserving step_outputs refs."""
-    resolved_steps: list[dict[str, Any]] = []
-    for index, step in enumerate(steps, start=1):
+def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
+    """Build the execution primitive catalog from the live bridge surface."""
+    if resource_agent is None:
+        return []
+    owner, profile = _build_catalog_owner(resource_agent)
+    resource_type = _resource_type_for_agent(resource_agent)
+    entries: list[dict[str, Any]] = []
+    for primitive_name in _raw_bridge_primitive_names(resource_agent):
+        fn = _callable_for_primitive(resource_agent, owner, primitive_name)
+        if not callable(fn):
+            continue
+        properties, required, description = _schema_properties_for_function(fn)
+        frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
+        preconditions = deepcopy(frontmatter.get("preconditions") or {})
+        effects = deepcopy(frontmatter.get("effects") or {})
+        observation_schema = deepcopy(
+            dict(profile.observation_output_schema_map or {}).get(primitive_name) or {}
+        )
+        entry = {
+            "name": primitive_name,
+            "resource_type": resource_type,
+            "description": str(frontmatter.get("description") or description or "").strip(),
+            "params": properties,
+            "required_params": required,
+            "preconditions": preconditions,
+            "effects": effects,
+            "primitive_kind": str(
+                dict(profile.primitive_kind_map or {}).get(primitive_name) or ""
+            ).strip(),
+            "output_schema": observation_schema,
+            "synthesis_hidden": bool(frontmatter.get("synthesis_hidden", False)),
+        }
+        entry["semantic_summary"] = _primitive_summary(
+            description=str(entry.get("description") or ""),
+            preconditions=preconditions,
+            effects=effects,
+        )
+        entries.append(entry)
+    return entries
+
+
+def _composite_parameter_schema(
+    *,
+    properties: dict[str, Any],
+    required: list[str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    return deepcopy(properties or {}), list(required or [])
+
+
+def _robot_prompt_composites(
+    primitive_catalog: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    primitive_names = {
+        str(entry.get("name") or "").strip()
+        for entry in (primitive_catalog or [])
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+    }
+    required_robot_primitives = {
+        "open_gripper",
+        "close_gripper",
+        "attach_part",
+        "detach_part",
+    }
+    if not required_robot_primitives <= primitive_names:
+        return []
+
+    composites: list[dict[str, Any]] = []
+
+    grasp_params, grasp_required = _composite_parameter_schema(
+        properties={
+            "model_name": {
+                "type": "string",
+                "description": "Controller model name to attach after grasp.",
+            },
+            "part_name": {
+                "type": "string",
+                "description": "Canonical part name for held-part tracking.",
+            },
+            "position": {
+                "type": "number",
+                "description": "Optional gripper closing position.",
+            },
+        },
+        required=["model_name"],
+    )
+    grasp_entry = {
+        "name": "grasp_part",
+        "resource_type": "robot",
+        "description": (
+            "Bridge-only composite primitive that closes the gripper and attaches "
+            "the targeted part to the robot."
+        ),
+        "params": grasp_params,
+        "required_params": grasp_required,
+        "preconditions": {"held_part": {"equals": None}},
+        "effects": {
+            "gripper_state": {"set": "closed"},
+            "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
+        },
+        "primitive_kind": "pick",
+        "output_schema": {},
+        "composite_expansion": [
+            {"primitive": "close_gripper", "params_from_parent": ["position"]},
+            {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
+        ],
+    }
+    grasp_entry["semantic_summary"] = _primitive_summary(
+        description=str(grasp_entry.get("description") or ""),
+        preconditions=dict(grasp_entry.get("preconditions") or {}),
+        effects=dict(grasp_entry.get("effects") or {}),
+    )
+    composites.append(grasp_entry)
+
+    release_params, release_required = _composite_parameter_schema(
+        properties={
+            "model_name": {
+                "type": "string",
+                "description": "Optional controller model name to detach.",
+            },
+            "assume_released_if_open": {
+                "type": "boolean",
+                "description": (
+                    "Treat an already-open gripper as an idempotent release when true."
+                ),
+            },
+        },
+        required=[],
+    )
+    release_entry = {
+        "name": "release_part",
+        "resource_type": "robot",
+        "description": (
+            "Bridge-only composite primitive that opens the gripper and detaches "
+            "the currently held part."
+        ),
+        "params": release_params,
+        "required_params": release_required,
+        "preconditions": {"held_part": {"exists": True}},
+        "effects": {
+            "gripper_state": {"set": "open"},
+            "held_part": {"set": None},
+        },
+        "primitive_kind": "release",
+        "output_schema": {},
+        "composite_expansion": [
+            {"primitive": "open_gripper", "params_from_parent": []},
+            {
+                "primitive": "detach_part",
+                "params_from_parent": ["model_name", "assume_released_if_open"],
+            },
+        ],
+    }
+    release_entry["semantic_summary"] = _primitive_summary(
+        description=str(release_entry.get("description") or ""),
+        preconditions=dict(release_entry.get("preconditions") or {}),
+        effects=dict(release_entry.get("effects") or {}),
+    )
+    composites.append(release_entry)
+
+    return composites
+
+
+def _prompt_hidden_primitive_names(resource_type: str) -> set[str]:
+    if resource_type == "robot":
+        return {"open_gripper", "close_gripper", "attach_part", "detach_part"}
+    return set()
+
+
+def filter_synthesis_primitive_catalog(
+    primitive_catalog: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Filter the LLM-facing primitive surface using explicit visibility only."""
+    resource_type = ""
+    for raw_entry in primitive_catalog or []:
+        if not isinstance(raw_entry, dict):
+            continue
+        resource_type = str(raw_entry.get("resource_type") or "").strip()
+        if resource_type:
+            break
+    hidden_names = _prompt_hidden_primitive_names(resource_type)
+    filtered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_entry in primitive_catalog or []:
+        if not isinstance(raw_entry, dict):
+            continue
+        name = str(raw_entry.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        if name in hidden_names:
+            continue
+        if bool(raw_entry.get("synthesis_hidden")):
+            continue
+        entry = deepcopy(raw_entry)
+        entry.pop("synthesis_hidden", None)
+        filtered.append(entry)
+        seen.add(name)
+
+    for composite in _robot_prompt_composites(primitive_catalog or []):
+        name = str(composite.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        filtered.append(deepcopy(composite))
+        seen.add(name)
+    return filtered
+
+
+def build_synthesis_primitive_catalog(
+    resource_agent: Any | None = None,
+    *,
+    primitive_catalog: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the LLM-facing synthesis catalog directly from execution primitives."""
+    source_catalog = primitive_catalog
+    if source_catalog is None and isinstance(resource_agent, list):
+        source_catalog = resource_agent
+        resource_agent = None
+    if source_catalog is None:
+        source_catalog = build_execution_primitive_catalog(resource_agent)
+    return filter_synthesis_primitive_catalog(source_catalog or [])
+
+
+def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
+    """Compatibility alias for callers expecting the older name."""
+    return build_execution_primitive_catalog(resource_agent)
+
+
+def build_primitive_reference_card(primitive_catalog: list[dict[str, Any]] | None) -> str:
+    """Render a compact human-readable reference card for prompt builders."""
+    lines: list[str] = []
+    for entry in filter_synthesis_primitive_catalog(primitive_catalog or []):
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(entry.get("description") or entry.get("semantic_summary") or "").strip()
+        params = dict(entry.get("params") or {})
+        required = {
+            str(item).strip() for item in (entry.get("required_params") or []) if str(item).strip()
+        }
+        param_tokens: list[str] = []
+        for param_name, schema in params.items():
+            if not isinstance(schema, dict):
+                continue
+            type_name = str(schema.get("type") or "string").strip()
+            suffix = " required" if param_name in required else ""
+            param_tokens.append(f"{param_name}:{type_name}{suffix}")
+        param_text = ", ".join(param_tokens) if param_tokens else "(no params)"
+        lines.append(f"- {name}: {description}")
+        lines.append(f"  params: {param_text}")
+    return "\n".join(lines).strip()
+
+
+def _snapshot_builder_payload(resource_agent: Any, profile: Any) -> dict[str, Any]:
+    if profile.snapshot_builder is not None:
+        built = profile.snapshot_builder(resource_agent)
+        if isinstance(built, dict):
+            return deepcopy(built)
+    if hasattr(resource_agent, "_snapshot_state"):
         try:
-            normalized = dict(step)
-            normalized["params"] = resolve_param_refs(
-                step.get("params") or {},
-                grounding_context,
-                preserve_step_output_refs=True,
-            )
-            resolved_steps.append(normalized)
-        except Exception as exc:
-            primitive = str(step.get("primitive", "")).strip()
-            return [], f"step {index} {primitive}: {exc}"
-    return resolved_steps, None
+            built = resource_agent._snapshot_state()
+        except Exception:
+            built = None
+        if isinstance(built, dict):
+            return deepcopy(built)
+    return {}
 
 
-def _validate_store_as(store_as: Any) -> str | None:
-    alias = str(store_as or "").strip()
-    if not alias:
-        return None
-    if not alias.replace("_", "").isalnum() or alias[0].isdigit():
-        return "store_as must be a snake_case-like identifier"
-    return None
+def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
+    """Build the canonical bridge snapshot for a resource without recursion."""
+    if resource_agent is None:
+        return {}
+    profile = get_resource_profile_for_agent(resource_agent)
+    raw_snapshot = _snapshot_builder_payload(resource_agent, profile)
+    resource_jid = str(
+        getattr(resource_agent, "jid", "") or getattr(resource_agent, "agent_name", "") or ""
+    ).strip()
+    resource_type = _resource_type_for_agent(resource_agent, snapshot=raw_snapshot)
+    normalized_resource = normalize_bridge_resource(
+        resource_jid=resource_jid,
+        resource_type=resource_type,
+        snapshot=raw_snapshot,
+        modeled_state={},
+    )
+    execution_catalog = build_execution_primitive_catalog(resource_agent)
+    normalized_resource["bridge_adapter"] = bridge_resource_capabilities(
+        resource_type,
+        primitive_catalog=execution_catalog,
+    )
+    return normalized_resource
 
 
-def _normalized_xyz_pose(payload: Any) -> dict[str, float] | None:
-    if not isinstance(payload, dict) or not {"x", "y", "z"} <= set(payload.keys()):
-        return None
-    try:
-        return {
-            "x": float(payload["x"]),
-            "y": float(payload["y"]),
-            "z": float(payload["z"]),
-        }
-    except (TypeError, ValueError):
-        return None
+def expand_composite_steps(
+    steps: list[dict[str, Any]] | None,
+    primitive_catalog: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate the incoming step shape while keeping v4 expansion as pass-through."""
+    names = {
+        str(entry.get("name") or "").strip()
+        for entry in (primitive_catalog or [])
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+    }
+    expanded: list[dict[str, Any]] = []
+    for index, raw_step in enumerate(steps or []):
+        if not isinstance(raw_step, dict):
+            raise TypeError(f"primitive step {index} must be an object")
+        if raw_step.get("steps") or raw_step.get("primitive_steps"):
+            raise ValueError("composite step expansion is not supported in v4 yet")
+        primitive = str(raw_step.get("primitive") or "").strip()
+        if not primitive:
+            raise ValueError(f"primitive step {index} is missing 'primitive'")
+        if names and primitive not in names:
+            raise ValueError(f"unknown primitive '{primitive}'")
+        expanded.append(
+            {
+                "primitive": primitive,
+                "params": deepcopy(raw_step.get("params") or {}),
+                **(
+                    {"store_as": str(raw_step.get("store_as") or "").strip()}
+                    if str(raw_step.get("store_as") or "").strip()
+                    else {}
+                ),
+            }
+        )
+    return expanded
 
 
-def _normalized_orientation(payload: Any) -> dict[str, float] | None:
-    if not isinstance(payload, dict) or not {"qx", "qy", "qz", "qw"} <= set(payload.keys()):
-        return None
-    try:
-        return {
-            "qx": float(payload["qx"]),
-            "qy": float(payload["qy"]),
-            "qz": float(payload["qz"]),
-            "qw": float(payload["qw"]),
-        }
-    except (TypeError, ValueError):
-        return None
+def _effect_value_from_params(params: dict[str, Any], param_name: str) -> Any:
+    value = params.get(str(param_name))
+    return deepcopy(value)
+
+
+def _apply_effect_spec(
+    field: str,
+    effect_spec: dict[str, Any],
+    params: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    profile: Any,
+) -> dict[str, Any]:
+    updated = deepcopy(snapshot)
+    if not isinstance(effect_spec, dict):
+        return updated
+
+    if "set" in effect_spec:
+        return resource_snapshot_set_field(
+            updated,
+            field,
+            deepcopy(effect_spec.get("set")),
+            profile=profile,
+        )
+    if effect_spec.get("set_unknown"):
+        return resource_snapshot_set_field(updated, field, None, profile=profile)
+    if "set_from_param" in effect_spec:
+        param_name = str(effect_spec.get("set_from_param") or "").strip()
+        return resource_snapshot_set_field(
+            updated,
+            field,
+            _effect_value_from_params(params, param_name),
+            profile=profile,
+        )
+    if "set_from_param_any_of" in effect_spec:
+        for candidate in effect_spec.get("set_from_param_any_of") or []:
+            value = _effect_value_from_params(params, str(candidate))
+            if value not in (None, ""):
+                return resource_snapshot_set_field(updated, field, value, profile=profile)
+        return updated
+    if "pose_absolute_from_params" in effect_spec:
+        keys = list(effect_spec.get("pose_absolute_from_params") or [])
+        pose = {}
+        for axis in keys[:3]:
+            axis_name = str(axis or "").strip()
+            if axis_name:
+                pose[axis_name] = deepcopy(params.get(axis_name))
+        return resource_snapshot_set_field(updated, field, pose, profile=profile)
+    if "pose_relative_from_params" in effect_spec:
+        base_pose = dict(resource_snapshot_field_value(updated, field, profile=profile) or {})
+        keys = list(effect_spec.get("pose_relative_from_params") or [])
+        x = float(base_pose.get("x", 0.0) or 0.0) + float(params.get(str(keys[0]), 0.0) or 0.0)
+        y = float(base_pose.get("y", 0.0) or 0.0) + float(params.get(str(keys[1]), 0.0) or 0.0)
+        z = float(base_pose.get("z", 0.0) or 0.0) + float(params.get(str(keys[2]), 0.0) or 0.0)
+        return resource_snapshot_set_field(updated, field, {"x": x, "y": y, "z": z}, profile=profile)
+    return updated
+
+
+def _refresh_canonical_mirrors(snapshot: dict[str, Any]) -> dict[str, Any]:
+    refreshed = deepcopy(snapshot or {})
+    resource_core = dict(refreshed.get("resource_core") or {})
+    for field in (
+        "resource_jid",
+        "resource_type",
+        "current_state",
+        "current_location",
+        "availability",
+        "active_work",
+        "occupancy",
+    ):
+        if field in resource_core:
+            refreshed[field] = deepcopy(resource_core.get(field))
+    for facet_values in (refreshed.get("resource_facets") or {}).values():
+        if not isinstance(facet_values, dict):
+            continue
+        for field, value in facet_values.items():
+            refreshed[field] = deepcopy(value)
+    return refreshed
+
+
+def apply_effects_to_snapshot(
+    step: dict[str, Any],
+    primitive_meta: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply semantic effect frontmatter onto a bridge snapshot."""
+    updated = deepcopy(snapshot or {})
+    params = dict(step.get("params") or {})
+    profile = get_resource_profile(
+        str(
+            dict(updated.get("resource_core") or {}).get("resource_type")
+            or updated.get("resource_type")
+            or "resource"
+        )
+    )
+    effects = dict(primitive_meta.get("effects") or {})
+    for field, effect_spec in effects.items():
+        updated = _apply_effect_spec(str(field), dict(effect_spec or {}), params, updated, profile=profile)
+    return _refresh_canonical_mirrors(updated)
 
 
 def preview_step_output(
     *,
     primitive: str,
     params: dict[str, Any],
-    snapshot: dict[str, Any],
-    grounding_context: dict[str, Any],
+    snapshot: dict[str, Any] | None = None,
+    grounding_context: dict[str, Any] | None = None,
+    resource_type: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Return a validation-time preview output using profile-owned hooks."""
-    resource_type = str(
-        dict(snapshot.get("resource_core") or {}).get("resource_type")
-        or snapshot.get("resource_type")
-        or ""
-    ).strip().lower()
-    profile = get_resource_profile(resource_type or "resource")
-    resolver = (profile.preview_output_map or {}).get(primitive)
-    if not callable(resolver):
-        return None, f"primitive '{primitive}' does not support store_as"
-    return resolver(params, snapshot, grounding_context)
+    """Preview an observation/generation output from params and current context."""
+    profile = get_resource_profile(resource_type or _infer_resource_type_for_primitive(primitive))
+    resolver = dict(profile.preview_output_map or {}).get(str(primitive or "").strip())
+    if resolver is None:
+        return None, f"primitive '{primitive}' does not define preview output"
+    return resolver(
+        deepcopy(params or {}),
+        deepcopy(snapshot or {}),
+        deepcopy(grounding_context or {}),
+    )
+
+
+def _infer_resource_type_for_primitive(primitive: str) -> str:
+    target = str(primitive or "").strip()
+    if not target:
+        return "resource"
+    for resource_type in ("robot", "printer", "resource"):
+        profile = get_resource_profile(resource_type)
+        if target in dict(profile.extract_output_map or {}) or target in dict(profile.preview_output_map or {}):
+            return resource_type
+    return "resource"
 
 
 def extract_step_output(
@@ -386,917 +724,184 @@ def extract_step_output(
     step_result: dict[str, Any],
     resource_type: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Extract one normalized runtime step output using profile-owned hooks."""
-    profile = get_resource_profile(resource_type or "resource")
-    resolver = (profile.extract_output_map or {}).get(primitive)
-    if not callable(resolver):
-        return None, f"primitive '{primitive}' does not support store_as"
-    return resolver(params, step_result)
+    """Normalize stored step outputs into deterministic bridge context payloads."""
+    profile = get_resource_profile(resource_type or _infer_resource_type_for_primitive(primitive))
+    resolver = dict(profile.extract_output_map or {}).get(str(primitive or "").strip())
+    if resolver is not None:
+        return resolver(deepcopy(params or {}), deepcopy(step_result or {}))
+
+    normalized_result = dict(step_result or {})
+    if isinstance(normalized_result.get("observation"), dict):
+        return deepcopy(normalized_result.get("observation")), None
+    if isinstance(normalized_result.get("data"), dict):
+        return deepcopy(normalized_result.get("data")), None
+    if normalized_result.get("success"):
+        return deepcopy(normalized_result), None
+    return None, f"primitive '{primitive}' does not define extractable output"
 
 
-def _required_params_from_signature(fn: Any) -> list[str]:
-    required: list[str] = []
-    for name, param in inspect.signature(fn).parameters.items():
-        if name in {"self", "cls"}:
-            continue
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            continue
-        if param.default is inspect._empty:
-            required.append(name)
-    return required
-
-
-def _param_schema(fn: Any, analyzed: dict[str, Any]) -> dict[str, Any]:
-    schema = analyzed.get("parameters") or {}
-    properties = dict(schema.get("properties") or {})
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": _required_params_from_signature(fn),
-    }
-
-
-def _normalize_semantics_map(payload: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for state_key, rule in payload.items():
-        if not isinstance(rule, dict):
-            continue
-        normalized = {k: v for k, v in rule.items() if k in (_SUPPORTED_PRECONDITION_OPS | _SUPPORTED_EFFECT_OPS)}
-        if normalized:
-            out[str(state_key)] = normalized
-    return out
-
-
-def _effect_phrase(field: str, rule: dict[str, Any]) -> str:
-    if "set" in rule:
-        return f"{field} becomes {rule['set']!r}"
-    if "set_from_param" in rule:
-        return f"{field} becomes parameter '{rule['set_from_param']}'"
-    if "pose_absolute_from_params" in rule:
-        coords = ", ".join(map(str, rule["pose_absolute_from_params"]))
-        return f"{field} becomes pose({coords})"
-    if "pose_relative_from_params" in rule:
-        coords = ", ".join(map(str, rule["pose_relative_from_params"]))
-        return f"{field} shifts by ({coords})"
-    if rule.get("set_unknown"):
-        return f"{field} becomes unknown"
-    return ""
-
-
-def _precondition_phrase(field: str, rule: dict[str, Any]) -> str:
-    if "equals" in rule:
-        return f"{field} must equal {rule['equals']!r}"
-    if "not_equals" in rule:
-        return f"{field} must not equal {rule['not_equals']!r}"
-    if "exists" in rule:
-        return f"{field} must {'exist' if rule['exists'] else 'not exist'}"
-    return ""
-
-
-def _semantic_summary(preconditions: dict[str, dict[str, Any]], effects: dict[str, dict[str, Any]]) -> str:
-    clauses: list[str] = []
-    for field, rule in preconditions.items():
-        phrase = _precondition_phrase(field, rule)
-        if phrase:
-            clauses.append(phrase)
-    for field, rule in effects.items():
-        phrase = _effect_phrase(field, rule)
-        if phrase:
-            clauses.append(phrase)
-    return "; ".join(clauses)
-
-
-def _bridge_semantic_tags(
-    primitive_name: str,
-    *,
-    preconditions: dict[str, dict[str, Any]],
-    effects: dict[str, dict[str, Any]],
-    resource_type: str = "",
-) -> dict[str, Any]:
-    def _field_delta(field: str) -> dict[str, Any] | None:
-        rule = dict(effects.get(field) or {})
-        return rule or None
-
-    profile = get_resource_profile(resource_type) if resource_type else None
-    observation_output_schema: dict[str, Any] | None = None
-    if profile is not None:
-        observation_output_schema = deepcopy(
-            dict(getattr(profile, "observation_output_schema_map", {}) or {}).get(primitive_name)
-            or None
-        )
-
-    carried_entity_field = str(getattr(profile, "carried_entity_field", "") or "").strip()
-    carried_entity_rule = dict(preconditions.get(carried_entity_field) or {}) if carried_entity_field else {}
-    requires_empty_carrier = carried_entity_rule.get("equals", object()) is None
-    required_carried_entity = (
-        carried_entity_rule.get("equals")
-        if "equals" in carried_entity_rule and carried_entity_rule.get("equals") not in (None, "")
-        else None
-    )
-    observation_kind = None
-    operation_kind = "motion"
-    goal_state_hint = None
-    requires_live_observation = False
-    part_effect = None
-    location_effect = None
-    carried_entity_effect = None
-
-    mapped_kind = (
-        str((profile.primitive_kind_map or {}).get(primitive_name) or "").strip()
-        if profile is not None
-        else ""
-    )
-    if mapped_kind:
-        operation_kind = mapped_kind
-
-    if primitive_name in (profile.preview_output_map if profile is not None else {}):
-        observation_kind = primitive_name
-        operation_kind = "observe" if operation_kind == "motion" else operation_kind
-        requires_live_observation = True
-    elif primitive_name == "move_to_named_pose":
-        operation_kind = "home"
-        location_effect = "named_pose"
-    elif primitive_name in {"move_cartesian", "move_pose", "move_relative"}:
-        operation_kind = "motion"
-        location_effect = "cartesian_motion"
-    return {
-        "produces_observation": primitive_name in (profile.preview_output_map if profile is not None else {}),
-        "top_level_observation_admissible": operation_kind == "observe",
-        "operation_kind": operation_kind,
-        "operation_family": operation_kind,
-        "observation_kind": observation_kind,
-        "observation_output_schema": observation_output_schema,
-        "resource_state_delta": _field_delta("current_state"),
-        "part_state_delta": _field_delta("part_state"),
-        "carried_entity_delta": _field_delta(carried_entity_field) if carried_entity_field else None,
-        "part_effect": part_effect,
-        "location_effect": location_effect,
-        "carried_entity_effect": carried_entity_effect,
-        "requires_live_observation": requires_live_observation,
-        "goal_state_hint": goal_state_hint,
-        "requires_empty_carrier": requires_empty_carrier,
-        "required_carried_entity": deepcopy(required_carried_entity),
-    }
-
-
-def _primitive_owner(resource_agent: Any, resource_type: str) -> Any | None:
-    profile = get_resource_profile_for_agent(resource_agent)
-    if profile.primitive_owner_resolver is not None:
-        owner = profile.primitive_owner_resolver(resource_agent)
-        if owner is not None:
-            return owner
-    primitive_names = getattr(resource_agent, "_BRIDGE_PRIMITIVES", None)
-    if primitive_names:
-        return resource_agent
+def _precondition_failed_message(field: str, condition: dict[str, Any], actual: Any) -> str | None:
+    if not isinstance(condition, dict):
+        return None
+    if condition.get("exists") is True and actual in (None, ""):
+        return f"precondition failed: '{field}' must exist"
+    if "equals" in condition and actual != condition.get("equals"):
+        return f"precondition failed: '{field}' expected {condition.get('equals')!r}, actual={actual!r}"
+    if "not_equals" in condition and actual == condition.get("not_equals"):
+        return f"precondition failed: '{field}' must not equal {condition.get('not_equals')!r}"
     return None
-
-
-def _catalog_params_summary(parameters: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    summary: dict[str, dict[str, Any]] = {}
-    for param_name, schema in (parameters.get("properties") or {}).items():
-        summary[str(param_name)] = {
-            "type": schema.get("type", "string"),
-            "description": schema.get("description", ""),
-        }
-    return summary
-
-
-def _composite_parameter_schema(
-    *,
-    properties: dict[str, dict[str, Any]],
-    required: list[str] | None = None,
-) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": deepcopy(properties),
-        "required": list(required or []),
-    }
-
-
-def _composite_catalog_entries(
-    *,
-    resource_type: str,
-    primitive_names: set[str],
-) -> list[dict[str, Any]]:
-    if resource_type != "robot":
-        return []
-
-    composites: list[dict[str, Any]] = []
-    required_robot_primitives = {
-        "open_gripper",
-        "close_gripper",
-        "attach_part",
-        "detach_part",
-    }
-    if required_robot_primitives <= set(primitive_names or set()):
-        composites.extend(
-            [
-                {
-                    "name": "grasp_part",
-                    "description": (
-                        "Bridge-only composite primitive that closes the gripper and "
-                        "attaches the targeted part to the robot."
-                    ),
-                    "parameters": _composite_parameter_schema(
-                        properties={
-                            "model_name": {
-                                "type": "string",
-                                "description": "Controller model name to attach after grasp.",
-                            },
-                            "part_name": {
-                                "type": "string",
-                                "description": "Canonical part name for held-part tracking.",
-                            },
-                            "position": {
-                                "type": "number",
-                                "description": "Optional gripper closing position.",
-                            },
-                        },
-                        required=["model_name"],
-                    ),
-                    "preconditions": {"held_part": {"equals": None}},
-                    "effects": {
-                        "gripper_state": {"set": "closed"},
-                        "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
-                    },
-                    "composite_expansion": [
-                        {"primitive": "close_gripper", "params_from_parent": ["position"]},
-                        {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
-                    ],
-                },
-                {
-                    "name": "release_part",
-                    "description": (
-                        "Bridge-only composite primitive that opens the gripper and "
-                        "detaches the currently held part."
-                    ),
-                    "parameters": _composite_parameter_schema(
-                        properties={
-                            "model_name": {
-                                "type": "string",
-                                "description": "Optional controller model name to detach.",
-                            },
-                            "assume_released_if_open": {
-                                "type": "boolean",
-                                "description": (
-                                    "Treat an already-open gripper as an idempotent release when true."
-                                ),
-                            },
-                        },
-                        required=[],
-                    ),
-                    "preconditions": {"held_part": {"exists": True}},
-                    "effects": {
-                        "gripper_state": {"set": "open"},
-                        "held_part": {"set": None},
-                    },
-                    "composite_expansion": [
-                        {"primitive": "open_gripper", "params_from_parent": []},
-                        {
-                            "primitive": "detach_part",
-                            "params_from_parent": ["model_name", "assume_released_if_open"],
-                        },
-                    ],
-                },
-            ]
-        )
-
-    if "move_relative" in set(primitive_names or set()):
-        composites.append(
-            {
-                "name": "move_by_offset",
-                "description": (
-                    "Bridge-only composite primitive that shifts the end-effector by a "
-                    "relative Cartesian offset from its current pose."
-                ),
-                "parameters": _composite_parameter_schema(
-                    properties={
-                        "dx": {
-                            "type": "number",
-                            "description": "Delta X in meters from the current pose.",
-                        },
-                        "dy": {
-                            "type": "number",
-                            "description": "Delta Y in meters from the current pose.",
-                        },
-                        "dz": {
-                            "type": "number",
-                            "description": "Delta Z in meters from the current pose.",
-                        },
-                        "speed": {
-                            "type": "number",
-                            "description": "Optional motion speed scale.",
-                        },
-                    },
-                    required=["dx", "dy", "dz"],
-                ),
-                "preconditions": {"current_pose": {"exists": True}},
-                "effects": {
-                    "current_pose": {"pose_relative_from_params": ["dx", "dy", "dz"]},
-                    "current_pose_ref": {"set_unknown": True},
-                },
-                "composite_expansion": [
-                    {"primitive": "move_relative", "params_from_parent": ["dx", "dy", "dz", "speed"]},
-                ],
-            }
-        )
-
-    rows: list[dict[str, Any]] = []
-    for composite in composites:
-        parameters = composite["parameters"]
-        preconditions = deepcopy(composite["preconditions"])
-        effects = deepcopy(composite["effects"])
-        rows.append(
-            {
-                "name": composite["name"],
-                "resource_type": resource_type,
-                "description": composite["description"],
-                "params": _catalog_params_summary(parameters),
-                "parameters": parameters,
-                "required_params": list(parameters.get("required") or []),
-                "preconditions": preconditions,
-                "effects": effects,
-                "semantic_summary": _semantic_summary(preconditions, effects),
-                "bridge_semantics": _bridge_semantic_tags(
-                    composite["name"],
-                    preconditions=preconditions,
-                    effects=effects,
-                    resource_type=resource_type,
-                ),
-                "composite_expansion": deepcopy(composite["composite_expansion"]),
-                "synthesis_hidden": False,
-            }
-        )
-    return rows
-
-
-def filter_synthesis_primitive_catalog(
-    primitive_catalog: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Return the LLM-facing primitive catalog from a full execution catalog."""
-    rows: list[dict[str, Any]] = []
-    for entry in (primitive_catalog or []):
-        if not isinstance(entry, dict):
-            continue
-        if bool(entry.get("synthesis_hidden")):
-            continue
-        resource_type = str(entry.get("resource_type") or "").strip().lower()
-        name = str(entry.get("name") or "").strip()
-        if resource_type == "robot" and name not in _ROBOT_SYNTHESIS_VISIBLE_PRIMITIVES:
-            continue
-        filtered = deepcopy(entry)
-        filtered.pop("composite_expansion", None)
-        filtered.pop("synthesis_hidden", None)
-        rows.append(filtered)
-    return rows
-
-
-def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Build the private execution catalogue for one bridge-capable resource."""
-    resource_type = bridge_resource_type(
-        resource=resource_agent,
-        static_capabilities=deepcopy(getattr(resource_agent, "static_capabilities", {}) or {}),
-    )
-
-    owner = _primitive_owner(resource_agent, resource_type)
-    if owner is None:
-        return []
-
-    analyzer = FunctionAnalyzer()
-    primitive_names = sorted(getattr(resource_agent, "_BRIDGE_PRIMITIVES", []) or [])
-    rows: list[dict[str, Any]] = []
-
-    for primitive_name in primitive_names:
-        fn = getattr(owner, primitive_name, None)
-        if not callable(fn):
-            continue
-
-        analyzed = analyzer.analyze_function(fn)
-        meta = FunctionAnalyzer._extract_yaml_frontmatter(fn)
-        preconditions = _normalize_semantics_map(meta.get("preconditions"))
-        effects = _normalize_semantics_map(meta.get("effects"))
-        params_schema = _param_schema(fn, analyzed)
-        params_summary = _catalog_params_summary(params_schema)
-
-        rows.append(
-            {
-                "name": primitive_name,
-                "resource_type": resource_type,
-                "description": analyzed.get("description", ""),
-                "params": params_summary,
-                "parameters": params_schema,
-                "required_params": list(params_schema.get("required") or []),
-                "preconditions": preconditions,
-                "effects": effects,
-                "semantic_summary": _semantic_summary(preconditions, effects),
-                "bridge_semantics": _bridge_semantic_tags(
-                    primitive_name,
-                    preconditions=preconditions,
-                    effects=effects,
-                    resource_type=resource_type,
-                ),
-                "synthesis_hidden": primitive_name in _SYNTHESIS_HIDDEN_PRIMITIVES,
-            }
-        )
-
-    rows.extend(
-        _composite_catalog_entries(
-            resource_type=resource_type,
-            primitive_names=set(primitive_names),
-        )
-    )
-    return rows
-
-
-def build_synthesis_primitive_catalog(
-    resource_agent: Any | None = None,
-    *,
-    primitive_catalog: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Build the LLM-facing synthesis catalog for one bridge-capable resource."""
-    source_catalog = primitive_catalog
-    if source_catalog is None and resource_agent is not None:
-        source_catalog = build_execution_primitive_catalog(resource_agent)
-    return filter_synthesis_primitive_catalog(source_catalog or [])
-
-
-def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Backward-compatible alias for the full execution catalog."""
-    return build_execution_primitive_catalog(resource_agent)
-
-
-_OPERATION_KIND_ORDER = [
-    "observe",
-    "pick",
-    "place",
-    "release",
-    "motion",
-    "home",
-    "orient",
-]
-
-
-def build_primitive_reference_card(
-    primitive_catalog: list[dict[str, Any]],
-) -> str:
-    """Build a human-readable reference card from an existing primitive catalog.
-
-    Groups primitives by ``bridge_semantics.operation_kind`` and emits a
-    compact multi-line summary suitable for injection into an LLM prompt.
-    """
-    if not primitive_catalog:
-        return ""
-
-    by_kind: dict[str, list[dict[str, Any]]] = {}
-    for entry in primitive_catalog:
-        if not isinstance(entry, dict):
-            continue
-        semantics = entry.get("bridge_semantics") or {}
-        kind = str(semantics.get("operation_kind") or "motion").strip()
-        by_kind.setdefault(kind, []).append(entry)
-
-    lines: list[str] = []
-    ordered_kinds = [k for k in _OPERATION_KIND_ORDER if k in by_kind]
-    ordered_kinds.extend(k for k in sorted(by_kind) if k not in ordered_kinds)
-
-    for kind in ordered_kinds:
-        label = kind.upper().replace("_", " ")
-        lines.append(f"[{label}]")
-        for entry in by_kind[kind]:
-            name = str(entry.get("name") or "").strip()
-            if not name:
-                continue
-
-            required = entry.get("required_params") or []
-            optional = [
-                p
-                for p in (entry.get("params") or {})
-                if p not in required
-            ]
-            sig_parts = [p for p in required]
-            sig_parts.extend(f"{p}?" for p in optional)
-            sig = ", ".join(sig_parts)
-
-            parts: list[str] = [f"  {name}({sig})"]
-
-            summary = str(entry.get("semantic_summary") or "").strip()
-            if summary:
-                parts.append(f"    Semantics: {summary}")
-
-            semantics = entry.get("bridge_semantics") or {}
-            output_schema = semantics.get("observation_output_schema")
-            if output_schema and isinstance(output_schema, dict):
-                schema_str = ", ".join(
-                    f"{k}: {v}" if not isinstance(v, dict) else f"{k}: {{{', '.join(v)}}}"
-                    for k, v in output_schema.items()
-                )
-                parts.append(f"    Output (store_as): {{{schema_str}}}")
-
-            lines.append("\n".join(parts))
-        lines.append("")
-
-    return "\n".join(lines).rstrip()
-
-
-def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
-    """Return the current primitive-level bridge snapshot for any resource.
-    """
-    resource_type = bridge_resource_type(
-        resource=resource_agent,
-        static_capabilities=deepcopy(getattr(resource_agent, "static_capabilities", {}) or {}),
-    )
-    profile = get_resource_profile(resource_type)
-
-    if profile.snapshot_builder is not None:
-        raw_snapshot = profile.snapshot_builder(resource_agent) or {}
-        if not isinstance(raw_snapshot, dict):
-            raw_snapshot = {}
-        raw_snapshot = deepcopy(raw_snapshot)
-    else:
-        raw_snapshot = {}
-        if hasattr(resource_agent, "_snapshot_state"):
-            raw_snapshot = resource_agent._snapshot_state() or {}
-        if not isinstance(raw_snapshot, dict):
-            raw_snapshot = {}
-        raw_snapshot = deepcopy(raw_snapshot)
-        raw_snapshot.setdefault("resource_type", resource_type)
-        raw_snapshot.setdefault(
-            "current_state",
-            str(getattr(resource_agent, "_current_state", "") or "").strip() or "idle",
-        )
-
-    canonical = canonical_bridge_resource(
-        resource_jid=str(getattr(resource_agent, "jid", "") or ""),
-        resource_type=resource_type,
-        snapshot=raw_snapshot,
-        modeled_state={},
-    )
-    primitive_catalog = build_execution_primitive_catalog(resource_agent)
-    canonical["bridge_adapter"] = bridge_adapter_capabilities(
-        resource_type,
-        primitive_catalog=primitive_catalog,
-    )
-    return canonical
-
-
-def expand_composite_steps(
-    steps: list[dict[str, Any]],
-    primitive_catalog: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Expand bridge-only composite primitives into atomic controller steps."""
-    catalog_by_name = {
-        str(entry.get("name", "")).strip(): entry
-        for entry in (primitive_catalog or [])
-        if isinstance(entry, dict) and str(entry.get("name", "")).strip()
-    }
-
-    expanded_steps: list[dict[str, Any]] = []
-
-    def _expand_one(
-        step: dict[str, Any],
-        *,
-        original_index: int,
-        stack: tuple[str, ...] = (),
-    ) -> None:
-        primitive = str(step.get("primitive", "")).strip()
-        primitive_meta = catalog_by_name.get(primitive)
-        if primitive_meta is None:
-            raise ValueError(f"step {original_index} used unknown primitive '{primitive}'")
-
-        params = step.get("params") or {}
-        params_error = _validate_step_params(params, primitive_meta)
-        if params_error:
-            raise ValueError(f"step {original_index} {primitive}: {params_error}")
-
-        expansion = primitive_meta.get("composite_expansion") or []
-        if not expansion:
-            expanded_steps.append(deepcopy(step))
-            return
-
-        if str(step.get("store_as") or "").strip():
-            raise ValueError(
-                f"step {original_index} {primitive}: store_as is not supported on composite primitives"
-            )
-        if primitive in stack:
-            raise ValueError(
-                f"step {original_index} {primitive}: composite expansion cycle detected"
-            )
-        if not isinstance(params, dict):
-            raise ValueError(f"step {original_index} {primitive}: params must be an object")
-
-        for raw_child in expansion:
-            if not isinstance(raw_child, dict):
-                raise ValueError(
-                    f"step {original_index} {primitive}: composite expansion must contain objects"
-                )
-            child_primitive = str(raw_child.get("primitive", "")).strip()
-            if not child_primitive:
-                raise ValueError(
-                    f"step {original_index} {primitive}: composite expansion primitive is missing"
-                )
-            child_params: dict[str, Any] = {}
-            for raw_param_name in (raw_child.get("params_from_parent") or []):
-                param_name = str(raw_param_name or "").strip()
-                if not param_name:
-                    continue
-                if param_name in params:
-                    child_params[param_name] = deepcopy(params[param_name])
-            _expand_one(
-                {"primitive": child_primitive, "params": child_params},
-                original_index=original_index,
-                stack=(*stack, primitive),
-            )
-
-    for index, step in enumerate(steps or [], start=1):
-        if not isinstance(step, dict):
-            raise ValueError(f"step {index} must be an object")
-        _expand_one(step, original_index=index)
-
-    return expanded_steps
-
-def _validate_step_params(params: Any, primitive_meta: dict[str, Any]) -> str | None:
-    if not isinstance(params, dict):
-        return "params must be an object"
-
-    schema = primitive_meta.get("parameters") or {}
-    properties = dict(schema.get("properties") or {})
-    required = list(schema.get("required") or [])
-
-    for required_name in required:
-        if required_name not in params:
-            return f"missing required param '{required_name}'"
-
-    for key in params:
-        if key not in properties:
-            return f"unknown param '{key}'"
-
-    return None
-
-
-def _check_preconditions(snapshot: dict[str, Any], primitive_meta: dict[str, Any]) -> str | None:
-    preconditions = primitive_meta.get("preconditions") or {}
-    profile = get_resource_profile(
-        str(
-            dict(snapshot.get("resource_core") or {}).get("resource_type")
-            or snapshot.get("resource_type")
-            or "resource"
-        ).strip().lower()
-        or "resource"
-    )
-    for field, rule in preconditions.items():
-        value = resource_snapshot_field_value(snapshot, field, profile=profile)
-        if "equals" in rule and value != rule["equals"]:
-            return f"precondition failed: {field} must equal {rule['equals']!r}"
-        if "not_equals" in rule and value == rule["not_equals"]:
-            return f"precondition failed: {field} must not equal {rule['not_equals']!r}"
-        if "exists" in rule:
-            exists = value is not None
-            if exists != bool(rule["exists"]):
-                return f"precondition failed: {field} existence mismatch"
-    return None
-
-
-def apply_effects_to_snapshot(
-    step: dict[str, Any], primitive_meta: dict[str, Any], snapshot: dict[str, Any]
-) -> dict[str, Any]:
-    """Apply one primitive's semantic effects to a snapshot."""
-    next_snapshot = deepcopy(snapshot)
-    params = dict(step.get("params") or {})
-    effects = primitive_meta.get("effects") or {}
-    profile = get_resource_profile(
-        str(
-            dict(next_snapshot.get("resource_core") or {}).get("resource_type")
-            or next_snapshot.get("resource_type")
-            or "resource"
-        ).strip().lower()
-        or "resource"
-    )
-
-    for field, rule in effects.items():
-        if "set" in rule:
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                deepcopy(rule["set"]),
-                profile=profile,
-            )
-            continue
-        if "set_from_param" in rule:
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                params.get(str(rule["set_from_param"])),
-                profile=profile,
-            )
-            continue
-        if "set_from_param_any_of" in rule:
-            resolved_value = None
-            for raw_param_name in (rule.get("set_from_param_any_of") or []):
-                param_name = str(raw_param_name or "").strip()
-                if not param_name:
-                    continue
-                if param_name in params and params.get(param_name) not in (None, ""):
-                    resolved_value = deepcopy(params.get(param_name))
-                    break
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                resolved_value,
-                profile=profile,
-            )
-            continue
-        if "pose_absolute_from_params" in rule:
-            x_key, y_key, z_key = list(rule["pose_absolute_from_params"])
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                {
-                    "x": float(params[x_key]),
-                    "y": float(params[y_key]),
-                    "z": float(params[z_key]),
-                },
-                profile=profile,
-            )
-            continue
-        if "pose_relative_from_params" in rule:
-            dx_key, dy_key, dz_key = list(rule["pose_relative_from_params"])
-            current_pose = dict(
-                resource_snapshot_field_value(next_snapshot, field, profile=profile) or {}
-            )
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                {
-                    "x": float(current_pose["x"]) + float(params[dx_key]),
-                    "y": float(current_pose["y"]) + float(params[dy_key]),
-                    "z": float(current_pose["z"]) + float(params[dz_key]),
-                },
-                profile=profile,
-            )
-            continue
-        if rule.get("set_unknown"):
-            next_snapshot = resource_snapshot_set_field(
-                next_snapshot,
-                field,
-                None,
-                profile=profile,
-            )
-
-    return next_snapshot
 
 
 def validate_and_project_steps(
-    steps: list[dict[str, Any]],
-    primitive_catalog: list[dict[str, Any]],
+    steps: list[dict[str, Any]] | None,
+    primitive_catalog: list[dict[str, Any]] | None,
     snapshot: dict[str, Any],
     *,
     grounding_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], str | None]:
-    """Validate a primitive sequence and project the resulting snapshot."""
-    projected = deepcopy(snapshot or {})
-    step_outputs: dict[str, Any] = {}
+    """Validate a primitive sequence and project its semantic effects forward."""
     try:
-        normalized_steps = expand_composite_steps(steps, primitive_catalog)
+        normalized_steps = expand_composite_steps(steps or [], primitive_catalog or [])
     except Exception as exc:
-        return False, projected, str(exc)
+        return False, deepcopy(snapshot or {}), str(exc)
+
     catalog_by_name = {
-        str(entry.get("name", "")).strip(): entry
+        str(entry.get("name") or "").strip(): entry
         for entry in (primitive_catalog or [])
-        if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
     }
+    projected = deepcopy(snapshot or {})
+    runtime_resource_type = str(
+        dict(projected.get("resource_core") or {}).get("resource_type")
+        or projected.get("resource_type")
+        or "resource"
+    ).strip() or "resource"
+    step_outputs: dict[str, Any] = {}
 
-    for index, step in enumerate(normalized_steps, start=1):
-        if not isinstance(step, dict):
-            return False, projected, f"step {index} must be an object"
-
-        primitive = str(step.get("primitive", "")).strip()
-        primitive_meta = catalog_by_name.get(primitive)
-        if primitive_meta is None:
-            return False, projected, f"step {index} used unknown primitive '{primitive}'"
-
-        store_as = str(step.get("store_as") or "").strip()
-        store_as_error = _validate_store_as(store_as)
-        if store_as_error:
-            return False, projected, f"step {index} {primitive}: {store_as_error}"
-        if store_as and store_as in step_outputs:
-            return False, projected, f"step {index} {primitive}: duplicate store_as '{store_as}'"
+    for step_index, step in enumerate(normalized_steps):
+        primitive = str(step.get("primitive") or "").strip()
+        primitive_meta = dict(catalog_by_name.get(primitive) or {})
+        if not primitive_meta:
+            return False, projected, f"unknown primitive '{primitive}' at step {step_index}"
 
         try:
             resolved_params = resolve_param_refs(
-                step.get("params") or {},
+                dict(step.get("params") or {}),
                 grounding_context or {},
                 step_outputs=step_outputs,
             )
         except Exception as exc:
-            return False, projected, f"step {index} {primitive}: {exc}"
+            return False, projected, f"param resolution failed at step {step_index} ({primitive}): {exc}"
 
-        params_error = _validate_step_params(resolved_params, primitive_meta)
-        if params_error:
-            return False, projected, f"step {index} {primitive}: {params_error}"
+        for required_param in primitive_meta.get("required_params") or []:
+            param_name = str(required_param or "").strip()
+            if not param_name:
+                continue
+            if param_name not in resolved_params or resolved_params.get(param_name) is None:
+                return (
+                    False,
+                    projected,
+                    f"missing required param '{param_name}' at step {step_index} ({primitive})",
+                )
 
-        precondition_error = _check_preconditions(projected, primitive_meta)
-        if precondition_error:
-            profile = get_resource_profile(
-                str(
-                    dict(projected.get("resource_core") or {}).get("resource_type")
-                    or projected.get("resource_type")
-                    or "resource"
-                ).strip().lower() or "resource"
-            )
-            _snap = resource_snapshot_fields_map(
-                projected, profile.snapshot_fields, profile=profile,
-            )
-            logger.debug(
-                "[PrimitiveSemantics] step %d %s FAILED precondition — "
-                "snapshot: %s, preconditions=%r",
-                index,
-                primitive,
-                ", ".join(f"{k}={v!r}" for k, v in _snap.items()),
-                primitive_meta.get("preconditions"),
-            )
-            return False, projected, f"step {index} {primitive}: {precondition_error}"
+        preconditions = dict(primitive_meta.get("preconditions") or {})
+        for field, condition in preconditions.items():
+            actual = resource_snapshot_field_value(projected, str(field))
+            failed = _precondition_failed_message(str(field), dict(condition or {}), actual)
+            if failed:
+                return False, projected, f"{failed} at step {step_index} ({primitive})"
 
-        preview_step = {**dict(step), "params": resolved_params}
-        try:
-            projected = apply_effects_to_snapshot(preview_step, primitive_meta, projected)
-        except Exception as exc:
-            return False, projected, f"step {index} {primitive}: failed to apply effects ({exc})"
+        preview_input = {**step, "params": deepcopy(resolved_params)}
+        projected = apply_effects_to_snapshot(preview_input, primitive_meta, projected)
 
-        # Implicit state transition: "home" operations set current_state to idle.
-        bridge_sem = primitive_meta.get("bridge_semantics") or {}
-        if bridge_sem.get("operation_kind") == "home":
-            _profile = get_resource_profile(
-                str(
-                    dict(projected.get("resource_core") or {}).get("resource_type")
-                    or projected.get("resource_type")
-                    or "resource"
-                ).strip().lower() or "resource"
-            )
-            projected = resource_snapshot_set_field(
-                projected, "current_state", "idle", profile=_profile,
-            )
-
+        store_as = str(step.get("store_as") or "").strip()
         if store_as:
-            preview_output, preview_error = preview_step_output(
+            preview, preview_error = preview_step_output(
                 primitive=primitive,
                 params=resolved_params,
                 snapshot=projected,
-                grounding_context=grounding_context or {},
+                grounding_context={
+                    **deepcopy(grounding_context or {}),
+                    "step_outputs": deepcopy(step_outputs),
+                },
+                resource_type=runtime_resource_type,
             )
-            if preview_error:
-                return False, projected, f"step {index} {primitive}: {preview_error}"
-            step_outputs[store_as] = preview_output
+            if preview_error is None:
+                step_outputs[store_as] = preview
 
     return True, projected, None
 
 
-def expected_snapshot_from_bridge_snapshot(
-    snapshot: dict[str, Any],
-    *,
-    resource_type: str = "resource",
-) -> dict[str, Any]:
-    """Keep only the fields that are stable enough for start-state validation."""
-    profile = get_resource_profile(resource_type)
-    return {
-        field: resource_snapshot_field_value(snapshot, field, profile=profile)
-        for field in profile.snapshot_fields
-    }
-
-
-def snapshot_matches_expected(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool, str | None]:
-    """Return whether actual snapshot satisfies expected snapshot fields."""
-    profile = get_resource_profile(
-        str(
-            dict(actual.get("resource_core") or {}).get("resource_type")
-            or actual.get("resource_type")
-            or "resource"
-        ).strip().lower()
-        or "resource"
-    )
-    for key in expected:
-        actual_value = resource_snapshot_field_value(actual, key, profile=profile)
-        if actual_value != expected.get(key):
-            return (
-                False,
-                f"expected {key}={expected.get(key)!r} but found {actual_value!r}",
-            )
+def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, str | None]:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False, f"{path or 'value'} expected object, actual={type(actual).__name__}"
+        for key, expected_value in expected.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            if key not in actual:
+                return False, f"{next_path} missing from actual snapshot"
+            ok, message = _compare_subset(actual.get(key), expected_value, next_path)
+            if not ok:
+                return False, message
+        return True, None
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return False, f"{path or 'value'} expected list, actual={type(actual).__name__}"
+        if len(actual) < len(expected):
+            return False, f"{path or 'value'} expected list length>={len(expected)}, actual={len(actual)}"
+        for index, expected_item in enumerate(expected):
+            ok, message = _compare_subset(actual[index], expected_item, f"{path}[{index}]")
+            if not ok:
+                return False, message
+        return True, None
+    if actual != expected:
+        return False, f"{path or 'value'} expected={expected!r} actual={actual!r}"
     return True, None
 
 
-def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:
-    """Apply bridge snapshot fields back onto resource agent runtime state."""
-    current_state = resource_snapshot_field_value(snapshot, "current_state")
-    if current_state is not None:
-        resource_agent._current_state = str(current_state)
+def snapshot_matches_expected(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool, str | None]:
+    """Compare an expected snapshot subset against the runtime snapshot."""
+    return _compare_subset(actual, expected)
 
+
+def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:
+    """Apply canonical snapshot fields back onto the live resource agent."""
+    if resource_agent is None:
+        return
     profile = get_resource_profile_for_agent(resource_agent)
+
+    current_state = resource_snapshot_field_value(snapshot, "current_state", profile=profile)
+    setattr(resource_agent, "_current_state", current_state)
+
+    current_location = resource_snapshot_field_value(snapshot, "current_location", profile=profile)
+    if hasattr(resource_agent, "_current_location") or current_location is not None:
+        setattr(resource_agent, "_current_location", current_location)
+
+    availability = resource_snapshot_availability(snapshot, profile=profile)
+    if hasattr(resource_agent, "_availability") or availability:
+        setattr(resource_agent, "_availability", availability)
+
     for field, target in dict(profile.sync_map or {}).items():
-        if not resource_snapshot_has_field(snapshot, field, profile=profile):
-            continue
-        value = resource_snapshot_field_value(snapshot, field, profile=profile)
+        value = resource_snapshot_field_value(snapshot, str(field), profile=profile)
         if callable(target):
-            target(resource_agent, value)
-        else:
-            setattr(resource_agent, str(target), value)
+            target(resource_agent, deepcopy(value))
+            continue
+        attr_name = str(target or "").strip()
+        if attr_name:
+            setattr(resource_agent, attr_name, deepcopy(value))
+
+
+__all__ = [
+    "apply_effects_to_snapshot",
+    "build_execution_primitive_catalog",
+    "build_primitive_reference_card",
+    "build_synthesis_primitive_catalog",
+    "expand_composite_steps",
+    "extract_step_output",
+    "filter_synthesis_primitive_catalog",
+    "get_resource_bridge_snapshot",
+    "resolve_param_refs",
+    "snapshot_matches_expected",
+    "sync_agent_from_bridge_snapshot",
+    "validate_and_project_steps",
+]

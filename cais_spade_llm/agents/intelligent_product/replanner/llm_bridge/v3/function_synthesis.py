@@ -21,10 +21,10 @@ import logging
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     SynthesizedTaskFn,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
     apply_effects_to_snapshot,
     validate_and_project_steps,
 )

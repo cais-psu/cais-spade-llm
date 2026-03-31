@@ -173,16 +173,8 @@ def create_resource_agents(
             if kind == "printing":
                 agent = PrintingAgent(jid, pw, **common)
             elif kind == "robot":
-                if "lg_slippage_mode" in meta or "lcp_slippage_mode" in meta:
-                    common["lg_slippage_mode"] = meta.get(
-                        "lg_slippage_mode",
-                        meta.get("lcp_slippage_mode"),
-                    )
-                if "lg_slippage_scope" in meta or "lcp_slippage_scope" in meta:
-                    common["lg_slippage_scope"] = meta.get(
-                        "lg_slippage_scope",
-                        meta.get("lcp_slippage_scope"),
-                    )
+                if isinstance(meta.get("failure_scenarios"), list):
+                    common["failure_scenarios"] = list(meta.get("failure_scenarios") or [])
                 common["execution_mode"] = _EXECUTION_MODE_OVERRIDE or str(
                     env_block.get("execution_mode", meta.get("execution_mode", "dry_run"))
                 ).strip().lower()
@@ -308,7 +300,6 @@ def create_product_agents(
                 resource_agents=resource_agents,
                 cca_jid=cca_jid,
                 camera=_CAMERA,
-                replan_mode=meta.get("replan_mode", "des"),
                 precomputed_bundle=product_bundle,
             )
 

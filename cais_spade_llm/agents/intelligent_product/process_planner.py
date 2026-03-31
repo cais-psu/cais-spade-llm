@@ -507,12 +507,29 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         violations: list[dict[str, Any]],
         resource_states: dict[str, dict[str, Any]],
     ) -> str:
+        failed_task_ids: list[str] = []
         for violation in violations:
             if not isinstance(violation, dict):
                 continue
             candidate = violation.get("resource_jid") or violation.get("failed_resource_jid")
             if candidate:
                 return str(candidate)
+            for key in ("failed_task_id", "task_id"):
+                candidate_task_id = str(violation.get(key) or "").strip()
+                if candidate_task_id:
+                    failed_task_ids.append(candidate_task_id)
+                    mapped_resource_jid = self._resource_jid_for_task_id(candidate_task_id)
+                    if mapped_resource_jid:
+                        return mapped_resource_jid
+            blocked_task_ids = violation.get("blocked_task_ids")
+            if isinstance(blocked_task_ids, (list, tuple, set)):
+                for raw_task_id in blocked_task_ids:
+                    candidate_task_id = str(raw_task_id or "").strip()
+                    if not candidate_task_id:
+                        continue
+                    mapped_resource_jid = self._resource_jid_for_task_id(candidate_task_id)
+                    if mapped_resource_jid:
+                        return mapped_resource_jid
             safety_ctx = violation.get("safety_ctx") or {}
             targets = safety_ctx.get("obligation_targets") or []
             if isinstance(targets, list):
@@ -522,12 +539,51 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     target_jid = str(target.get("resource_jid", "")).strip()
                     if target_jid:
                         return target_jid
+        failed_like_states = {"failed", "error", "fault", "faulted", "aborted"}
+        for ra in self.resource_agents:
+            ra_jid_candidate = str(ra.jid)
+            rs = resource_states.get(ra_jid_candidate, {})
+            current_state = str(rs.get("current_state", "") or "").strip().lower()
+            if current_state in failed_like_states:
+                return ra_jid_candidate
         for ra in self.resource_agents:
             ra_jid_candidate = str(ra.jid)
             rs = resource_states.get(ra_jid_candidate, {})
             if rs.get("current_state", "idle") != "idle":
                 return ra_jid_candidate
         return str(self.resource_agents[0].jid) if self.resource_agents else "unknown"
+
+    def _resource_jid_for_task_id(self, task_id: str) -> str:
+        target_task_id = str(task_id or "").strip()
+        if not target_task_id:
+            return ""
+        for node in self.nodes:
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("id") or "").strip() != target_task_id:
+                continue
+            if str(node.get("type") or "").strip() != "task":
+                continue
+            resource_jid = str(node.get("resource_jid") or "").strip()
+            if resource_jid:
+                return resource_jid
+        return ""
+
+    def _function_name_for_task_id(self, task_id: str) -> str:
+        target_task_id = str(task_id or "").strip()
+        if not target_task_id:
+            return ""
+        for node in self.nodes:
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("id") or "").strip() != target_task_id:
+                continue
+            if str(node.get("type") or "").strip() != "task":
+                continue
+            function_name = str(node.get("function_name") or "").strip()
+            if function_name:
+                return function_name
+        return ""
 
     @staticmethod
     def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -709,6 +765,51 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 targets.append(deepcopy(target))
 
         return targets
+
+    def _primary_failure_context(
+        self,
+        violations: list[dict[str, Any]],
+        *,
+        fallback_resource_jid: str = "",
+    ) -> dict[str, Any]:
+        fallback_jid = str(fallback_resource_jid or "").strip()
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            failed_task_id = str(
+                violation.get("failed_task_id") or violation.get("task_id") or ""
+            ).strip()
+            failed_resource_jid = str(
+                violation.get("resource_jid") or violation.get("failed_resource_jid") or ""
+            ).strip()
+            if not failed_resource_jid and failed_task_id:
+                failed_resource_jid = self._resource_jid_for_task_id(failed_task_id)
+            if not failed_resource_jid:
+                failed_resource_jid = fallback_jid
+            raw_failure_context = violation.get("failure_context")
+            if not isinstance(raw_failure_context, dict):
+                raw_failure_context = {}
+            observations = raw_failure_context.get("observations")
+            observations = observations if isinstance(observations, dict) else {}
+            failed_function_name = str(
+                observations.get("function_name")
+                or self._function_name_for_task_id(failed_task_id)
+                or ""
+            ).strip()
+            if raw_failure_context or failed_task_id or failed_resource_jid or failed_function_name:
+                return {
+                    "failed_task_id": failed_task_id,
+                    "failed_resource_jid": failed_resource_jid,
+                    "failed_function_name": failed_function_name,
+                    "failure_context": deepcopy(raw_failure_context),
+                }
+
+        return {
+            "failed_task_id": "",
+            "failed_resource_jid": fallback_jid,
+            "failed_function_name": "",
+            "failure_context": {},
+        }
 
     def _node_exists(self, task_id: str) -> bool:
         return any(
@@ -1079,73 +1180,13 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         bridge_feedback: str = "",
         bridge_generation_mode: str = "auto",
     ) -> dict[str, Any] | None:
-        """Online replan — routes to DES or LLM based on replan_mode."""
-        replan_mode = str(getattr(self.product_agent, "replan_mode", "llm") or "llm").strip().lower()
-        if replan_mode == "none":
-            self.logger.info("[Planner] Online replanning disabled (replan_mode=none).")
-            return None
-        if replan_mode == "des":
-            return await self.replan_with_feedback_des(
-                violations,
-                system_coordination_state=system_coordination_state,
-                bridge_feedback=bridge_feedback,
-                bridge_generation_mode=bridge_generation_mode,
-            )
-        await self.replan_with_feedback_llm(
+        """Online replan — always run DES recovery, then DES bridge fallback if needed."""
+        return await self.replan_with_feedback_des(
             violations,
             system_coordination_state=system_coordination_state,
+            bridge_feedback=bridge_feedback,
+            bridge_generation_mode=bridge_generation_mode,
         )
-        return None
-
-    async def replan_with_feedback_llm(
-        self,
-        violations: list[dict],
-        system_coordination_state: dict | None = None,
-    ) -> None:
-        """LLM-guided online replanning."""
-        self.logger.info("[Planner] Triggering LLM Re-planning with online feedback...")
-
-        failed_nodes = [n for n in self.nodes if n.get("type") == "task"]
-        conflict_task_ids = self._extract_conflict_task_ids(violations, source="online")
-        plan_payload = []
-        for node in failed_nodes:
-            node_copy = node.copy()
-            if conflict_task_ids and node_copy["id"] in conflict_task_ids:
-                node_copy["_FOCUS_HERE"] = " <<< THIS TASK IS INVOLVED IN A VIOLATION"
-            plan_payload.append(node_copy)
-
-        if not conflict_task_ids:
-            self.logger.warning("[Planner] No conflict task IDs found; sending full plan context.")
-
-        tools_catalog = self._deduplicate_tools_catalog(getattr(self.product_agent, "tools_catalog", []))
-        resource_infos = [
-            {"jid": str(getattr(ra, "jid", "")), "static_capabilities": getattr(ra, "static_capabilities", {})}
-            for ra in self.resource_agents
-        ]
-
-        product_state = self.product_agent._build_product_state()
-        system_state = {**(system_coordination_state or {}), **product_state}
-
-        prompt = build_replan_prompt(
-            failed_plan_nodes=plan_payload,
-            violations=violations,
-            tools_catalog=tools_catalog,
-            resource_infos=resource_infos,
-            source="online",
-            safety_text=self.product_agent.safety_text,
-            system_state=system_state,
-        )
-        raw = await self.product_agent.ask_llm(prompt=prompt, with_functions=False, temperature=0.0)
-        self._dump_replan_debug(source="online", prompt=prompt, violations=violations,
-                                resource_infos=resource_infos, system_state=system_state, llm_response=raw)
-        try:
-            modified_tasks = json.loads(raw).get("tasks", [])
-            if not modified_tasks:
-                self.logger.warning("[Planner] LLM returned no modified tasks.")
-                return
-            self._apply_replan_patch(modified_tasks)
-        except json.JSONDecodeError as exc:
-            self.logger.error("[Planner] LLM replanning returned invalid JSON: %s", exc)
 
     async def replan_with_feedback_des(
         self,
@@ -1194,10 +1235,21 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 if not isinstance(derived_entry, dict):
                     continue
                 current_entry = dict(merged_part_tracker.get(part_name) or {})
+                force_keys = {
+                    str(key).strip()
+                    for key in (derived_entry.get("_force_keys") or [])
+                    if str(key).strip()
+                }
                 for key, value in derived_entry.items():
-                    if value in (None, "", [], {}):
+                    if key == "_force_keys":
                         continue
-                    if key in {"state", "location"} and current_entry.get(key) not in (None, "", "unknown"):
+                    if key not in force_keys and value in (None, "", [], {}):
+                        continue
+                    if (
+                        key in {"state", "location"}
+                        and key not in force_keys
+                        and current_entry.get(key) not in (None, "", "unknown")
+                    ):
                         continue
                     current_entry[key] = deepcopy(value)
                 merged_part_tracker[str(part_name)] = current_entry
@@ -1222,6 +1274,10 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         path: list[dict[str, Any]] | None = None
         x_c: dict[str, Any] | None = None
         stuck_ra_jid = self._identify_stuck_resource(violations, resource_states)
+        failure_context_payload = self._primary_failure_context(
+            violations,
+            fallback_resource_jid=stuck_ra_jid,
+        )
 
         # Track the best anchor for obligation recovery (the target resource's
         # last pending task, NOT the blocked task on a different resource).
@@ -1394,20 +1450,26 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
             M_e = compile_environment_model(bids)
 
-            if bids:
-                x_c = bids[0].str_x[0]
-            else:
-                x_c = {
-                    "part_states": part_states,
-                    "part_locations": part_locations,
-                    "resource_state": default_resource_state,
-                }
-
             # If we know the product agent will auto-load a preprogrammed scenario,
             # skip the 8s BFS search entirely.
             if bridge_generation_mode == "manual":
+                x_c = self._build_resource_search_state(
+                    resource_jid=stuck_ra_jid,
+                    resource_states=resource_states,
+                    default_resource_state=default_resource_state,
+                    part_states=part_states,
+                    part_locations=part_locations,
+                )
                 self.logger.info("[Planner] Fast-tracking to bridge request (skipping DES search for preprogrammed scenarios).")
             else:
+                if bids:
+                    x_c = bids[0].str_x[0]
+                else:
+                    x_c = {
+                        "part_states": part_states,
+                        "part_locations": part_locations,
+                        "resource_state": default_resource_state,
+                    }
                 path = plan_on_environment_model(M_e, x_c, P_id, goal_state)
         elif path is None and not P_id and not obligation_targets:
             x_c = self._build_resource_search_state(
@@ -1473,6 +1535,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 part_states=part_states,
                 part_locations=part_locations,
                 bridge_safety_context=bridge_safety_context,
+                failure_context=failure_context_payload,
             )
             if str(bridge_generation_mode or "auto").strip().lower() == "manual":
                 message = (
@@ -1508,6 +1571,38 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     bridge_proposal=bridge_proposal,
                     bridge_debug=self.get_last_bridge_debug(),
                 )
+            bridge_debug = self.get_last_bridge_debug()
+            bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
+            if bridge_status in {"ready_for_llm", "llm_output_recorded"}:
+                message = (
+                    "DES found no modeled continuation. The single-shot bridge prompt ran and "
+                    "captured raw LLM output, but no validated bridge proposal is available yet."
+                )
+                self.logger.info("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    plan_changed=False,
+                    used_llm_bridge=(bridge_status == "llm_output_recorded"),
+                    human_required=False,
+                    awaiting_bridge_generation=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
+            if bridge_status == "unsupported_reasoning_mode":
+                message = (
+                    "DES found no modeled continuation, but the selected bridge reasoning mode "
+                    "is not implemented."
+                )
+                self.logger.error("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    human_required=True,
+                    used_llm_bridge=False,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
             message = "DES recovery could not find a modeled path and the LLM bridge produced no compilable proposal."
             self.logger.error("[Planner] %s", message)
             return self._build_des_replan_result(
@@ -1515,7 +1610,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 used_llm_bridge=used_llm_bridge,
                 message=message,
                 bridge_summary=bridge_summary,
-                bridge_debug=self.get_last_bridge_debug(),
+                bridge_debug=bridge_debug,
+                prepared_bridge_request=prepared_bridge_request,
             )
 
         failed_task_id = ""
@@ -1577,8 +1673,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 return state
         return completed_states[-1] if completed_states else None
 
-    @staticmethod
     def _derive_part_tracker_from_violations(
+        self,
         violations: list[dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
         derived: dict[str, dict[str, Any]] = {}
@@ -1588,9 +1684,40 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             failure_context = violation.get("failure_context")
             if not isinstance(failure_context, dict):
                 continue
+            observations = failure_context.get("observations")
+            observations = observations if isinstance(observations, dict) else {}
+            failed_task_id = str(
+                violation.get("failed_task_id") or violation.get("task_id") or ""
+            ).strip()
+            failed_resource_jid = str(
+                violation.get("resource_jid") or violation.get("failed_resource_jid") or ""
+            ).strip()
+            if not failed_resource_jid and failed_task_id:
+                failed_resource_jid = self._resource_jid_for_task_id(failed_task_id)
+            pose_candidate = None
+            for key in ("observed_pose", "pose", "dropped_location", "last_known_position"):
+                pose_candidate = self._coerce_xyz_pose(observations.get(key))
+                if pose_candidate is not None:
+                    break
+            state_before = observations.get("state_before")
+            state_before = state_before if isinstance(state_before, dict) else {}
+            state_after = observations.get("state_after")
+            state_after = state_after if isinstance(state_after, dict) else {}
+            before_held = str(state_before.get("held_part") or "").strip()
+            after_held = str(state_after.get("held_part") or "").strip()
+            released_part_name = before_held if before_held and not after_held else ""
+            observed_part_state = str(observations.get("part_state") or "").strip()
             affected_entities = failure_context.get("affected_entities")
             if not isinstance(affected_entities, list):
-                continue
+                affected_entities = []
+            if not affected_entities and released_part_name:
+                affected_entities = [
+                    {
+                        "entity_type": "part",
+                        "entity_id": released_part_name,
+                        "state": observed_part_state or "unknown",
+                    }
+                ]
             for entity in affected_entities:
                 if not isinstance(entity, dict):
                     continue
@@ -1600,12 +1727,35 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 if not part_name:
                     continue
                 entry = derived.setdefault(part_name, {"state": "unknown", "location": None})
-                state = str(entity.get("state") or "").strip()
+                force_keys = {
+                    str(key).strip()
+                    for key in (entry.get("_force_keys") or [])
+                    if str(key).strip()
+                }
+                state = observed_part_state or str(entity.get("state") or "").strip()
                 if state:
                     entry["state"] = state
+                    if state.lower() in {"unknown", "untracked", "misplaced"}:
+                        force_keys.add("state")
                 location = entity.get("location")
                 if isinstance(location, str) and location.strip():
                     entry["location"] = location.strip()
+                if pose_candidate is not None:
+                    entry["observed_pose"] = deepcopy(pose_candidate)
+                    entry["location"] = None
+                    force_keys.add("location")
+                if observations.get("observation_required") or (
+                    released_part_name == part_name and pose_candidate is None
+                ):
+                    entry["observation_required"] = True
+                if failed_resource_jid and released_part_name == part_name:
+                    entry["location"] = None
+                    entry["last_known_location"] = (
+                        entry.get("last_known_location") or f"{failed_resource_jid}_gripper"
+                    )
+                    force_keys.add("location")
+                if force_keys:
+                    entry["_force_keys"] = sorted(force_keys)
         return derived
 
     def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:

@@ -13,8 +13,13 @@
       "place_insert",
       "move_home"
     ],
-    "lg_slippage_mode": "off",
-    "lg_slippage_scope": "ur5e",
+    "failure_scenarios": [
+      {
+        "scenario_id": "lg_slippage",
+        "mode": "off",
+        "scope": "ur5e"
+      }
+    ],
     "gazebo": {
       "static_capabilities": {
         "resource_type": "robot",

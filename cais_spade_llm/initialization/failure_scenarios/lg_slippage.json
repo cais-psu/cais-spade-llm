@@ -1,0 +1,97 @@
+{
+  "scenario_id": "lg_slippage",
+  "trigger": {
+    "resource_type": "robot",
+    "function_names": [
+      "place_insert"
+    ],
+    "checkpoints": [
+      "after_execute_before_commit"
+    ],
+    "part_names": [
+      "LG"
+    ],
+    "execution_modes": [
+      "dry_run",
+      "simulation"
+    ]
+  },
+  "affected_entities": [
+    {
+      "entity_type": "part",
+      "entity_id": "LG",
+      "state": "unknown"
+    }
+  ],
+  "observation_template": {
+    "gripper_force": 0.0,
+    "camera_detection": {
+      "object_found": true,
+      "shape_match_confidence": 0.85,
+      "orientation": "flat",
+      "visible_damage": false
+    },
+    "observation_required": true
+  },
+  "injection": {
+    "drop_pose": {
+      "x": 0.0,
+      "y": 0.2,
+      "z": 1.035
+    },
+    "orientation_quat": {
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0
+    }
+  },
+  "effects": [
+    {
+      "type": "set_entity_pose",
+      "model_name": {
+        "ref": "task_ctx.model_name"
+      },
+      "pose": {
+        "ref": "injection.drop_pose"
+      },
+      "orientation_quat": {
+        "ref": "injection.orientation_quat"
+      }
+    },
+    {
+      "type": "set_agent_field",
+      "field": "_held_part",
+      "value": null
+    },
+    {
+      "type": "set_agent_field",
+      "field": "_current_state",
+      "value": "failed"
+    },
+    {
+      "type": "set_agent_field",
+      "field": "_gripper_state",
+      "value": "open"
+    },
+    {
+      "type": "clear_task_context"
+    },
+    {
+      "type": "emit_observation_fields",
+      "fields": {
+        "last_commanded_location": {
+          "ref": "call_args.destination_location"
+        },
+        "dropped_location": {
+          "ref": "injection.drop_pose"
+        }
+      }
+    },
+    {
+      "type": "return_failure",
+      "status": "failed",
+      "content": "Assembly verification failed."
+    }
+  ]
+}

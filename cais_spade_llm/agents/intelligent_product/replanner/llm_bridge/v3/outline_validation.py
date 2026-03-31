@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.recovery_context_builder import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.recovery_context_builder import (
     build_grounding_assessment,
 )
 

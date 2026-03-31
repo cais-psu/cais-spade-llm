@@ -2,6 +2,10 @@
 
 This folder contains the runtime recovery logic used when the product plan can no longer continue safely.
 
+Runtime replanning is DES-driven. There is no separate top-level runtime
+`replan_mode`; the LLM is used only inside the DES bridge fallback. The older
+offline LLM plan-repair path remains separate.
+
 ## What Was Implemented
 
 The recovery path was changed from a generic suffix-search plus synthetic LLM tool insertion into a safety-driven workflow:
@@ -25,6 +29,9 @@ The recovery path was changed from a generic suffix-search plus synthetic LLM to
   compilation, and the multi-turn DES-guided bridge loop.
 - `classical_vs_llm_bridge.md`
   Design note on why the current bridge layer is under-modeled for classical planning alone and why `LLM + ReAct + DES` fits the existing task/primitive split.
+- `tss_based_llm_bridge_v4.md`
+  Design-intent note for the new bridge: current prepare-trace/`llm_input`
+  state and the target validated proposal flow.
 - `../process_planner.py`
   Top-level DES recovery orchestration, obligation-driven DES selection, and
   delegation into the extracted bridge replanner module.

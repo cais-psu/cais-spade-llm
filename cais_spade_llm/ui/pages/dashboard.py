@@ -1252,8 +1252,6 @@ def render(bridge: SystemBridge) -> None:
                             with ui.row().classes("items-center gap-2 flex-wrap text-xs text-slate-600"):
                                 ui.label(f"Trigger: {str(recovery.get('trigger', '') or 'n/a')}")
                                 ui.label(f"Failed task: {str(recovery.get('failed_task_id', '') or 'n/a')}")
-                                if str(recovery.get("replan_mode", "")).strip().lower() == "llm":
-                                    ui.badge("Experimental full-LLM mode").props("color=orange")
 
                             with ui.row().classes("items-center gap-2 flex-wrap mt-1"):
                                 for stage_label, stage_color in _stage_badges(recovery):

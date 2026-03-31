@@ -374,12 +374,12 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                 "macro_name": "clear_xarm6_zone",
                 "description": "Retreat xarm6 to the recovery-clear pose to free the shared workspace.",
                 "rationale": "Clears the collision zone before ur5e performs the LG recovery.",
-                "expected_start_state": "recovery_required",
+                "expected_start_state": "failed",
                 "task_params": {
                     "clear_pose": {"context_ref": "/resources/xarm6@localhost/named_poses/home"},
                 },
                 "task_metadata": {
-                    "in_state": "recovery_required",
+                    "in_state": "failed",
                     "out_state": "idle",
                     "required_context_keys": [],
                     "context_mapping": {},

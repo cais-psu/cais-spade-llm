@@ -5,11 +5,17 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
+from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
+    build_failure_event,
+    failure_context_from_scenario_config,
+    load_failure_scenario_config,
+)
 
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 
@@ -28,22 +34,9 @@ class RobotAgent(ResourceAgent):
     _RESOURCE_PROFILE = ROBOT_PROFILE
 
     def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
-        # Failure-injection controls for LG placement tests.
-        # Accept legacy lcp_* keys as aliases so older fixtures still load.
-        # - always: fail every qualifying LG place
-        # - once: fail first qualifying LG place, then allow
-        # - off: never inject LG slippage failures
-        lg_slippage_mode = str(
-            kw.pop("lg_slippage_mode", kw.pop("lcp_slippage_mode", "always"))
-        ).lower()
-        if lg_slippage_mode not in {"always", "once", "off"}:
-            lg_slippage_mode = "always"
-        self.lg_slippage_mode = lg_slippage_mode
-        # Scope to one robot by name ("xarm6"), or "any".
-        self.lg_slippage_scope = str(
-            kw.pop("lg_slippage_scope", kw.pop("lcp_slippage_scope", "xarm6"))
-        ).lower()
-        self._lg_slippage_triggered = False
+        raw_failure_scenarios = kw.pop("failure_scenarios", None)
+        self.failure_scenarios = self._normalize_failure_scenario_bindings(raw_failure_scenarios)
+        self._triggered_failure_scenarios: set[str] = set()
 
         # Controller config from the environment-specific robot JSON block.
         controller_config = kw.pop("controller_config", {})
@@ -88,9 +81,9 @@ class RobotAgent(ResourceAgent):
         self._position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"
         self._bridge_pose_ref: Optional[str] = None
-        # Phased context threading through pick→grasp→approach→insert.
-        # Replaces the controller's _active_ctx; owned by the agent.
-        self._pick_ctx: Dict[str, Any] = {}  # open, closed
+        # Shared task execution context threaded across task-level functions.
+        # `_pick_ctx` remains as a temporary compatibility alias.
+        self._task_ctx: Dict[str, Any] = {}
         # Use pre-initialized controller (from Gazebo prewarm) if available,
         # to avoid paying the ROS2 init cost again on first task.
         if self._injected_controller is not None:
@@ -109,13 +102,19 @@ class RobotAgent(ResourceAgent):
         self.logger.info(
             (
                 "RobotAgent '%s' initialized. mode=%s tools=%s "
-                "lg_slippage_mode=%s lg_slippage_scope=%s"
+                "failure_scenarios=%s"
             ),
             name,
             self.execution_mode,
             list(self.executables.keys()),
-            self.lg_slippage_mode,
-            self.lg_slippage_scope,
+            [
+                {
+                    "scenario_id": binding.get("scenario_id"),
+                    "mode": binding.get("mode"),
+                    "scope": binding.get("scope"),
+                }
+                for binding in self.failure_scenarios
+            ],
         )
 
     async def teardown(self) -> None:
@@ -177,21 +176,468 @@ class RobotAgent(ResourceAgent):
             return ref
         return f"{ref}@{self._jid_domain()}"
 
-    def _should_inject_lg_slippage(self, target_part_name: str) -> bool:
-        """Return True if LG slippage should be injected for this placement."""
-        if str(target_part_name) != "LG":
-            return False
-        if self.lg_slippage_mode == "off":
-            return False
+    @property
+    def _pick_ctx(self) -> Dict[str, Any]:
+        """Compatibility alias for older code paths that still reference `_pick_ctx`."""
+        return self._task_ctx
 
-        if self.lg_slippage_scope not in ("any", self._robot_scope_name()):
-            return False
+    @_pick_ctx.setter
+    def _pick_ctx(self, value: Dict[str, Any]) -> None:
+        self._task_ctx = value if isinstance(value, dict) else {}
 
-        if self.lg_slippage_mode == "once" and self._lg_slippage_triggered:
-            return False
+    @staticmethod
+    def _normalize_failure_scenario_bindings(raw_bindings: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for raw_binding in raw_bindings or []:
+            if isinstance(raw_binding, str):
+                binding = {"scenario_id": raw_binding}
+            elif isinstance(raw_binding, dict):
+                binding = deepcopy(raw_binding)
+            else:
+                continue
+            scenario_id = str(binding.get("scenario_id") or "").strip()
+            if not scenario_id:
+                continue
+            mode = str(binding.get("mode") or "always").strip().lower()
+            if mode not in {"always", "once", "off"}:
+                mode = "always"
+            scope = str(binding.get("scope") or "any").strip().lower() or "any"
+            binding["scenario_id"] = scenario_id
+            binding["mode"] = mode
+            binding["scope"] = scope
+            normalized.append(binding)
+        return normalized
 
-        self._lg_slippage_triggered = True
-        return True
+    @staticmethod
+    def _normalize_optional_selector(
+        raw_value: Any,
+        *,
+        lowercase: bool = False,
+    ) -> set[str] | None:
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, str):
+            raw_items = [raw_value]
+        elif isinstance(raw_value, (list, tuple, set)):
+            raw_items = list(raw_value)
+        else:
+            return set()
+
+        values: set[str] = set()
+        for raw_item in raw_items:
+            token = str(raw_item or "").strip()
+            if not token:
+                continue
+            values.add(token.lower() if lowercase else token)
+        if not values:
+            return set()
+        return values
+
+    def _scenario_selector_values(
+        self,
+        *,
+        trigger: dict[str, Any],
+        scenario_id: str,
+        plural_key: str,
+        singular_key: str | None = None,
+        lowercase: bool = False,
+    ) -> set[str] | None:
+        if plural_key in trigger:
+            raw_value = trigger.get(plural_key)
+        elif singular_key and singular_key in trigger:
+            raw_value = trigger.get(singular_key)
+        else:
+            return None
+        values = self._normalize_optional_selector(raw_value, lowercase=lowercase)
+        if values == set():
+            self.logger.warning(
+                "[Robot] Failure scenario '%s' has invalid selector '%s'; skipping scenario.",
+                scenario_id,
+                plural_key,
+            )
+        return values
+
+    def _match_failure_scenario(
+        self,
+        *,
+        function_name: str,
+        checkpoint: str,
+        part_name: str = "",
+        call_args: Dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        function_token = str(function_name or "").strip().lower()
+        checkpoint_token = str(checkpoint or "").strip().lower()
+        part_token = str(part_name or "").strip()
+        for binding in self.failure_scenarios:
+            scenario_id = str(binding.get("scenario_id") or "").strip()
+            if not scenario_id:
+                continue
+            mode = str(binding.get("mode") or "always").strip().lower()
+            scope = str(binding.get("scope") or "any").strip().lower() or "any"
+            if mode == "off":
+                continue
+            if scope not in {"any", self._robot_scope_name()}:
+                continue
+            trigger_key = str(binding.get("trigger_key") or scenario_id).strip() or scenario_id
+            if mode == "once" and trigger_key in self._triggered_failure_scenarios:
+                continue
+
+            try:
+                scenario_config = load_failure_scenario_config(scenario_id)
+            except Exception:
+                self.logger.exception(
+                    "[Robot] Failed to load failure scenario config '%s'.",
+                    scenario_id,
+                )
+                continue
+
+            trigger = dict(scenario_config.get("trigger") or {})
+            function_names = self._scenario_selector_values(
+                trigger=trigger,
+                scenario_id=scenario_id,
+                plural_key="function_names",
+                singular_key="function_name",
+                lowercase=True,
+            )
+            if function_names == set():
+                continue
+            if function_names is not None and function_token not in function_names:
+                continue
+
+            checkpoints = self._scenario_selector_values(
+                trigger=trigger,
+                scenario_id=scenario_id,
+                plural_key="checkpoints",
+                lowercase=True,
+            )
+            if checkpoints == set():
+                continue
+            if checkpoints is not None and checkpoint_token not in checkpoints:
+                continue
+
+            part_names = self._scenario_selector_values(
+                trigger=trigger,
+                scenario_id=scenario_id,
+                plural_key="part_names",
+                singular_key="part_name",
+            )
+            if part_names == set():
+                continue
+            if part_names is not None and part_token not in part_names:
+                continue
+
+            execution_modes = self._scenario_selector_values(
+                trigger=trigger,
+                scenario_id=scenario_id,
+                plural_key="execution_modes",
+                lowercase=True,
+            )
+            if execution_modes == set():
+                continue
+            if execution_modes is None:
+                execution_modes = self._scenario_selector_values(
+                    trigger=dict(scenario_config.get("injection") or {}),
+                    scenario_id=scenario_id,
+                    plural_key="enabled_execution_modes",
+                    lowercase=True,
+                )
+                if execution_modes == set():
+                    continue
+            if execution_modes is not None and self.execution_mode not in execution_modes:
+                continue
+
+            effects = deepcopy(scenario_config.get("effects") or [])
+            if not isinstance(effects, list) or not effects:
+                self.logger.warning(
+                    "[Robot] Failure scenario '%s' has no effects; skipping scenario.",
+                    scenario_id,
+                )
+                continue
+
+            return {
+                "scenario_id": scenario_id,
+                "trigger_key": trigger_key,
+                "binding": deepcopy(binding),
+                "scenario_config": deepcopy(scenario_config),
+                "effects": effects,
+                "call_args": deepcopy(call_args or {}),
+                "function_name": str(function_name or "").strip(),
+                "checkpoint": str(checkpoint or "").strip(),
+                "matched_part_name": part_token,
+                "base_failure_context": failure_context_from_scenario_config(scenario_config),
+            }
+        return None
+
+    @staticmethod
+    def _resolve_effect_ref(ref: str, effect_context: Dict[str, Any]) -> Any:
+        path = [segment for segment in str(ref or "").split(".") if segment]
+        if not path:
+            raise ValueError("effect ref is empty")
+        sentinel = object()
+        current: Any = effect_context.get(path[0], sentinel)
+        if current is sentinel:
+            raise KeyError(path[0])
+        for segment in path[1:]:
+            if isinstance(current, dict):
+                if segment not in current:
+                    raise KeyError(ref)
+                current = current[segment]
+            else:
+                if not hasattr(current, segment):
+                    raise KeyError(ref)
+                current = getattr(current, segment)
+        return deepcopy(current)
+
+    def _resolve_effect_value(self, value: Any, effect_context: Dict[str, Any]) -> Any:
+        if isinstance(value, dict):
+            if set(value.keys()) == {"ref"}:
+                return self._resolve_effect_ref(str(value.get("ref") or ""), effect_context)
+            return {
+                key: self._resolve_effect_value(item, effect_context)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._resolve_effect_value(item, effect_context) for item in value]
+        return deepcopy(value)
+
+    def _scenario_error_result(
+        self,
+        match: Dict[str, Any],
+        *,
+        message: str,
+        effect_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        scenario_id = str(match.get("scenario_id") or "").strip() or "unknown_scenario"
+        detail = f"Failure scenario '{scenario_id}' is misconfigured: {message}"
+        self.logger.error("[Robot] %s", detail)
+        observations = deepcopy(effect_context.get("emitted_observations") or {})
+        observations["scenario_error"] = message
+        failure_event = build_failure_event(
+            failed_task_id=str(effect_context.get("task_id") or "").strip(),
+            failed_resource_jid=str(self.jid or "").strip(),
+            failed_function_name=str(effect_context.get("function_name") or "").strip(),
+            final_status="failed",
+            part_name=str(effect_context.get("matched_part_name") or "").strip(),
+            base_failure_context=deepcopy(effect_context.get("base_failure_context") or {}),
+            observations=observations,
+        )
+        failure_context = dict(failure_event.get("failure_context") or {})
+        failure_observations = deepcopy(failure_context.get("observations") or {})
+        return {
+            "status": "failed",
+            "content": detail,
+            "observations": failure_observations,
+            "failure_context": failure_context,
+        }
+
+    async def _apply_failure_effect(
+        self,
+        *,
+        match: Dict[str, Any],
+        effect: Dict[str, Any],
+        effect_context: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        effect_type = str(effect.get("type") or "").strip()
+        if not effect_type:
+            raise ValueError("effect is missing type")
+
+        if effect_type == "set_agent_field":
+            field = str(effect.get("field") or "").strip()
+            if not field:
+                raise ValueError("set_agent_field requires 'field'")
+            value = self._resolve_effect_value(effect.get("value"), effect_context)
+            setattr(self, field, value)
+            if field in {"_task_ctx", "_pick_ctx"}:
+                effect_context["task_ctx"] = self._task_ctx
+            return None
+
+        if effect_type == "clear_agent_field":
+            field = str(effect.get("field") or "").strip()
+            if not field:
+                raise ValueError("clear_agent_field requires 'field'")
+            setattr(self, field, None)
+            if field in {"_task_ctx", "_pick_ctx"}:
+                effect_context["task_ctx"] = self._task_ctx
+            return None
+
+        if effect_type == "clear_task_context":
+            self._task_ctx = {}
+            effect_context["task_ctx"] = self._task_ctx
+            return None
+
+        if effect_type == "detach_attached_model":
+            model_name = str(
+                self._resolve_effect_value(effect.get("model_name"), effect_context) or ""
+            ).strip()
+            if model_name:
+                result = await self._execute_primitive("detach_part", {"model_name": model_name})
+                if not result.get("success", False):
+                    self.logger.warning(
+                        "[Robot] Failure effect detach_part did not succeed for %s: %s",
+                        model_name,
+                        result.get("message"),
+                    )
+            return None
+
+        if effect_type == "open_gripper":
+            result = await self._execute_primitive("open_gripper", {})
+            if not result.get("success", False):
+                self.logger.warning(
+                    "[Robot] Failure effect open_gripper did not succeed: %s",
+                    result.get("message"),
+                )
+            return None
+
+        if effect_type == "set_entity_pose":
+            model_name = str(
+                self._resolve_effect_value(effect.get("model_name"), effect_context) or ""
+            ).strip()
+            pose = self._resolve_effect_value(effect.get("pose"), effect_context)
+            orientation_quat = self._resolve_effect_value(
+                effect.get("orientation_quat"),
+                effect_context,
+            )
+            if not model_name:
+                return None
+            if not isinstance(pose, dict):
+                raise ValueError("set_entity_pose requires pose dict")
+            if not isinstance(orientation_quat, dict):
+                raise ValueError("set_entity_pose requires orientation_quat dict")
+            try:
+                x = float(pose["x"])
+                y = float(pose["y"])
+                z = float(pose["z"])
+                qx = float(orientation_quat["qx"])
+                qy = float(orientation_quat["qy"])
+                qz = float(orientation_quat["qz"])
+                qw = float(orientation_quat["qw"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"set_entity_pose has invalid pose/quaternion: {exc}") from exc
+            if self.execution_mode == "dry_run" or self._controller is None:
+                return None
+            try:
+                await asyncio.to_thread(
+                    self._controller.set_entity_pose,
+                    model_name,
+                    x=x,
+                    y=y,
+                    z=z,
+                    qx=qx,
+                    qy=qy,
+                    qz=qz,
+                    qw=qw,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "[Robot] Failure effect set_entity_pose failed for %s: %s",
+                    model_name,
+                    exc,
+                )
+            return None
+
+        if effect_type == "emit_observation_fields":
+            fields = effect.get("fields")
+            if not isinstance(fields, dict):
+                raise ValueError("emit_observation_fields requires 'fields' dict")
+            resolved_fields = self._resolve_effect_value(fields, effect_context)
+            if not isinstance(resolved_fields, dict):
+                raise ValueError("emit_observation_fields resolved to non-dict")
+            effect_context["emitted_observations"].update(resolved_fields)
+            return None
+
+        if effect_type == "return_failure":
+            status = str(
+                self._resolve_effect_value(effect.get("status") or "failed", effect_context)
+                or "failed"
+            ).strip()
+            content = str(
+                self._resolve_effect_value(effect.get("content") or "task failed", effect_context)
+                or "task failed"
+            ).strip()
+            failure_event = build_failure_event(
+                failed_task_id=str(effect_context.get("task_id") or "").strip(),
+                failed_resource_jid=str(self.jid or "").strip(),
+                failed_function_name=str(effect_context.get("function_name") or "").strip(),
+                final_status=status,
+                part_name=str(effect_context.get("matched_part_name") or "").strip(),
+                base_failure_context=deepcopy(effect_context.get("base_failure_context") or {}),
+                observations=deepcopy(effect_context.get("emitted_observations") or {}),
+            )
+            failure_context = dict(failure_event.get("failure_context") or {})
+            failure_observations = deepcopy(failure_context.get("observations") or {})
+            return {
+                "status": status,
+                "content": content,
+                "observations": failure_observations,
+                "failure_context": failure_context,
+            }
+
+        raise ValueError(f"unknown failure effect type '{effect_type}'")
+
+    async def _maybe_inject_failure(
+        self,
+        *,
+        function_name: str,
+        checkpoint: str,
+        part_name: str = "",
+        call_args: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        match = self._match_failure_scenario(
+            function_name=function_name,
+            checkpoint=checkpoint,
+            part_name=part_name,
+            call_args=call_args,
+        )
+        if match is None:
+            return None
+
+        self.logger.warning(
+            "[Robot] Injecting failure scenario '%s' at %s.%s",
+            match["scenario_id"],
+            function_name,
+            checkpoint,
+        )
+        self._triggered_failure_scenarios.add(str(match.get("trigger_key") or "").strip())
+
+        effect_context: Dict[str, Any] = {
+            "agent": self,
+            "task_ctx": self._task_ctx,
+            "call_args": deepcopy(call_args or {}),
+            "injection": deepcopy(dict(match["scenario_config"].get("injection") or {})),
+            "matched_part_name": str(match.get("matched_part_name") or "").strip(),
+            "task_id": str(dict(call_args or {}).get("task_id") or "").strip(),
+            "function_name": str(function_name or "").strip(),
+            "base_failure_context": deepcopy(match.get("base_failure_context") or {}),
+            "emitted_observations": {},
+        }
+
+        for effect in match.get("effects") or []:
+            if not isinstance(effect, dict):
+                return self._scenario_error_result(
+                    match,
+                    message="effect entry is not an object",
+                    effect_context=effect_context,
+                )
+            try:
+                maybe_result = await self._apply_failure_effect(
+                    match=match,
+                    effect=effect,
+                    effect_context=effect_context,
+                )
+            except Exception as exc:
+                return self._scenario_error_result(
+                    match,
+                    message=str(exc),
+                    effect_context=effect_context,
+                )
+            if maybe_result is not None:
+                return maybe_result
+
+        return self._scenario_error_result(
+            match,
+            message="scenario completed without a return_failure effect",
+            effect_context=effect_context,
+        )
 
     def _build_controller(self):
         """
@@ -276,50 +722,29 @@ class RobotAgent(ResourceAgent):
             return False, time.monotonic() - start
         return bool(ok), time.monotonic() - start
 
-    def _classify_failure_mode(self, message: str) -> str:
-        text = str(message or "").strip().lower()
-        if not text:
-            return "unknown"
-        if "timed out" in text or "timeout" in text:
-            return "timeout"
-        if any(
-            marker in text
-            for marker in (
-                "no parts detected",
-                "not detected",
-                "cannot read current ee pose",
-                "planning fraction",
-                "trajectory goal rejected",
-                "failed to move",
-                "failed to descend",
-                "failed to lift",
-                "unreachable",
-            )
-        ):
-            return "unreachable"
-        if "safety" in text and "block" in text:
-            return "safety_block"
-        return "unknown"
-
     def _task_failure(
         self,
         message: str,
         *,
         step: str,
         observations: Optional[Dict[str, Any]] = None,
+        failure_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         detail = str(message or "task failed")
         self.logger.error("[Robot] %s failed: %s", step, detail)
         failure_observations: Dict[str, Any] = {"step": step}
         if isinstance(observations, dict):
             failure_observations.update(observations)
+        context_payload = deepcopy(failure_context if isinstance(failure_context, dict) else {})
+        merged_observations = deepcopy(context_payload.get("observations") or {})
+        if not isinstance(merged_observations, dict):
+            merged_observations = {}
+        merged_observations.update(failure_observations)
+        context_payload["observations"] = merged_observations
         return {
             "status": "failed",
             "content": detail,
-            "failure_context": {
-                "failure_mode": self._classify_failure_mode(detail),
-                "observations": failure_observations,
-            },
+            "failure_context": context_payload,
         }
 
     async def _execute_controller_helper(
@@ -425,13 +850,38 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
+        call_args = {
+            "origin_resource_location": origin_resource_location,
+            "part_name": part_name,
+            "speed": speed,
+            "product_jid": product_jid,
+            "task_id": task_id,
+            "product_geometry": product_geometry,
+        }
+        injected = await self._maybe_inject_failure(
+            function_name="pick_approach",
+            checkpoint="before_execute",
+            part_name=part_name,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         if self.execution_mode == "dry_run":
             await self._simulate_action(
                 f"Travel empty to pick location {origin_resource_location} for {part_name} "
                 f"(speed={speed or 'default'})",
                 duration=5.0,
             )
-            self._pick_ctx = {
+            injected = await self._maybe_inject_failure(
+                function_name="pick_approach",
+                checkpoint="after_execute_before_commit",
+                part_name=part_name,
+                call_args=call_args,
+            )
+            if injected is not None:
+                return injected
+            self._task_ctx = {
                 "part_name": part_name,
                 "model_name": "",
                 "tx": 0.0, "ty": 0.0, "tz": 0.0,
@@ -519,7 +969,16 @@ class RobotAgent(ResourceAgent):
                 observations={"part_name": targets.get("part_name")},
             )
 
-        self._pick_ctx = {
+        injected = await self._maybe_inject_failure(
+            function_name="pick_approach",
+            checkpoint="after_execute_before_commit",
+            part_name=part_name,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
+        self._task_ctx = {
             "part_name": targets["part_name"],
             "model_name": targets["model_name"],
             "tx": targets["tx"],
@@ -599,6 +1058,23 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
+        call_args = {
+            "part_name": part_name,
+            "origin_resource_location": origin_resource_location,
+            "gripper": gripper,
+            "product_jid": product_jid,
+            "task_id": task_id,
+            "product_geometry": product_geometry,
+        }
+        injected = await self._maybe_inject_failure(
+            function_name="pick_grasp",
+            checkpoint="before_execute",
+            part_name=part_name,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         if self.execution_mode == "dry_run":
             await self._simulate_action(
                 f"Picking {part_name} from {origin_resource_location} "
@@ -617,7 +1093,7 @@ class RobotAgent(ResourceAgent):
                 )
 
             # Attach part in simulation (Gazebo link attacher).
-            model_name = self._pick_ctx.get("model_name", "")
+            model_name = self._task_ctx.get("model_name", "")
             if model_name:
                 self._log_step("pick_grasp", "attaching part", model=model_name)
                 r = await self._execute_primitive("attach_part", {"model_name": model_name})
@@ -629,9 +1105,9 @@ class RobotAgent(ResourceAgent):
                     )
 
             # Lift part to travel height after grasping.
-            travel_z = self._pick_ctx.get("travel_z", 1.2)
-            tx = self._pick_ctx.get("tx", 0.0)
-            ty = self._pick_ctx.get("ty", 0.0)
+            travel_z = self._task_ctx.get("travel_z", 1.2)
+            tx = self._task_ctx.get("tx", 0.0)
+            ty = self._task_ctx.get("ty", 0.0)
             self._log_step("pick_grasp", "lifting part", z=f"{travel_z:.3f}")
             r = await self._execute_controller_helper(
                 "_move_pose_direct",
@@ -644,6 +1120,15 @@ class RobotAgent(ResourceAgent):
                     observations={"part_name": part_name},
                 )
 
+        injected = await self._maybe_inject_failure(
+            function_name="pick_grasp",
+            checkpoint="after_execute_before_commit",
+            part_name=part_name,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         self._held_part = part_name
         self._current_state = "picked"
         self._gripper_state = "closed"
@@ -653,9 +1138,9 @@ class RobotAgent(ResourceAgent):
             "observations": {
                 "part_name": part_name,
                 "origin_pose": {
-                    "x": self._pick_ctx.get("tx", 0.0),
-                    "y": self._pick_ctx.get("ty", 0.0),
-                    "z": self._pick_ctx.get("tz", 0.0),
+                    "x": self._task_ctx.get("tx", 0.0),
+                    "y": self._task_ctx.get("ty", 0.0),
+                    "z": self._task_ctx.get("tz", 0.0),
                 },
             },
         }
@@ -724,13 +1209,38 @@ class RobotAgent(ResourceAgent):
                 part_name, self._held_part
             )
 
+        call_args = {
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "speed": speed,
+            "product_jid": product_jid,
+            "task_id": task_id,
+            "product_geometry": product_geometry,
+        }
+        injected = await self._maybe_inject_failure(
+            function_name="place_approach",
+            checkpoint="before_execute",
+            part_name=part_name or str(self._held_part or ""),
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         if self.execution_mode == "dry_run":
             await self._simulate_action(
                 f"Move loaded part {self._held_part} to {destination_location} "
                 f"(speed={speed or 'default'})",
                 duration=5.0,
             )
-            self._pick_ctx.update({
+            injected = await self._maybe_inject_failure(
+                function_name="place_approach",
+                checkpoint="after_execute_before_commit",
+                part_name=part_name or str(self._held_part or ""),
+                call_args=call_args,
+            )
+            if injected is not None:
+                return injected
+            self._task_ctx.update({
                 "slot_x": 0.0, "slot_y": 0.0,
                 "board_top_z": 1.025, "place_z": 1.1,
                 "destination_location": destination_location,
@@ -746,7 +1256,7 @@ class RobotAgent(ResourceAgent):
         # Simulation / physical: geometry helper + primitives.
         place = await asyncio.to_thread(
             self._controller.compute_place_targets,
-            self._pick_ctx,
+            self._task_ctx,
             product_geometry,
             part_name,
             0.0,
@@ -758,9 +1268,9 @@ class RobotAgent(ResourceAgent):
                 step="place_approach.compute_place_targets",
                 observations={"part_name": self._held_part},
             )
-        travel_z = self._pick_ctx.get("travel_z", 1.2)
-        tx = self._pick_ctx.get("tx", 0.0)
-        ty = self._pick_ctx.get("ty", 0.0)
+        travel_z = self._task_ctx.get("travel_z", 1.2)
+        tx = self._task_ctx.get("tx", 0.0)
+        ty = self._task_ctx.get("ty", 0.0)
         self._log_step(
             "place_approach",
             "computed place targets",
@@ -812,7 +1322,16 @@ class RobotAgent(ResourceAgent):
                 observations={"part_name": self._held_part},
             )
 
-        self._pick_ctx.update({
+        injected = await self._maybe_inject_failure(
+            function_name="place_approach",
+            checkpoint="after_execute_before_commit",
+            part_name=part_name or str(self._held_part or ""),
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
+        self._task_ctx.update({
             "slot_x": place["slot_x"],
             "slot_y": place["slot_y"],
             "board_top_z": place["board_top_z"],
@@ -821,7 +1340,7 @@ class RobotAgent(ResourceAgent):
             "destination_location": destination_location,
         })
         if place.get("model_name"):
-            self._pick_ctx["model_name"] = place["model_name"]
+            self._task_ctx["model_name"] = place["model_name"]
 
         self._current_state = "positioned"
         self._position = {
@@ -892,59 +1411,22 @@ class RobotAgent(ResourceAgent):
             return {"status": "blocked", "content": msg}
 
         placed_target = part_name or self._held_part
-        if self._should_inject_lg_slippage(placed_target):
-            self.logger.error("[Robot] Assembly verification failed for %s.", placed_target)
-
-            # Simulate failed insertion by dropping LG into a UR5e-reachable
-            # recovery lane near the UR5e base, out of xArm6 reach.
-            drop_x, drop_y, drop_z = 0.0, 0.20, 1.035
-            if self.execution_mode != "dry_run":
-                model_name = self._pick_ctx.get("model_name", "")
-                if model_name and self._controller is not None:
-                    await asyncio.to_thread(
-                        self._controller.detach_part, model_name
-                    )
-                    # Place near the UR5e base, away from the board.
-                    # LG recovery uses a flat top-down pickup, so keep the part upright.
-                    await asyncio.to_thread(
-                        self._controller.set_entity_pose,
-                        model_name,
-                        x=drop_x, y=drop_y, z=drop_z,
-                        qx=0.0, qy=0.0, qz=0.0, qw=1.0,
-                    )
-                    self.logger.warning(
-                        "[Robot] LG slippage: %s rolled to the ur5e-side "
-                        "recovery lane (%.2f, %.2f, %.2f)",
-                        model_name, drop_x, drop_y, drop_z,
-                    )
-                    await asyncio.to_thread(self._controller.open_gripper)
-
-            self._held_part = None
-            self._current_state = "recovery_required"
-            self._gripper_state = "open"
-            self._pick_ctx = {}
-
-            return {
-                "status": "failed",
-                "content": "Assembly verification failed.",
-                "observations": {
-                    "gripper_force": 0.0,
-                    "camera_detection": {
-                        "object_found": True,
-                        "zone": "assembly_board_v1",
-                        "shape_match_confidence": 0.85,
-                        "orientation": "flat",
-                        "visible_damage": False,
-                    },
-                    "last_commanded_location": destination_location,
-                    "dropped_location": {
-                        "x": drop_x, "y": drop_y, "z": drop_z,
-                        "region": "ur5e_base_area",
-                        "near": "ur5e_recovery_lane",
-                        "description": "Rolled toward UR5e base into the ur5e-only recovery lane",
-                    },
-                },
-            }
+        call_args = {
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "orientation": orientation,
+            "product_jid": product_jid,
+            "task_id": task_id,
+            "product_geometry": product_geometry,
+        }
+        injected = await self._maybe_inject_failure(
+            function_name="place_insert",
+            checkpoint="before_execute",
+            part_name=placed_target,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
 
         if self.execution_mode == "dry_run":
             await self._simulate_action(
@@ -952,11 +1434,19 @@ class RobotAgent(ResourceAgent):
                 f"(orientation={orientation or 'default'})",
                 duration=5.0,
             )
+            injected = await self._maybe_inject_failure(
+                function_name="place_insert",
+                checkpoint="after_execute_before_commit",
+                part_name=placed_target,
+                call_args=call_args,
+            )
+            if injected is not None:
+                return injected
             placed = self._held_part
             self._held_part = None
             self._current_state = "placed"
             self._gripper_state = "open"
-            self._pick_ctx = {}
+            self._task_ctx = {}
             return {
                 "status": "completed",
                 "content": f"Assembled {placed} at {destination_location}.",
@@ -964,13 +1454,13 @@ class RobotAgent(ResourceAgent):
             }
 
         # Simulation / physical: open gripper + detach + snap + lift.
-        model_name = self._pick_ctx.get("model_name", "")
-        slot_x = self._pick_ctx.get("slot_x", 0.0)
-        slot_y = self._pick_ctx.get("slot_y", 0.0)
-        board_top_z = self._pick_ctx.get("board_top_z", 1.025)
-        part_height = self._pick_ctx.get("part_height", 0.08)
-        place_z = self._pick_ctx.get("place_z", board_top_z + part_height)
-        travel_z = self._pick_ctx.get("travel_z", 1.2)
+        model_name = self._task_ctx.get("model_name", "")
+        slot_x = self._task_ctx.get("slot_x", 0.0)
+        slot_y = self._task_ctx.get("slot_y", 0.0)
+        board_top_z = self._task_ctx.get("board_top_z", 1.025)
+        part_height = self._task_ctx.get("part_height", 0.08)
+        place_z = self._task_ctx.get("place_z", board_top_z + part_height)
+        travel_z = self._task_ctx.get("travel_z", 1.2)
         self._log_step(
             "place_insert",
             "releasing part",
@@ -993,19 +1483,27 @@ class RobotAgent(ResourceAgent):
         )
         released_ok = bool(release.get("success"))
 
+        if not released_ok:
+            return self._task_failure(
+                str(release.get("message") or f"failed to assemble {self._held_part} at {destination_location}"),
+                step="place_insert.release",
+                observations={"part_name": self._held_part, "destination_location": destination_location},
+            )
+
+        injected = await self._maybe_inject_failure(
+            function_name="place_insert",
+            checkpoint="after_execute_before_commit",
+            part_name=placed_target,
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         placed = self._held_part
         self._held_part = None
         self._current_state = "placed"
         self._gripper_state = "open"
-        self._pick_ctx = {}
-
-        if not released_ok:
-            self._current_state = "recovery_required"
-            return self._task_failure(
-                str(release.get("message") or f"failed to assemble {placed} at {destination_location}"),
-                step="place_insert.release",
-                observations={"part_name": placed, "destination_location": destination_location},
-            )
+        self._task_ctx = {}
 
         return {
             "status": "completed",
@@ -1045,17 +1543,46 @@ class RobotAgent(ResourceAgent):
             self.logger.warning("[Robot] %s", msg)
             return {"status": "blocked", "content": msg}
 
+        call_args = {
+            "product_jid": product_jid,
+            "task_id": task_id,
+        }
+        injected = await self._maybe_inject_failure(
+            function_name="move_home",
+            checkpoint="before_execute",
+            part_name="",
+            call_args=call_args,
+        )
+        if injected is not None:
+            return injected
+
         if self.execution_mode == "dry_run":
             await self._simulate_action("Moving arm to home position", duration=3.0)
+            injected = await self._maybe_inject_failure(
+                function_name="move_home",
+                checkpoint="after_execute_before_commit",
+                part_name="",
+                call_args=call_args,
+            )
+            if injected is not None:
+                return injected
             self._current_state = "idle"
             self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
             self._bridge_pose_ref = "home"
-            self._pick_ctx = {}
+            self._task_ctx = {}
             return {"status": "completed", "content": "At home position."}
 
         self._log_step("move_home", "returning robot to home pose")
         r = await self._execute_controller_helper("move_home", {})
         if r.get("success"):
+            injected = await self._maybe_inject_failure(
+                function_name="move_home",
+                checkpoint="after_execute_before_commit",
+                part_name="",
+                call_args=call_args,
+            )
+            if injected is not None:
+                return injected
             self._current_state = "idle"
             message = str(r.get("message") or "")
             if "remembered start pose" in message:
@@ -1068,9 +1595,9 @@ class RobotAgent(ResourceAgent):
                         "z": float(pose_data.get("z", 0.0)),
                     }
                 else:
-                    start_x = self._pick_ctx.get("start_x")
-                    start_y = self._pick_ctx.get("start_y")
-                    start_z = self._pick_ctx.get("start_z")
+                    start_x = self._task_ctx.get("start_x")
+                    start_y = self._task_ctx.get("start_y")
+                    start_z = self._task_ctx.get("start_z")
                     self._position = {
                         "x": float(start_x or 0.0),
                         "y": float(start_y or 0.0),
@@ -1080,7 +1607,7 @@ class RobotAgent(ResourceAgent):
             else:
                 self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
                 self._bridge_pose_ref = "home"
-            self._pick_ctx = {}
+            self._task_ctx = {}
             return {"status": "completed", "content": "At home position."}
 
         return self._task_failure(

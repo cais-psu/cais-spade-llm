@@ -1,0 +1,42 @@
+{
+  "scenario_id": "move_home_failure",
+  "trigger": {
+    "resource_type": "robot",
+    "function_names": [
+      "move_home"
+    ],
+    "checkpoints": [
+      "after_execute_before_commit"
+    ],
+    "execution_modes": [
+      "dry_run"
+    ]
+  },
+  "observation_template": {
+    "observation_required": true
+  },
+  "effects": [
+    {
+      "type": "set_agent_field",
+      "field": "_current_state",
+      "value": "failed"
+    },
+    {
+      "type": "clear_task_context"
+    },
+    {
+      "type": "emit_observation_fields",
+      "fields": {
+        "scenario_id": "move_home_failure",
+        "requested_task_id": {
+          "ref": "task_id"
+        }
+      }
+    },
+    {
+      "type": "return_failure",
+      "status": "failed",
+      "content": "Move home failure injected."
+    }
+  ]
+}

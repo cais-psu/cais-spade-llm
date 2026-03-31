@@ -7,7 +7,7 @@ import logging
 import json
 from typing import Any, Callable, Coroutine, Optional
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.bridge_adapters import (
     canonical_bridge_event,
     canonical_bridge_resource,
 )
@@ -129,7 +129,7 @@ def _bridge_resource_entries(
     bridge_snapshot: dict[str, Any] | None,
     bridge_resources: dict[str, Any] | None,
 ) -> dict[str, dict[str, Any]]:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
         filter_synthesis_primitive_catalog,
     )
 
@@ -898,7 +898,7 @@ def _normalize_primitive_bridge_proposal(
     obligation_targets: list[dict[str, Any]] | None = None,
 ) -> Optional[dict[str, Any]]:
     """Validate and normalize a primitive-based bridge proposal."""
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
         expected_snapshot_from_bridge_snapshot,
         resolve_param_refs,
         resolve_step_param_refs,

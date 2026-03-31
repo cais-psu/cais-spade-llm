@@ -20,7 +20,6 @@ _INIT_DIR = Path("cais_spade_llm/initialization/products")
 _PRODUCT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_PRODUCT_INSTRUCTIONS = "This product requires to be printed and assembled as specified."
 
-_REPLAN_MODES = ["des", "llm", "none"]
 _PRODUCT_CONFIG_ORDER = [
     "type",
     "jid",
@@ -30,7 +29,6 @@ _PRODUCT_CONFIG_ORDER = [
     "instructions",
     "product_specification_file",
     "product_geometry_file",
-    "replan_mode",
 ]
 _READONLY_PRODUCT_CONFIG_KEYS = {"type"}
 _CONTROLLED_PRODUCT_CONFIG_KEYS = {
@@ -40,7 +38,6 @@ _CONTROLLED_PRODUCT_CONFIG_KEYS = {
     "domain",
     "instructions",
     "product_geometry_file",
-    "replan_mode",
 }
 
 # Geometry template matching assembly_board-v1 structure.
@@ -78,7 +75,7 @@ _GEO_TEMPLATE = {
 
 def _editable_product_fields() -> list[str]:
     """Fields the user can edit in the product configuration table."""
-    return ["instructions", "product_geometry_file", "replan_mode"]
+    return ["instructions", "product_geometry_file"]
 
 
 def _default_product_meta(product_name: str = "") -> dict[str, Any]:
@@ -92,20 +89,17 @@ def _default_product_meta(product_name: str = "") -> dict[str, Any]:
         "instructions": _DEFAULT_PRODUCT_INSTRUCTIONS,
         "product_specification_file": str(_REQ_DIR / f"{name}.txt") if name else "",
         "product_geometry_file": "",
-        "replan_mode": "des",
     }
 
 
 def _normalize_product_meta(meta: dict[str, Any] | None, *, product_name: str = "") -> dict[str, Any]:
     out = dict(_default_product_meta(product_name))
     for key, value in dict(meta or {}).items():
-        if str(key).strip() == "cad_path":
+        if str(key).strip() in {"cad_path", "replan_mode"}:
             continue
         out[str(key)] = value
     if not isinstance(out.get("functions"), list):
         out["functions"] = []
-    if str(out.get("replan_mode", "")).strip() not in _REPLAN_MODES:
-        out["replan_mode"] = "des"
     return out
 
 
@@ -324,8 +318,6 @@ def render(bridge: SystemBridge) -> None:
 
                     if key == "product_geometry_file":
                         value = str(getattr(value_widget, "value", "") or "").strip()
-                    elif key == "replan_mode":
-                        value = str(getattr(value_widget, "value", "") or "des").strip() or "des"
                     elif key in {"type", "jid", "password", "domain", "instructions"}:
                         value = str(getattr(value_widget, "value", "") or "")
                     else:
@@ -375,12 +367,6 @@ def render(bridge: SystemBridge) -> None:
                                 value_widget = ui.select(
                                     geo_options,
                                     value=str(value or ""),
-                                    label="Value",
-                                ).classes("flex-1")
-                            elif key == "replan_mode":
-                                value_widget = ui.select(
-                                    {mode: mode for mode in _REPLAN_MODES},
-                                    value=str(value or "des"),
                                     label="Value",
                                 ).classes("flex-1")
                             elif key in {"type", "jid", "password", "domain"}:

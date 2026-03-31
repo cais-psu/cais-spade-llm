@@ -26,6 +26,10 @@ from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_sc
     build_preprogrammed_bridge_proposal,
     canonical_preprogrammed_bridge_scenario_id,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
+    DEFAULT_BRIDGE_DEBUG_DIR,
+    write_bridge_artifacts,
+)
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
@@ -57,7 +61,6 @@ class ProductAgent(LlmAgent):
         instruction_override: Optional[str] = None,
         cca_jid: Optional[str] = None,
         camera: Optional["CameraModule"] = None,
-        replan_mode: str = "llm",
         precomputed_bundle: Optional[Dict[str, Any]] = None,
         **kw,
     ) -> None:
@@ -65,7 +68,6 @@ class ProductAgent(LlmAgent):
         :param resource_jids: List of RA JIDs to target (first is used).
         :param product_specification_file: Path to spec text (utf-8). Optional.
         :param instruction_override: If provided, this text is used instead of reading a file.
-        :param replan_mode: Online replanning strategy — "des", "llm", or "none".
         """
         super().__init__(jid, password, name=name, agent_role="product", **kw)
 
@@ -84,7 +86,6 @@ class ProductAgent(LlmAgent):
         # Cache safety text for use during replanning
         self.safety_text: str = ""
 
-        self.replan_mode = replan_mode
         self.precomputed_bundle: dict[str, Any] = dict(precomputed_bundle or {})
 
         # Planner scaffolding
@@ -122,6 +123,7 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
         self._bridge_generation_mode = "auto"
+        self._bridge_reasoning_mode = "single_shot"
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
         self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
@@ -158,6 +160,12 @@ class ProductAgent(LlmAgent):
             ).strip().lower()
             if self._bridge_generation_mode not in {"auto", "manual"}:
                 self._bridge_generation_mode = "auto"
+            self._bridge_reasoning_mode = str(
+                precomputed_policy.get("bridge_reasoning_mode", "single_shot")
+                or "single_shot"
+            ).strip().lower()
+            if self._bridge_reasoning_mode not in {"single_shot", "multi_turn"}:
+                self._bridge_reasoning_mode = "single_shot"
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -386,7 +394,6 @@ class ProductAgent(LlmAgent):
         return {
             "product_name": self.agent_name,
             "product_jid": str(self.jid),
-            "replan_mode": str(self.replan_mode or "llm").strip().lower() or "llm",
             "status": "idle",
             "resolution_class": "none",
             "trigger": "",
@@ -400,6 +407,7 @@ class ProductAgent(LlmAgent):
             "operator_guidance": "",
             "bridge_proposal": None,
             "bridge_debug": None,
+            "bridge_artifacts": {},
             "bridge_approval_state": "none",
             "active_bridge_sequence": None,
             "bridge_feedback_history": [],
@@ -436,6 +444,7 @@ class ProductAgent(LlmAgent):
         operator_guidance: str | None = None,
         bridge_proposal: dict[str, Any] | None | object = _UNSET,
         bridge_debug: dict[str, Any] | None | object = _UNSET,
+        bridge_artifacts: dict[str, Any] | None | object = _UNSET,
         bridge_approval_state: str | None = None,
         active_bridge_sequence: dict[str, Any] | None | object = _UNSET,
         bridge_feedback_history: list[str] | object = _UNSET,
@@ -446,7 +455,6 @@ class ProductAgent(LlmAgent):
         current = self._empty_runtime_recovery() if reset else deepcopy(self.runtime_recovery)
         current["product_name"] = self.agent_name
         current["product_jid"] = str(self.jid)
-        current["replan_mode"] = str(self.replan_mode or "llm").strip().lower() or "llm"
         current["attempts_max"] = int(self._runtime_repair_max_attempts)
 
         if status is not None:
@@ -471,6 +479,12 @@ class ProductAgent(LlmAgent):
             current["bridge_proposal"] = deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None
         if bridge_debug is not _UNSET:
             current["bridge_debug"] = deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None
+        if bridge_artifacts is not _UNSET:
+            current["bridge_artifacts"] = (
+                deepcopy(bridge_artifacts)
+                if isinstance(bridge_artifacts, dict)
+                else {}
+            )
         if bridge_approval_state is not None:
             current["bridge_approval_state"] = str(bridge_approval_state or "none").strip() or "none"
         if active_bridge_sequence is not _UNSET:
@@ -620,6 +634,75 @@ class ProductAgent(LlmAgent):
             self.logger.debug(f"[Product] Saved product state to {self.product_state_path.resolve()}")
         except Exception:
             self.logger.exception("[Product] Failed to persist product state.")
+
+    def _bridge_debug_directory(self) -> Path:
+        return DEFAULT_BRIDGE_DEBUG_DIR
+
+    def _build_runtime_bridge_artifact_payload(
+        self,
+        *,
+        phase: str,
+        prepared_bridge_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+        return {
+            "phase": str(phase or "").strip(),
+            "product_name": self.agent_name,
+            "product_jid": str(self.jid),
+            "runtime_recovery": deepcopy(self.runtime_recovery),
+            "prepared_bridge_request": deepcopy(prepared_bridge_request),
+            "bridge_debug": bridge_debug,
+            "updated_at_utc": self._utc_now_iso(),
+        }
+
+    def _record_runtime_bridge_artifacts(
+        self,
+        *,
+        phase: str,
+        prepared_bridge_request: dict[str, Any],
+    ) -> dict[str, str]:
+        artifact_payload = self._build_runtime_bridge_artifact_payload(
+            phase=phase,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        artifact_paths = write_bridge_artifacts(
+            artifact_payload,
+            phase_label=phase,
+            debug_dir=self._bridge_debug_directory(),
+            write_latest=True,
+            filename_prefix=f"bridge_runtime_{phase}",
+        )
+
+        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+        bridge_artifacts = deepcopy(bridge_debug.get("artifacts") or {})
+        if not isinstance(bridge_artifacts, dict):
+            bridge_artifacts = {}
+        bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
+        bridge_debug["artifacts"] = bridge_artifacts
+        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+
+        if hasattr(self.process_planner, "_set_last_bridge_debug"):
+            self.process_planner._set_last_bridge_debug(bridge_debug)
+
+        runtime_bridge_artifacts = deepcopy(self.runtime_recovery.get("bridge_artifacts") or {})
+        if not isinstance(runtime_bridge_artifacts, dict):
+            runtime_bridge_artifacts = {}
+        runtime_bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(
+            artifact_paths
+        )
+        self._set_runtime_recovery(
+            bridge_debug=bridge_debug,
+            bridge_artifacts=runtime_bridge_artifacts,
+        )
+        self.logger.info(
+            "[Product] Wrote bridge %s artifacts: prompt=%s latest_prompt=%s response=%s latest_response=%s",
+            str(phase or "").strip() or "runtime",
+            artifact_paths.get("prompt_artifact_path", ""),
+            artifact_paths.get("latest_prompt_artifact_path", ""),
+            artifact_paths.get("response_artifact_path", ""),
+            artifact_paths.get("latest_response_artifact_path", ""),
+        )
+        return artifact_paths
 
     def _persist_resource_state(self) -> None:
         """Persist each resource agent's current state snapshot to disk."""
@@ -813,7 +896,9 @@ class ProductAgent(LlmAgent):
                 self.runtime_repair_state = runtime_repair_state
             runtime_recovery = product_state.get("runtime_recovery")
             if isinstance(runtime_recovery, dict):
-                self.runtime_recovery = deepcopy(runtime_recovery)
+                restored_runtime_recovery = deepcopy(runtime_recovery)
+                restored_runtime_recovery.pop("replan_mode", None)
+                self.runtime_recovery = restored_runtime_recovery
                 self._sync_runtime_repair_state()
             alert = product_state.get("plan_safety_alert")
             self.plan_safety_alert = dict(alert) if isinstance(alert, dict) else None
@@ -1925,7 +2010,17 @@ class ProductAgent(LlmAgent):
                 self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                     prepared_bridge_request
                 )
-                if scenario_hint:
+                if hasattr(self.process_planner, "emit_prepare_trace_summary"):
+                    try:
+                        self.process_planner.emit_prepare_trace_summary(prepared_bridge_request)
+                    except Exception:
+                        self.logger.exception(
+                            "[Product] Failed to emit prepare-trace summary for runtime bridge request."
+                        )
+                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+                active_bridge_phase = str(bridge_session.get("phase") or "").strip().lower()
+                allow_preprogrammed_autoload = active_bridge_phase not in {"prepare_trace"}
+                if scenario_hint and allow_preprogrammed_autoload:
                     self.logger.info(
                         "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
                         scenario_hint,
@@ -1975,6 +2070,12 @@ class ProductAgent(LlmAgent):
                             "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
                             scenario_hint,
                         )
+                elif scenario_hint and not allow_preprogrammed_autoload:
+                    self.logger.info(
+                        "[Product] Active bridge mode left runtime recovery at prepare-trace checkpoint; "
+                        "skipping preprogrammed auto-load for scenario_id=%s",
+                        scenario_hint,
+                    )
                 message = (
                     base_message
                     or "DES found no modeled continuation. Bridge session is ready for LLM reasoning."
@@ -1996,6 +2097,14 @@ class ProductAgent(LlmAgent):
                     append_history=True,
                     history_message=message,
                 )
+                self._record_runtime_bridge_artifacts(
+                    phase="prepare",
+                    prepared_bridge_request=prepared_bridge_request,
+                )
+                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
+                    prepared_bridge_request
+                )
+                recovery = deepcopy(self.runtime_recovery)
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
@@ -2177,9 +2286,6 @@ class ProductAgent(LlmAgent):
         ok: bool,
         violations: list[dict[str, Any]],
     ) -> bool:
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            return False
-
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         if not self._runtime_recovery_context and status in {"", "idle", "resolved"}:
             return False
@@ -2350,8 +2456,6 @@ class ProductAgent(LlmAgent):
         return recovery
 
     async def generate_runtime_bridge_proposal(self) -> dict[str, Any]:
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("runtime bridge generation is only available when replan_mode=des")
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         prepared_bridge_request = deepcopy(
@@ -2415,6 +2519,16 @@ class ProductAgent(LlmAgent):
             bridge_debug = self.process_planner.get_last_bridge_debug()
             self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                 prepared_bridge_request
+            )
+            self._record_runtime_bridge_artifacts(
+                phase="single_shot",
+                prepared_bridge_request=prepared_bridge_request,
+            )
+            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
+                prepared_bridge_request
+            )
+            bridge_debug = deepcopy(
+                prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
             )
             if isinstance(proposal, dict):
                 bridge_summary = self.process_planner._bridge_summary(proposal)
@@ -2661,8 +2775,6 @@ class ProductAgent(LlmAgent):
 
     def load_preprogrammed_runtime_bridge_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
         started_at = time.perf_counter()
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("preprogrammed bridge scenarios are only available when replan_mode=des")
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
 
@@ -2746,8 +2858,6 @@ class ProductAgent(LlmAgent):
 
     def approve_runtime_bridge_proposal_sync(self) -> dict[str, Any]:
         started_at = time.perf_counter()
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("bridge approval is only available when replan_mode=des")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         if status != "llm_bridge":
             raise RuntimeError("no pending bridge proposal is awaiting approval")
@@ -3069,8 +3179,6 @@ class ProductAgent(LlmAgent):
         return self.approve_runtime_bridge_proposal_sync()
 
     async def reject_runtime_bridge_proposal(self, feedback: str) -> dict[str, Any]:
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("bridge rejection is only available when replan_mode=des")
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
@@ -3136,8 +3244,6 @@ class ProductAgent(LlmAgent):
         return recovery
 
     async def retry_runtime_recovery_des(self) -> dict[str, Any]:
-        if str(self.replan_mode or "llm").strip().lower() != "des":
-            raise RuntimeError("runtime DES retry is only available when replan_mode=des")
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         trigger = str(self._runtime_recovery_context.get("trigger", "") or "operator_retry")
@@ -3574,65 +3680,14 @@ class ProductAgent(LlmAgent):
                 reason,
                 failed_task_id,
             )
-            if str(agent.replan_mode or "llm").strip().lower() == "des":
-                await agent._handle_runtime_des_replan_request(
-                    reason=str(reason),
-                    failed_task_id=str(failed_task_id),
-                    violations=violations,
-                    system_coordination_state=system_coordination_state,
-                )
-                await asyncio.to_thread(agent._persist_product_state)
-                return
-
-            await agent.process_planner.replan_with_feedback_online(
-                violations,
+            await agent._handle_runtime_des_replan_request(
+                reason=str(reason),
+                failed_task_id=str(failed_task_id),
+                violations=violations,
                 system_coordination_state=system_coordination_state,
             )
-
-            # After online replan, let previously blocked tasks be re-evaluated via
-            # fresh safety_check when they are dispatched again.
-            candidate_ids: set[str] = set()
-            for v in violations:
-                if not isinstance(v, dict):
-                    continue
-                for k in ("failed_task_id", "task_id"):
-                    tid = v.get(k)
-                    if tid:
-                        candidate_ids.add(str(tid))
-                for k in ("affected_task_ids", "blocked_task_ids", "unreachable_task_ids"):
-                    vals = v.get(k)
-                    if isinstance(vals, (list, tuple, set)):
-                        candidate_ids.update(str(x) for x in vals if x)
-
-            reactivated = agent._reactivate_blocked_tasks(
-                candidate_task_ids=(candidate_ids or None)
-            )
-            if reactivated:
-                agent.logger.info(
-                    "[Product] Reactivated %d blocked task(s) to pending after online replan.",
-                    reactivated,
-                )
-
-            # Rebuild + re-register runtime FSA monitor context at CCA
-            # so online monitoring tracks the repaired plan structure.
-            try:
-                agent.process_planner.compile_global_fsa()
-                agent.process_planner.save_global_fsa(agent.global_fsa_path)
-
-                payload = agent._build_plan_validation_payload()
-                agent._ensure_plan_result_inbox()
-                msg_check = Message(to=agent.cca_jid)
-                msg_check.set_metadata("type", "plan_safety_check")
-                msg_check.body = json.dumps(payload)
-                await self.send(msg_check)
-
-                agent.logger.info(
-                    "[Product] Recompiled plan FSA after online replan and sent plan_safety_check to CCA."
-                )
-            except Exception:
-                agent.logger.exception(
-                    "[Product] Failed to rebuild/re-register FSA after online replan."
-                )
+            await asyncio.to_thread(agent._persist_product_state)
+            return
 
             await asyncio.to_thread(agent._persist_plan_snapshot)
             await asyncio.to_thread(agent._persist_product_state)

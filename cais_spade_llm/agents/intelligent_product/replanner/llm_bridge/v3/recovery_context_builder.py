@@ -14,23 +14,23 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     RecoveryContext,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.part_state_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.part_state_semantics import (
     part_state_is_carried,
     part_state_is_stably_grounded,
     part_state_requires_external_localization,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.bridge_adapters import (
     canonical_bridge_resource,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
     build_primitive_catalog,
     build_synthesis_primitive_catalog,
     preview_step_output,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.observation_policy import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.observation_policy import (
     primitive_supports_part_grounding,
     semantic_observation_candidates_from_grounding_candidates,
 )
@@ -1023,7 +1023,7 @@ def _rank_observers_for_part(
         score = 0
         reasons: list[str] = []
 
-        if current_state in ("error", "fault", "offline", "recovery_required"):
+        if current_state in ("error", "fault", "offline", "recovery_required", "failed"):
             score -= 90
             reasons.append(f"resource state '{current_state}' is degraded")
         elif current_state in ("idle", ""):

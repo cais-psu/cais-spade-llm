@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     RecoveryLibraryEntry,
     SynthesizedTaskFn,
     compute_primitive_fingerprint,

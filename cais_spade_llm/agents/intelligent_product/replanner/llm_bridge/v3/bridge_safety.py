@@ -7,7 +7,7 @@ import json
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.bridge_adapters import (
     bridge_adapter_capabilities,
     bridge_resource_type,
     canonical_bridge_constraint_from_rule,
@@ -187,7 +187,7 @@ class BridgeSafetyMixin:
         if focused_resource is None:
             return None, None, {}
 
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
             build_execution_primitive_catalog,
             build_synthesis_primitive_catalog,
         )

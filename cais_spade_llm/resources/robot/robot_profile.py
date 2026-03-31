@@ -110,7 +110,7 @@ def _robot_event_family(event: dict[str, Any]) -> str:
     if has_pick_verb and has_place_verb:
         return "pick_place"
     if part_to == "assembled" or "assemble" in event_name or "insert" in event_name:
-        if delta_from in {"idle", "recovery_required"} or "pick_place" in event_name:
+        if delta_from in {"idle", "recovery_required", "failed"} or "pick_place" in event_name:
             return "pick_place"
         return "assemble"
     if part_to == "in_gripper" or delta_to == "picked" or "repick" in event_name:

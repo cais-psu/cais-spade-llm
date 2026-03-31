@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_types import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.mutation_types import (
     RepairProgram,
     RepairStepKind,
     ValidatedRepairProgram,
@@ -46,43 +46,43 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.mutation_typ
     validated_program_from_dict,
     validated_program_to_dict,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.recovery_context_builder import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.recovery_context_builder import (
     build_grounding_assessment,
     build_recovery_context,
     part_observation_status,
     recovery_context_to_prompt_dict,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.repair_program_validator import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.repair_program_validator import (
     validate_repair_program,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.recovery_library import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.recovery_library import (
     RecoveryLibrary,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.outline_validation import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.outline_validation import (
     OutlineValidationResult,
     materialize_abstract_repair_order,
     materialize_outline_actions,
     outline_signature,
     validate_repair_outline,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.observation_policy import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.observation_policy import (
     observation_semantic_operation,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.primitive_semantics import (
     validate_and_project_steps,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.tss_schemas import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.tss_schemas import (
     REPAIR_TURN_RESPONSE_SCHEMA,
     PROJECT_PRIMITIVE_SEQUENCE_TOOL,
     parse_structured_response,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.tss_feedback import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.tss_feedback import (
     BridgeFeedbackSummary,
     summarize_validation_feedback,
     feedback_to_prompt_section,
     open_witnesses_to_prompt_section,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.tss_turn_cache import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.tss_turn_cache import (
     TurnCache,
     ProgramDelta,
     compute_context_fingerprint,
@@ -894,6 +894,7 @@ def _summarize_turn_thought(
             for token in (
                 "occupied",
                 "recovery_required",
+                "failed",
                 "not reachable",
                 "outside",
                 "assembled before",

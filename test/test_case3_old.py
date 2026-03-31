@@ -66,9 +66,9 @@ from cais_spade_llm.agents.central_controller.central_controller_agent import (
     CentralControllerAgent,
 )
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_adapters import (
-    bridge_adapter_capabilities,
-    canonical_bridge_resource,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
+    bridge_resource_capabilities,
+    normalize_bridge_resource,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_generation import (
     normalize_bridge_turn_response,
@@ -789,7 +789,7 @@ class FakeBridgePrinter:
         self._material_state = material_state
 
     def get_bridge_snapshot(self) -> dict[str, Any]:
-        return canonical_bridge_resource(
+        return normalize_bridge_resource(
             resource_jid=self.jid,
             resource_type="printer",
             snapshot={
@@ -5078,7 +5078,7 @@ def test_printer_only_repair_prompt_omits_manipulator_example() -> None:
                 "bridge_snapshot": deepcopy(printer_snapshot),
                 "resource_core": deepcopy(printer_snapshot.get("resource_core") or {}),
                 "resource_facets": deepcopy(printer_snapshot.get("resource_facets") or {}),
-                "bridge_adapter": bridge_adapter_capabilities("printer"),
+                "bridge_adapter": bridge_resource_capabilities("printer"),
             }
         },
         grounding_context={
@@ -5185,7 +5185,7 @@ def test_context_ref_aliases_for_step_outputs_are_supported() -> None:
 
 
 def test_pick_and_place_preview_outputs_expose_pose_aliases() -> None:
-    robot_bridge_snapshot = canonical_bridge_resource(
+    robot_bridge_snapshot = normalize_bridge_resource(
         resource_jid="robot@localhost",
         resource_type="robot",
         snapshot={
@@ -5785,7 +5785,7 @@ class FakeBridgePrinterWithPrimitives:
         }
 
     def get_bridge_snapshot(self) -> dict[str, Any]:
-        return canonical_bridge_resource(
+        return normalize_bridge_resource(
             resource_jid=self.jid,
             resource_type="printer",
             snapshot={
@@ -5832,7 +5832,7 @@ def test_printer_with_primitives_capability_derived_executable() -> None:
         active_job="JOB_42",
     )
     catalog = build_primitive_catalog(printer)
-    caps = bridge_adapter_capabilities("printer", primitive_catalog=catalog)
+    caps = bridge_resource_capabilities("printer", primitive_catalog=catalog)
     assert caps["supports_executable_bridge"] is True
     assert caps["supports_printer_job_control"] is True
     assert caps["supports_manipulator_pick_place"] is False
@@ -5847,7 +5847,7 @@ def test_snapshot_only_printer_not_executable() -> None:
     )
     catalog = build_primitive_catalog(printer)
     assert catalog == []
-    caps = bridge_adapter_capabilities("printer", primitive_catalog=catalog)
+    caps = bridge_resource_capabilities("printer", primitive_catalog=catalog)
     assert caps["supports_executable_bridge"] is False
     assert caps["supports_printer_job_control"] is False
 

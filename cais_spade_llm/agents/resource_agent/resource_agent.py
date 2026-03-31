@@ -14,6 +14,9 @@ from spade.message import Message  # SPADE message objects (XMPP stanzas under t
 from spade.template import Template  # Filters incoming messages by metadata.
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
+    build_failure_event,
+)
 
 
 class ResourceAgent(LlmAgent):
@@ -436,126 +439,33 @@ class ResourceAgent(LlmAgent):
     ) -> Dict[str, Any]:
         """
         Build a normalized failure context payload for any failure type.
-
-        Canonical schema:
-          - failure_class
-          - failure_mode
-          - retryable
-          - severity
-          - affected_entities (optional)
-          - observations (optional)
         """
-        failure_context: Dict[str, Any] = {}
-
-        if isinstance(result, dict) and isinstance(result.get("failure_context"), dict):
-            failure_context.update(result.get("failure_context") or {})
-
         is_failed = isinstance(final_status, str) and final_status.startswith("failed")
         if not is_failed:
-            return failure_context
+            if isinstance(result, dict) and isinstance(result.get("failure_context"), dict):
+                return deepcopy(result.get("failure_context") or {})
+            return {}
 
-        raw_mode = final_status.split(":", 1)[1] if ":" in final_status else final_status
-        raw_mode = str(raw_mode).strip().lower()
-        requested_mode = str(
-            failure_context.get("failure_mode") or raw_mode
-        ).strip().lower()
+        raw_failure_context = {}
+        raw_observations = {}
+        if isinstance(result, dict):
+            if isinstance(result.get("failure_context"), dict):
+                raw_failure_context = deepcopy(result.get("failure_context") or {})
+            if isinstance(result.get("observations"), dict):
+                raw_observations = deepcopy(result.get("observations") or {})
 
-        # Canonical failure taxonomy used across all resources/tools.
-        canonical_modes = {
-            "slippage",
-            "breakdown",
-            "timeout",
-            "collision",
-            "unreachable",
-            "safety_block",
-            "unknown",
-        }
-        mode_aliases = {
-            "tool_timeout": "timeout",
-            "llm_timeout": "timeout",
-            "resource_lost": "breakdown",
-            "hardware_fault": "breakdown",
-            "gripper_jam": "breakdown",
-            "jam": "breakdown",
-            "safety_violation": "safety_block",
-            "blocked": "safety_block",
-            "coordination_block": "safety_block",
-            "path_blocked": "unreachable",
-        }
-        normalized_mode = mode_aliases.get(requested_mode, requested_mode)
-        failure_mode = normalized_mode if normalized_mode in canonical_modes else "unknown"
-
-        default_class_by_mode = {
-            "breakdown": "resource_failure",
-            "collision": "environment_failure",
-            "unreachable": "environment_failure",
-            "safety_block": "coordination_failure",
-            "timeout": "execution_failure",
-            "slippage": "execution_failure",
-            "unknown": "execution_failure",
-        }
-        failure_class = str(
-            failure_context.get("failure_class")
-            or default_class_by_mode.get(failure_mode, "execution_failure")
+        failure_event = build_failure_event(
+            failed_task_id=str(fn_args.get("task_id") or "").strip(),
+            failed_resource_jid=str(getattr(self, "jid", "") or "").strip(),
+            failed_function_name=str(fn_name or "").strip(),
+            final_status=str(final_status or "").strip(),
+            part_name=str(fn_args.get("part_name") or "").strip(),
+            base_failure_context=raw_failure_context,
+            observations=raw_observations,
+            state_before=state_before,
+            state_after=state_after,
         )
-
-        non_retryable_modes = {"breakdown", "collision"}
-        retryable = failure_context.get("retryable")
-        if not isinstance(retryable, bool):
-            retryable = failure_mode not in non_retryable_modes
-
-        default_severity_by_mode = {
-            "breakdown": "high",
-            "collision": "high",
-            "unreachable": "medium",
-            "safety_block": "medium",
-            "timeout": "medium",
-            "slippage": "medium",
-            "unknown": "medium",
-        }
-        severity = str(
-            failure_context.get("severity")
-            or default_severity_by_mode.get(failure_mode, "medium")
-        )
-
-        affected_entities = failure_context.get("affected_entities")
-        if not isinstance(affected_entities, list):
-            affected_entities = []
-        if not affected_entities and fn_args.get("part_name"):
-            affected_entities = [
-                {
-                    "entity_type": "part",
-                    "entity_id": str(fn_args.get("part_name")),
-                    "state": "unknown",
-                }
-            ]
-
-        observations = failure_context.get("observations")
-        if not isinstance(observations, dict):
-            observations = {}
-        observations.setdefault("function_name", fn_name)
-        observations.setdefault("status", str(final_status))
-        observations.setdefault("raw_failure_mode", requested_mode)
-        if state_before:
-            observations.setdefault("state_before", state_before)
-        if state_after:
-            observations.setdefault("state_after", state_after)
-
-        canonical = {
-            "failure_class": failure_class,
-            "failure_mode": failure_mode,
-            "retryable": retryable,
-            "severity": severity,
-            "affected_entities": affected_entities,
-            "observations": observations,
-        }
-
-        # Preserve custom extension fields while keeping canonical keys stable.
-        for k, v in failure_context.items():
-            if k not in canonical:
-                canonical[k] = v
-
-        return canonical
+        return deepcopy(failure_event.get("failure_context") or {})
 
     async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
         """

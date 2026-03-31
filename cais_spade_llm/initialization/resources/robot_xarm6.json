@@ -13,8 +13,13 @@
       "place_insert",
       "move_home"
     ],
-    "lg_slippage_mode": "once",
-    "lg_slippage_scope": "xarm6",
+    "failure_scenarios": [
+      {
+        "scenario_id": "lg_slippage",
+        "mode": "once",
+        "scope": "xarm6"
+      }
+    ],
     "gazebo": {
       "static_capabilities": {
         "resource_type": "robot",
