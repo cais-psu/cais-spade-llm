@@ -9,7 +9,7 @@ Run with F5 / python directly:
     python test/test_case3_bridge_dryrun.py --prepare-only
     python test/test_case3_bridge_dryrun.py --model gpt-4o
     python test/test_case3_bridge_dryrun.py --show-llm-input
-    python test/test_case3_bridge_dryrun.py --show-single-shot-prompt
+    python test/test_case3_bridge_dryrun.py --show-prompt
 
 Run as pytest:
     pytest test/test_case3_bridge_dryrun.py -v
@@ -81,6 +81,9 @@ from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPla
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    transition_multi_turn_phase,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     get_resource_bridge_snapshot,
 )
@@ -89,6 +92,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
     failure_context_from_scenario_config,
     load_failure_scenario_config,
 )
+from cais_spade_llm.resources.resource_profile import get_resource_profile
 
 
 class ProcessPlannerPrepareTrace(ProcessPlanner):
@@ -116,6 +120,11 @@ CASE3_COMPLETED_TASK_IDS = (
 )
 MOCK_SINGLE_SHOT_RESPONSE = json.dumps(
     {
+        "thought": (
+            "xarm6 is failed after LG placement, and SAFE_1 keeps the protected MCP suffix blocked "
+            "until LG is recovered. Using xarm6 to recover LG is the smallest proposal that restores "
+            "the blocked suffix and returns the failed resource to a resumable state."
+        ),
         "primary_obligation": {
             "rule_id": "SAFE_2-1",
             "resource_jid": "xarm6@localhost",
@@ -124,6 +133,162 @@ MOCK_SINGLE_SHOT_RESPONSE = json.dumps(
     },
     indent=2,
 )
+MOCK_MULTI_TURN_OUTLINE_TASKS = [
+    {
+        "outline_id": "outline_clear_xarm6",
+        "resource_jid": "xarm6@localhost",
+        "macro_name": "clear_failed_robot",
+        "description": "Clear the failed robot to a resumable idle posture.",
+        "rationale": "The focused failed resource must leave the failed placement state before nominal continuation can resume.",
+        "expected_start_state": "xarm6 failed with empty gripper near failed placement pose",
+        "expected_end_state": "xarm6 idle at a safe named pose with no held part",
+        "depends_on": [],
+    },
+    {
+        "outline_id": "outline_recover_lg_with_ur5e",
+        "resource_jid": "ur5e@localhost",
+        "macro_name": "recover_lg_and_resume_mcp",
+        "description": "Return the held MCP to origin, recover LG to the board, then resume the blocked MCP flow.",
+        "rationale": "SAFE_1 keeps MCP blocked until LG is assembled, so the supporting robot must restore the missing predecessor part first.",
+        "part_name": "LG",
+        "expected_start_state": "ur5e holds MCP while LG remains unassembled",
+        "expected_end_state": "LG is assembled and ur5e is ready to resume MCP placement",
+        "depends_on": ["outline_clear_xarm6"],
+    },
+]
+MOCK_MULTI_TURN_MACRO_TASKS = [
+    {
+        "resource_jid": "xarm6@localhost",
+        "macro_name": "clear_failed_robot",
+        "description": "Clear xarm6 from the failed placement pose to home.",
+        "rationale": "This restores the focused failed resource to a resumable state.",
+        "expected_start_state": "xarm6 failed with empty gripper",
+        "task_params": {"target_pose_name": "home"},
+        "task_metadata": {"outline_id": "outline_clear_xarm6"},
+        "primitive_steps": [
+            {
+                "primitive": "move_to_named_pose",
+                "params": {"pose_name": "home"},
+            }
+        ],
+    },
+    {
+        "resource_jid": "ur5e@localhost",
+        "macro_name": "recover_lg_and_resume_mcp",
+        "description": "Return MCP, recover LG to the board, and leave ur5e ready to continue.",
+        "rationale": "LG must be assembled before MCP continuation is safe.",
+        "part_name": "LG",
+        "expected_start_state": "ur5e holds MCP while LG is observed away from the board",
+        "task_params": {
+            "mcp_origin": "prusa-mk4-2",
+            "lg_destination": "assembly_board-v1",
+        },
+        "task_metadata": {"outline_id": "outline_recover_lg_with_ur5e"},
+        "primitive_steps": [
+            {
+                "primitive": "compute_place_targets",
+                "params": {"part_name": "MCP", "destination_location": "prusa-mk4-2"},
+                "store_as": "mcp_return",
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {"context_ref": "/step_outputs/mcp_return/approach_pose"},
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {"context_ref": "/step_outputs/mcp_return/target_pose"},
+            },
+            {
+                "primitive": "release_part",
+                "params": {"part_name": "MCP"},
+            },
+            {
+                "primitive": "detect_parts",
+                "params": {"part_name": "LG"},
+                "store_as": "lg_detection",
+            },
+            {
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "LG",
+                    "target_pose": {"context_ref": "/step_outputs/lg_detection/pose"},
+                },
+                "store_as": "lg_pick",
+            },
+            {
+                "primitive": "compute_place_targets",
+                "params": {
+                    "part_name": "LG",
+                    "pick_ctx": {"context_ref": "/step_outputs/lg_pick"},
+                    "destination_location": "assembly_board-v1",
+                },
+                "store_as": "lg_place",
+            },
+        ],
+    },
+]
+MOCK_MULTI_TURN_FINAL_PROPOSAL = {
+    "thought": (
+        "xarm6 first clears the failed placement state so the focused failed resource becomes resumable. "
+        "ur5e then restores MCP to origin, recovers LG to the board, and leaves the blocked MCP suffix runnable again."
+    ),
+    "primary_obligation": {
+        "rule_id": "SAFE_1",
+        "resource_jid": "ur5e@localhost",
+    },
+    "macro_tasks": deepcopy(MOCK_MULTI_TURN_MACRO_TASKS),
+}
+MOCK_MULTI_TURN_RESPONSES = [
+    {
+        "thought": "LG placement remains unresolved, and one grounded geometry computation will package the known LG pose into reusable pick targets.",
+        "decision": "observe",
+        "blocking_summary": [
+            "LG is not yet assembled on the board.",
+            "SAFE_1 blocks MCP continuation until LG is assembled.",
+        ],
+        "sufficient_grounding": False,
+        "observe_reason": (
+            "Grounding is not yet sufficient because the next outline should use "
+            "reusable pick geometry for LG instead of freehand numeric poses."
+        ),
+        "observe_requests": [
+            {
+                "resource_jid": "xarm6@localhost",
+                "primitive": "compute_pick_targets",
+                "params": {
+                    "part_name": "LG",
+                    "target_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+                },
+                "store_as": "lg_pick_seed",
+            }
+        ],
+    },
+    {
+        "thought": "The prompt facts plus the reusable LG pick geometry are enough to outline recovery.",
+        "decision": "grounded",
+        "blocking_summary": [
+            "xarm6 is failed.",
+            "ur5e holds MCP while LG still needs assembly.",
+        ],
+        "sufficient_grounding": True,
+        "observe_requests": [],
+    },
+    {
+        "thought": "The recovery needs one macro to clear xarm6 and one macro to let ur5e restore the blocked part ordering.",
+        "decision": "outline_ready",
+        "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
+    },
+    {
+        "thought": "The accepted outline now resolves into primitive-connected macro tasks that preserve the LG-before-MCP dependency.",
+        "decision": "draft_ready",
+        "macro_tasks": deepcopy(MOCK_MULTI_TURN_MACRO_TASKS),
+    },
+    {
+        "thought": "The draft is now packaged as the final bridge proposal.",
+        "decision": "final_ready",
+        "final_proposal": deepcopy(MOCK_MULTI_TURN_FINAL_PROPOSAL),
+    },
+]
 
 MUTEX_RULE_FAMILIES = frozenset(
     {
@@ -1015,27 +1180,6 @@ def _contains_fixed_recovery_labels(value: Any) -> bool:
     return any(token in serialized for token in fixed_tokens)
 
 
-def _compact_prompt_condition_target(
-    entry: dict[str, Any],
-    *,
-    include_entity: bool,
-) -> dict[str, Any]:
-    compact: dict[str, Any] = {}
-    if include_entity:
-        entity_kind = str(entry.get("entity_kind") or "").strip()
-        entity = str(entry.get("entity") or "").strip()
-        if entity_kind:
-            compact["entity_kind"] = entity_kind
-        if entity:
-            compact["entity"] = entity
-    field = str(entry.get("field") or "").strip()
-    if field:
-        compact["field"] = field
-    if "expected" in entry:
-        compact["expected"] = deepcopy(entry.get("expected"))
-    return compact
-
-
 def _expected_prompt_bridge_snapshot(
     resource_entry: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1103,12 +1247,210 @@ def _expected_prompt_bridge_snapshot(
             if "named_poses" in bridge_snapshot
             else manipulator.get("named_poses")
         ),
+        "workspace_bounds": deepcopy(
+            dict(resource_entry.get("static_capabilities") or {}).get("workspace_bounds")
+        ),
     }
     return {
         key: value
         for key, value in prompt_snapshot.items()
         if value not in (None, "", [], {})
     }
+
+
+def _expected_ordered_resource_jids(
+    *,
+    focused_resource_jid: str,
+    observed_resources: list[dict[str, Any]],
+    bridge_resources: dict[str, Any],
+) -> list[str]:
+    ordered_resource_jids: list[str] = []
+    seen_resource_jids: set[str] = set()
+
+    def _append_resource_jid(raw_value: Any) -> None:
+        resource_jid = str(raw_value or "").strip()
+        if not resource_jid or resource_jid in seen_resource_jids:
+            return
+        seen_resource_jids.add(resource_jid)
+        ordered_resource_jids.append(resource_jid)
+
+    _append_resource_jid(focused_resource_jid)
+    for row in observed_resources:
+        _append_resource_jid(row.get("resource_jid"))
+    for resource_jid in sorted(bridge_resources):
+        _append_resource_jid(resource_jid)
+    return ordered_resource_jids
+
+
+def _expected_runtime_resource_facts(
+    prepared_bridge_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context_summary = dict(prepared_bridge_request.get("context_summary") or {})
+    fault_event = dict(context_summary.get("fault_event") or {})
+    current_product_state = dict(context_summary.get("current_product_state") or {})
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    observed_resources = [
+        dict(row)
+        for row in (current_product_state.get("resources") or [])
+        if isinstance(row, dict)
+    ]
+    observed_by_jid = {
+        str(row.get("resource_jid") or "").strip(): row
+        for row in observed_resources
+        if str(row.get("resource_jid") or "").strip()
+    }
+
+    runtime_resources: list[dict[str, Any]] = []
+    for resource_jid in _expected_ordered_resource_jids(
+        focused_resource_jid=str(fault_event.get("focused_resource_jid") or "").strip(),
+        observed_resources=observed_resources,
+        bridge_resources=bridge_resources,
+    ):
+        observed_row = dict(observed_by_jid.get(resource_jid) or {})
+        bridge_snapshot = _expected_prompt_bridge_snapshot(
+            dict(bridge_resources.get(resource_jid) or {})
+        )
+        runtime_row = {
+            "resource_jid": resource_jid,
+            "current_state": deepcopy(
+                observed_row.get("current_state")
+                if "current_state" in observed_row
+                else bridge_snapshot.get("current_state")
+            ),
+            "current_location": deepcopy(
+                observed_row.get("current_location")
+                if "current_location" in observed_row
+                else bridge_snapshot.get("current_location")
+            ),
+            "availability": deepcopy(
+                observed_row.get("availability")
+                if "availability" in observed_row
+                else bridge_snapshot.get("availability")
+            ),
+            "held_part": deepcopy(
+                observed_row.get("held_part")
+                if "held_part" in observed_row
+                else bridge_snapshot.get("held_part")
+            ),
+        }
+        for optional_field in (
+            "gripper_state",
+            "current_pose",
+            "current_pose_ref",
+            "named_poses",
+            "workspace_bounds",
+        ):
+            optional_value = deepcopy(bridge_snapshot.get(optional_field))
+            if optional_value not in (None, "", [], {}):
+                runtime_row[optional_field] = optional_value
+        runtime_resources.append(runtime_row)
+    return runtime_resources
+
+
+def _expected_part_facts(
+    prepared_bridge_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context_summary = dict(prepared_bridge_request.get("context_summary") or {})
+    current_product_state = dict(context_summary.get("current_product_state") or {})
+    relevant_assembly_requirements = [
+        deepcopy(entry)
+        for entry in (context_summary.get("relevant_assembly_requirements") or [])
+        if isinstance(entry, dict)
+    ]
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+
+    requirements_by_product: dict[str, list[dict[str, Any]]] = {}
+    for requirement_entry in relevant_assembly_requirements:
+        product = str(requirement_entry.get("product") or "").strip()
+        if product:
+            requirements_by_product.setdefault(product, []).append(requirement_entry)
+
+    current_resources = [
+        dict(row)
+        for row in (current_product_state.get("resources") or [])
+        if isinstance(row, dict)
+    ]
+    held_part_to_resource = {
+        str(row.get("held_part") or "").strip(): str(row.get("resource_jid") or "").strip()
+        for row in current_resources
+        if str(row.get("held_part") or "").strip()
+        and str(row.get("resource_jid") or "").strip()
+    }
+
+    pending_task_ids_by_part: dict[str, list[str]] = {}
+    for resource_jid in sorted(bridge_resources):
+        resource_entry = dict(bridge_resources.get(resource_jid) or {})
+        for task in (resource_entry.get("pending_tasks") or []):
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id") or "").strip()
+            part_name = str((task.get("params") or {}).get("part_name") or "").strip()
+            if task_id and part_name:
+                pending_task_ids_by_part.setdefault(part_name, []).append(task_id)
+
+    current_parts = [
+        dict(row)
+        for row in (current_product_state.get("parts") or [])
+        if isinstance(row, dict)
+    ]
+    current_part_by_name = {
+        str(row.get("part_name") or "").strip(): row
+        for row in current_parts
+        if str(row.get("part_name") or "").strip()
+    }
+    tracker_by_part = {
+        str(part_name or "").strip(): dict(raw_entry or {})
+        for part_name, raw_entry in dict(prepared_bridge_request.get("part_tracker") or {}).items()
+        if str(part_name or "").strip() and isinstance(raw_entry, dict)
+    }
+
+    ordered_part_names: list[str] = []
+    seen_part_names: set[str] = set()
+    for row in current_parts:
+        part_name = str(row.get("part_name") or "").strip()
+        if part_name and part_name not in seen_part_names:
+            seen_part_names.add(part_name)
+            ordered_part_names.append(part_name)
+    for part_name in sorted(tracker_by_part):
+        if part_name not in seen_part_names:
+            seen_part_names.add(part_name)
+            ordered_part_names.append(part_name)
+
+    part_facts: list[dict[str, Any]] = []
+    for part_name in ordered_part_names:
+        current_part_row = dict(current_part_by_name.get(part_name) or {})
+        tracker_entry = dict(tracker_by_part.get(part_name) or {})
+        requirement_entry = dict((requirements_by_product.get(part_name) or [None])[0] or {})
+        current_location = deepcopy(current_part_row.get("location"))
+        holder_resource_jid = str(held_part_to_resource.get(part_name) or "").strip()
+        if (
+            not holder_resource_jid
+            and isinstance(current_location, str)
+            and current_location.endswith("_gripper")
+        ):
+            holder_resource_jid = current_location.rsplit("_gripper", 1)[0]
+        part_facts.append(
+            {
+                "part_name": part_name,
+                "current_state": deepcopy(current_part_row.get("state")),
+                "current_location": current_location,
+                "location_basis": deepcopy(current_part_row.get("location_basis")),
+                "observed_pose": deepcopy(current_part_row.get("observed_pose")),
+                "current_holder_resource_jid": holder_resource_jid or None,
+                "origin_location": deepcopy(tracker_entry.get("origin_resource_location")),
+                "goal_location": deepcopy(current_part_row.get("target_location")),
+                "goal_requirement_id": (
+                    str(requirement_entry.get("requirement_id") or "").strip() or None
+                ),
+                "nominal_requirement_resource_jid": (
+                    str(requirement_entry.get("resource_jid") or "").strip() or None
+                ),
+                "pending_nominal_task_ids": deepcopy(
+                    pending_task_ids_by_part.get(part_name) or []
+                ),
+            }
+        )
+    return part_facts
 
 
 def _expected_allowed_execution_surface(
@@ -1130,79 +1472,73 @@ def _expected_allowed_execution_surface(
         for row in observed_resources
         if str(row.get("resource_jid") or "").strip()
     }
-
-    ordered_resource_jids: list[str] = []
-    seen_resource_jids: set[str] = set()
-
-    def _append_resource_jid(raw_value: Any) -> None:
-        resource_jid = str(raw_value or "").strip()
-        if not resource_jid or resource_jid in seen_resource_jids:
-            return
-        seen_resource_jids.add(resource_jid)
-        ordered_resource_jids.append(resource_jid)
-
-    _append_resource_jid(focused_resource_jid)
-    for row in observed_resources:
-        _append_resource_jid(row.get("resource_jid"))
-    for resource_jid in sorted(bridge_resources):
-        _append_resource_jid(resource_jid)
+    ordered_resource_jids = _expected_ordered_resource_jids(
+        focused_resource_jid=focused_resource_jid,
+        observed_resources=observed_resources,
+        bridge_resources=bridge_resources,
+    )
 
     prompt_resources: list[dict[str, Any]] = []
+
+    def _expected_allowed_primitives(resource_entry: dict[str, Any]) -> list[dict[str, Any]]:
+        resource_type = str(resource_entry.get("resource_type") or "resource").strip() or "resource"
+        profile = get_resource_profile(resource_type)
+        preview_output_map = dict(profile.preview_output_map or {})
+        extract_output_map = dict(profile.extract_output_map or {})
+        allowed_primitives: list[dict[str, Any]] = []
+        for item in (resource_entry.get("primitive_catalog") or []):
+            if not isinstance(item, dict):
+                continue
+            primitive_name = str(item.get("name") or "").strip()
+            if not primitive_name:
+                continue
+            allowed_entry: dict[str, Any] = {"name": primitive_name}
+            description = str(item.get("description") or item.get("semantic_summary") or "").strip()
+            if description:
+                allowed_entry["description"] = description
+            allowed_entry["required_params"] = [
+                str(param).strip()
+                for param in (item.get("required_params") or [])
+                if str(param).strip()
+            ]
+            primitive_kind = str(item.get("primitive_kind") or "").strip()
+            if primitive_kind:
+                allowed_entry["primitive_kind"] = primitive_kind
+            output_fields = [
+                str(field).strip()
+                for field in dict(item.get("output_schema") or {}).keys()
+                if str(field).strip()
+            ]
+            if output_fields:
+                allowed_entry["output_fields"] = output_fields
+            hard_preconditions = deepcopy(item.get("preconditions") or {})
+            if hard_preconditions:
+                allowed_entry["hard_preconditions"] = hard_preconditions
+            allowed_entry["supports_store_as"] = (
+                primitive_name in preview_output_map or primitive_name in extract_output_map
+            )
+            allowed_primitives.append(allowed_entry)
+        return allowed_primitives
+
     for resource_jid in ordered_resource_jids:
         bridge_entry = dict(bridge_resources.get(resource_jid) or {})
         adapter_capabilities = dict(bridge_entry.get("bridge_adapter") or {})
         if not adapter_capabilities.get("supports_executable_bridge"):
             continue
         observed_row = dict(observed_by_jid.get(resource_jid) or {})
-        prompt_bridge_snapshot = _expected_prompt_bridge_snapshot(bridge_entry)
-        pending_task_ids = [
-            str(task.get("id") or "").strip()
-            for task in (bridge_entry.get("pending_tasks") or [])
-            if isinstance(task, dict) and str(task.get("id") or "").strip()
-        ]
-        prompt_primitive_catalog = [
-            {
-                key: deepcopy(value)
-                for key, value in item.items()
-                if key != "composite_expansion"
-            }
-            for item in (bridge_entry.get("primitive_catalog") or [])
-            if isinstance(item, dict)
-        ]
         prompt_resources.append(
             {
                 "resource_jid": resource_jid,
+                "resource_type": str(
+                    bridge_entry.get("resource_type")
+                    or dict((bridge_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get("resource_type")
+                    or "unknown"
+                ).strip(),
                 "role": deepcopy(
                     observed_row.get("role")
                     or ("focused" if resource_jid == focused_resource_jid else "supporting")
                 ),
-                "current_state": deepcopy(
-                    observed_row.get("current_state")
-                    if "current_state" in observed_row
-                    else prompt_bridge_snapshot.get("current_state")
-                ),
-                "current_location": deepcopy(
-                    observed_row.get("current_location")
-                    if "current_location" in observed_row
-                    else prompt_bridge_snapshot.get("current_location")
-                ),
-                "availability": deepcopy(
-                    observed_row.get("availability")
-                    if "availability" in observed_row
-                    else prompt_bridge_snapshot.get("availability")
-                ),
-                "held_part": deepcopy(
-                    observed_row.get("held_part")
-                    if "held_part" in observed_row
-                    else prompt_bridge_snapshot.get("held_part")
-                ),
-                "pending_task_ids": deepcopy(
-                    observed_row.get("pending_task_ids")
-                    if isinstance(observed_row.get("pending_task_ids"), list)
-                    else pending_task_ids
-                ),
-                "prompt_bridge_snapshot": deepcopy(prompt_bridge_snapshot),
-                "prompt_primitive_catalog": prompt_primitive_catalog,
+                "allowed_primitives": _expected_allowed_primitives(bridge_entry),
             }
         )
 
@@ -1282,9 +1618,9 @@ def _build_live_style_slippage_fixture(
     )
     part_defaults: dict[str, dict[str, Any]] = {
         "LG": {
-            "state": "unknown",
-            "location": "xarm6@localhost_gripper",
-            "last_known_location": "xarm6@localhost_gripper",
+            "state": "misplaced",
+            "location": None,
+            "last_known_location": None,
             "last_successful_task": _latest_completed_task_id_for_part(
                 plan_payload,
                 part_name="LG",
@@ -1311,6 +1647,12 @@ def _build_live_style_slippage_fixture(
     }
     derived_part_tracker = planner._derive_part_tracker_from_violations([failure_payload])
     part_tracker = _merge_part_tracker(base_part_tracker, derived_part_tracker)
+    lg_entry = dict(part_tracker.get("LG") or {})
+    if lg_entry:
+        lg_entry["state"] = "misplaced"
+        lg_entry["location"] = None
+        lg_entry["last_known_location"] = None
+        part_tracker["LG"] = lg_entry
     part_states = {
         str(name): info.get("state")
         for name, info in part_tracker.items()
@@ -1616,18 +1958,43 @@ async def run_case3_bridge_dryrun(
     write_debug: bool = True,
     *,
     llm_model: str | None = None,
+    bridge_reasoning_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Run the active bridge through the pre-LLM single-shot handoff."""
+    """Run the active bridge through the configured bridge reasoning mode."""
     fixture, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
         fixture_mode="live",
+        bridge_reasoning_mode=bridge_reasoning_mode,
     )
 
     proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
     bridge_debug = planner.get_last_bridge_debug()
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    reasoning_mode = str(bridge_session.get("reasoning_mode") or "single_shot").strip()
+    multi_turn_session = deepcopy(bridge_debug.get("multi_turn_session") or {})
+    multi_turn_turns = list(multi_turn_session.get("turns") or [])
+    raw_response_value = ""
+    if reasoning_mode == "multi_turn":
+        latest_response = (
+            dict(multi_turn_turns[-1] or {}).get("raw_response")
+            if multi_turn_turns
+            else None
+        )
+        if latest_response not in (None, "", [], {}):
+            raw_response_value = json.dumps(
+                latest_response,
+                indent=2,
+                default=str,
+                ensure_ascii=True,
+            )
+    else:
+        raw_response_value = str(
+            ((bridge_debug.get("single_shot_turn") or {}).get("raw_response") or "")
+        )
 
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
+        "reasoning_mode": reasoning_mode,
         "status": str(bridge_debug.get("status") or ""),
         "proposal": proposal,
         "bridge_debug": bridge_debug,
@@ -1640,14 +2007,18 @@ async def run_case3_bridge_dryrun(
         "single_shot_prompt_text": str(
             prepared_bridge_request.get("single_shot_prompt_text") or ""
         ),
-        "raw_response": str(
-            ((bridge_debug.get("single_shot_turn") or {}).get("raw_response") or "")
+        "multi_turn_session_seed": deepcopy(
+            prepared_bridge_request.get("multi_turn_session_seed") or {}
         ),
+        "multi_turn_session": multi_turn_session,
+        "raw_response": raw_response_value,
         "turn_log": deepcopy(product_agent.turn_log),
         "prompt_artifact_path": None,
         "latest_prompt_artifact_path": None,
         "response_artifact_path": None,
         "latest_response_artifact_path": None,
+        "session_transcript_artifact_path": None,
+        "latest_session_transcript_artifact_path": None,
     }
 
     if write_debug:
@@ -1661,15 +2032,19 @@ async def run_case3_bridge_prepare_trace(
     write_debug: bool = True,
     *,
     llm_model: str | None = None,
+    bridge_reasoning_mode: str | None = None,
 ) -> dict[str, Any]:
     """Prepare the bridge request and stop before any LLM stage."""
     fixture, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
         configure_live=False,
         fixture_mode="live",
+        bridge_reasoning_mode=bridge_reasoning_mode,
     )
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
+        "reasoning_mode": str(bridge_session.get("reasoning_mode") or "single_shot").strip(),
         "status": "prepared_only",
         "fixture": fixture,
         "bridge_debug": planner.get_last_bridge_debug(),
@@ -1682,12 +2057,17 @@ async def run_case3_bridge_prepare_trace(
         "single_shot_prompt_text": str(
             prepared_bridge_request.get("single_shot_prompt_text") or ""
         ),
+        "multi_turn_session_seed": deepcopy(
+            prepared_bridge_request.get("multi_turn_session_seed") or {}
+        ),
         "raw_response": "",
         "turn_log": deepcopy(product_agent.turn_log),
         "prompt_artifact_path": None,
         "latest_prompt_artifact_path": None,
         "response_artifact_path": None,
         "latest_response_artifact_path": None,
+        "session_transcript_artifact_path": None,
+        "latest_session_transcript_artifact_path": None,
     }
     if write_debug:
         artifact_paths = _write_debug_artifacts(
@@ -1784,6 +2164,7 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
         if isinstance(row, dict) and str(row.get("part_name") or "")
     }
     lg_row = parts_by_name.get("LG") or {}
+    assert lg_row.get("state") == "misplaced"
     assert lg_row.get("location") in (None, "")
     assert lg_row.get("observed_pose"), "LG observed pose should come from shared failure context"
     assert not (active_safety_diagnosis.get("obligation_targets") or []), "live-style default should not inject obligations"
@@ -1847,7 +2228,7 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
         for entry in unsatisfied_goal_conditions
         if isinstance(entry, dict)
     }
-    assert ("goal", "LG", "state", GOAL_STATE, "unknown") in goal_unsatisfied_keys
+    assert ("goal", "LG", "state", GOAL_STATE, "misplaced") in goal_unsatisfied_keys
     assert ("goal", "MCP", "state", GOAL_STATE, "in_gripper") in goal_unsatisfied_keys
 
     unsatisfied_conditions = modeled_continuation_gap.get("unsatisfied_conditions") or []
@@ -1864,18 +2245,9 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
 
     observed_runtime_state = llm_input.get("observed_runtime_state") or {}
     llm_resources = observed_runtime_state.get("resources") or []
-    llm_parts = observed_runtime_state.get("parts") or []
     assert llm_resources, "llm_input observed resources are missing"
-    assert llm_parts, "llm_input observed parts are missing"
-
-    llm_parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in llm_parts
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    llm_lg_row = llm_parts_by_name.get("LG") or {}
-    assert llm_lg_row.get("observed_pose"), "llm_input should retain LG observed pose"
-    assert "target_location" not in llm_lg_row, "llm_input parts should not include modeled target fields"
+    assert "parts" not in observed_runtime_state, "llm_input part facts should live in part_facts"
+    assert llm_resources == _expected_runtime_resource_facts(prepared_bridge_request)
 
     llm_resource_by_jid = {
         str(row.get("resource_jid") or ""): row
@@ -1885,6 +2257,27 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
     xarm6_runtime_row = llm_resource_by_jid.get("xarm6@localhost") or {}
     assert xarm6_runtime_row.get("current_state") == "failed"
     assert "pending_task_ids" not in xarm6_runtime_row, "llm_input observed resources should not include pending task ids"
+    assert xarm6_runtime_row.get("current_pose"), "llm_input resource facts should retain grounded poses"
+    assert xarm6_runtime_row.get("named_poses"), "llm_input resource facts should retain named poses"
+
+    part_facts = llm_input.get("part_facts") or []
+    assert part_facts == _expected_part_facts(prepared_bridge_request)
+    llm_parts_by_name = {
+        str(row.get("part_name") or ""): row
+        for row in part_facts
+        if isinstance(row, dict) and str(row.get("part_name") or "")
+    }
+    llm_lg_row = llm_parts_by_name.get("LG") or {}
+    assert llm_lg_row.get("current_state") == "misplaced"
+    assert llm_lg_row.get("observed_pose"), "llm_input should retain LG observed pose"
+    assert llm_lg_row.get("goal_location") == "assembly_board-v1"
+    assert llm_lg_row.get("goal_requirement_id") == "REQ_2"
+    assert llm_lg_row.get("nominal_requirement_resource_jid") == "xarm6@localhost"
+    assert llm_lg_row.get("current_holder_resource_jid") is None
+    llm_mcp_row = llm_parts_by_name.get("MCP") or {}
+    assert llm_mcp_row.get("current_holder_resource_jid") == "ur5e@localhost"
+    assert llm_mcp_row.get("origin_location") == "prusa-mk4-2"
+    assert "target_location" not in llm_lg_row, "llm_input part facts should not expose raw modeled target fields"
 
     llm_loaded_rule_ids = {
         str(rule.get("rule_id") or "")
@@ -1902,7 +2295,9 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
     assert llm_requirement_ids >= {"REQ_1", "REQ_2"}
 
     llm_gap = llm_input.get("modeled_continuation_gap") or {}
-    assert llm_gap.get("goal_state") == GOAL_STATE
+    assert "goal_state" not in llm_gap
+    assert "unmet_goal_conditions" not in llm_gap
+    assert llm_gap.get("pending_nominal_tasks"), "llm_input should retain pending nominal tasks"
     continuation_gap_entries = llm_gap.get("unmet_continuation_conditions") or []
     idle_continuation_gap = next(
         (
@@ -1916,15 +2311,32 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
         None,
     )
     assert idle_continuation_gap, "llm_input should retain unmet continuation condition for xarm6"
+    assert str(idle_continuation_gap.get("condition_id") or "").startswith("cond_")
+    pending_nominal_tasks = llm_gap.get("pending_nominal_tasks") or []
+    move_home_task = next(
+        (
+            entry for entry in pending_nominal_tasks
+            if isinstance(entry, dict) and entry.get("id") == "REQ_2_T5"
+        ),
+        None,
+    )
+    assert move_home_task, "llm_input should retain pending move_home task"
+    assert idle_continuation_gap.get("condition_id") in (
+        move_home_task.get("blocked_by_condition_ids") or []
+    )
     assert "bridge_debug" not in llm_input
     assert "data_flow_trace" not in llm_input
     assert "requirement_task_index" not in llm_input
     assert "task_requirement_map" not in llm_input
+    llm_fault_event = llm_input.get("fault_event") or {}
+    assert llm_fault_event.get("affected_part_names") == ["LG"]
+    assert "affected_parts" not in llm_fault_event
 
     allowed_execution_surface = llm_input.get("allowed_execution_surface") or {}
     assert allowed_execution_surface == _expected_allowed_execution_surface(
         prepared_bridge_request
     )
+    assert "primitive_catalog_by_resource_type" not in allowed_execution_surface
     allowed_surface_resources = allowed_execution_surface.get("resources") or []
     allowed_resource_by_jid = {
         str(row.get("resource_jid") or ""): row
@@ -1933,12 +2345,16 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
     }
     assert set(allowed_resource_by_jid) >= {"ur5e@localhost", "xarm6@localhost"}
     for resource_jid, resource_entry in allowed_resource_by_jid.items():
-        prompt_bridge_snapshot = resource_entry.get("prompt_bridge_snapshot") or {}
-        prompt_primitive_catalog = resource_entry.get("prompt_primitive_catalog") or []
-        assert prompt_bridge_snapshot.get("resource_jid") == resource_jid
+        allowed_primitives = resource_entry.get("allowed_primitives") or []
+        assert set(resource_entry) == {
+            "resource_jid",
+            "resource_type",
+            "role",
+            "allowed_primitives",
+        }
         primitive_names = {
             str(entry.get("name") or "")
-            for entry in prompt_primitive_catalog
+            for entry in allowed_primitives
             if isinstance(entry, dict) and str(entry.get("name") or "")
         }
         assert {"grasp_part", "release_part"} <= primitive_names
@@ -1946,8 +2362,23 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
             primitive_names
             & {"open_gripper", "close_gripper", "attach_part", "detach_part"}
         )
-        for primitive_entry in prompt_primitive_catalog:
+        for primitive_entry in allowed_primitives:
             assert "composite_expansion" not in primitive_entry
+            assert "params" not in primitive_entry
+            assert "effects" not in primitive_entry
+            assert "preconditions" not in primitive_entry
+            assert "output_schema" not in primitive_entry
+            assert isinstance(primitive_entry.get("required_params"), list)
+            assert isinstance(primitive_entry.get("supports_store_as"), bool)
+            if primitive_entry.get("name") in {
+                "detect_parts",
+                "get_current_pose",
+                "compute_pick_targets",
+                "compute_place_targets",
+            }:
+                assert primitive_entry.get("supports_store_as") is True
+            if primitive_entry.get("name") in {"grasp_part", "release_part", "move_to_named_pose"}:
+                assert primitive_entry.get("hard_preconditions")
 
     assert single_shot_prompt_input.get("reasoning_mode") == "single_shot"
     assert single_shot_prompt_input.get("llm_input") == llm_input
@@ -1957,51 +2388,32 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
     assert "focused_bridge_snapshot" not in single_shot_prompt_input
     assert "bridge_resources" not in single_shot_prompt_input
     assert "other_resources_summary" not in single_shot_prompt_input
-    proposal_success_criteria = single_shot_prompt_input.get("proposal_success_criteria") or {}
-    assert proposal_success_criteria.get("focused_resource_jid") == llm_input.get("fault_event", {}).get(
-        "focused_resource_jid"
-    )
-    assert proposal_success_criteria.get("resume_ready_now") == llm_gap.get("resume_ready")
-    assert proposal_success_criteria.get("target_resume_ready") is True
-    assert proposal_success_criteria.get("protected_nominal_task_suffix") == llm_gap.get(
-        "pending_nominal_task_ids"
-    )
-    assert proposal_success_criteria.get("goal_targets_to_improve") == [
-        _compact_prompt_condition_target(entry, include_entity=True)
-        for entry in (llm_gap.get("unmet_goal_conditions") or [])
-        if isinstance(entry, dict)
-    ]
-    must_satisfy = proposal_success_criteria.get("focused_resource_targets") or []
-    assert must_satisfy == [
-        _compact_prompt_condition_target(entry, include_entity=False)
-        for entry in continuation_gap_entries
-        if isinstance(entry, dict)
-    ]
-    current_product_state = context_summary.get("current_product_state") or {}
-    active_safety_diagnosis = (current_product_state.get("active_safety_diagnosis") or {})
-    focused_resource_jid = llm_input.get("fault_event", {}).get("focused_resource_jid")
-    obligation_rule_ids = proposal_success_criteria.get("obligation_rule_ids_to_preserve") or []
-    assert obligation_rule_ids == [
-        str(target.get("rule_id") or "")
-        for target in (active_safety_diagnosis.get("obligation_targets") or [])
-        if isinstance(target, dict)
-        and target.get("resource_jid") == focused_resource_jid
-        and str(target.get("rule_id") or "")
-    ]
+    assert "proposal_success_criteria" not in single_shot_prompt_input
     response_contract = single_shot_prompt_input.get("response_contract") or {}
-    assert response_contract.get("top_level_required_fields") == ["primary_obligation", "macro_tasks"]
+    assert response_contract.get("top_level_required_fields") == [
+        "thought",
+        "primary_obligation",
+        "macro_tasks",
+    ]
+    thought_contract = response_contract.get("thought") or {}
+    assert thought_contract.get("summary_style") == "2-4 factual sentences"
     assert "Loaded Safety Rules" in single_shot_prompt_text
+    assert "Current Resource Facts" in single_shot_prompt_text
+    assert "Current Part Facts" in single_shot_prompt_text
     assert "Relevant Assembly Requirements" in single_shot_prompt_text
     assert "Modeled Continuation Gap" in single_shot_prompt_text
-    assert "Proposal Success Criteria" in single_shot_prompt_text
+    assert "Proposal Success Criteria" not in single_shot_prompt_text
     assert "Required JSON Response Contract" in single_shot_prompt_text
     assert "Hard Constraints" in single_shot_prompt_text
     assert "Allowed Execution Surface" in single_shot_prompt_text
-    assert "prompt_bridge_snapshot" in single_shot_prompt_text
-    assert "prompt_primitive_catalog" in single_shot_prompt_text
+    assert "Observed Runtime State" not in single_shot_prompt_text
+    assert "prompt_bridge_snapshot" not in single_shot_prompt_text
+    assert "allowed_primitives" in single_shot_prompt_text
+    assert "primitive_catalog_by_resource_type" not in single_shot_prompt_text
     assert "bridge_resources" not in single_shot_prompt_text
     assert "focused_primitive_catalog" not in single_shot_prompt_text
     assert "other_resources_summary" not in single_shot_prompt_text
+    assert "recovery_opportunities" not in single_shot_prompt_text
     assert "grasp_part" in single_shot_prompt_text
     assert "release_part" in single_shot_prompt_text
     assert "open_gripper" not in single_shot_prompt_text
@@ -2010,6 +2422,19 @@ def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
     assert "detach_part" not in single_shot_prompt_text
     assert "ur5e@localhost" in single_shot_prompt_text
     assert "xarm6@localhost" in single_shot_prompt_text
+    assert "Do not contradict grounded runtime facts already present in the prompt." in single_shot_prompt_text
+    assert "Return a recovery that restores a state where the blocked nominal tasks can run again" in single_shot_prompt_text
+    assert "Make the recovery logically connected as a state progression" in single_shot_prompt_text
+    assert "Reuse grounded facts and previously derived outputs." in single_shot_prompt_text
+    assert "Do not invent concrete grounded values" in single_shot_prompt_text
+    current_part_facts_block = (
+        single_shot_prompt_text.split("Current Part Facts\n", 1)[1]
+        .split("\n\nLoaded Safety Rules", 1)[0]
+    )
+    assert '"part_name": "LG"' in current_part_facts_block
+    assert '"current_state": "misplaced"' in current_part_facts_block
+    assert '"current_location":' not in current_part_facts_block
+    assert '"current_state": "unknown"' not in current_part_facts_block
 
     assert not _contains_fixed_recovery_labels(prepared_bridge_request), "prepared request still contains fixed recovery labels"
 
@@ -2223,9 +2648,20 @@ def _print_llm_input(llm_input: dict[str, Any]) -> None:
     print(json.dumps(llm_input, indent=2, default=str))
 
 
-def _print_single_shot_prompt(prompt_text: str) -> None:
+def _extract_latest_prompt_text(result: dict[str, Any]) -> str:
+    reasoning_mode = str(result.get("reasoning_mode") or "").strip().lower()
+    if reasoning_mode == "multi_turn":
+        multi_turn_session = dict(result.get("multi_turn_session") or {})
+        turns = list(multi_turn_session.get("turns") or [])
+        if turns:
+            latest_turn = dict(turns[-1] or {})
+            return str(latest_turn.get("prompt_text") or "")
+    return str(result.get("single_shot_prompt_text") or "")
+
+
+def _print_prompt(prompt_text: str, *, reasoning_mode: str) -> None:
     print()
-    print("Single-Shot Prompt")
+    print(f"Prompt ({reasoning_mode or 'single_shot'})")
     print(prompt_text or "")
 
 
@@ -2234,11 +2670,17 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
     latest_prompt_artifact_path = result.get("latest_prompt_artifact_path")
     response_artifact_path = result.get("response_artifact_path")
     latest_response_artifact_path = result.get("latest_response_artifact_path")
+    session_transcript_artifact_path = result.get("session_transcript_artifact_path")
+    latest_session_transcript_artifact_path = result.get(
+        "latest_session_transcript_artifact_path"
+    )
     if (
         not prompt_artifact_path
         and not latest_prompt_artifact_path
         and not response_artifact_path
         and not latest_response_artifact_path
+        and not session_transcript_artifact_path
+        and not latest_session_transcript_artifact_path
     ):
         return
     print()
@@ -2250,6 +2692,10 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
         print("Response artifact:          ", response_artifact_path)
     if latest_response_artifact_path:
         print("Latest response artifact:   ", latest_response_artifact_path)
+    if session_transcript_artifact_path:
+        print("Session artifact:           ", session_transcript_artifact_path)
+    if latest_session_transcript_artifact_path:
+        print("Latest session artifact:    ", latest_session_transcript_artifact_path)
 
 
 def _assert_completed_parts_drop_out_of_unsatisfied_goals(
@@ -2505,7 +2951,7 @@ def test_case3_bridge_debug_sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_case3_bridge_multi_turn_override() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
+    fixture, _, planner, prepared_bridge_request = asyncio.run(
         _prepare_bridge_dryrun_harness(
             configure_live=False,
             fixture_mode="live",
@@ -2516,11 +2962,148 @@ def test_case3_bridge_multi_turn_override() -> None:
     assert bridge_session.get("reasoning_mode") == "multi_turn"
     assert "single_shot_prompt_input" not in prepared_bridge_request
     assert "single_shot_prompt_text" not in prepared_bridge_request
+    session_seed = prepared_bridge_request.get("multi_turn_session_seed") or {}
+    assert session_seed.get("current_phase") == "grounding"
+    assert session_seed.get("observation_store") == {}
+    assert session_seed.get("accepted_outline") is None
+    llm_input = prepared_bridge_request.get("llm_input") or {}
+    assert llm_input.get("part_facts"), "multi-turn should reuse the shared single-shot grounding package"
 
-    proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-    assert proposal is None
+    scripted_responses = iter(deepcopy(MOCK_MULTI_TURN_RESPONSES))
+
+    async def _mock_ask_llm_structured(
+        self: FakeProductAgent,
+        prompt: str,
+        *,
+        response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+        max_tool_rounds: int = 3,
+    ) -> dict[str, Any]:
+        del prompt, response_format, tools, tool_executor, max_tool_rounds
+        response = deepcopy(next(scripted_responses))
+        self._turn_index += 1
+        self.turn_log.append(
+            {
+                "turn_index": self._turn_index,
+                "prompt": "<mocked-structured>",
+                "response": deepcopy(response),
+            }
+        )
+        return response
+
+    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
+        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
+
+    assert proposal == MOCK_MULTI_TURN_FINAL_PROPOSAL
     bridge_debug = planner.get_last_bridge_debug()
-    assert bridge_debug.get("status") == "unsupported_reasoning_mode"
+    assert bridge_debug.get("status") == "final_proposal_recorded"
+    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
+    assert multi_turn_session.get("status") == "final_proposal_recorded"
+    assert multi_turn_session.get("observation_count") == 1
+    assert len(multi_turn_session.get("observation_history") or []) == 1
+    assert multi_turn_session.get("accepted_outline") == MOCK_MULTI_TURN_OUTLINE_TASKS
+    assert multi_turn_session.get("proposal_draft") == {
+        "thought": MOCK_MULTI_TURN_RESPONSES[3]["thought"],
+        "macro_tasks": MOCK_MULTI_TURN_MACRO_TASKS,
+    }
+    assert multi_turn_session.get("final_proposal") == MOCK_MULTI_TURN_FINAL_PROPOSAL
+    assert [
+        turn.get("phase")
+        for turn in (multi_turn_session.get("turns") or [])
+    ] == [
+        "grounding",
+        "grounding",
+        "outline",
+        "primitive_generation",
+        "finalize",
+    ]
+    observation_history = multi_turn_session.get("observation_history") or []
+    assert observation_history[0].get("store_as") == "lg_pick_seed"
+    assert (multi_turn_session.get("observation_store") or {}).get("lg_pick_seed")
+    assert fixture.get("part_tracker", {}).get("LG"), "fixture sanity check failed"
+
+
+def test_case3_bridge_multi_turn_transitions() -> None:
+    assert transition_multi_turn_phase("grounding", "observe") == "grounding"
+    assert transition_multi_turn_phase("grounding", "grounded") == "outline"
+    assert transition_multi_turn_phase("outline", "need_grounding") == "grounding"
+    assert transition_multi_turn_phase("outline", "outline_ready") == "primitive_generation"
+    assert (
+        transition_multi_turn_phase("primitive_generation", "need_grounding") == "grounding"
+    )
+    assert transition_multi_turn_phase("primitive_generation", "need_outline_revision") == "outline"
+    assert transition_multi_turn_phase("primitive_generation", "draft_ready") == "finalize"
+    assert transition_multi_turn_phase("finalize", "need_grounding") == "grounding"
+    assert transition_multi_turn_phase("finalize", "need_outline_revision") == "outline"
+    assert (
+        transition_multi_turn_phase("finalize", "need_primitive_revision")
+        == "primitive_generation"
+    )
+    assert transition_multi_turn_phase("finalize", "final_ready") == "finalize"
+
+
+def test_case3_bridge_multi_turn_debug_sidecars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "DEBUG_DIR", tmp_path)
+    scripted_responses = iter(deepcopy(MOCK_MULTI_TURN_RESPONSES))
+
+    async def _mock_ask_llm_structured(
+        self: FakeProductAgent,
+        prompt: str,
+        *,
+        response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+        max_tool_rounds: int = 3,
+    ) -> dict[str, Any]:
+        del prompt, response_format, tools, tool_executor, max_tool_rounds
+        response = deepcopy(next(scripted_responses))
+        self._turn_index += 1
+        self.turn_log.append(
+            {
+                "turn_index": self._turn_index,
+                "prompt": "<mocked-structured>",
+                "response": deepcopy(response),
+            }
+        )
+        return response
+
+    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=True,
+                bridge_reasoning_mode="multi_turn",
+            )
+        )
+
+    prompt_artifact_path = Path(str(result.get("prompt_artifact_path") or ""))
+    latest_prompt_artifact_path = Path(str(result.get("latest_prompt_artifact_path") or ""))
+    response_artifact_path = Path(str(result.get("response_artifact_path") or ""))
+    latest_response_artifact_path = Path(str(result.get("latest_response_artifact_path") or ""))
+    session_artifact_path = Path(str(result.get("session_transcript_artifact_path") or ""))
+    latest_session_artifact_path = Path(
+        str(result.get("latest_session_transcript_artifact_path") or "")
+    )
+
+    assert prompt_artifact_path.exists()
+    assert prompt_artifact_path.name.startswith("multi_turn_turn05_finalize_prompt_")
+    assert latest_prompt_artifact_path.exists()
+    assert latest_prompt_artifact_path.name == "multi_turn_turn05_finalize_prompt_latest.txt"
+    assert response_artifact_path.exists()
+    assert response_artifact_path.name.startswith("multi_turn_turn05_finalize_response_")
+    assert latest_response_artifact_path.exists()
+    assert latest_response_artifact_path.name == "multi_turn_turn05_finalize_response_latest.txt"
+    assert session_artifact_path.exists()
+    assert session_artifact_path.name.startswith("multi_turn_session_prepare_")
+    assert latest_session_artifact_path.exists()
+    assert latest_session_artifact_path.name.startswith("multi_turn_session_prepare_")
+    assert latest_session_artifact_path.name.endswith("_latest.txt")
+    session_text = latest_session_artifact_path.read_text(encoding="utf-8")
+    assert "\"current_phase\": \"finalize\"" in session_text
+    assert "\"final_proposal\"" in session_text
 
 
 # ---------------------------------------------------------------------------
@@ -2529,9 +3112,15 @@ def test_case3_bridge_multi_turn_override() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Case 3 LG-slippage bridge single-shot prompt preparation"
+        description="Case 3 LG-slippage bridge dry-run harness"
     )
     parser.add_argument("--model", default=DEFAULT_LIVE_MODEL, help="OpenAI model name")
+    parser.add_argument(
+        "--reasoning-mode",
+        choices=("single_shot", "multi_turn"),
+        default="multi_turn",
+        help="Bridge reasoning mode to exercise when running the script directly",
+    )
     parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifact")
     parser.add_argument(
         "--prepare-only",
@@ -2541,7 +3130,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--full-run",
         action="store_true",
-        help="Compatibility flag; full single-shot prompt preparation is now the default",
+        help="Compatibility flag; full bridge execution is the default",
     )
     parser.add_argument(
         "--show-llm-input",
@@ -2556,18 +3145,30 @@ if __name__ == "__main__":
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--show-single-shot-prompt",
-        dest="show_single_shot_prompt",
+        "--show-prompt",
+        dest="show_prompt",
         action="store_true",
-        help="Print the rendered single-shot prompt text in the terminal",
+        help="Print the current mode prompt text in the terminal",
     )
     parser.add_argument(
-        "--hide-single-shot-prompt",
-        dest="show_single_shot_prompt",
+        "--hide-prompt",
+        dest="show_prompt",
         action="store_false",
         help=argparse.SUPPRESS,
     )
-    parser.set_defaults(show_llm_input=False, show_single_shot_prompt=False)
+    parser.add_argument(
+        "--show-single-shot-prompt",
+        dest="show_prompt",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--hide-single-shot-prompt",
+        dest="show_prompt",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(show_llm_input=False, show_prompt=False)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -2577,15 +3178,19 @@ if __name__ == "__main__":
             run_case3_bridge_prepare_trace(
                 write_debug=not args.no_debug,
                 llm_model=args.model,
+                bridge_reasoning_mode=args.reasoning_mode,
             )
         )
         print()
-        print("Prepare-trace context build completed.")
+        print(f"Prepare-trace context build completed ({args.reasoning_mode}).")
         _print_prepare_context_summary(result.get("context_summary") or {})
         if args.show_llm_input:
             _print_llm_input(result.get("llm_input") or {})
-        if args.show_single_shot_prompt:
-            _print_single_shot_prompt(result.get("single_shot_prompt_text") or "")
+        if args.show_prompt:
+            _print_prompt(
+                _extract_latest_prompt_text(result),
+                reasoning_mode=str(result.get("reasoning_mode") or args.reasoning_mode),
+            )
         _print_debug_artifact_paths(result)
         sys.exit(0)
 
@@ -2593,14 +3198,18 @@ if __name__ == "__main__":
         run_case3_bridge_dryrun(
             write_debug=not args.no_debug,
             llm_model=args.model,
+            bridge_reasoning_mode=args.reasoning_mode,
         )
     )
 
     print()
-    print("Single-shot bridge status:", result.get("status") or "-")
+    print(f"Bridge status ({result.get('reasoning_mode') or args.reasoning_mode}):", result.get("status") or "-")
     _print_prepare_context_summary(result.get("context_summary") or {})
-    if args.show_single_shot_prompt:
-        _print_single_shot_prompt(result.get("single_shot_prompt_text") or "")
+    if args.show_prompt:
+        _print_prompt(
+            _extract_latest_prompt_text(result),
+            reasoning_mode=str(result.get("reasoning_mode") or args.reasoning_mode),
+        )
     if args.show_llm_input:
         _print_llm_input(result.get("llm_input") or {})
     _print_debug_artifact_paths(result)

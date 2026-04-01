@@ -6,14 +6,17 @@ import asyncio
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
+from hashlib import sha1
 from math import sqrt
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_prompts import (
-    build_single_shot_prompt_input,
-    render_single_shot_prompt,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    build_multi_turn_session_seed,
+    build_single_shot_prompt_artifacts,
+    execute_multi_turn_bridge,
+    execute_single_shot_bridge,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
     bridge_resource_capabilities,
@@ -426,8 +429,7 @@ class BridgeSessionMixin:
                     "status": str(status_entry.get("status") or "unknown").strip(),
                     "product": deepcopy(node.get("product")),
                     "resource_jid": resource_jids[0] if len(resource_jids) == 1 else None,
-                    "related_task_ids": related_task_ids,
-                    "pending_related_task_ids": pending_related_task_ids,
+                    "pending_task_ids": pending_related_task_ids,
                 }
             )
 
@@ -594,6 +596,54 @@ class BridgeSessionMixin:
             str(entry.get("field") or "").strip(),
             json.dumps(entry.get("expected"), sort_keys=True, default=str),
         )
+
+    @staticmethod
+    def _condition_id(entry: dict[str, Any]) -> str:
+        payload = {
+            "kind": str(entry.get("kind") or "").strip(),
+            "condition_family": str(entry.get("condition_family") or "").strip(),
+            "entity_kind": str(entry.get("entity_kind") or "").strip(),
+            "entity": str(entry.get("entity") or "").strip(),
+            "field": str(entry.get("field") or "").strip(),
+            "expected": deepcopy(entry.get("expected")),
+            "actual": deepcopy(entry.get("actual")),
+            "source_task_id": str(entry.get("source_task_id") or "").strip(),
+            "source_task_ids": [
+                str(task_id or "").strip()
+                for task_id in (entry.get("source_task_ids") or [])
+                if str(task_id or "").strip()
+            ],
+            "source_function_name": str(entry.get("source_function_name") or "").strip(),
+            "blocking_rule_id": str(entry.get("blocking_rule_id") or "").strip(),
+        }
+        digest = sha1(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"cond_{digest}"
+
+    @staticmethod
+    def _ordered_resource_jids(
+        *,
+        focused_resource_jid: str,
+        observed_resources: list[dict[str, Any]],
+        bridge_resources: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        ordered_resource_jids: list[str] = []
+        seen_resource_jids: set[str] = set()
+
+        def _append_resource_jid(raw_value: Any) -> None:
+            resource_jid = str(raw_value or "").strip()
+            if not resource_jid or resource_jid in seen_resource_jids:
+                return
+            seen_resource_jids.add(resource_jid)
+            ordered_resource_jids.append(resource_jid)
+
+        _append_resource_jid(focused_resource_jid)
+        for row in observed_resources:
+            _append_resource_jid(row.get("resource_jid"))
+        for resource_jid in sorted(bridge_resources):
+            _append_resource_jid(resource_jid)
+        return ordered_resource_jids
 
     def _bridge_grounding_context(
         self,
@@ -1901,6 +1951,68 @@ class BridgeSessionMixin:
                     unsatisfied_entry["actual"] = deepcopy(actual_location)
                     unsatisfied_goal_conditions.append(unsatisfied_entry)
 
+        # Detect pending suffix tasks blocked by safety ordering rules.
+        # For each "ordering_place_approach_priority" rule, if the gateway part
+        # has not yet been assembled, find pending place_approach tasks for the
+        # blocked part and inject them as continuation conditions.  This ensures
+        # the LLM sees the full scope of the deadlock, not just the xarm6 state gap.
+        for _rule in (prepared_bridge_request.get("loaded_safety_rules") or []):
+            if not isinstance(_rule, dict):
+                continue
+            if str(_rule.get("constraint_type") or "").strip() != "ordering_place_approach_priority":
+                continue
+            _rule_id = str(_rule.get("id") or _rule.get("rule_id") or "").strip()
+            _products = [str(p or "").lower().strip() for p in (_rule.get("product") or [])]
+            if len(_products) < 2:
+                continue
+            _gateway_lower = _products[0]
+            _blocked_lower = _products[1]
+            _dest = str((_rule.get("context") or {}).get("destination") or "").strip()
+            _gw_row = next(
+                (row for name, row in parts_by_name.items() if name.lower() == _gateway_lower),
+                {},
+            )
+            _gw_state = _gw_row.get("state")
+            _gw_location = _gw_row.get("location")
+            _gateway_satisfied = (
+                bool(goal_state)
+                and _gw_state == goal_state
+                and (not _dest or _gw_location == _dest)
+            )
+            if _gateway_satisfied:
+                continue
+            # The blocked event type comes from the rule itself (e.g. "place_approach"),
+            # so detection generalises to any ordering constraint the rule specifies.
+            _blocked_event = str(_rule.get("event") or "").strip()
+            for _raw_entry in bridge_resources.values():
+                if not isinstance(_raw_entry, dict):
+                    continue
+                for _task in (_raw_entry.get("pending_tasks") or []):
+                    if not isinstance(_task, dict):
+                        continue
+                    _fn = str(_task.get("function_name") or "").strip()
+                    _task_part = str((_task.get("params") or {}).get("part_name") or "").lower().strip()
+                    _task_id = str(_task.get("id") or "").strip()
+                    if (
+                        _task_id
+                        and _task_part == _blocked_lower
+                        and (_blocked_event and _fn == _blocked_event)
+                    ):
+                        unmet_continuation_conditions.append({
+                            "kind": "safety_blocked_suffix_task",
+                            "condition_family": "continuation",
+                            "entity_kind": "task",
+                            "entity": _task_id,
+                            "field": "safety_gate",
+                            "expected": "unblocked",
+                            "actual": f"blocked_by_{_rule_id}",
+                            "blocking_rule_id": _rule_id,
+                            "blocking_reason": (
+                                f"{_gateway_lower.upper()} must be placed at {_dest!r} "
+                                f"before {_blocked_lower.upper()} place_approach"
+                            ),
+                        })
+
         unsatisfied_conditions: list[dict[str, Any]] = []
         seen_unsatisfied_signatures: set[tuple[str, str, str, str, str]] = set()
         for entry in unsatisfied_goal_conditions + unmet_continuation_conditions:
@@ -2052,48 +2164,203 @@ class BridgeSessionMixin:
             if isinstance(entry, dict)
         ]
         modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
+        bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+        current_resources = [
+            dict(row)
+            for row in (current_product_state.get("resources") or [])
+            if isinstance(row, dict)
+        ]
+        current_resource_by_jid = {
+            str(row.get("resource_jid") or "").strip(): row
+            for row in current_resources
+            if str(row.get("resource_jid") or "").strip()
+        }
+        ordered_resource_jids = self._ordered_resource_jids(
+            focused_resource_jid=str(fault_event.get("focused_resource_jid") or "").strip(),
+            observed_resources=current_resources,
+            bridge_resources=bridge_resources,
+        )
 
         observed_resources: list[dict[str, Any]] = []
-        for row in (current_product_state.get("resources") or []):
-            if not isinstance(row, dict):
-                continue
-            observed_resources.append(
-                {
-                    "resource_jid": deepcopy(row.get("resource_jid")),
-                    "current_state": deepcopy(row.get("current_state")),
-                    "current_location": deepcopy(row.get("current_location")),
-                    "current_location_basis": deepcopy(row.get("current_location_basis")),
-                    "availability": deepcopy(row.get("availability")),
-                    "held_part": deepcopy(row.get("held_part")),
-                    "held_part_location": deepcopy(row.get("held_part_location")),
-                }
-            )
+        held_part_to_resource: dict[str, str] = {}
+        for resource_jid in ordered_resource_jids:
+            current_row = dict(current_resource_by_jid.get(resource_jid) or {})
+            bridge_entry = dict(bridge_resources.get(resource_jid) or {})
+            bridge_snapshot = self._build_prompt_bridge_snapshot(bridge_entry)
+            observed_resource = {
+                "resource_jid": resource_jid,
+                "current_state": deepcopy(
+                    current_row.get("current_state")
+                    if "current_state" in current_row
+                    else bridge_snapshot.get("current_state")
+                ),
+                "current_location": deepcopy(
+                    current_row.get("current_location")
+                    if "current_location" in current_row
+                    else bridge_snapshot.get("current_location")
+                ),
+                "availability": deepcopy(
+                    current_row.get("availability")
+                    if "availability" in current_row
+                    else bridge_snapshot.get("availability")
+                ),
+                "held_part": deepcopy(
+                    current_row.get("held_part")
+                    if "held_part" in current_row
+                    else bridge_snapshot.get("held_part")
+                ),
+            }
+            for optional_field in (
+                "gripper_state",
+                "current_pose",
+                "current_pose_ref",
+                "named_poses",
+                "workspace_bounds",
+            ):
+                optional_value = deepcopy(bridge_snapshot.get(optional_field))
+                if optional_value not in (None, "", [], {}):
+                    observed_resource[optional_field] = optional_value
+            observed_resources.append(observed_resource)
+            held_part = str(observed_resource.get("held_part") or "").strip()
+            if held_part:
+                held_part_to_resource.setdefault(held_part, resource_jid)
 
-        observed_parts: list[dict[str, Any]] = []
-        for row in (current_product_state.get("parts") or []):
-            if not isinstance(row, dict):
-                continue
-            observed_parts.append(
-                {
-                    "part_name": deepcopy(row.get("part_name")),
-                    "state": deepcopy(row.get("state")),
-                    "location": deepcopy(row.get("location")),
-                    "location_basis": deepcopy(row.get("location_basis")),
-                    "observed_pose": deepcopy(row.get("observed_pose")),
-                }
-            )
-
-        unmet_goal_conditions = [
-            deepcopy(entry)
-            for entry in (modeled_continuation_gap.get("unsatisfied_goal_conditions") or [])
-            if isinstance(entry, dict)
-        ]
-        unmet_continuation_conditions = [
+        raw_unmet_continuation_conditions = [
             deepcopy(entry)
             for entry in (modeled_continuation_gap.get("unsatisfied_conditions") or [])
             if isinstance(entry, dict)
             and str(entry.get("condition_family") or "").strip() == "continuation"
         ]
+        unmet_continuation_conditions: list[dict[str, Any]] = []
+        condition_ids_by_task_id: dict[str, list[str]] = {}
+        for entry in raw_unmet_continuation_conditions:
+            enriched_entry = deepcopy(entry)
+            condition_id = self._condition_id(enriched_entry)
+            enriched_entry["condition_id"] = condition_id
+            unmet_continuation_conditions.append(enriched_entry)
+
+            task_refs: set[str] = set()
+            source_task_id = str(enriched_entry.get("source_task_id") or "").strip()
+            if source_task_id:
+                task_refs.add(source_task_id)
+            if str(enriched_entry.get("entity_kind") or "").strip() == "task":
+                entity_task_id = str(enriched_entry.get("entity") or "").strip()
+                if entity_task_id:
+                    task_refs.add(entity_task_id)
+            task_refs.update(
+                str(task_id or "").strip()
+                for task_id in (enriched_entry.get("source_task_ids") or [])
+                if str(task_id or "").strip()
+            )
+            for task_id in task_refs:
+                bucket = condition_ids_by_task_id.setdefault(task_id, [])
+                if condition_id not in bucket:
+                    bucket.append(condition_id)
+
+        pending_tasks_detail: list[dict[str, Any]] = []
+        pending_task_ids_by_part: dict[str, list[str]] = {}
+        for resource_jid in sorted(bridge_resources):
+            raw_entry = dict(bridge_resources.get(resource_jid) or {})
+            for task in (raw_entry.get("pending_tasks") or []):
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if not task_id:
+                    continue
+                task_part = str((task.get("params") or {}).get("part_name") or "").strip() or None
+                pending_tasks_detail.append(
+                    {
+                        "id": task_id,
+                        "function": str(task.get("function_name") or "").strip(),
+                        "part": task_part,
+                        "resource": resource_jid,
+                        "blocked_by_condition_ids": deepcopy(
+                            condition_ids_by_task_id.get(task_id) or []
+                        ),
+                    }
+                )
+                if task_part:
+                    pending_task_ids_by_part.setdefault(task_part, []).append(task_id)
+
+        requirements_by_product: dict[str, list[dict[str, Any]]] = {}
+        for requirement_entry in relevant_assembly_requirements:
+            product = str(requirement_entry.get("product") or "").strip()
+            if product:
+                requirements_by_product.setdefault(product, []).append(requirement_entry)
+
+        current_parts = [
+            dict(row)
+            for row in (current_product_state.get("parts") or [])
+            if isinstance(row, dict)
+        ]
+        current_part_by_name = {
+            str(row.get("part_name") or "").strip(): row
+            for row in current_parts
+            if str(row.get("part_name") or "").strip()
+        }
+        tracker_by_part = {
+            str(part_name or "").strip(): dict(raw_entry or {})
+            for part_name, raw_entry in dict(prepared_bridge_request.get("part_tracker") or {}).items()
+            if str(part_name or "").strip() and isinstance(raw_entry, dict)
+        }
+        ordered_part_names: list[str] = []
+        seen_observed_part_names: set[str] = set()
+        for row in current_parts:
+            part_name = str(row.get("part_name") or "").strip()
+            if part_name and part_name not in seen_observed_part_names:
+                seen_observed_part_names.add(part_name)
+                ordered_part_names.append(part_name)
+        for part_name in sorted(tracker_by_part):
+            if part_name not in seen_observed_part_names:
+                seen_observed_part_names.add(part_name)
+                ordered_part_names.append(part_name)
+
+        part_facts: list[dict[str, Any]] = []
+        for part_name in ordered_part_names:
+            current_part_row = dict(current_part_by_name.get(part_name) or {})
+            tracker_entry = dict(tracker_by_part.get(part_name) or {})
+            requirement_entry = dict((requirements_by_product.get(part_name) or [None])[0] or {})
+            current_location = deepcopy(current_part_row.get("location"))
+            holder_resource_jid = str(held_part_to_resource.get(part_name) or "").strip()
+            if (
+                not holder_resource_jid
+                and isinstance(current_location, str)
+                and current_location.endswith("_gripper")
+            ):
+                holder_resource_jid = current_location.rsplit("_gripper", 1)[0]
+            part_facts.append(
+                {
+                    "part_name": part_name,
+                    "current_state": deepcopy(current_part_row.get("state")),
+                    "current_location": current_location,
+                    "location_basis": deepcopy(current_part_row.get("location_basis")),
+                    "observed_pose": deepcopy(current_part_row.get("observed_pose")),
+                    "current_holder_resource_jid": holder_resource_jid or None,
+                    "origin_location": deepcopy(tracker_entry.get("origin_resource_location")),
+                    "goal_location": deepcopy(current_part_row.get("target_location")),
+                    "goal_requirement_id": (
+                        str(requirement_entry.get("requirement_id") or "").strip() or None
+                    ),
+                    "nominal_requirement_resource_jid": (
+                        str(requirement_entry.get("resource_jid") or "").strip() or None
+                    ),
+                    "pending_nominal_task_ids": deepcopy(
+                        pending_task_ids_by_part.get(part_name) or []
+                    ),
+                }
+            )
+
+        affected_part_names: list[str] = []
+        seen_part_names: set[str] = set()
+        for raw_entry in (fault_event.get("affected_parts") or []):
+            if isinstance(raw_entry, dict):
+                part_name = str(raw_entry.get("part_name") or "").strip()
+            else:
+                part_name = str(raw_entry or "").strip()
+            if not part_name or part_name in seen_part_names:
+                continue
+            seen_part_names.add(part_name)
+            affected_part_names.append(part_name)
 
         return {
             "fault_event": {
@@ -2101,13 +2368,17 @@ class BridgeSessionMixin:
                 "blocked_at_task_id": deepcopy(fault_event.get("blocked_at_task_id")),
                 "blocked_at_function": deepcopy(fault_event.get("blocked_at_function")),
                 "resource_state": deepcopy(fault_event.get("resource_state")),
-                "resource_state_after": deepcopy(fault_event.get("resource_state_after") or {}),
-                "affected_parts": deepcopy(fault_event.get("affected_parts") or []),
+                "resource_state_after": {
+                    k: v
+                    for k, v in deepcopy(fault_event.get("resource_state_after") or {}).items()
+                    if k not in ("execution_mode", "controller_ready")
+                },
+                "affected_part_names": affected_part_names,
             },
             "observed_runtime_state": {
                 "resources": observed_resources,
-                "parts": observed_parts,
             },
+            "part_facts": part_facts,
             "loaded_safety_rules": [
                 deepcopy(rule)
                 for rule in (current_product_state.get("loaded_safety_rules") or [])
@@ -2120,95 +2391,13 @@ class BridgeSessionMixin:
             ],
             "relevant_assembly_requirements": relevant_assembly_requirements,
             "modeled_continuation_gap": {
-                "goal_state": deepcopy(modeled_continuation_gap.get("goal_state")),
-                "pending_nominal_task_ids": deepcopy(
-                    modeled_continuation_gap.get("pending_nominal_task_ids") or []
-                ),
-                "unmet_goal_conditions": unmet_goal_conditions,
+                "pending_nominal_tasks": pending_tasks_detail,
                 "unmet_continuation_conditions": unmet_continuation_conditions,
                 "resume_ready": deepcopy(modeled_continuation_gap.get("resume_ready")),
             },
             "allowed_execution_surface": self._build_allowed_execution_surface(
                 prepared_bridge_request
             ),
-        }
-
-    @staticmethod
-    def _compact_prompt_condition_target(
-        entry: dict[str, Any],
-        *,
-        include_entity: bool,
-    ) -> dict[str, Any]:
-        compact: dict[str, Any] = {}
-        if include_entity:
-            entity_kind = str(entry.get("entity_kind") or "").strip()
-            entity = str(entry.get("entity") or "").strip()
-            if entity_kind:
-                compact["entity_kind"] = entity_kind
-            if entity:
-                compact["entity"] = entity
-        field = str(entry.get("field") or "").strip()
-        if field:
-            compact["field"] = field
-        if "expected" in entry:
-            compact["expected"] = deepcopy(entry.get("expected"))
-        return compact
-
-    def _build_proposal_success_criteria(
-        self,
-        prepared_bridge_request: dict[str, Any],
-    ) -> dict[str, Any]:
-        context_summary = dict(prepared_bridge_request.get("context_summary") or {})
-        fault_event = dict(context_summary.get("fault_event") or {})
-        current_product_state = dict(context_summary.get("current_product_state") or {})
-        active_safety_diagnosis = dict(current_product_state.get("active_safety_diagnosis") or {})
-        modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
-
-        focused_resource_jid = str(fault_event.get("focused_resource_jid") or "").strip()
-        focused_continuation_conditions = [
-            deepcopy(entry)
-            for entry in (modeled_continuation_gap.get("unsatisfied_conditions") or [])
-            if isinstance(entry, dict)
-            and str(entry.get("condition_family") or "").strip() == "continuation"
-            and (
-                not focused_resource_jid
-                or str(entry.get("entity") or "").strip() == focused_resource_jid
-            )
-        ]
-        active_obligation_targets = [
-            deepcopy(target)
-            for target in (active_safety_diagnosis.get("obligation_targets") or [])
-            if isinstance(target, dict)
-            and (
-                not focused_resource_jid
-                or str(target.get("resource_jid") or "").strip() == focused_resource_jid
-            )
-        ]
-        obligation_rule_ids = [
-            str(target.get("rule_id") or "").strip()
-            for target in active_obligation_targets
-            if str(target.get("rule_id") or "").strip()
-        ]
-
-        return {
-            "focused_resource_jid": focused_resource_jid,
-            "resume_ready_now": deepcopy(modeled_continuation_gap.get("resume_ready")),
-            "target_resume_ready": True,
-            "focused_resource_targets": [
-                self._compact_prompt_condition_target(entry, include_entity=False)
-                for entry in focused_continuation_conditions
-                if self._compact_prompt_condition_target(entry, include_entity=False)
-            ],
-            "obligation_rule_ids_to_preserve": obligation_rule_ids,
-            "protected_nominal_task_suffix": deepcopy(
-                modeled_continuation_gap.get("pending_nominal_task_ids") or []
-            ),
-            "goal_targets_to_improve": [
-                self._compact_prompt_condition_target(entry, include_entity=True)
-                for entry in (modeled_continuation_gap.get("unsatisfied_goal_conditions") or [])
-                if isinstance(entry, dict)
-                and self._compact_prompt_condition_target(entry, include_entity=True)
-            ],
         }
 
     @staticmethod
@@ -2280,6 +2469,9 @@ class BridgeSessionMixin:
                 if "named_poses" in bridge_snapshot
                 else manipulator.get("named_poses")
             ),
+            "workspace_bounds": deepcopy(
+                dict(resource_entry.get("static_capabilities") or {}).get("workspace_bounds")
+            ),
         }
         return {
             key: value
@@ -2288,18 +2480,49 @@ class BridgeSessionMixin:
         }
 
     @staticmethod
-    def _build_prompt_primitive_catalog(
+    def _build_prompt_allowed_primitives(
         resource_entry: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        resource_type = str(resource_entry.get("resource_type") or "resource").strip() or "resource"
+        profile = get_resource_profile(resource_type)
+        preview_output_map = dict(profile.preview_output_map or {})
+        extract_output_map = dict(profile.extract_output_map or {})
         prompt_catalog: list[dict[str, Any]] = []
         for raw_item in (resource_entry.get("primitive_catalog") or []):
             if not isinstance(raw_item, dict):
                 continue
-            prompt_item = {
-                key: deepcopy(value)
-                for key, value in raw_item.items()
-                if key != "composite_expansion"
-            }
+            primitive_name = str(raw_item.get("name") or "").strip()
+            if not primitive_name:
+                continue
+            prompt_item: dict[str, Any] = {"name": primitive_name}
+            description = str(
+                raw_item.get("description") or raw_item.get("semantic_summary") or ""
+            ).strip()
+            if description:
+                prompt_item["description"] = description
+            required_params = [
+                str(item).strip()
+                for item in (raw_item.get("required_params") or [])
+                if str(item).strip()
+            ]
+            prompt_item["required_params"] = required_params
+            primitive_kind = str(raw_item.get("primitive_kind") or "").strip()
+            if primitive_kind:
+                prompt_item["primitive_kind"] = primitive_kind
+            output_schema = dict(raw_item.get("output_schema") or {})
+            output_fields = [
+                str(field).strip()
+                for field in output_schema.keys()
+                if str(field).strip()
+            ]
+            if output_fields:
+                prompt_item["output_fields"] = output_fields
+            hard_preconditions = deepcopy(raw_item.get("preconditions") or {})
+            if hard_preconditions:
+                prompt_item["hard_preconditions"] = hard_preconditions
+            prompt_item["supports_store_as"] = (
+                primitive_name in preview_output_map or primitive_name in extract_output_map
+            )
             prompt_catalog.append(prompt_item)
         return prompt_catalog
 
@@ -2322,22 +2545,11 @@ class BridgeSessionMixin:
             for row in observed_resources
             if str(row.get("resource_jid") or "").strip()
         }
-
-        ordered_resource_jids: list[str] = []
-        seen_resource_jids: set[str] = set()
-
-        def _append_resource_jid(raw_value: Any) -> None:
-            resource_jid = str(raw_value or "").strip()
-            if not resource_jid or resource_jid in seen_resource_jids:
-                return
-            seen_resource_jids.add(resource_jid)
-            ordered_resource_jids.append(resource_jid)
-
-        _append_resource_jid(focused_resource_jid)
-        for row in observed_resources:
-            _append_resource_jid(row.get("resource_jid"))
-        for resource_jid in sorted(bridge_resources):
-            _append_resource_jid(resource_jid)
+        ordered_resource_jids = self._ordered_resource_jids(
+            focused_resource_jid=focused_resource_jid,
+            observed_resources=observed_resources,
+            bridge_resources=bridge_resources,
+        )
 
         prompt_resources: list[dict[str, Any]] = []
         for resource_jid in ordered_resource_jids:
@@ -2346,46 +2558,20 @@ class BridgeSessionMixin:
             if not adapter_capabilities.get("supports_executable_bridge"):
                 continue
             observed_row = dict(observed_by_jid.get(resource_jid) or {})
-            prompt_bridge_snapshot = self._build_prompt_bridge_snapshot(bridge_entry)
-            pending_task_ids = [
-                str(task.get("id") or "").strip()
-                for task in (bridge_entry.get("pending_tasks") or [])
-                if isinstance(task, dict) and str(task.get("id") or "").strip()
-            ]
+            resource_type = str(
+                bridge_entry.get("resource_type")
+                or dict((bridge_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get("resource_type")
+                or "unknown"
+            ).strip()
             prompt_resources.append(
                 {
                     "resource_jid": resource_jid,
+                    "resource_type": resource_type,
                     "role": deepcopy(
                         observed_row.get("role")
                         or ("focused" if resource_jid == focused_resource_jid else "supporting")
                     ),
-                    "current_state": deepcopy(
-                        observed_row.get("current_state")
-                        if "current_state" in observed_row
-                        else prompt_bridge_snapshot.get("current_state")
-                    ),
-                    "current_location": deepcopy(
-                        observed_row.get("current_location")
-                        if "current_location" in observed_row
-                        else prompt_bridge_snapshot.get("current_location")
-                    ),
-                    "availability": deepcopy(
-                        observed_row.get("availability")
-                        if "availability" in observed_row
-                        else prompt_bridge_snapshot.get("availability")
-                    ),
-                    "held_part": deepcopy(
-                        observed_row.get("held_part")
-                        if "held_part" in observed_row
-                        else prompt_bridge_snapshot.get("held_part")
-                    ),
-                    "pending_task_ids": deepcopy(
-                        observed_row.get("pending_task_ids")
-                        if isinstance(observed_row.get("pending_task_ids"), list)
-                        else pending_task_ids
-                    ),
-                    "prompt_bridge_snapshot": deepcopy(prompt_bridge_snapshot),
-                    "prompt_primitive_catalog": self._build_prompt_primitive_catalog(
+                    "allowed_primitives": self._build_prompt_allowed_primitives(
                         bridge_entry
                     ),
                 }
@@ -2399,19 +2585,7 @@ class BridgeSessionMixin:
         self,
         prepared_bridge_request: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
-        reasoning_mode = self._normalize_bridge_reasoning_mode(
-            dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode")
-            or self._resolve_bridge_reasoning_mode()
-        )
-        prompt_input = build_single_shot_prompt_input(
-            reasoning_mode=reasoning_mode,
-            llm_input=deepcopy(prepared_bridge_request.get("llm_input") or {}),
-            proposal_success_criteria=self._build_proposal_success_criteria(
-                prepared_bridge_request
-            ),
-        )
-        prompt_text = render_single_shot_prompt(prompt_input)
-        return prompt_input, prompt_text
+        return build_single_shot_prompt_artifacts(self, prepared_bridge_request)
 
     async def prepare_bridge_request(
         self,
@@ -2568,6 +2742,10 @@ class BridgeSessionMixin:
             prepared_bridge_request["single_shot_prompt_text"] = str(
                 single_shot_prompt_text or ""
             )
+        elif reasoning_mode == "multi_turn":
+            prepared_bridge_request["multi_turn_session_seed"] = deepcopy(
+                build_multi_turn_session_seed(prepared_bridge_request)
+            )
 
         bridge_debug = {
             "builder": "prepare_trace",
@@ -2586,6 +2764,10 @@ class BridgeSessionMixin:
                     prepared_bridge_request.get("single_shot_prompt_text") or ""
                 ),
             }
+        elif reasoning_mode == "multi_turn":
+            bridge_debug["multi_turn_session"] = deepcopy(
+                prepared_bridge_request.get("multi_turn_session_seed") or {}
+            )
         prepared_bridge_request["bridge_debug"] = bridge_debug
         if hasattr(self, "_set_last_bridge_debug"):
             self._set_last_bridge_debug(bridge_debug)
@@ -2611,54 +2793,19 @@ class BridgeSessionMixin:
         bridge_debug["source"] = "llm_bridge_v4"
         bridge_debug["reasoning_mode"] = reasoning_mode
 
-        if reasoning_mode != "single_shot":
-            bridge_debug["status"] = "unsupported_reasoning_mode"
-            bridge_debug["message"] = (
-                "The selected bridge reasoning_mode is not implemented in the active bridge yet."
-            )
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            if hasattr(self, "_set_last_bridge_debug"):
-                self._set_last_bridge_debug(bridge_debug)
-            return None
+        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        if hasattr(self, "_set_last_bridge_debug"):
+            self._set_last_bridge_debug(bridge_debug)
 
-        if not isinstance(prepared_bridge_request.get("single_shot_prompt_input"), dict) or not str(
-            prepared_bridge_request.get("single_shot_prompt_text") or ""
-        ).strip():
-            single_shot_prompt_input, single_shot_prompt_text = (
-                self._build_single_shot_prompt_artifacts(prepared_bridge_request)
-            )
-            prepared_bridge_request["single_shot_prompt_input"] = deepcopy(
-                single_shot_prompt_input
-            )
-            prepared_bridge_request["single_shot_prompt_text"] = str(
-                single_shot_prompt_text or ""
-            )
+        if reasoning_mode == "single_shot":
+            return await execute_single_shot_bridge(self, prepared_bridge_request)
+        if reasoning_mode == "multi_turn":
+            return await execute_multi_turn_bridge(self, prepared_bridge_request)
 
-        product_agent = getattr(self, "product_agent", None)
-        ask_llm = getattr(product_agent, "ask_llm", None)
-        if not callable(ask_llm):
-            raise RuntimeError("product_agent.ask_llm is required for single-shot bridge execution")
-
-        prompt_text = str(prepared_bridge_request.get("single_shot_prompt_text") or "")
-        raw_response = await ask_llm(
-            prompt=prompt_text,
-            with_functions=False,
-            temperature=0.0,
-        )
-        bridge_debug["status"] = "llm_output_recorded"
+        bridge_debug["status"] = "unsupported_reasoning_mode"
         bridge_debug["message"] = (
-            "Single-shot prompt was sent to the LLM and the raw response was captured. "
-            "Proposal parsing and validation are not implemented yet."
+            "The selected bridge reasoning_mode is not implemented in the active bridge yet."
         )
-        bridge_debug["single_shot_turn"] = {
-            "reasoning_mode": reasoning_mode,
-            "status": "llm_output_recorded",
-            "prompt_input": deepcopy(
-                prepared_bridge_request.get("single_shot_prompt_input") or {}
-            ),
-            "prompt_text": prompt_text,
-            "raw_response": str(raw_response or ""),
-        }
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         if hasattr(self, "_set_last_bridge_debug"):
             self._set_last_bridge_debug(bridge_debug)
