@@ -54,14 +54,47 @@ class ResourceProfile:
     event_state_validator: EventStateValidator | None = None
     capability_flags: Mapping[str, bool] = field(default_factory=dict)
     observation_families: tuple[str, ...] = ()
+    grounding_observation_primitives: tuple[str, ...] = ()
+    grounding_observation_fact_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     example_families: tuple[str, ...] = ("generic_bridge",)
     observation_output_schema_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     preview_output_map: Mapping[str, PreviewOutputResolver] = field(default_factory=dict)
     extract_output_map: Mapping[str, ExtractOutputResolver] = field(default_factory=dict)
+    store_as_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     carried_entity_field: str = ""
     carried_entity_location_builder: CarriedEntityLocationBuilder | None = None
     prompt_addendum: str = ""
     repair_example: str = ""
+
+
+def resource_store_as_contract(
+    profile: ResourceProfile | None,
+    primitive_name: str,
+) -> dict[str, Any]:
+    primitive_token = str(primitive_name or "").strip()
+    if profile is None or not primitive_token:
+        return {}
+    contract = dict((profile.store_as_contract_map or {}).get(primitive_token) or {})
+    required_params = [
+        str(param).strip()
+        for param in (contract.get("required_params") or [])
+        if str(param).strip()
+    ]
+    any_of_param_sets = [
+        [
+            str(param).strip()
+            for param in (param_set or [])
+            if str(param).strip()
+        ]
+        for param_set in (contract.get("any_of_param_sets") or [])
+        if isinstance(param_set, (list, tuple))
+    ]
+    normalized: dict[str, Any] = {}
+    if required_params:
+        normalized["required_params"] = required_params
+    if any_of_param_sets:
+        normalized["any_of_param_sets"] = any_of_param_sets
+    return normalized
 
 
 def resource_snapshot_field_value(

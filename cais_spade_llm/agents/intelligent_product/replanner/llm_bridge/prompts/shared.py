@@ -11,7 +11,7 @@ def json_block(value: Any) -> str:
     return json.dumps(value, indent=2, default=str, ensure_ascii=True)
 
 
-def _prompt_part_facts(part_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def prompt_part_facts(part_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rendered_rows: list[dict[str, Any]] = []
     for raw_row in (part_facts or []):
         if not isinstance(raw_row, dict):
@@ -47,7 +47,7 @@ def build_shared_fact_sections(
         json_block(observed_runtime_state.get("resources") or []),
         "",
         "Current Part Facts",
-        json_block(_prompt_part_facts(payload.get("part_facts") or [])),
+        json_block(prompt_part_facts(payload.get("part_facts") or [])),
         "",
         "Loaded Safety Rules",
         json_block(safety_section),
@@ -73,4 +73,4 @@ def build_shared_fact_sections(
     return sections
 
 
-__all__ = ["build_shared_fact_sections", "json_block"]
+__all__ = ["build_shared_fact_sections", "json_block", "prompt_part_facts"]

@@ -22,6 +22,7 @@ from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
+    resource_store_as_contract,
     resource_snapshot_availability,
     resource_snapshot_field_value,
     resource_snapshot_set_field,
@@ -157,6 +158,24 @@ def _primitive_summary(
     return f"{base} ({'; '.join(detail_parts)})"
 
 
+def _effective_catalog_required_params(
+    required: list[str],
+    *,
+    profile: Any,
+    primitive_name: str,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    contract = resource_store_as_contract(profile, primitive_name)
+    for raw_name in list(required or []) + list(contract.get("required_params") or []):
+        token = str(raw_name or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        merged.append(token)
+    return merged
+
+
 def _resource_type_for_agent(resource_agent: Any, *, snapshot: dict[str, Any] | None = None) -> str:
     static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
     return resolve_bridge_resource_type(
@@ -272,6 +291,11 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
         if not callable(fn):
             continue
         properties, required, description = _schema_properties_for_function(fn)
+        required = _effective_catalog_required_params(
+            required,
+            profile=profile,
+            primitive_name=primitive_name,
+        )
         frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
         preconditions = deepcopy(frontmatter.get("preconditions") or {})
         effects = deepcopy(frontmatter.get("effects") or {})

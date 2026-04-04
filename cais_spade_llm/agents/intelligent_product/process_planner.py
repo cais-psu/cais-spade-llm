@@ -1589,6 +1589,22 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     bridge_debug=bridge_debug,
                     prepared_bridge_request=prepared_bridge_request,
                 )
+            if bridge_status == "paused_after_grounding":
+                message = (
+                    "DES found no modeled continuation. Multi-turn grounding completed and "
+                    "paused before outline generation for review."
+                )
+                self.logger.info("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    plan_changed=False,
+                    used_llm_bridge=True,
+                    human_required=False,
+                    awaiting_bridge_generation=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
             if bridge_status == "unsupported_reasoning_mode":
                 message = (
                     "DES found no modeled continuation, but the selected bridge reasoning mode "

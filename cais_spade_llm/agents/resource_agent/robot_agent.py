@@ -2123,48 +2123,260 @@ class RobotAgent(ResourceAgent):
         part_name: str | None,
         part_context: Dict[str, Any],
         bridge_snapshot: Dict[str, Any],
+        grounded_action: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Workspace-aware feasibility check for bridge recovery events.
 
-        For clear/home operations: always allowed.
-        For pick/place/pick_place: checks the target pose against workspace bounds.
-        Falls back to allowed if no workspace_bounds are configured.
+        Uses the grounded bridge action's structured target/effect contract
+        rather than natural-language task labels. Falls back to permissive
+        behavior when the task does not expose a pose that can be checked.
         """
         from copy import deepcopy
 
-        op = str(operation_kind or "").strip().lower()
+        del operation_kind
         evidence: Dict[str, Any] = {
             "part_context": deepcopy(part_context),
             "bridge_snapshot": deepcopy(bridge_snapshot),
             "resource_jid": str(getattr(self, "jid", "") or ""),
+            "grounded_action": deepcopy(grounded_action or {}),
         }
 
-        # Clear/home: always feasible (robot moves to its own named pose).
-        if op in {"clear", "home"}:
+        bridge_snapshot = deepcopy(bridge_snapshot or {})
+        part_context = deepcopy(part_context or {})
+        grounded_action = deepcopy(grounded_action or {})
+        target_info = dict(grounded_action.get("target") or part_context.get("target") or {})
+        expected_effect = dict(grounded_action.get("expected_effect") or {})
+        preconditions = dict(grounded_action.get("preconditions") or {})
+        resource_preconditions = dict(preconditions.get("resource") or {})
+        part_preconditions = dict(preconditions.get("part") or {})
+        source_ref = dict(preconditions.get("source_ref") or {})
+        effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
+        task_kind = str(grounded_action.get("task_kind") or "").strip().lower()
+        expected_resource = dict(expected_effect.get("resource") or {})
+        expected_part = dict(expected_effect.get("part") or {})
+        named_pose = str(target_info.get("named_pose") or part_context.get("named_pose") or "").strip()
+        available_named_poses = {
+            str(name).strip()
+            for name in (
+                bridge_snapshot.get("named_poses")
+                or self.static_capabilities.get("named_poses")
+                or []
+            )
+            if str(name).strip()
+        }
+        if named_pose and available_named_poses and named_pose not in available_named_poses:
             return {
-                "allowed": True,
-                "reason": f"{op} operation always feasible for own robot",
+                "allowed": False,
+                "constraint_code": "named_pose_unavailable",
+                "guard": {
+                    "kind": "named_pose_unavailable",
+                    "resource_jid": str(getattr(self, "jid", "") or ""),
+                    "named_pose": named_pose,
+                },
+                "reason": f"named pose '{named_pose}' is not available on this robot",
+                "evidence": {
+                    **evidence,
+                    "named_pose": named_pose,
+                    "available_named_poses": sorted(available_named_poses),
+                },
+            }
+
+        availability = str(bridge_snapshot.get("availability") or "").strip().lower()
+        if availability == "unavailable":
+            return {
+                "allowed": False,
+                "constraint_code": "resource_unavailable",
+                "guard": {
+                    "kind": "resource_not_available",
+                    "resource_jid": str(getattr(self, "jid", "") or ""),
+                },
+                "reason": "resource is currently unavailable",
                 "evidence": evidence,
             }
 
-        # For pick/place/pick_place: check target pose against workspace.
+        held_part = str(
+            bridge_snapshot.get("held_part")
+            or part_context.get("resource_held_part")
+            or ""
+        ).strip()
+        gripper_state = str(
+            bridge_snapshot.get("gripper_state")
+            or part_context.get("resource_gripper_state")
+            or ""
+        ).strip().lower()
+        current_holder = str(part_context.get("current_holder_resource_jid") or "").strip()
+        resource_jid = str(getattr(self, "jid", "") or "")
+        supported_recovery_states = {
+            str(token).strip()
+            for token in (
+                bridge_snapshot.get("supported_recovery_states")
+                or self.static_capabilities.get("supported_recovery_states")
+                or []
+            )
+            if str(token).strip()
+        }
+        desired_held_part = str(expected_resource.get("held_part") or "").strip()
+        desired_part_holder = str(expected_part.get("holder") or "").strip()
+        desired_part_location = str(expected_part.get("location") or "").strip()
+        desired_resource_location = str(expected_resource.get("location") or "").strip()
+        desired_resource_state = str(expected_resource.get("current_state") or "").strip()
+        part_affecting = bool(
+            effect_scope in {"part_only", "resource_and_part"}
+            or any(
+                key in expected_part and expected_part.get(key) not in (None, "", [], {})
+                for key in ("state", "location", "pose", "holder")
+            )
+        )
+        requires_part_acquisition = bool(
+            part_name
+            and part_affecting
+            and bool(part_preconditions.get("requires_acquisition"))
+        )
+        if (
+            effect_scope == "resource_only"
+            and desired_resource_state
+            and not (
+                named_pose
+                or target_info.get("pose")
+                or target_info.get("slot_pose")
+                or desired_resource_location
+            )
+            and (not supported_recovery_states or desired_resource_state not in supported_recovery_states)
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "unsupported_resource_target",
+                "guard": {
+                    "kind": "unsupported_resource_target",
+                    "resource_jid": resource_jid,
+                    "resource_state": desired_resource_state,
+                },
+                "reason": (
+                    f"resource-only transition targets state '{desired_resource_state}' "
+                    "without a concrete supported recovery pose or advertised recovery target"
+                ),
+                "evidence": {
+                    **evidence,
+                    "supported_recovery_states": sorted(supported_recovery_states),
+                    "resource_preconditions": deepcopy(resource_preconditions),
+                },
+            }
+        if requires_part_acquisition and part_name:
+            if held_part and held_part != str(part_name).strip():
+                return {
+                    "allowed": False,
+                    "constraint_code": "holder_conflict",
+                    "guard": {
+                        "kind": "resource_holds_part",
+                        "resource_jid": str(getattr(self, "jid", "") or ""),
+                        "held_part": held_part,
+                    },
+                    "reason": (
+                        f"resource already holds '{held_part}' and cannot acquire "
+                        f"'{str(part_name).strip()}'"
+                    ),
+                    "evidence": {**evidence, "conflicting_part": held_part},
+                }
+            if current_holder and current_holder != str(getattr(self, "jid", "") or ""):
+                return {
+                    "allowed": False,
+                    "constraint_code": "holder_conflict",
+                    "guard": {
+                        "kind": "part_held_by_other",
+                        "part_name": str(part_name).strip(),
+                        "current_holder_resource_jid": current_holder,
+                    },
+                    "reason": (
+                        f"part '{str(part_name).strip()}' is currently held by "
+                        f"'{current_holder}', not this robot"
+                    ),
+                    "evidence": {**evidence, "current_holder_resource_jid": current_holder},
+                }
+            if not held_part and gripper_state == "closed":
+                return {
+                    "allowed": False,
+                    "constraint_code": "gripper_occupancy_conflict",
+                    "guard": {
+                        "kind": "gripper_closed_without_target_part",
+                        "resource_jid": str(getattr(self, "jid", "") or ""),
+                    },
+                    "reason": "gripper is already closed without holding the target part",
+                    "evidence": evidence,
+                }
+            if not source_ref:
+                return {
+                    "allowed": False,
+                    "constraint_code": "source_reference_unavailable",
+                    "guard": {
+                        "kind": "source_reference_unavailable",
+                        "resource_jid": resource_jid,
+                        "part_name": str(part_name).strip(),
+                    },
+                    "reason": (
+                        f"task requires acquiring '{str(part_name).strip()}' first but no "
+                        "grounded current source reference is available"
+                    ),
+                    "evidence": evidence,
+                }
+        elif part_affecting and part_name and task_kind != "continuation_resume":
+            if held_part != str(part_name).strip() and current_holder != resource_jid:
+                return {
+                    "allowed": False,
+                    "constraint_code": "required_part_not_held",
+                    "guard": {
+                        "kind": "required_part_not_held",
+                        "resource_jid": resource_jid,
+                        "part_name": str(part_name).strip(),
+                    },
+                    "reason": (
+                        f"task changes part '{str(part_name).strip()}' but resource "
+                        f"'{resource_jid}' does not currently hold it"
+                    ),
+                    "evidence": evidence,
+                }
+
         target_pose: Dict[str, Any] | None = None
-        if op in {"pick", "pick_place"}:
-            # Pick target: observed_pose from part_context
-            target_pose = part_context.get("observed_pose")
-            if target_pose is None:
-                # Try nested under "pose"
-                target_pose = part_context.get("pose")
-        elif op == "place":
-            # Place target: slot_pose from target info
-            target_info = part_context.get("target") or {}
-            target_pose = target_info.get("slot_pose") or target_info.get("pose")
+        if requires_part_acquisition or str(target_info.get("source_location") or "").strip() == "observed_pose":
+            source_pose = dict(source_ref.get("pose") or {})
+            target_pose = (
+                source_pose
+                or part_context.get("observed_pose")
+                or target_info.get("source_pose")
+                or part_context.get("pose")
+            )
+            if requires_part_acquisition and target_pose is None:
+                return {
+                    "allowed": False,
+                    "constraint_code": "source_reference_unavailable",
+                    "guard": {
+                        "kind": "source_reference_unavailable",
+                        "resource_jid": resource_jid,
+                        "part_name": str(part_name or "").strip() or None,
+                    },
+                    "reason": (
+                        f"task requires acquiring '{str(part_name).strip()}' first but its "
+                        "grounded source reference has no usable pose or location evidence"
+                    ),
+                    "evidence": {
+                        **evidence,
+                        "source_ref": deepcopy(source_ref),
+                    },
+                }
+        if target_pose is None:
+            target_pose = (
+                target_info.get("slot_pose")
+                or target_info.get("pose")
+                or dict(expected_part.get("pose") or {})
+                or None
+            )
 
         if target_pose is None:
-            # No pose to check; allow (can't determine infeasibility).
             return {
                 "allowed": True,
-                "reason": f"no target pose available for {op}; defaulting to allowed",
+                "reason": (
+                    "grounded preconditions are satisfied and no pose-dependent "
+                    "reachability check is required"
+                ),
                 "evidence": evidence,
             }
 
@@ -2175,6 +2387,17 @@ class RobotAgent(ResourceAgent):
         )
         return {
             "allowed": inside,
+            "constraint_code": "workspace_unreachable" if not inside else None,
+            "guard": (
+                {
+                    "kind": "observed_pose_unreachable",
+                    "resource_jid": str(getattr(self, "jid", "") or ""),
+                    "part_name": str(part_name or "").strip() or None,
+                    "pose": deepcopy(target_pose),
+                }
+                if not inside
+                else None
+            ),
             "reason": reason,
             "evidence": evidence,
         }

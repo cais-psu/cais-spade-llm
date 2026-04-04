@@ -198,6 +198,158 @@ def _robot_event_contract_validator(
     return None
 
 
+def _robot_pose_in_workspace(
+    pose: dict[str, Any],
+    bounds: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    violations: list[str] = []
+    for axis in ("x", "y", "z"):
+        value = pose.get(axis)
+        if value is None:
+            continue
+        try:
+            coord = float(value)
+        except (TypeError, ValueError):
+            continue
+        lower = bounds.get(f"{axis}_min_m")
+        upper = bounds.get(f"{axis}_max_m")
+        if lower is not None and coord < float(lower):
+            violations.append(f"{axis}={coord:.4f} < {axis}_min_m={float(lower):.4f}")
+        if upper is not None and coord > float(upper):
+            violations.append(f"{axis}={coord:.4f} > {axis}_max_m={float(upper):.4f}")
+    return len(violations) == 0, violations
+
+
+def validate_outline_macro_for_resource(
+    *,
+    task: dict[str, Any],
+    resource_row: dict[str, Any],
+    parts_by_name: dict[str, dict[str, Any]],
+    signature: dict[str, Any],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    task_id = str(task.get("outline_id") or "").strip()
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    task_part_name = str(task.get("part_name") or "").strip()
+    inferred_primary_part = str(signature.get("inferable_primary_part") or "").strip()
+    effective_part_name = inferred_primary_part or task_part_name
+    action_target = dict(task.get("action_target") or {})
+    bounds = dict(resource_row.get("workspace_bounds") or {})
+    held_part_before = str(
+        dict(signature.get("resource_before") or {}).get("held_part") or ""
+    ).strip()
+    gripper_before = str(
+        dict(signature.get("resource_before") or {}).get("gripper_state") or ""
+    ).strip().lower()
+
+    named_pose = str(action_target.get("named_pose") or "").strip()
+    if named_pose:
+        raw_named_poses = resource_row.get("named_poses")
+        if isinstance(raw_named_poses, dict):
+            available_named_poses = {
+                str(pose_name).strip()
+                for pose_name in raw_named_poses.keys()
+                if str(pose_name).strip()
+            }
+        else:
+            available_named_poses = {
+                str(pose_name).strip()
+                for pose_name in (raw_named_poses or [])
+                if str(pose_name).strip()
+            }
+        if available_named_poses and named_pose not in available_named_poses:
+            findings.append(
+                {
+                    "task_id": task_id,
+                    "resource_jid": resource_jid,
+                    "part_name": task_part_name or None,
+                    "pose_source": "task_contract",
+                    "pose": None,
+                    "workspace_bounds": deepcopy(bounds),
+                    "failed_axes": ["named_pose_not_available"],
+                    "named_pose": named_pose,
+                }
+            )
+
+    if bool(signature.get("illegal_holder_swap")):
+        findings.append(
+            {
+                "task_id": task_id,
+                "resource_jid": resource_jid,
+                "part_name": effective_part_name or None,
+                "pose_source": "resource_assignment",
+                "pose": None,
+                "workspace_bounds": deepcopy(bounds),
+                "failed_axes": ["illegal_holder_swap"],
+                "conflicting_part": held_part_before or None,
+            }
+        )
+
+    direct_observed_pickup_parts = [
+        str(item).strip()
+        for item in (signature.get("direct_observed_pickup_parts") or [])
+        if str(item).strip()
+    ]
+    for part_name in direct_observed_pickup_parts:
+        part_row = dict(parts_by_name.get(part_name) or {})
+        current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
+        observed_pose = dict(part_row.get("observed_pose") or {})
+        if held_part_before and held_part_before != part_name:
+            findings.append(
+                {
+                    "task_id": task_id,
+                    "resource_jid": resource_jid,
+                    "part_name": part_name,
+                    "pose_source": "resource_assignment",
+                    "pose": None,
+                    "workspace_bounds": deepcopy(bounds),
+                    "failed_axes": ["held_part_conflict"],
+                    "conflicting_part": held_part_before,
+                }
+            )
+        if current_holder and current_holder != resource_jid:
+            findings.append(
+                {
+                    "task_id": task_id,
+                    "resource_jid": resource_jid,
+                    "part_name": part_name,
+                    "pose_source": "part_assignment",
+                    "pose": None,
+                    "workspace_bounds": deepcopy(bounds),
+                    "failed_axes": ["held_part_conflict"],
+                    "current_holder_resource_jid": current_holder,
+                }
+            )
+        if not held_part_before and gripper_before == "closed":
+            findings.append(
+                {
+                    "task_id": task_id,
+                    "resource_jid": resource_jid,
+                    "part_name": part_name,
+                    "pose_source": "resource_assignment",
+                    "pose": None,
+                    "workspace_bounds": deepcopy(bounds),
+                    "failed_axes": ["gripper_occupancy_conflict"],
+                }
+            )
+        if observed_pose and bounds:
+            reachable, violations = _robot_pose_in_workspace(observed_pose, bounds)
+            if not reachable:
+                findings.append(
+                    {
+                        "task_id": task_id,
+                        "resource_jid": resource_jid,
+                        "part_name": part_name,
+                        "pose_source": "observed_pose",
+                        "pose": deepcopy(observed_pose),
+                        "workspace_bounds": deepcopy(bounds),
+                        "failed_axes": deepcopy(violations),
+                        "failed_reason": "physically_unreachable",
+                    }
+                )
+    return findings
+
+
 def _robot_state_projector(
     *,
     resource_entry: dict[str, Any],
@@ -342,6 +494,12 @@ def _normalize_detected_item_output(item: Any, *, fallback_name: str = "") -> di
     model_name = str(item.get("model_name") or "").strip()
     if model_name:
         output["model_name"] = model_name
+    current_location = str(item.get("current_location") or "").strip()
+    if current_location:
+        output["current_location"] = current_location
+    current_holder_resource_jid = str(item.get("current_holder_resource_jid") or "").strip()
+    if current_holder_resource_jid:
+        output["current_holder_resource_jid"] = current_holder_resource_jid
     return output
 
 
@@ -1305,10 +1463,23 @@ ROBOT_PROFILE = ResourceProfile(
     event_state_validator=_robot_event_state_validator,
     capability_flags={"supports_manipulator_pick_place": True},
     observation_families=("part_detection", "resource_pose"),
+    grounding_observation_primitives=("detect_parts",),
+    grounding_observation_fact_map={
+        "part_pose": {
+            "entity_kind": "part",
+            "primitive": "detect_parts",
+            "entity_param": "part_name",
+            "request_fields": ("fact_type", "entity", "store_as"),
+            "optional_request_fields": ("scope", "reason"),
+        },
+    },
     example_families=("generic_bridge", "manipulator_pick_place"),
     observation_output_schema_map={
         "detect_parts": {
             "part_name": "string",
+            "x": "number",
+            "y": "number",
+            "z": "number",
             "pose": {"x": "number", "y": "number", "z": "number"},
             "orientation": {"qx": "number", "qy": "number", "qz": "number", "qw": "number"},
         },
@@ -1343,6 +1514,18 @@ ROBOT_PROFILE = ResourceProfile(
         "get_current_pose": _extract_pose_output,
         "compute_pick_targets": _extract_pick_targets_output,
         "compute_place_targets": _extract_place_targets_output,
+    },
+    store_as_contract_map={
+        "detect_parts": {
+            "required_params": ["part_name"],
+        },
+        "get_current_pose": {},
+        "compute_pick_targets": {
+            "required_params": ["part_name"],
+        },
+        "compute_place_targets": {
+            "any_of_param_sets": [["part_name"], ["pick_ctx.part_name"]],
+        },
     },
     carried_entity_field="held_part",
     carried_entity_location_builder=_robot_carried_location,

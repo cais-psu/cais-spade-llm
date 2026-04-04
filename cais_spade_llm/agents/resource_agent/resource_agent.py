@@ -126,12 +126,14 @@ class ResourceAgent(LlmAgent):
         part_name: str | None = None,
         part_context: Dict[str, Any] | None = None,
         bridge_snapshot: Dict[str, Any] | None = None,
+        grounded_action: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Default permissive bridge feasibility oracle.
 
         Subclasses (RobotAgent, PrintingAgent) can override with
         resource-specific checks.
         """
+        del operation_kind, part_name, part_context, bridge_snapshot, grounded_action
         return {"allowed": True, "reason": "default permissive oracle"}
 
     async def execute_recovery_macro(

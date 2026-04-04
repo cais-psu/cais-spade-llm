@@ -111,8 +111,10 @@ class PrintingAgent(ResourceAgent):
         part_name: str | None = None,
         part_context: dict[str, Any] | None = None,
         bridge_snapshot: dict[str, Any] | None = None,
+        grounded_action: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Printer-specific bridge feasibility checks."""
+        del operation_kind, part_name, part_context, grounded_action
         snapshot = bridge_snapshot or {}
         material = str(snapshot.get("material_state") or "").strip()
         bed = str(snapshot.get("bed_state") or "").strip()

@@ -2557,6 +2557,35 @@ class ProductAgent(LlmAgent):
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
+            bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
+            if bridge_status == "paused_after_grounding":
+                message = (
+                    "LLM bridge grounding completed and is paused before outline generation for review."
+                )
+                recovery = self._set_runtime_recovery(
+                    status="llm_bridge",
+                    resolution_class="none",
+                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                    failed_task_id=failed_task_id,
+                    message=message,
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="generating",
+                    active_bridge_sequence=None,
+                    bridge_feedback_history=list(
+                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    ),
+                    violations=violations,
+                    append_history=True,
+                    history_message=message,
+                )
+                self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
+
             message = (
                 "LLM bridge reasoning produced no validated final plan. Review the trace, refine, or retry DES."
             )

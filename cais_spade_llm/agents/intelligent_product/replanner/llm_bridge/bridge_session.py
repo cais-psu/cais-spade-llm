@@ -25,6 +25,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resou
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
+    resource_store_as_contract,
     resource_snapshot_carried_entity,
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
@@ -203,18 +204,201 @@ class BridgeSessionMixin:
         }
 
     def _bridge_loaded_safety_rules(self) -> list[dict[str, Any]]:
-        payload = self._load_json_artifact(self._bridge_artifact_path("safety_logic_json"))
+        safety_logic_path = self._bridge_artifact_path("safety_logic_json")
+        payload = self._load_json_artifact(safety_logic_path)
         if isinstance(payload, dict):
             raw_rules = payload.get("rules") or []
         elif isinstance(payload, list):
             raw_rules = payload
         else:
             raw_rules = []
-        return [deepcopy(rule) for rule in raw_rules if isinstance(rule, dict)]
+        safety_dir = safety_logic_path.parent if safety_logic_path is not None else None
+        loaded_rules: list[dict[str, Any]] = []
+        for raw_rule in raw_rules:
+            if not isinstance(raw_rule, dict):
+                continue
+            rule = deepcopy(raw_rule)
+            rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
+            if rule_id:
+                rule.setdefault("rule_id", rule_id)
+            summary = str(
+                rule.get("generated_interpretation")
+                or rule.get("text")
+                or rule.get("raw_text")
+                or ""
+            ).strip()
+            if summary:
+                rule.setdefault("summary", summary)
+            rule.setdefault("ap_scope", self._bridge_rule_ap_scope(rule))
+            dfa_dot = self._bridge_rule_dfa_dot(rule_id, safety_dir=safety_dir)
+            if dfa_dot:
+                rule["dfa_dot"] = dfa_dot
+            bridge_aps = self._bridge_rule_bridge_aps(rule)
+            if bridge_aps:
+                rule["bridge_aps"] = bridge_aps
+            loaded_rules.append(rule)
+        return loaded_rules
+
+    @staticmethod
+    def _bridge_rule_ap_scope(rule: dict[str, Any]) -> str:
+        explicit_scope = str(rule.get("ap_scope") or "").strip().lower()
+        if explicit_scope in {"nominal", "bridge", "both"}:
+            return explicit_scope
+        constraint_type = str(rule.get("constraint_type") or "").strip().lower()
+        if constraint_type in {
+            "ordering_place_approach_priority",
+            "mutual_exclusion_in_destination_area",
+        }:
+            return "both"
+        return "nominal"
+
+    @staticmethod
+    def _bridge_rule_dfa_dot(
+        rule_id: str,
+        *,
+        safety_dir: Path | None,
+    ) -> str:
+        if not rule_id or safety_dir is None:
+            return ""
+        candidate = safety_dir / f"{rule_id}_dfa.dot"
+        if not candidate.exists():
+            return ""
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _bridge_rule_bridge_aps(rule: dict[str, Any]) -> list[dict[str, Any]]:
+        constraint_type = str(rule.get("constraint_type") or "").strip().lower()
+        nominal_aps = [
+            deepcopy(ap)
+            for ap in (rule.get("aps") or [])
+            if isinstance(ap, dict)
+            and str(ap.get("label") or "").strip()
+            and str(ap.get("full") or "").strip()
+        ]
+        if not nominal_aps:
+            return []
+        if constraint_type == "ordering_place_approach_priority":
+            return BridgeSessionMixin._bridge_priority_rule_aps(rule, nominal_aps)
+        if constraint_type == "mutual_exclusion_in_destination_area":
+            return BridgeSessionMixin._bridge_mutex_rule_aps(rule, nominal_aps)
+        return []
+
+    @staticmethod
+    def _bridge_priority_rule_aps(
+        rule: dict[str, Any],
+        nominal_aps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        destination = str((rule.get("context") or {}).get("destination") or "").strip()
+        products = [
+            str(item or "").strip().lower()
+            for item in (rule.get("product") or [])
+            if str(item or "").strip()
+        ]
+        gateway_product = products[0] if len(products) >= 1 else ""
+        blocked_product = products[1] if len(products) >= 2 else ""
+        bridge_aps: list[dict[str, Any]] = []
+        for ap in nominal_aps:
+            label = str(ap.get("label") or "").strip()
+            full = str(ap.get("full") or "").strip()
+            descriptor = full.split("/")
+            if len(descriptor) < 6:
+                continue
+            _, process, product, resource, _, _ = descriptor[:6]
+            product_token = str(product or "").strip().lower()
+            resource_token = str(resource or "").strip().lower()
+            if blocked_product and product_token == blocked_product:
+                bridge_aps.append(
+                    {
+                        "label": label,
+                        "full": (
+                            f"ap_event/bridge/{product_token}/{resource_token or 'any'}/"
+                            f"move_part_to_destination/destination={destination}"
+                        ),
+                        "selector": {
+                            "mode": "move_part_to_destination",
+                            "part": product_token or "any",
+                            "resource": resource_token or "any",
+                            "destination": destination,
+                        },
+                    }
+                )
+                continue
+            if gateway_product and product_token == gateway_product:
+                bridge_aps.append(
+                    {
+                        "label": label,
+                        "full": (
+                            f"ap_state/bridge/{product_token}/any/"
+                            f"part_goal_satisfied/destination={destination}&state=assembled"
+                        ),
+                        "selector": {
+                            "mode": "part_goal_satisfied",
+                            "part": product_token or "any",
+                            "resource": "any",
+                            "destination": destination,
+                            "states": ["assembled", "placed"],
+                        },
+                    }
+                )
+        return bridge_aps
+
+    @staticmethod
+    def _bridge_mutex_rule_aps(
+        rule: dict[str, Any],
+        nominal_aps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        destination = str((rule.get("context") or {}).get("destination") or "").strip()
+        bridge_aps: list[dict[str, Any]] = []
+        for ap in nominal_aps:
+            label = str(ap.get("label") or "").strip()
+            full = str(ap.get("full") or "").strip()
+            descriptor = full.split("/")
+            if len(descriptor) < 6:
+                continue
+            prefix, _, product, resource, symbol, _ = descriptor[:6]
+            resource_token = str(resource or "").strip().lower() or "any"
+            product_token = str(product or "").strip().lower() or "any"
+            if prefix == "ap_event":
+                bridge_aps.append(
+                    {
+                        "label": label,
+                        "full": (
+                            f"ap_event/bridge/{product_token}/{resource_token}/"
+                            f"resource_move_to_destination/destination={destination}"
+                        ),
+                        "selector": {
+                            "mode": "resource_move_to_destination",
+                            "part": product_token,
+                            "resource": resource_token,
+                            "destination": destination,
+                        },
+                    }
+                )
+                continue
+            if prefix == "ap_state":
+                bridge_aps.append(
+                    {
+                        "label": label,
+                        "full": (
+                            f"ap_state/bridge/{product_token}/{resource_token}/"
+                            f"resource_in_destination/destination={destination}&symbol={symbol}"
+                        ),
+                        "selector": {
+                            "mode": "resource_in_destination",
+                            "part": product_token,
+                            "resource": resource_token,
+                            "destination": destination,
+                        },
+                    }
+                )
+        return bridge_aps
 
     @staticmethod
     def _brief_safety_rule(rule: dict[str, Any]) -> dict[str, Any]:
-        return {
+        row = {
             "rule_id": str(rule.get("id") or rule.get("rule_id") or "").strip(),
             "constraint_type": str(rule.get("constraint_type") or "").strip(),
             "summary": str(
@@ -224,6 +408,10 @@ class BridgeSessionMixin:
                 or ""
             ).strip(),
         }
+        ap_scope = str(rule.get("ap_scope") or "").strip()
+        if ap_scope:
+            row["ap_scope"] = ap_scope
+        return row
 
     @staticmethod
     def _normalize_resource_token(value: Any) -> str:
@@ -303,7 +491,18 @@ class BridgeSessionMixin:
             if not signature or signature in seen_signatures:
                 continue
             seen_signatures.add(signature)
-            selected.append(self._brief_safety_rule(rule))
+            selected_rule = deepcopy(rule)
+            selected_rule.setdefault("rule_id", rule_id)
+            selected_rule.setdefault(
+                "summary",
+                str(
+                    rule.get("generated_interpretation")
+                    or rule.get("text")
+                    or rule.get("raw_text")
+                    or ""
+                ).strip(),
+            )
+            selected.append(selected_rule)
 
         if selected:
             return selected
@@ -317,7 +516,21 @@ class BridgeSessionMixin:
             if not signature or signature in seen_fallback:
                 continue
             seen_fallback.add(signature)
-            fallback.append(self._brief_safety_rule(rule))
+            fallback_rule = deepcopy(rule)
+            fallback_rule.setdefault(
+                "rule_id",
+                str(rule.get("id") or rule.get("rule_id") or "").strip(),
+            )
+            fallback_rule.setdefault(
+                "summary",
+                str(
+                    rule.get("generated_interpretation")
+                    or rule.get("text")
+                    or rule.get("raw_text")
+                    or ""
+                ).strip(),
+            )
+            fallback.append(fallback_rule)
         return fallback
 
     def _build_relevant_assembly_requirements(
@@ -475,7 +688,7 @@ class BridgeSessionMixin:
         observed_pose = self._coerce_xyz_pose(tracker_entry.get("observed_pose"))
         if observed_pose is None:
             return None, "unavailable"
-        return None, "observed_pose_only"
+        return None, "sensor_observation"
 
     def _resolve_resource_location(
         self,
@@ -2153,6 +2366,8 @@ class BridgeSessionMixin:
     def _build_llm_input(
         self,
         prepared_bridge_request: dict[str, Any],
+        *,
+        preload_observed_pose: bool = True,
     ) -> dict[str, Any]:
         context_summary = dict(prepared_bridge_request.get("context_summary") or {})
         fault_event = dict(context_summary.get("fault_event") or {})
@@ -2334,7 +2549,11 @@ class BridgeSessionMixin:
                     "current_state": deepcopy(current_part_row.get("state")),
                     "current_location": current_location,
                     "location_basis": deepcopy(current_part_row.get("location_basis")),
-                    "observed_pose": deepcopy(current_part_row.get("observed_pose")),
+                    "observed_pose": (
+                        deepcopy(current_part_row.get("observed_pose"))
+                        if preload_observed_pose
+                        else None
+                    ),
                     "current_holder_resource_jid": holder_resource_jid or None,
                     "origin_location": deepcopy(tracker_entry.get("origin_resource_location")),
                     "goal_location": deepcopy(current_part_row.get("target_location")),
@@ -2384,6 +2603,14 @@ class BridgeSessionMixin:
                 for rule in (current_product_state.get("loaded_safety_rules") or [])
                 if isinstance(rule, dict)
             ],
+            "bridge_safety_context": {
+                "rule_ids": deepcopy(active_safety_diagnosis.get("rule_ids") or []),
+                "safe_next_task_ids": deepcopy(
+                    active_safety_diagnosis.get("safe_next_task_ids") or []
+                ),
+                "status": deepcopy(active_safety_diagnosis.get("status")),
+                "reason": deepcopy(active_safety_diagnosis.get("reason")),
+            },
             "obligation_targets": [
                 deepcopy(target)
                 for target in (active_safety_diagnosis.get("obligation_targets") or [])
@@ -2520,9 +2747,30 @@ class BridgeSessionMixin:
             hard_preconditions = deepcopy(raw_item.get("preconditions") or {})
             if hard_preconditions:
                 prompt_item["hard_preconditions"] = hard_preconditions
-            prompt_item["supports_store_as"] = (
+            supports_store_as = (
                 primitive_name in preview_output_map or primitive_name in extract_output_map
             )
+            prompt_item["supports_store_as"] = supports_store_as
+            if supports_store_as:
+                store_as_contract = resource_store_as_contract(profile, primitive_name)
+                store_as_required_params = [
+                    str(item).strip()
+                    for item in (store_as_contract.get("required_params") or [])
+                    if str(item).strip()
+                ]
+                store_as_any_of_param_sets = [
+                    [
+                        str(item).strip()
+                        for item in (param_set or [])
+                        if str(item).strip()
+                    ]
+                    for param_set in (store_as_contract.get("any_of_param_sets") or [])
+                    if isinstance(param_set, (list, tuple))
+                ]
+                if store_as_required_params:
+                    prompt_item["store_as_required_params"] = store_as_required_params
+                if store_as_any_of_param_sets:
+                    prompt_item["store_as_any_of_param_sets"] = store_as_any_of_param_sets
             prompt_catalog.append(prompt_item)
         return prompt_catalog
 
@@ -2731,6 +2979,7 @@ class BridgeSessionMixin:
         )
         prepared_bridge_request["llm_input"] = self._build_llm_input(
             prepared_bridge_request,
+            preload_observed_pose=reasoning_mode != "multi_turn",
         )
         if reasoning_mode == "single_shot":
             single_shot_prompt_input, single_shot_prompt_text = (
