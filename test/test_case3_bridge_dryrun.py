@@ -1,12 +1,7 @@
-"""Dry-run test: Case 3 LG-slippage scenario → LLM bridge recovery.
+"""Dry-run scenario for Case 3 LG slippage -> LLM bridge recovery.
 
-Mimics what happens in Gazebo when xArm6 places LG, slippage is injected,
-and the LLM bridge is triggered to produce a recovery plan.  The plan is then
-compared against the verified preprogrammed plan (recover_lg_v1).
-
-Run with F5 / python directly:
+Run directly:
     python test/test_case3_bridge_dryrun.py
-    python test/test_case3_bridge_dryrun.py --prepare-only
     python test/test_case3_bridge_dryrun.py --model gpt-4o
     python test/test_case3_bridge_dryrun.py --show-llm-input
     python test/test_case3_bridge_dryrun.py --show-prompt
@@ -19,12 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import io
 import json
 import logging
 import os
 import sys
-from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -75,47 +68,23 @@ def _load_local_env(path: Path) -> None:
 
 _load_local_env(ROOT / ".env")
 
-import pytest
-
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    multi_turn_v2 as multi_turn_v2_mode,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-    build_multi_turn_session_seed,
-    transition_multi_turn_phase,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-    _active_pruned_actions_for_state,
-    _apply_outline_task_effects,
-    _build_outline_validation_findings,
-    _build_pruned_actions,
-    _execute_observe_requests,
-    _infer_outline_macro_signature,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
     compile_grounded_outline_task,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn import (
-    build_multi_turn_phase_prompt_input,
-    multi_turn_phase_response_schema,
-    render_multi_turn_phase_prompt,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     get_resource_bridge_snapshot,
-)
-from cais_spade_llm.agents.central_controller.outline_macro_safety import (
-    project_outline_macro_bridge_aps,
-    validate_outline_macro_bridge_safety,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
     build_failure_event,
     failure_context_from_scenario_config,
     load_failure_scenario_config,
-)
-from cais_spade_llm.resources.resource_profile import (
-    get_resource_profile,
-    resource_store_as_contract,
 )
 
 
@@ -131,10 +100,10 @@ class ProcessPlannerPrepareTrace(ProcessPlanner):
 CASE_ID = "case3_llm_bridge"
 FAILED_TASK_ID = "REQ_2_T4"
 ANCHOR_TASK_ID = "REQ_2_T3"
-SCENARIO_ID = "recover_lg_v1"
 GOAL_STATE = "assembled"
 DEFAULT_LIVE_MODEL = os.environ.get("CASE3_RECOVERY_MODEL", "gpt-4o")
 DEBUG_DIR = Path("cais_spade_llm/monitor/debug")
+_POST_VALIDATION_INSPECTION_TURNS = 3
 CASE3_COMPLETED_TASK_IDS = (
     "REQ_1_T1",
     "REQ_1_T2",
@@ -156,488 +125,6 @@ MOCK_SINGLE_SHOT_RESPONSE = json.dumps(
         "macro_tasks": [],
     },
     indent=2,
-)
-
-
-def _outline_validation_ref(
-    *,
-    task_id: str,
-    pose_source: str,
-    failed_axes: list[str],
-    resource_jid: str = "",
-) -> dict[str, Any]:
-    ref = {
-        "task_id": task_id,
-        "pose_source": pose_source,
-        "failed_axes": list(failed_axes),
-    }
-    if resource_jid:
-        ref["resource_jid"] = resource_jid
-    return ref
-
-
-def _case3_continuation_condition_ids(prepared_bridge_request: dict[str, Any]) -> dict[str, str]:
-    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-    modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    condition_ids: dict[str, str] = {}
-    for raw_condition in (modeled_gap.get("unmet_continuation_conditions") or []):
-        if not isinstance(raw_condition, dict):
-            continue
-        condition_id = str(raw_condition.get("condition_id") or "").strip()
-        if not condition_id:
-            continue
-        kind = str(raw_condition.get("kind") or "").strip()
-        entity = str(raw_condition.get("entity") or "").strip()
-        source_task_id = str(raw_condition.get("source_task_id") or "").strip()
-        if kind == "focused_resource_terminal_state" and entity == "xarm6@localhost":
-            condition_ids["xarm6_idle"] = condition_id
-        elif kind == "safety_blocked_suffix_task" and (
-            source_task_id == "REQ_1_T3" or entity == "REQ_1_T3"
-        ):
-            condition_ids["mcp_safe1"] = condition_id
-    return condition_ids
-
-
-def _outline_bridge_validation_context(
-    prepared_bridge_request: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-    resources_by_jid = {
-        str(row.get("resource_jid") or "").strip(): deepcopy(row)
-        for row in (dict(llm_input.get("observed_runtime_state") or {}).get("resources") or [])
-        if isinstance(row, dict) and str(row.get("resource_jid") or "").strip()
-    }
-    parts_by_name = {
-        str(row.get("part_name") or "").strip(): deepcopy(row)
-        for row in (llm_input.get("part_facts") or [])
-        if isinstance(row, dict) and str(row.get("part_name") or "").strip()
-    }
-    return llm_input, resources_by_jid, parts_by_name
-
-
-MOCK_MULTI_TURN_OUTLINE_TASKS = [
-    {
-        "outline_id": "outline_clear_xarm6",
-        "resource_jid": "xarm6@localhost",
-        "description": "Move xarm6 from the failed placement posture back to home so it is no longer blocking recovery.",
-        "rationale": "The focused failed resource must leave the failed placement state before the fallback sequence can continue safely.",
-        "action_target": {
-            "named_pose": "home",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "current_state": "failed",
-            "held_part": None,
-            "gripper_state": "open",
-            "position": {
-                "x": 0.1,
-                "y": 0.08,
-                "z": 1.1994999760206477,
-            },
-        },
-        "expected_end_state": {
-            "current_state": "idle",
-            "held_part": None,
-            "gripper_state": "open",
-        },
-        "depends_on": [],
-    },
-    {
-        "outline_id": "outline_return_mcp_to_printer",
-        "resource_jid": "ur5e@localhost",
-        "description": "Place MCP back at prusa-mk4-2 so ur5e can switch to LG recovery.",
-        "rationale": "The supporting robot must free its gripper before it can recover the misplaced predecessor part.",
-        "part_name": "MCP",
-        "action_target": {
-            "target_location": "prusa-mk4-2",
-            "requirement_id": "REQ_1",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "gripper_state": "closed",
-            "held_part": "MCP",
-            "part_name": "MCP",
-        },
-        "expected_end_state": {
-            "current_state": "idle",
-            "gripper_state": "released",
-            "held_part": None,
-            "part_name": "MCP",
-            "location": "prusa-mk4-2",
-        },
-        "depends_on": ["outline_clear_xarm6"],
-    },
-    {
-        "outline_id": "outline_pick_lg_with_ur5e",
-        "resource_jid": "ur5e@localhost",
-        "description": "Move to the grounded LG pose and pick the misplaced LG part.",
-        "rationale": "ur5e must secure LG from the grounded misplaced pose before it can restore the part to the assembly board.",
-        "part_name": "LG",
-        "action_target": {
-            "source_location": "observed_pose",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "part_name": "LG",
-            "position": {"x": 0.0, "y": 0.2, "z": 1.035},
-            "current_state": "misplaced",
-            "held_part": None,
-            "gripper_state": "open",
-        },
-        "expected_end_state": {
-            "part_name": "LG",
-            "held_part": "LG",
-            "gripper_state": "closed",
-            "current_state": "picked",
-        },
-        "depends_on": ["outline_return_mcp_to_printer"],
-    },
-    {
-        "outline_id": "outline_place_lg_with_ur5e",
-        "resource_jid": "ur5e@localhost",
-        "description": "Place LG at assembly_board-v1 from the grounded recovery-side pose.",
-        "rationale": "SAFE_1 keeps MCP blocked until LG is restored to the assembly board.",
-        "part_name": "LG",
-        "action_target": {
-            "target_location": "assembly_board-v1",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "part_name": "LG",
-            "held_part": "LG",
-            "gripper_state": "closed",
-            "current_state": "picked",
-        },
-        "expected_end_state": {
-            "part_name": "LG",
-            "current_state": "assembled",
-            "held_part": None,
-            "gripper_state": "released",
-            "location": "assembly_board-v1",
-        },
-        "depends_on": ["outline_pick_lg_with_ur5e"],
-    },
-    {
-        "outline_id": "outline_resume_mcp_assembly",
-        "resource_jid": "ur5e@localhost",
-        "description": "Resume MCP assembly once LG has been restored.",
-        "rationale": "With LG placed, the blocked MCP suffix can safely resume.",
-        "part_name": "MCP",
-        "action_target": {
-            "target_location": "assembly_board-v1",
-            "requirement_id": "REQ_1",
-        },
-        "expected_start_state": {
-            "current_state": "idle",
-            "held_part": None,
-            "part_name": "MCP",
-        },
-        "expected_end_state": {
-            "current_state": "idle",
-            "gripper_state": "released",
-            "held_part": None,
-            "part_name": "MCP",
-            "location": "assembly_board-v1",
-        },
-        "depends_on": ["outline_place_lg_with_ur5e"],
-    },
-]
-MOCK_MULTI_TURN_INVALID_XARM_OUTLINE_TASKS = [
-    {
-        "outline_id": "outline_clear_xarm6",
-        "resource_jid": "xarm6@localhost",
-        "description": "Move xarm6 from the failed placement posture back to home.",
-        "rationale": "The focused failed resource must clear the failed posture before the fallback sequence continues.",
-        "action_target": {
-            "named_pose": "home",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "current_state": "failed",
-            "held_part": None,
-            "gripper_state": "open",
-            "position": {
-                "x": 0.1,
-                "y": 0.08,
-                "z": 1.1994999760206477,
-            },
-        },
-        "expected_end_state": {
-            "current_state": "idle",
-            "held_part": None,
-            "gripper_state": "open",
-        },
-        "depends_on": [],
-    },
-    {
-        "outline_id": "outline_recover_lg_with_xarm6",
-        "resource_jid": "xarm6@localhost",
-        "description": "Recover LG from the observed slippage pose with xarm6 and place it on the board.",
-        "rationale": "This invalid draft tries to keep the repair on the failed robot even though the grounded LG pose is outside xarm6 reach.",
-        "part_name": "LG",
-        "action_target": {
-            "target_location": "assembly_board-v1",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "part_name": "LG",
-            "position": {"x": 0.0, "y": 0.2, "z": 1.035},
-        },
-        "expected_end_state": {
-            "part_name": "LG",
-            "current_state": "assembled",
-            "location": "assembly_board-v1",
-        },
-        "depends_on": ["outline_clear_xarm6"],
-    },
-]
-MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS: list[dict[str, Any]] = []
-MOCK_INVALID_XARM_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="outline_recover_lg_with_xarm6",
-        resource_jid="xarm6@localhost",
-        pose_source="resource_feasibility",
-        failed_axes=["workspace_unreachable"],
-    ),
-]
-MOCK_MISSING_PART_NAME_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="xarm6@localhost",
-        pose_source="task_contract",
-        failed_axes=["missing_part_name"],
-    ),
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="xarm6@localhost",
-        pose_source="observed_pose",
-        failed_axes=["y=0.2000 > y_max_m=0.1000"],
-    ),
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="xarm6@localhost",
-        pose_source="expected_start_state",
-        failed_axes=["y=0.2000 > y_max_m=0.1000"],
-    ),
-]
-MOCK_ABSTRACT_TASK_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="ur5e@localhost",
-        pose_source="task_contract",
-        failed_axes=["task_not_projectable"],
-    )
-]
-MOCK_UNEXPECTED_PART_REFERENCE_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT1",
-        resource_jid="xarm6@localhost",
-        pose_source="task_contract",
-        failed_axes=["resource_only_part_tag_ignored"],
-    )
-]
-MOCK_HELD_PART_CONFLICT_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="ur5e@localhost",
-        pose_source="resource_feasibility",
-        failed_axes=["holder_conflict"],
-    ),
-]
-MOCK_ILLEGAL_HOLDER_SWAP_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="ur5e@localhost",
-        pose_source="resource_feasibility",
-        failed_axes=["holder_conflict"],
-    )
-]
-MOCK_NAMED_POSE_NOT_AVAILABLE_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT1",
-        resource_jid="xarm6@localhost",
-        pose_source="resource_feasibility",
-        failed_axes=["named_pose_unavailable"],
-    )
-]
-MOCK_MISSING_POST_TASK_ANCHOR_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="OT2",
-        resource_jid="ur5e@localhost",
-        pose_source="task_contract",
-        failed_axes=["task_not_projectable"],
-    )
-]
-MOCK_CONTINUATION_PREREQUISITE_REQUIRED_FINDING_REFS = [
-    _outline_validation_ref(
-        task_id="resume_mcp",
-        resource_jid="ur5e@localhost",
-        pose_source="task_contract",
-        failed_axes=["dependency_unsatisfied"],
-    ),
-    _outline_validation_ref(
-        task_id="resume_mcp",
-        resource_jid="ur5e@localhost",
-        pose_source="task_contract",
-        failed_axes=["order_violation"],
-    ),
-    _outline_validation_ref(
-        task_id="resume_mcp",
-        resource_jid="ur5e@localhost",
-        pose_source="task_contract",
-        failed_axes=["blocker_open"],
-    ),
-]
-MOCK_MULTI_TURN_MACRO_TASKS = [
-    {
-        "resource_jid": "xarm6@localhost",
-        "macro_name": "clear_failed_robot",
-        "description": "Clear xarm6 from the failed placement pose to home.",
-        "rationale": "This restores the focused failed resource to a resumable state.",
-        "expected_start_state": "xarm6 failed with empty gripper",
-        "task_params": {"target_pose_name": "home"},
-        "task_metadata": {"outline_id": "outline_clear_xarm6"},
-        "primitive_steps": [
-            {
-                "primitive": "move_to_named_pose",
-                "params": {"pose_name": "home"},
-            }
-        ],
-    },
-    {
-        "resource_jid": "ur5e@localhost",
-        "macro_name": "recover_lg_and_resume_mcp",
-        "description": "Return MCP, recover LG to the board, and leave ur5e ready to continue.",
-        "rationale": "LG must be assembled before MCP continuation is safe.",
-        "part_name": "LG",
-        "expected_start_state": "ur5e holds MCP while LG is observed away from the board",
-        "task_params": {
-            "mcp_origin": "prusa-mk4-2",
-            "lg_destination": "assembly_board-v1",
-        },
-        "task_metadata": {"outline_id": "outline_recover_lg_with_ur5e"},
-        "primitive_steps": [
-            {
-                "primitive": "compute_place_targets",
-                "params": {"part_name": "MCP", "destination_location": "prusa-mk4-2"},
-                "store_as": "mcp_return",
-            },
-            {
-                "primitive": "move_cartesian",
-                "params": {"context_ref": "/step_outputs/mcp_return/approach_pose"},
-            },
-            {
-                "primitive": "move_cartesian",
-                "params": {"context_ref": "/step_outputs/mcp_return/target_pose"},
-            },
-            {
-                "primitive": "release_part",
-                "params": {"part_name": "MCP"},
-            },
-            {
-                "primitive": "detect_parts",
-                "params": {"part_name": "LG"},
-                "store_as": "lg_detection",
-            },
-            {
-                "primitive": "compute_pick_targets",
-                "params": {
-                    "part_name": "LG",
-                    "target_pose": {"context_ref": "/step_outputs/lg_detection/pose"},
-                },
-                "store_as": "lg_pick",
-            },
-            {
-                "primitive": "compute_place_targets",
-                "params": {
-                    "part_name": "LG",
-                    "pick_ctx": {"context_ref": "/step_outputs/lg_pick"},
-                    "destination_location": "assembly_board-v1",
-                },
-                "store_as": "lg_place",
-            },
-        ],
-    },
-]
-MOCK_MULTI_TURN_FINAL_PROPOSAL = {
-    "thought": (
-        "xarm6 first clears the failed placement state so the focused failed resource becomes resumable. "
-        "ur5e then restores MCP to origin, recovers LG to the board, and leaves the blocked MCP suffix runnable again."
-    ),
-    "primary_obligation": {
-        "rule_id": "SAFE_1",
-        "resource_jid": "ur5e@localhost",
-    },
-    "macro_tasks": deepcopy(MOCK_MULTI_TURN_MACRO_TASKS),
-}
-MOCK_MULTI_TURN_RESPONSES = [
-    {
-        "thought": "LG placement remains unresolved, and the current failure facts do not include a trusted live LG pose.",
-        "decision": "observe",
-        "blocking_reasons": [
-            "LG is not yet assembled on the board.",
-            "SAFE_1 blocks MCP continuation until LG is assembled.",
-        ],
-        "grounded_facts": [
-            "xarm6 is failed at the blocked LG suffix.",
-            "LG still needs a runtime observation before recovery can be grounded.",
-        ],
-        "recovery_implications": [
-            "Recovery planning still needs a concrete LG pose before choosing a replacement manipulator sequence.",
-        ],
-        "sufficient_grounding": False,
-        "observe_reason": (
-            "Grounding is not yet sufficient because LG still needs a runtime pose observation."
-        ),
-        "observe_requests": [
-            {
-                "fact_type": "part_pose",
-                "entity": "LG",
-                "store_as": "lg_detection_seed",
-            }
-        ],
-    },
-    {
-        "thought": "The prompt facts plus the stored LG observation are enough to outline recovery.",
-        "decision": "grounded",
-        "blocking_reasons": [
-            "xarm6 is failed.",
-            "ur5e holds MCP while LG still needs assembly.",
-        ],
-        "grounded_facts": [
-            "LG was observed at x=0.0, y=0.2, z=1.035 in the ur5e side of the cell.",
-            "xarm6 remains failed and cannot finish the original LG assemble suffix.",
-            "SAFE_1 still requires LG placement before MCP can approach the assembly board.",
-        ],
-        "recovery_implications": [
-            "The replacement plan should recover LG from the ur5e-reachable side of the workspace.",
-            "The assembly-board area must remain clear of xarm6 activity while the fallback sequence is prepared.",
-        ],
-        "sufficient_grounding": True,
-        "observe_requests": [],
-    },
-    {
-        "thought": "The recovery needs grounded task-level actions that clear xarm6, restore LG, and then resume MCP.",
-        "addressed_validation_findings": deepcopy(MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS),
-        "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-    },
-    {
-        "thought": "The accepted outline now resolves into primitive-connected macro tasks that preserve the LG-before-MCP dependency.",
-        "decision": "draft_ready",
-        "macro_tasks": deepcopy(MOCK_MULTI_TURN_MACRO_TASKS),
-    },
-    {
-        "thought": "The draft is now packaged as the final bridge proposal.",
-        "decision": "final_ready",
-        "final_proposal": deepcopy(MOCK_MULTI_TURN_FINAL_PROPOSAL),
-    },
-]
-
-MUTEX_RULE_FAMILIES = frozenset(
-    {
-        "mutual_exclusion_zone",
-        "no_simultaneous_presence_in_destination_area",
-    }
 )
 
 # ---------------------------------------------------------------------------
@@ -694,84 +181,6 @@ def _load_robot_config(path: Path, key: str) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise KeyError(f"robot config {path} is missing top-level key '{key}'")
     return config
-
-
-# ---------------------------------------------------------------------------
-# Safety rule helpers (loaded from cca_safety_logic.json)
-# ---------------------------------------------------------------------------
-
-
-def _load_runtime_safety_rules() -> list[dict[str, Any]]:
-    payload = _load_json(
-        _repo_root() / "cais_spade_llm" / "safety" / "cca_safety_logic.json"
-    )
-    if isinstance(payload, dict):
-        raw_rules = payload.get("rules") or []
-    elif isinstance(payload, list):
-        raw_rules = payload
-    else:
-        raw_rules = []
-    return [dict(rule) for rule in raw_rules if isinstance(rule, dict)]
-
-
-def _find_runtime_safety_rule(
-    *,
-    destination: str,
-    required_resources: set[str],
-    constraint_families: set[str] | None = None,
-) -> dict[str, Any]:
-    allowed_families = {
-        str(item or "").strip().lower()
-        for item in (constraint_families or MUTEX_RULE_FAMILIES)
-        if str(item or "").strip()
-    }
-    normalized_resources = {
-        str(r or "").strip().lower() for r in required_resources if str(r or "").strip()
-    }
-    for rule in _load_runtime_safety_rules():
-        ct = str(rule.get("constraint_type", "") or "").strip().lower()
-        ctx = dict(rule.get("context") or {})
-        dest = str(ctx.get("destination", "") or "").strip()
-        rule_res = {
-            str(r or "").strip().lower()
-            for r in (rule.get("resources") or [])
-            if str(r or "").strip()
-        }
-        if ct in allowed_families and dest == destination and normalized_resources.issubset(rule_res):
-            return deepcopy(rule)
-    raise LookupError(
-        f"No runtime safety rule for destination={destination!r} "
-        f"resources={sorted(normalized_resources)!r}"
-    )
-
-
-# Module-level safety constants (evaluated once at import).
-CASE3_BOARD_MUTEX_RULE = _find_runtime_safety_rule(
-    destination="assembly_board-v1",
-    required_resources={"ur5e", "xarm6"},
-)
-CASE3_BOARD_MUTEX_RULE_ID = str(CASE3_BOARD_MUTEX_RULE.get("id", "") or "").strip()
-
-CASE3_LG_BEFORE_MCP_RULE_ID = "CASE3_LG_BEFORE_MCP_PRECEDENCE"
-CASE3_LG_BEFORE_MCP_RULE: dict[str, Any] = {
-    "id": CASE3_LG_BEFORE_MCP_RULE_ID,
-    "constraint_type": "precedence",
-    "text": "LG must be assembled at the assembly board before MCP may return to the assembly board.",
-    "raw_text": "LG must be assembled at the assembly board before MCP may return to the assembly board.",
-    "generated_interpretation": (
-        "Treat LG completion as a safety-gated prerequisite before MCP resumes "
-        "to the protected goal location."
-    ),
-    "resources": ["ur5e", "xarm6"],
-    "context": {"before_part": "LG", "after_part": "MCP"},
-}
-
-
-# ---------------------------------------------------------------------------
-# FakeProductAgent  (live LLM only — no scripted turns)
-# ---------------------------------------------------------------------------
-
-
 class FakeProductAgent:
     def __init__(
         self,
@@ -799,10 +208,8 @@ class FakeProductAgent:
             else {}
         )
         self._bridge_reasoning_mode = str(
-            precomputed_policy.get("bridge_reasoning_mode", "single_shot") or "single_shot"
+            precomputed_policy.get("bridge_reasoning_mode", "multi_turn") or "multi_turn"
         ).strip().lower()
-        if self._bridge_reasoning_mode not in {"single_shot", "multi_turn"}:
-            self._bridge_reasoning_mode = "single_shot"
         bundle_artifacts = dict(self.precomputed_bundle.get("artifacts") or {})
         self.structured_requirements_path = Path(
             str(bundle_artifacts.get("requirements_json") or "")
@@ -1416,6 +823,10 @@ class FakeBridgeRobot:
             )
             if str(token).strip()
         }
+        allows_abstract_idle_recovery = (
+            effect_scope == "resource_only"
+            and desired_resource_state.lower() == "idle"
+        )
         part_affecting = bool(
             effect_scope in {"part_only", "resource_and_part"}
             or any(
@@ -1431,6 +842,7 @@ class FakeBridgeRobot:
         if (
             effect_scope == "resource_only"
             and desired_resource_state
+            and not allows_abstract_idle_recovery
             and not (
                 named_pose
                 or target_info.get("pose")
@@ -1743,405 +1155,6 @@ def _merge_part_tracker(
     return merged_part_tracker
 
 
-def _contains_fixed_recovery_labels(value: Any) -> bool:
-    fixed_tokens = (
-        "ur5e_recovery_lane",
-        "ur5e_base_area",
-        "assembly_board_v1",
-    )
-    serialized = json.dumps(value, default=str)
-    return any(token in serialized for token in fixed_tokens)
-
-
-def _expected_prompt_bridge_snapshot(
-    resource_entry: dict[str, Any],
-) -> dict[str, Any]:
-    bridge_snapshot = dict(resource_entry.get("bridge_snapshot") or {})
-    resource_core = dict(bridge_snapshot.get("resource_core") or {})
-    resource_facets = dict(bridge_snapshot.get("resource_facets") or {})
-    manipulator = dict(resource_facets.get("manipulator") or {})
-    prompt_snapshot = {
-        "resource_jid": str(
-            resource_entry.get("resource_jid")
-            or resource_core.get("resource_jid")
-            or ""
-        ).strip(),
-        "resource_type": deepcopy(
-            bridge_snapshot.get("resource_type")
-            or resource_core.get("resource_type")
-        ),
-        "current_state": deepcopy(
-            bridge_snapshot.get("current_state")
-            if "current_state" in bridge_snapshot
-            else resource_core.get("current_state")
-        ),
-        "current_location": deepcopy(
-            bridge_snapshot.get("current_location")
-            if "current_location" in bridge_snapshot
-            else resource_core.get("current_location")
-        ),
-        "availability": deepcopy(
-            bridge_snapshot.get("availability")
-            if "availability" in bridge_snapshot
-            else resource_core.get("availability")
-        ),
-        "active_work": deepcopy(
-            bridge_snapshot.get("active_work")
-            if "active_work" in bridge_snapshot
-            else resource_core.get("active_work")
-        ),
-        "occupancy": deepcopy(
-            bridge_snapshot.get("occupancy")
-            or resource_core.get("occupancy")
-            or {}
-        ),
-        "held_part": deepcopy(
-            bridge_snapshot.get("held_part")
-            if "held_part" in bridge_snapshot
-            else manipulator.get("held_part")
-        ),
-        "gripper_state": deepcopy(
-            bridge_snapshot.get("gripper_state")
-            if "gripper_state" in bridge_snapshot
-            else manipulator.get("gripper_state")
-        ),
-        "current_pose": deepcopy(
-            bridge_snapshot.get("current_pose")
-            if "current_pose" in bridge_snapshot
-            else manipulator.get("current_pose")
-        ),
-        "current_pose_ref": deepcopy(
-            bridge_snapshot.get("current_pose_ref")
-            if "current_pose_ref" in bridge_snapshot
-            else manipulator.get("current_pose_ref")
-        ),
-        "named_poses": deepcopy(
-            bridge_snapshot.get("named_poses")
-            if "named_poses" in bridge_snapshot
-            else manipulator.get("named_poses")
-        ),
-        "workspace_bounds": deepcopy(
-            dict(resource_entry.get("static_capabilities") or {}).get("workspace_bounds")
-        ),
-    }
-    return {
-        key: value
-        for key, value in prompt_snapshot.items()
-        if value not in (None, "", [], {})
-    }
-
-
-def _expected_ordered_resource_jids(
-    *,
-    focused_resource_jid: str,
-    observed_resources: list[dict[str, Any]],
-    bridge_resources: dict[str, Any],
-) -> list[str]:
-    ordered_resource_jids: list[str] = []
-    seen_resource_jids: set[str] = set()
-
-    def _append_resource_jid(raw_value: Any) -> None:
-        resource_jid = str(raw_value or "").strip()
-        if not resource_jid or resource_jid in seen_resource_jids:
-            return
-        seen_resource_jids.add(resource_jid)
-        ordered_resource_jids.append(resource_jid)
-
-    _append_resource_jid(focused_resource_jid)
-    for row in observed_resources:
-        _append_resource_jid(row.get("resource_jid"))
-    for resource_jid in sorted(bridge_resources):
-        _append_resource_jid(resource_jid)
-    return ordered_resource_jids
-
-
-def _expected_runtime_resource_facts(
-    prepared_bridge_request: dict[str, Any],
-) -> list[dict[str, Any]]:
-    context_summary = dict(prepared_bridge_request.get("context_summary") or {})
-    fault_event = dict(context_summary.get("fault_event") or {})
-    current_product_state = dict(context_summary.get("current_product_state") or {})
-    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
-    observed_resources = [
-        dict(row)
-        for row in (current_product_state.get("resources") or [])
-        if isinstance(row, dict)
-    ]
-    observed_by_jid = {
-        str(row.get("resource_jid") or "").strip(): row
-        for row in observed_resources
-        if str(row.get("resource_jid") or "").strip()
-    }
-
-    runtime_resources: list[dict[str, Any]] = []
-    for resource_jid in _expected_ordered_resource_jids(
-        focused_resource_jid=str(fault_event.get("focused_resource_jid") or "").strip(),
-        observed_resources=observed_resources,
-        bridge_resources=bridge_resources,
-    ):
-        observed_row = dict(observed_by_jid.get(resource_jid) or {})
-        bridge_snapshot = _expected_prompt_bridge_snapshot(
-            dict(bridge_resources.get(resource_jid) or {})
-        )
-        runtime_row = {
-            "resource_jid": resource_jid,
-            "current_state": deepcopy(
-                observed_row.get("current_state")
-                if "current_state" in observed_row
-                else bridge_snapshot.get("current_state")
-            ),
-            "current_location": deepcopy(
-                observed_row.get("current_location")
-                if "current_location" in observed_row
-                else bridge_snapshot.get("current_location")
-            ),
-            "availability": deepcopy(
-                observed_row.get("availability")
-                if "availability" in observed_row
-                else bridge_snapshot.get("availability")
-            ),
-            "held_part": deepcopy(
-                observed_row.get("held_part")
-                if "held_part" in observed_row
-                else bridge_snapshot.get("held_part")
-            ),
-        }
-        for optional_field in (
-            "gripper_state",
-            "current_pose",
-            "current_pose_ref",
-            "named_poses",
-            "workspace_bounds",
-        ):
-            optional_value = deepcopy(bridge_snapshot.get(optional_field))
-            if optional_value not in (None, "", [], {}):
-                runtime_row[optional_field] = optional_value
-        runtime_resources.append(runtime_row)
-    return runtime_resources
-
-
-def _expected_part_facts(
-    prepared_bridge_request: dict[str, Any],
-) -> list[dict[str, Any]]:
-    context_summary = dict(prepared_bridge_request.get("context_summary") or {})
-    current_product_state = dict(context_summary.get("current_product_state") or {})
-    relevant_assembly_requirements = [
-        deepcopy(entry)
-        for entry in (context_summary.get("relevant_assembly_requirements") or [])
-        if isinstance(entry, dict)
-    ]
-    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
-
-    requirements_by_product: dict[str, list[dict[str, Any]]] = {}
-    for requirement_entry in relevant_assembly_requirements:
-        product = str(requirement_entry.get("product") or "").strip()
-        if product:
-            requirements_by_product.setdefault(product, []).append(requirement_entry)
-
-    current_resources = [
-        dict(row)
-        for row in (current_product_state.get("resources") or [])
-        if isinstance(row, dict)
-    ]
-    held_part_to_resource = {
-        str(row.get("held_part") or "").strip(): str(row.get("resource_jid") or "").strip()
-        for row in current_resources
-        if str(row.get("held_part") or "").strip()
-        and str(row.get("resource_jid") or "").strip()
-    }
-
-    pending_task_ids_by_part: dict[str, list[str]] = {}
-    for resource_jid in sorted(bridge_resources):
-        resource_entry = dict(bridge_resources.get(resource_jid) or {})
-        for task in (resource_entry.get("pending_tasks") or []):
-            if not isinstance(task, dict):
-                continue
-            task_id = str(task.get("id") or "").strip()
-            part_name = str((task.get("params") or {}).get("part_name") or "").strip()
-            if task_id and part_name:
-                pending_task_ids_by_part.setdefault(part_name, []).append(task_id)
-
-    current_parts = [
-        dict(row)
-        for row in (current_product_state.get("parts") or [])
-        if isinstance(row, dict)
-    ]
-    current_part_by_name = {
-        str(row.get("part_name") or "").strip(): row
-        for row in current_parts
-        if str(row.get("part_name") or "").strip()
-    }
-    tracker_by_part = {
-        str(part_name or "").strip(): dict(raw_entry or {})
-        for part_name, raw_entry in dict(prepared_bridge_request.get("part_tracker") or {}).items()
-        if str(part_name or "").strip() and isinstance(raw_entry, dict)
-    }
-
-    ordered_part_names: list[str] = []
-    seen_part_names: set[str] = set()
-    for row in current_parts:
-        part_name = str(row.get("part_name") or "").strip()
-        if part_name and part_name not in seen_part_names:
-            seen_part_names.add(part_name)
-            ordered_part_names.append(part_name)
-    for part_name in sorted(tracker_by_part):
-        if part_name not in seen_part_names:
-            seen_part_names.add(part_name)
-            ordered_part_names.append(part_name)
-
-    part_facts: list[dict[str, Any]] = []
-    for part_name in ordered_part_names:
-        current_part_row = dict(current_part_by_name.get(part_name) or {})
-        tracker_entry = dict(tracker_by_part.get(part_name) or {})
-        requirement_entry = dict((requirements_by_product.get(part_name) or [None])[0] or {})
-        current_location = deepcopy(current_part_row.get("location"))
-        holder_resource_jid = str(held_part_to_resource.get(part_name) or "").strip()
-        if (
-            not holder_resource_jid
-            and isinstance(current_location, str)
-            and current_location.endswith("_gripper")
-        ):
-            holder_resource_jid = current_location.rsplit("_gripper", 1)[0]
-        part_facts.append(
-            {
-                "part_name": part_name,
-                "current_state": deepcopy(current_part_row.get("state")),
-                "current_location": current_location,
-                "location_basis": deepcopy(current_part_row.get("location_basis")),
-                "observed_pose": deepcopy(current_part_row.get("observed_pose")),
-                "current_holder_resource_jid": holder_resource_jid or None,
-                "origin_location": deepcopy(tracker_entry.get("origin_resource_location")),
-                "goal_location": deepcopy(current_part_row.get("target_location")),
-                "goal_requirement_id": (
-                    str(requirement_entry.get("requirement_id") or "").strip() or None
-                ),
-                "nominal_requirement_resource_jid": (
-                    str(requirement_entry.get("resource_jid") or "").strip() or None
-                ),
-                "pending_nominal_task_ids": deepcopy(
-                    pending_task_ids_by_part.get(part_name) or []
-                ),
-            }
-        )
-    return part_facts
-
-
-def _expected_allowed_execution_surface(
-    prepared_bridge_request: dict[str, Any],
-) -> dict[str, Any]:
-    context_summary = dict(prepared_bridge_request.get("context_summary") or {})
-    fault_event = dict(context_summary.get("fault_event") or {})
-    focused_resource_jid = str(fault_event.get("focused_resource_jid") or "").strip()
-    current_product_state = dict(context_summary.get("current_product_state") or {})
-    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
-
-    observed_resources = [
-        dict(row)
-        for row in (current_product_state.get("resources") or [])
-        if isinstance(row, dict)
-    ]
-    observed_by_jid = {
-        str(row.get("resource_jid") or "").strip(): row
-        for row in observed_resources
-        if str(row.get("resource_jid") or "").strip()
-    }
-    ordered_resource_jids = _expected_ordered_resource_jids(
-        focused_resource_jid=focused_resource_jid,
-        observed_resources=observed_resources,
-        bridge_resources=bridge_resources,
-    )
-
-    prompt_resources: list[dict[str, Any]] = []
-
-    def _expected_allowed_primitives(resource_entry: dict[str, Any]) -> list[dict[str, Any]]:
-        resource_type = str(resource_entry.get("resource_type") or "resource").strip() or "resource"
-        profile = get_resource_profile(resource_type)
-        preview_output_map = dict(profile.preview_output_map or {})
-        extract_output_map = dict(profile.extract_output_map or {})
-        allowed_primitives: list[dict[str, Any]] = []
-        for item in (resource_entry.get("primitive_catalog") or []):
-            if not isinstance(item, dict):
-                continue
-            primitive_name = str(item.get("name") or "").strip()
-            if not primitive_name:
-                continue
-            allowed_entry: dict[str, Any] = {"name": primitive_name}
-            description = str(item.get("description") or item.get("semantic_summary") or "").strip()
-            if description:
-                allowed_entry["description"] = description
-            allowed_entry["required_params"] = [
-                str(param).strip()
-                for param in (item.get("required_params") or [])
-                if str(param).strip()
-            ]
-            primitive_kind = str(item.get("primitive_kind") or "").strip()
-            if primitive_kind:
-                allowed_entry["primitive_kind"] = primitive_kind
-            output_fields = [
-                str(field).strip()
-                for field in dict(item.get("output_schema") or {}).keys()
-                if str(field).strip()
-            ]
-            if output_fields:
-                allowed_entry["output_fields"] = output_fields
-            hard_preconditions = deepcopy(item.get("preconditions") or {})
-            if hard_preconditions:
-                allowed_entry["hard_preconditions"] = hard_preconditions
-            supports_store_as = (
-                primitive_name in preview_output_map or primitive_name in extract_output_map
-            )
-            allowed_entry["supports_store_as"] = supports_store_as
-            if supports_store_as:
-                store_as_contract = resource_store_as_contract(profile, primitive_name)
-                store_as_required_params = [
-                    str(param).strip()
-                    for param in (store_as_contract.get("required_params") or [])
-                    if str(param).strip()
-                ]
-                store_as_any_of_param_sets = [
-                    [
-                        str(param).strip()
-                        for param in (param_set or [])
-                        if str(param).strip()
-                    ]
-                    for param_set in (store_as_contract.get("any_of_param_sets") or [])
-                    if isinstance(param_set, (list, tuple))
-                ]
-                if store_as_required_params:
-                    allowed_entry["store_as_required_params"] = store_as_required_params
-                if store_as_any_of_param_sets:
-                    allowed_entry["store_as_any_of_param_sets"] = store_as_any_of_param_sets
-            allowed_primitives.append(allowed_entry)
-        return allowed_primitives
-
-    for resource_jid in ordered_resource_jids:
-        bridge_entry = dict(bridge_resources.get(resource_jid) or {})
-        adapter_capabilities = dict(bridge_entry.get("bridge_adapter") or {})
-        if not adapter_capabilities.get("supports_executable_bridge"):
-            continue
-        observed_row = dict(observed_by_jid.get(resource_jid) or {})
-        prompt_resources.append(
-            {
-                "resource_jid": resource_jid,
-                "resource_type": str(
-                    bridge_entry.get("resource_type")
-                    or dict((bridge_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get("resource_type")
-                    or "unknown"
-                ).strip(),
-                "role": deepcopy(
-                    observed_row.get("role")
-                    or ("focused" if resource_jid == focused_resource_jid else "supporting")
-                ),
-                "allowed_primitives": _expected_allowed_primitives(bridge_entry),
-            }
-        )
-
-    return {
-        "focused_resource_jid": focused_resource_jid,
-        "resources": prompt_resources,
-    }
-
-
 def _build_live_style_failure_payload(
     plan_payload: dict[str, Any],
     *,
@@ -2293,102 +1306,6 @@ def _build_live_style_slippage_fixture(
         "failure_context": failure_payload,
     }
 
-
-def _build_synthetic_slippage_fixture() -> dict[str, Any]:
-    """Build the richer synthetic case used only for optional full-run experiments."""
-    scenario_config = load_failure_scenario_config("lg_slippage")
-    lg_slippage_pose = deepcopy(
-        (dict(scenario_config.get("injection") or {}).get("drop_pose") or {})
-    )
-    part_tracker: dict[str, Any] = {
-        "LG": {
-            "state": "misplaced",
-            "location": None,
-            "last_known_location": None,
-            "observed_pose": deepcopy(lg_slippage_pose),
-            "pose_source": "synthetic_fixture",
-            "last_successful_task": ANCHOR_TASK_ID,
-            "origin_resource_location": "prusa-mk4-1",
-        },
-        "MCP": {
-            "state": "in_gripper",
-            "location": "ur5e@localhost_gripper",
-            "last_known_location": "ur5e@localhost_gripper",
-            "observed_pose": None,
-            "last_successful_task": "REQ_1_T2",
-            "origin_resource_location": "prusa-mk4-2",
-        },
-    }
-    part_states = {"LG": "misplaced", "MCP": "in_gripper"}
-    part_locations = {
-        "LG": None,
-        "MCP": "ur5e@localhost_gripper",
-    }
-    resource_states: dict[str, dict[str, Any]] = {
-        "xarm6@localhost": {
-            "current_state": "failed",
-            "held_part": None,
-            "current_location": "assembly_board-v1",
-        },
-        "ur5e@localhost": {
-            "current_state": "picked",
-            "held_part": "MCP",
-            "current_location": None,
-        },
-    }
-    stuck_state: dict[str, Any] = {
-        "resource_state": "failed",
-        "current_part": None,
-        "current_location": "assembly_board-v1",
-        "part_states": deepcopy(part_states),
-        "part_locations": deepcopy(part_locations),
-    }
-    return {
-        "failed_task_id": FAILED_TASK_ID,
-        "anchor_task_id": ANCHOR_TASK_ID,
-        "goal_state": GOAL_STATE,
-        "P_id": ["LG", "MCP"],
-        "obligation_targets": [
-            {"rule_id": CASE3_BOARD_MUTEX_RULE_ID, "resource_jid": "xarm6@localhost"}
-        ],
-        "bridge_feedback": "",
-        "default_resource_state": "idle",
-        "part_tracker": part_tracker,
-        "part_states": part_states,
-        "part_locations": part_locations,
-        "resource_states": resource_states,
-        "stuck_state": stuck_state,
-        "bridge_safety_context": {
-            "rule_ids": [CASE3_LG_BEFORE_MCP_RULE_ID, CASE3_BOARD_MUTEX_RULE_ID],
-            "safe_next_task_ids": [],
-            "running_aps": [],
-            "candidate_aps": [],
-            "predicted_state_aps": [],
-            "status": "",
-            "reason": "",
-            "constraints": [
-                {
-                    "part_name": "MCP",
-                    "forbidden_location": "assembly_board-v1",
-                    "until_conditions": [
-                        {"entity_kind": "part", "entity": "LG", "field": "state", "expected": "assembled"},
-                        {"entity_kind": "part", "entity": "LG", "field": "location", "expected": "assembly_board-v1"},
-                    ],
-                    "reason": (
-                        "resume-suffix parts may not be staged at their protected goal "
-                        "location before bridge-replaced parts satisfy marked re-entry"
-                    ),
-                    "rule_id": CASE3_LG_BEFORE_MCP_RULE_ID,
-                }
-            ],
-            "safety_rules": [
-                deepcopy(CASE3_LG_BEFORE_MCP_RULE),
-                deepcopy(CASE3_BOARD_MUTEX_RULE),
-            ],
-        },
-    }
-
-
 def _normalized_observation_pose(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
@@ -2521,30 +1438,16 @@ def _relax_recovery_clear_precondition(prepared_bridge_request: dict[str, Any]) 
 
 def _configure_live_bridge_session(
     prepared_bridge_request: dict[str, Any],
-    *,
-    stop_after_phase: str | None = None,
 ) -> None:
-    """Increase turn budget for live LLM runs."""
+    """Tune the prepared bridge session for the direct dry-run harness."""
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    reasoning_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
-    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 16)
-    bridge_session["max_observations"] = max(int(bridge_session.get("max_observations", 3) or 3), 5)
-    bridge_session["max_observe_batch"] = max(1, min(3, int(bridge_session.get("max_observe_batch", 3) or 3)))
-    bridge_session["max_final_retries"] = max(int(bridge_session.get("max_final_retries", 2) or 2), 4)
-    normalized_stop_after = str(stop_after_phase or "").strip().lower()
-    if stop_after_phase is None and reasoning_mode == "multi_turn":
-        normalized_stop_after = "grounding"
-    if normalized_stop_after:
-        bridge_session["stop_after_phase"] = normalized_stop_after
-    else:
-        bridge_session.pop("stop_after_phase", None)
+    bridge_session["reasoning_mode"] = "multi_turn"
+    bridge_session["multi_turn_engine"] = "v2"
+    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 20)
     bridge_session["repair_mode"] = "recover"
     bridge_session["observation_backend"] = "mock_detect_parts_harness"
+    bridge_session["outline_mode"] = "incremental_candidates_validated"
     prepared_bridge_request["bridge_session"] = bridge_session
-    if reasoning_mode == "multi_turn":
-        prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -2555,10 +1458,6 @@ def _configure_live_bridge_session(
 async def _prepare_bridge_dryrun_harness(
     *,
     llm_model: str | None = None,
-    configure_live: bool = True,
-    fixture_mode: str = "live",
-    bridge_reasoning_mode: str | None = None,
-    multi_turn_stop_after_phase: str | None = None,
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any]]:
     """Load configs, build fake agents, prepare the bridge request."""
     paths = _case3_paths()
@@ -2566,11 +1465,6 @@ async def _prepare_bridge_dryrun_harness(
     plan_payload = _load_json(paths["plan"])
     geometry_payload = _load_json(paths["geometry"])
     bundle_context = _case3_bundle_context(paths)
-    if bridge_reasoning_mode is not None:
-        bundle_context["replan_policy"] = {
-            **dict(bundle_context.get("replan_policy") or {}),
-            "bridge_reasoning_mode": str(bridge_reasoning_mode or "").strip(),
-        }
     ur5e_config = _load_robot_config(paths["ur5e"], "ur5e")
     xarm6_config = _load_robot_config(paths["xarm6"], "xarm6")
 
@@ -2616,14 +1510,11 @@ async def _prepare_bridge_dryrun_harness(
     planner.nodes = deepcopy(plan_payload.get("nodes") or [])
     _apply_runtime_status_snapshot(planner.nodes)
 
-    if str(fixture_mode or "").strip().lower() == "synthetic":
-        fixture = _build_synthetic_slippage_fixture()
-    else:
-        fixture = _build_live_style_slippage_fixture(
-            planner=planner,
-            plan_payload=plan_payload,
-            xarm6_position={"x": 0.1, "y": 0.08, "z": 1.1994999760206477},
-        )
+    fixture = _build_live_style_slippage_fixture(
+        planner=planner,
+        plan_payload=plan_payload,
+        xarm6_position={"x": 0.1, "y": 0.08, "z": 1.1994999760206477},
+    )
 
     async def _direct_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
         return func(*args, **kwargs)
@@ -2657,12 +1548,11 @@ async def _prepare_bridge_dryrun_harness(
     xarm6.set_shared_observations(shared_grounding_observations)
 
     product_agent.prepared_bridge_request = prepared_bridge_request
-    if configure_live:
-        _relax_recovery_clear_precondition(prepared_bridge_request)
-        _configure_live_bridge_session(
-            prepared_bridge_request,
-            stop_after_phase=multi_turn_stop_after_phase,
-        )
+    _relax_recovery_clear_precondition(prepared_bridge_request)
+    _configure_live_bridge_session(prepared_bridge_request)
+    prepared_bridge_request["multi_turn_session_seed"] = (
+        multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+    )
 
     return fixture, product_agent, planner, prepared_bridge_request
 
@@ -2676,21 +1566,11 @@ async def run_case3_bridge_dryrun(
     write_debug: bool = True,
     *,
     llm_model: str | None = None,
-    bridge_reasoning_mode: str | None = None,
-    multi_turn_stop_after_phase: str | None = None,
+    stop_before_primitive_generation: bool = True,
 ) -> dict[str, Any]:
-    """Run the active bridge through the configured bridge reasoning mode."""
-    effective_stop_after_phase = multi_turn_stop_after_phase
-    if (
-        effective_stop_after_phase is None
-        and str(bridge_reasoning_mode or "").strip().lower() == "multi_turn"
-    ):
-        effective_stop_after_phase = "outline"
-    fixture, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+    """Run the Case 3 dry-run scenario through the bridge once."""
+    _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
-        fixture_mode="live",
-        bridge_reasoning_mode=bridge_reasoning_mode,
-        multi_turn_stop_after_phase=effective_stop_after_phase,
     )
 
     if write_debug:
@@ -2701,30 +1581,82 @@ async def run_case3_bridge_dryrun(
         bridge_debug_seed["per_turn_debug_dir"] = str(debug_dir)
         prepared_bridge_request["bridge_debug"] = bridge_debug_seed
 
+    # First run: grounding + first outline task
     proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
+
+    # Resume loop: keep running while paused after outline turns
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+        execute_multi_turn_bridge as _resume_bridge,
+    )
+    max_resume = max(
+        10,
+        int(
+            dict(prepared_bridge_request.get("bridge_session") or {}).get("max_turns")
+            or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+            or 0
+        ),
+    )
+    post_validation_resume_budget = 0
+    for _resume_i in range(max_resume):
+        ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+        if ss.get("status") != "paused_after_outline_turn":
+            break
+        if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Outline completed; stopping before primitive_generation for inspection"
+            )
+            break
+        if stop_before_primitive_generation:
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Resuming outline loop until primitive_generation (round %d)", _resume_i + 1,
+            )
+            proposal = await _resume_bridge(
+                planner, prepared_bridge_request, session_state=ss,
+            )
+            continue
+        findings = list(ss.get("outline_validation_findings") or [])
+        if not findings and str(ss.get("outline_mode") or "").strip().lower() == "incremental_candidates_validated":
+            findings = [
+                deepcopy(row)
+                for row in (ss.get("candidate_rejection_feedback") or [])
+                if isinstance(row, dict)
+            ]
+        if findings and post_validation_resume_budget <= 0:
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Validation rejection detected (%d findings) — resuming %d more turns",
+                len(findings),
+                _POST_VALIDATION_INSPECTION_TURNS,
+            )
+            post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
+        elif post_validation_resume_budget > 0:
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Resuming post-validation inspection turn (%d remaining after this resume)",
+                post_validation_resume_budget - 1,
+            )
+        else:
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Resuming outline loop (round %d)", _resume_i + 1,
+            )
+        proposal = await _resume_bridge(
+            planner, prepared_bridge_request, session_state=ss,
+        )
+        if post_validation_resume_budget > 0:
+            post_validation_resume_budget -= 1
+            next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+            if (
+                post_validation_resume_budget == 0
+                and next_ss.get("status") == "paused_after_outline_turn"
+            ):
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"
+                )
+                break
+
     bridge_debug = planner.get_last_bridge_debug()
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    reasoning_mode = str(bridge_session.get("reasoning_mode") or "single_shot").strip()
-    multi_turn_session = deepcopy(bridge_debug.get("multi_turn_session") or {})
-    multi_turn_turns = list(multi_turn_session.get("turns") or [])
-    raw_response_value = ""
-    if reasoning_mode == "multi_turn":
-        latest_response = (
-            dict(multi_turn_turns[-1] or {}).get("raw_response")
-            if multi_turn_turns
-            else None
-        )
-        if latest_response not in (None, "", [], {}):
-            raw_response_value = json.dumps(
-                latest_response,
-                indent=2,
-                default=str,
-                ensure_ascii=True,
-            )
-    else:
-        raw_response_value = str(
-            ((bridge_debug.get("single_shot_turn") or {}).get("raw_response") or "")
-        )
+    reasoning_mode = str(bridge_session.get("reasoning_mode") or "multi_turn").strip()
+    multi_turn_session = dict((bridge_debug or {}).get("multi_turn_session") or {})
+    turns = list(multi_turn_session.get("turns") or [])
 
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
@@ -2735,17 +1667,8 @@ async def run_case3_bridge_dryrun(
         "prepared_bridge_request": prepared_bridge_request,
         "context_summary": deepcopy(prepared_bridge_request.get("context_summary") or {}),
         "llm_input": deepcopy(prepared_bridge_request.get("llm_input") or {}),
-        "single_shot_prompt_input": deepcopy(
-            prepared_bridge_request.get("single_shot_prompt_input") or {}
-        ),
-        "single_shot_prompt_text": str(
-            prepared_bridge_request.get("single_shot_prompt_text") or ""
-        ),
-        "multi_turn_session_seed": deepcopy(
-            prepared_bridge_request.get("multi_turn_session_seed") or {}
-        ),
-        "multi_turn_session": multi_turn_session,
-        "raw_response": raw_response_value,
+        "multi_turn_session": deepcopy(multi_turn_session),
+        "turns": deepcopy(turns),
         "turn_log": deepcopy(product_agent.turn_log),
         "prompt_artifact_path": None,
         "latest_prompt_artifact_path": None,
@@ -2762,56 +1685,6 @@ async def run_case3_bridge_dryrun(
     return result
 
 
-async def run_case3_bridge_prepare_trace(
-    write_debug: bool = True,
-    *,
-    llm_model: str | None = None,
-    bridge_reasoning_mode: str | None = None,
-) -> dict[str, Any]:
-    """Prepare the bridge request and stop before any LLM stage."""
-    fixture, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
-        llm_model=llm_model,
-        configure_live=False,
-        fixture_mode="live",
-        bridge_reasoning_mode=bridge_reasoning_mode,
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    result: dict[str, Any] = {
-        "scenario": "case3_lg_slippage",
-        "reasoning_mode": str(bridge_session.get("reasoning_mode") or "single_shot").strip(),
-        "status": "prepared_only",
-        "fixture": fixture,
-        "bridge_debug": planner.get_last_bridge_debug(),
-        "prepared_bridge_request": prepared_bridge_request,
-        "context_summary": deepcopy(prepared_bridge_request.get("context_summary") or {}),
-        "llm_input": deepcopy(prepared_bridge_request.get("llm_input") or {}),
-        "single_shot_prompt_input": deepcopy(
-            prepared_bridge_request.get("single_shot_prompt_input") or {}
-        ),
-        "single_shot_prompt_text": str(
-            prepared_bridge_request.get("single_shot_prompt_text") or ""
-        ),
-        "multi_turn_session_seed": deepcopy(
-            prepared_bridge_request.get("multi_turn_session_seed") or {}
-        ),
-        "raw_response": "",
-        "turn_log": deepcopy(product_agent.turn_log),
-        "prompt_artifact_path": None,
-        "latest_prompt_artifact_path": None,
-        "response_artifact_path": None,
-        "latest_response_artifact_path": None,
-        "session_transcript_artifact_path": None,
-        "latest_session_transcript_artifact_path": None,
-    }
-    if write_debug:
-        artifact_paths = _write_debug_artifacts(
-            result,
-            filename_prefix="bridge_case3_prepare",
-        )
-        result.update(artifact_paths)
-    return result
-
-
 def _write_debug_artifacts(
     payload: dict[str, Any],
     *,
@@ -2824,7 +1697,7 @@ def _write_debug_artifacts(
         payload,
         phase_label=filename_prefix,
         debug_dir=debug_dir,
-        write_latest=True,
+        write_latest=False,
         filename_prefix=filename_prefix,
     )
 
@@ -2835,402 +1708,19 @@ def _write_debug_artifacts(
 
 
 def _assert_bridge_dryrun(result: dict[str, Any]) -> None:
-    assert result.get("proposal") is None, "single-shot prepare slice should stop before any proposal"
     bridge_debug = result.get("bridge_debug") or {}
-    assert bridge_debug.get("status") == "llm_output_recorded", (
-        f"Bridge did not reach prompt-ready state; status={bridge_debug.get('status')!r}"
+    status = str(bridge_debug.get("status") or "")
+    reasoning_mode = str(result.get("reasoning_mode") or "")
+    assert reasoning_mode == "multi_turn", (
+        f"Expected multi_turn reasoning mode; got {reasoning_mode!r}"
     )
-    assert result.get("single_shot_prompt_input"), "single-shot prompt input is missing"
-    assert str(result.get("single_shot_prompt_text") or "").strip(), "single-shot prompt text is missing"
-    assert str(result.get("raw_response") or "").strip(), "raw LLM response is missing"
-
-
-def _assert_bridge_prepare_trace(result: dict[str, Any]) -> None:
-    assert result.get("status") == "prepared_only"
-    prepared_bridge_request = result.get("prepared_bridge_request") or {}
-    context_summary = result.get("context_summary") or {}
-    llm_input = prepared_bridge_request.get("llm_input") or {}
-    bridge_session = prepared_bridge_request.get("bridge_session") or {}
-    single_shot_prompt_input = prepared_bridge_request.get("single_shot_prompt_input") or {}
-    single_shot_prompt_text = str(prepared_bridge_request.get("single_shot_prompt_text") or "")
-    assert prepared_bridge_request, "prepared bridge request is missing"
-    assert context_summary, "context summary is missing"
-    assert llm_input, "llm_input is missing"
-    assert bridge_session.get("reasoning_mode") == "single_shot"
-    primitive_catalog = list(prepared_bridge_request.get("primitive_catalog") or [])
-    assert primitive_catalog, "focused primitive catalog is missing"
-    assert isinstance(prepared_bridge_request.get("bridge_snapshot"), dict)
-    assert single_shot_prompt_input, "single-shot prompt input is missing"
-    assert single_shot_prompt_text.strip(), "single-shot prompt text is missing"
-
-    fault_event = context_summary.get("fault_event") or {}
-    assert fault_event.get("focused_resource_jid") == "xarm6@localhost"
-    assert fault_event.get("blocked_at_task_id") == FAILED_TASK_ID
-    assert fault_event.get("blocked_at_function") == "place_insert"
-    assert "goal_state" not in fault_event
-    assert "pending_parts" not in fault_event
-
-    current_product_state = context_summary.get("current_product_state") or {}
-    relevant_assembly_requirements = context_summary.get("relevant_assembly_requirements") or []
-    resources = current_product_state.get("resources") or []
-    parts = current_product_state.get("parts") or []
-    active_safety_diagnosis = current_product_state.get("active_safety_diagnosis") or {}
-    loaded_safety_rules = current_product_state.get("loaded_safety_rules") or []
-    modeled_continuation_gap = context_summary.get("modeled_continuation_gap") or {}
-    failure_context_raw = prepared_bridge_request.get("failure_context_raw") or {}
-    failure_anchor = prepared_bridge_request.get("failure_anchor") or {}
-    assert failure_context_raw, "failure context raw is missing"
-    assert failure_anchor, "failure anchor is missing"
-    assert resources, "resource summary is missing"
-    assert parts, "part summary is missing"
-    assert prepared_bridge_request.get("requirement_nodes"), "requirement inventory is missing"
-    assert prepared_bridge_request.get("requirements_status"), "requirements status is missing"
-    assert prepared_bridge_request.get("loaded_safety_rules"), "loaded safety rules are missing"
-    assert modeled_continuation_gap.get("goal_state") == GOAL_STATE
-    assert modeled_continuation_gap.get("pending_nominal_task_ids"), "pending continuation summary is missing"
-    assert modeled_continuation_gap.get("blocking_reasons"), "blocking reasons are missing"
-    assert FAILED_TASK_ID not in (modeled_continuation_gap.get("pending_nominal_task_ids") or [])
-    assert "REQ_2_T5" in (modeled_continuation_gap.get("pending_nominal_task_ids") or [])
-
-    parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in parts
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    lg_row = parts_by_name.get("LG") or {}
-    assert lg_row.get("state") == "misplaced"
-    assert lg_row.get("location") in (None, "")
-    assert lg_row.get("observed_pose"), "LG observed pose should come from shared failure context"
-    assert not (active_safety_diagnosis.get("obligation_targets") or []), "live-style default should not inject obligations"
-    assert not (active_safety_diagnosis.get("rule_ids") or []), "live-style default should not inject safety rules"
-    loaded_rule_ids = {
-        str(rule.get("rule_id") or "")
-        for rule in loaded_safety_rules
-        if isinstance(rule, dict) and str(rule.get("rule_id") or "")
-    }
-    assert loaded_rule_ids >= {"SAFE_1", "SAFE_2"}, "loaded safety rules should include the verified bundle rules"
-    safe1_loaded_rule = next(
-        (
-            rule for rule in loaded_safety_rules
-            if isinstance(rule, dict) and str(rule.get("rule_id") or "") == "SAFE_1"
-        ),
-        {},
+    multi_turn_session = result.get("multi_turn_session") or {}
+    session_status = str(multi_turn_session.get("status") or "")
+    assert session_status in ("completed", "turn_budget_exhausted", "error"), (
+        f"Unexpected multi-turn session status: {session_status!r}"
     )
-    assert safe1_loaded_rule.get("ap_scope") in {"both", "bridge"}
-    assert safe1_loaded_rule.get("bridge_aps"), "bridge AP metadata should be loaded for SAFE_1"
-    assert str(safe1_loaded_rule.get("dfa_dot") or "").strip(), "SAFE_1 DFA DOT should be loaded"
-
-    requirement_map = {
-        str(entry.get("requirement_id") or ""): entry
-        for entry in relevant_assembly_requirements
-        if isinstance(entry, dict) and str(entry.get("requirement_id") or "")
-    }
-    assert set(requirement_map) >= {"REQ_1", "REQ_2"}, "relevant assembly requirements should include MCP and LG goals"
-    assert requirement_map["REQ_1"].get("status") in {"pending", "in_progress"}
-    assert "MCP" in str(requirement_map["REQ_1"].get("summary") or "")
-    assert requirement_map["REQ_2"].get("status") == "failed"
-    assert "LG" in str(requirement_map["REQ_2"].get("summary") or "")
-    goal_conditions = modeled_continuation_gap.get("goal_conditions") or []
-    assert goal_conditions, "goal conditions are missing"
-    goal_condition_keys = {
-        (
-            str(entry.get("condition_family") or ""),
-            str(entry.get("entity") or ""),
-            str(entry.get("field") or ""),
-            entry.get("expected"),
-        )
-        for entry in goal_conditions
-        if isinstance(entry, dict)
-    }
-    assert ("goal", "LG", "state", GOAL_STATE) in goal_condition_keys
-    assert ("goal", "MCP", "state", GOAL_STATE) in goal_condition_keys
-
-    continuation_requirements = modeled_continuation_gap.get("continuation_requirements") or []
-    idle_requirement = next(
-        (
-            entry for entry in continuation_requirements
-            if isinstance(entry, dict)
-            and entry.get("entity") == "xarm6@localhost"
-            and entry.get("field") == "current_state"
-            and entry.get("expected") == "idle"
-        ),
-        None,
-    )
-    assert idle_requirement, "continuation idle requirement is missing"
-    assert idle_requirement.get("source_task_id") == "REQ_2_T5"
-    assert idle_requirement.get("source_function_name") == "move_home"
-
-    unsatisfied_goal_conditions = modeled_continuation_gap.get("unsatisfied_goal_conditions") or []
-    goal_unsatisfied_keys = {
-        (
-            str(entry.get("condition_family") or ""),
-            str(entry.get("entity") or ""),
-            str(entry.get("field") or ""),
-            entry.get("expected"),
-            entry.get("actual"),
-        )
-        for entry in unsatisfied_goal_conditions
-        if isinstance(entry, dict)
-    }
-    assert ("goal", "LG", "state", GOAL_STATE, "misplaced") in goal_unsatisfied_keys
-    assert ("goal", "MCP", "state", GOAL_STATE, "in_gripper") in goal_unsatisfied_keys
-
-    unsatisfied_conditions = modeled_continuation_gap.get("unsatisfied_conditions") or []
-    assert unsatisfied_conditions, "unsatisfied conditions are missing"
-    families = {
-        str(entry.get("condition_family") or "")
-        for entry in unsatisfied_conditions
-        if isinstance(entry, dict)
-    }
-    assert "goal" in families, "goal-family unsatisfied conditions are missing"
-    assert "continuation" in families, "continuation-family unsatisfied conditions are missing"
-    assert modeled_continuation_gap.get("resume_ready") is False
-    assert llm_input.get("fault_event", {}).get("blocked_at_task_id") == FAILED_TASK_ID
-
-    observed_runtime_state = llm_input.get("observed_runtime_state") or {}
-    llm_resources = observed_runtime_state.get("resources") or []
-    assert llm_resources, "llm_input observed resources are missing"
-    assert "parts" not in observed_runtime_state, "llm_input part facts should live in part_facts"
-    assert llm_resources == _expected_runtime_resource_facts(prepared_bridge_request)
-
-    llm_resource_by_jid = {
-        str(row.get("resource_jid") or ""): row
-        for row in llm_resources
-        if isinstance(row, dict) and str(row.get("resource_jid") or "")
-    }
-    xarm6_runtime_row = llm_resource_by_jid.get("xarm6@localhost") or {}
-    assert xarm6_runtime_row.get("current_state") == "failed"
-    assert "pending_task_ids" not in xarm6_runtime_row, "llm_input observed resources should not include pending task ids"
-    assert xarm6_runtime_row.get("current_pose"), "llm_input resource facts should retain grounded poses"
-    assert xarm6_runtime_row.get("named_poses"), "llm_input resource facts should retain named poses"
-
-    part_facts = llm_input.get("part_facts") or []
-    assert part_facts == _expected_part_facts(prepared_bridge_request)
-    llm_parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in part_facts
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    llm_lg_row = llm_parts_by_name.get("LG") or {}
-    assert llm_lg_row.get("current_state") == "misplaced"
-    assert llm_lg_row.get("observed_pose"), "llm_input should retain LG observed pose"
-    assert llm_lg_row.get("goal_location") == "assembly_board-v1"
-    assert llm_lg_row.get("goal_requirement_id") == "REQ_2"
-    assert llm_lg_row.get("nominal_requirement_resource_jid") == "xarm6@localhost"
-    assert llm_lg_row.get("current_holder_resource_jid") is None
-    llm_mcp_row = llm_parts_by_name.get("MCP") or {}
-    assert llm_mcp_row.get("current_holder_resource_jid") == "ur5e@localhost"
-    assert llm_mcp_row.get("origin_location") == "prusa-mk4-2"
-    assert "target_location" not in llm_lg_row, "llm_input part facts should not expose raw modeled target fields"
-
-    llm_loaded_rule_ids = {
-        str(rule.get("rule_id") or "")
-        for rule in (llm_input.get("loaded_safety_rules") or [])
-        if isinstance(rule, dict) and str(rule.get("rule_id") or "")
-    }
-    assert llm_loaded_rule_ids >= {"SAFE_1", "SAFE_2"}
-    llm_safe1_rule = next(
-        (
-            rule for rule in (llm_input.get("loaded_safety_rules") or [])
-            if isinstance(rule, dict) and str(rule.get("rule_id") or "") == "SAFE_1"
-        ),
-        {},
-    )
-    assert llm_safe1_rule.get("bridge_aps"), "llm_input should retain bridge AP metadata for SAFE_1"
-    assert isinstance(llm_input.get("obligation_targets"), list)
-
-    llm_requirement_ids = {
-        str(entry.get("requirement_id") or "")
-        for entry in (llm_input.get("relevant_assembly_requirements") or [])
-        if isinstance(entry, dict) and str(entry.get("requirement_id") or "")
-    }
-    assert llm_requirement_ids >= {"REQ_1", "REQ_2"}
-
-    llm_gap = llm_input.get("modeled_continuation_gap") or {}
-    assert "goal_state" not in llm_gap
-    assert "unmet_goal_conditions" not in llm_gap
-    assert llm_gap.get("pending_nominal_tasks"), "llm_input should retain pending nominal tasks"
-    continuation_gap_entries = llm_gap.get("unmet_continuation_conditions") or []
-    idle_continuation_gap = next(
-        (
-            entry for entry in continuation_gap_entries
-            if isinstance(entry, dict)
-            and entry.get("entity") == "xarm6@localhost"
-            and entry.get("field") == "current_state"
-            and entry.get("expected") == "idle"
-            and entry.get("actual") == "failed"
-        ),
-        None,
-    )
-    assert idle_continuation_gap, "llm_input should retain unmet continuation condition for xarm6"
-    assert str(idle_continuation_gap.get("condition_id") or "").startswith("cond_")
-    pending_nominal_tasks = llm_gap.get("pending_nominal_tasks") or []
-    move_home_task = next(
-        (
-            entry for entry in pending_nominal_tasks
-            if isinstance(entry, dict) and entry.get("id") == "REQ_2_T5"
-        ),
-        None,
-    )
-    assert move_home_task, "llm_input should retain pending move_home task"
-    assert idle_continuation_gap.get("condition_id") in (
-        move_home_task.get("blocked_by_condition_ids") or []
-    )
-    assert "bridge_debug" not in llm_input
-    assert "data_flow_trace" not in llm_input
-    assert "requirement_task_index" not in llm_input
-    assert "task_requirement_map" not in llm_input
-    llm_fault_event = llm_input.get("fault_event") or {}
-    assert llm_fault_event.get("affected_part_names") == ["LG"]
-    assert "affected_parts" not in llm_fault_event
-
-    allowed_execution_surface = llm_input.get("allowed_execution_surface") or {}
-    assert allowed_execution_surface == _expected_allowed_execution_surface(
-        prepared_bridge_request
-    )
-    assert "primitive_catalog_by_resource_type" not in allowed_execution_surface
-    allowed_surface_resources = allowed_execution_surface.get("resources") or []
-    allowed_resource_by_jid = {
-        str(row.get("resource_jid") or ""): row
-        for row in allowed_surface_resources
-        if isinstance(row, dict) and str(row.get("resource_jid") or "")
-    }
-    assert set(allowed_resource_by_jid) >= {"ur5e@localhost", "xarm6@localhost"}
-    for resource_jid, resource_entry in allowed_resource_by_jid.items():
-        allowed_primitives = resource_entry.get("allowed_primitives") or []
-        assert set(resource_entry) == {
-            "resource_jid",
-            "resource_type",
-            "role",
-            "allowed_primitives",
-        }
-        primitive_names = {
-            str(entry.get("name") or "")
-            for entry in allowed_primitives
-            if isinstance(entry, dict) and str(entry.get("name") or "")
-        }
-        assert {"grasp_part", "release_part"} <= primitive_names
-        assert not (
-            primitive_names
-            & {"open_gripper", "close_gripper", "attach_part", "detach_part"}
-        )
-        for primitive_entry in allowed_primitives:
-            assert "composite_expansion" not in primitive_entry
-            assert "params" not in primitive_entry
-            assert "effects" not in primitive_entry
-            assert "preconditions" not in primitive_entry
-            assert "output_schema" not in primitive_entry
-            assert isinstance(primitive_entry.get("required_params"), list)
-            assert isinstance(primitive_entry.get("supports_store_as"), bool)
-            if primitive_entry.get("name") in {
-                "detect_parts",
-                "get_current_pose",
-                "compute_pick_targets",
-                "compute_place_targets",
-            }:
-                assert primitive_entry.get("supports_store_as") is True
-            if primitive_entry.get("name") in {"grasp_part", "release_part", "move_to_named_pose"}:
-                assert primitive_entry.get("hard_preconditions")
-
-    assert single_shot_prompt_input.get("reasoning_mode") == "single_shot"
-    assert single_shot_prompt_input.get("llm_input") == llm_input
-    assert "obligation_targets" not in single_shot_prompt_input
-    assert "primitive_catalog" not in single_shot_prompt_input
-    assert "bridge_snapshot" not in single_shot_prompt_input
-    assert "focused_bridge_snapshot" not in single_shot_prompt_input
-    assert "bridge_resources" not in single_shot_prompt_input
-    assert "other_resources_summary" not in single_shot_prompt_input
-    assert "proposal_success_criteria" not in single_shot_prompt_input
-    response_contract = single_shot_prompt_input.get("response_contract") or {}
-    assert response_contract.get("top_level_required_fields") == [
-        "thought",
-        "primary_obligation",
-        "macro_tasks",
-    ]
-    thought_contract = response_contract.get("thought") or {}
-    assert thought_contract.get("summary_style") == "2-4 factual sentences"
-    assert "Loaded Safety Rules" in single_shot_prompt_text
-    assert "Current Resource Facts" in single_shot_prompt_text
-    assert "Current Part Facts" in single_shot_prompt_text
-    assert "Relevant Assembly Requirements" in single_shot_prompt_text
-    assert "Modeled Continuation Gap" in single_shot_prompt_text
-    assert "Proposal Success Criteria" not in single_shot_prompt_text
-    assert "Required JSON Response Contract" in single_shot_prompt_text
-    assert "Hard Constraints" in single_shot_prompt_text
-    assert "Allowed Execution Surface" in single_shot_prompt_text
-    assert "Observed Runtime State" not in single_shot_prompt_text
-    assert "prompt_bridge_snapshot" not in single_shot_prompt_text
-    assert "allowed_primitives" in single_shot_prompt_text
-    assert "primitive_catalog_by_resource_type" not in single_shot_prompt_text
-    assert "bridge_resources" not in single_shot_prompt_text
-    assert "focused_primitive_catalog" not in single_shot_prompt_text
-    assert "other_resources_summary" not in single_shot_prompt_text
-    assert "recovery_opportunities" not in single_shot_prompt_text
-    assert "grasp_part" in single_shot_prompt_text
-    assert "release_part" in single_shot_prompt_text
-    assert "open_gripper" not in single_shot_prompt_text
-    assert "close_gripper" not in single_shot_prompt_text
-    assert "attach_part" not in single_shot_prompt_text
-    assert "detach_part" not in single_shot_prompt_text
-    assert "ur5e@localhost" in single_shot_prompt_text
-    assert "xarm6@localhost" in single_shot_prompt_text
-    assert "Do not contradict grounded runtime facts already present in the prompt." in single_shot_prompt_text
-    assert "Return a recovery that restores a state where the blocked nominal tasks can run again" in single_shot_prompt_text
-    assert "Make the recovery logically connected as a state progression" in single_shot_prompt_text
-    assert "Reuse grounded facts and previously derived outputs." in single_shot_prompt_text
-    assert "Do not invent concrete grounded values" in single_shot_prompt_text
-    current_part_facts_block = (
-        single_shot_prompt_text.split("Current Part Facts\n", 1)[1]
-        .split("\n\nLoaded Safety Rules", 1)[0]
-    )
-    assert '"part_name": "LG"' in current_part_facts_block
-    assert '"current_state": "misplaced"' in current_part_facts_block
-    assert '"current_location":' not in current_part_facts_block
-    assert '"current_state": "unknown"' not in current_part_facts_block
-
-    assert not _contains_fixed_recovery_labels(prepared_bridge_request), "prepared request still contains fixed recovery labels"
-
-    bridge_debug = prepared_bridge_request.get("bridge_debug") or {}
-    single_shot_turn = bridge_debug.get("single_shot_turn") or {}
-    assert single_shot_turn.get("reasoning_mode") == "single_shot"
-    assert single_shot_turn.get("status") == "prepared_for_llm"
-    assert single_shot_turn.get("prompt_input") == single_shot_prompt_input
-    assert single_shot_turn.get("prompt_text") == single_shot_prompt_text
-
-    bridge_session_source = Path(
-        "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/bridge_session.py"
-    ).read_text(encoding="utf-8")
-    bridge_prompts_source = Path(
-        "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/bridge_prompts.py"
-    ).read_text(encoding="utf-8")
-    bridge_normalization_source = Path(
-        "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/bridge_resource_normalization.py"
-    ).read_text(encoding="utf-8")
-    primitive_semantics_source = Path(
-        "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/primitive_semantics.py"
-    ).read_text(encoding="utf-8")
-    assert "llm_bridge.v3" not in bridge_session_source
-    assert "llm_bridge.v3" not in bridge_prompts_source
-    assert "llm_bridge.v3" not in bridge_normalization_source
-    assert "llm_bridge.v3.primitive_semantics" not in primitive_semantics_source
-
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        _print_prepare_context_summary(context_summary)
-    rendered = buffer.getvalue()
-    fault_pos = rendered.find("Fault Event")
-    current_pos = rendered.find("Current Product State")
-    active_safety_pos = rendered.find("Active Safety Diagnosis")
-    loaded_safety_pos = rendered.find("Loaded Safety Rules")
-    assembly_req_pos = rendered.find("Relevant Assembly Requirements")
-    gap_pos = rendered.find("Modeled Continuation Gap")
-    assert fault_pos != -1, "Fault Event heading is missing"
-    assert current_pos != -1, "Current Product State heading is missing"
-    assert active_safety_pos == -1, "empty Active Safety Diagnosis should be hidden"
-    assert loaded_safety_pos != -1, "Loaded Safety Rules heading is missing"
-    assert assembly_req_pos != -1, "Relevant Assembly Requirements heading is missing"
-    assert gap_pos != -1, "Modeled Continuation Gap heading is missing"
-    assert fault_pos < current_pos < loaded_safety_pos < assembly_req_pos < gap_pos, "prepare-trace section order is incorrect"
+    turns = result.get("turns") or []
+    assert len(turns) >= 1, "Expected at least one turn in multi-turn session"
 
 
 def _format_pose_brief(value: Any) -> str:
@@ -3249,30 +1739,16 @@ def _format_pose_brief(value: Any) -> str:
 def _print_prepare_context_summary(context_summary: dict[str, Any]) -> None:
     fault_event = dict(context_summary.get("fault_event") or {})
     current_product_state = dict(context_summary.get("current_product_state") or {})
-    relevant_assembly_requirements = list(context_summary.get("relevant_assembly_requirements") or [])
+    relevant_assembly_requirements = list(
+        context_summary.get("relevant_assembly_requirements") or []
+    )
     modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
     resources = list(current_product_state.get("resources") or [])
     parts = list(current_product_state.get("parts") or [])
-    active_safety_diagnosis = dict(current_product_state.get("active_safety_diagnosis") or {})
-    loaded_safety_rules = list(current_product_state.get("loaded_safety_rules") or [])
-    has_active_safety_diagnosis = bool(
-        (active_safety_diagnosis.get("obligation_targets") or [])
-        or (active_safety_diagnosis.get("rule_ids") or [])
-        or (active_safety_diagnosis.get("active_rules") or [])
-        or str(active_safety_diagnosis.get("status") or "").strip()
-        or str(active_safety_diagnosis.get("reason") or "").strip()
-    )
-
-    def _derived_from(entry: dict[str, Any]) -> str:
-        task_id = str(entry.get("source_task_id") or "").strip()
-        function_name = str(entry.get("source_function_name") or "").strip()
-        if not task_id and not function_name:
-            return "-"
-        return f"{task_id or '-'}" + (f"/{function_name}" if function_name else "")
 
     print()
     print("Fault Event")
-    print(f"  focused_resource_jid: {fault_event.get('focused_resource_jid')}")
+    print(f"  focused_resource_jid: {fault_event.get('focused_resource_jid') or '-'}")
     print(f"  blocked_at_task_id:   {fault_event.get('blocked_at_task_id') or '-'}")
     print(f"  blocked_at_function:  {fault_event.get('blocked_at_function') or '-'}")
     print(f"  resource_state:       {fault_event.get('resource_state') or '-'}")
@@ -3284,15 +1760,11 @@ def _print_prepare_context_summary(context_summary: dict[str, Any]) -> None:
         if not isinstance(row, dict):
             continue
         print(
-            "  {jid}: state={state}, held_part={held}, location={location} [{basis}], "
-            "availability={availability}, pending={pending}".format(
+            "  {jid}: state={state}, held_part={held}, location={location}".format(
                 jid=row.get("resource_jid") or "-",
                 state=row.get("current_state") or "-",
                 held=row.get("held_part") or "-",
                 location=row.get("current_location") or "-",
-                basis=row.get("current_location_basis") or "-",
-                availability=row.get("availability") or "-",
-                pending=row.get("pending_task_ids") or [],
             )
         )
 
@@ -3302,56 +1774,16 @@ def _print_prepare_context_summary(context_summary: dict[str, Any]) -> None:
         if not isinstance(row, dict):
             continue
         print(
-            "  {part}: state={state}, location={location} [{basis}], observed_pose={pose}, "
-            "target_location={target}".format(
+            "  {part}: state={state}, location={location}, observed_pose={pose}".format(
                 part=row.get("part_name") or "-",
                 state=row.get("state") or "-",
                 location=row.get("location") or "-",
-                basis=row.get("location_basis") or "-",
                 pose=_format_pose_brief(row.get("observed_pose")),
-                target=row.get("target_location") or "-",
-            )
-        )
-
-    if has_active_safety_diagnosis:
-        print()
-        print("Active Safety Diagnosis")
-        print(f"  obligation_targets: {active_safety_diagnosis.get('obligation_targets') or []}")
-        print(f"  active_rule_ids:    {active_safety_diagnosis.get('rule_ids') or []}")
-        if str(active_safety_diagnosis.get("status") or "").strip():
-            print(f"  status:             {active_safety_diagnosis.get('status')}")
-        if str(active_safety_diagnosis.get("reason") or "").strip():
-            print(f"  reason:             {active_safety_diagnosis.get('reason')}")
-        for rule in (active_safety_diagnosis.get("active_rules") or [])[:4]:
-            if not isinstance(rule, dict):
-                continue
-            print(
-                "  active_rule: {rule_id} [{constraint_type}] {summary}".format(
-                    rule_id=rule.get("rule_id") or "-",
-                    constraint_type=rule.get("constraint_type") or "-",
-                    summary=rule.get("summary") or "-",
-                )
-            )
-
-    print()
-    print("Loaded Safety Rules")
-    if not loaded_safety_rules:
-        print("  rules: []")
-    for rule in loaded_safety_rules[:6]:
-        if not isinstance(rule, dict):
-            continue
-        print(
-            "  loaded_rule: {rule_id} [{constraint_type}] {summary}".format(
-                rule_id=rule.get("rule_id") or "-",
-                constraint_type=rule.get("constraint_type") or "-",
-                summary=rule.get("summary") or "-",
             )
         )
 
     print()
     print("Relevant Assembly Requirements")
-    if not relevant_assembly_requirements:
-        print("  requirements: []")
     for requirement in relevant_assembly_requirements:
         if not isinstance(requirement, dict):
             continue
@@ -3366,32 +1798,11 @@ def _print_prepare_context_summary(context_summary: dict[str, Any]) -> None:
     print()
     print("Modeled Continuation Gap")
     print(f"  goal_state:               {modeled_continuation_gap.get('goal_state') or '-'}")
-    print(f"  pending_nominal_task_ids: {modeled_continuation_gap.get('pending_nominal_task_ids') or []}")
+    print(
+        "  pending_nominal_task_ids: "
+        f"{modeled_continuation_gap.get('pending_nominal_task_ids') or []}"
+    )
     print(f"  resume_ready:             {modeled_continuation_gap.get('resume_ready')}")
-    for entry in (modeled_continuation_gap.get("unsatisfied_conditions") or [])[:8]:
-        if not isinstance(entry, dict):
-            continue
-        condition_family = str(entry.get("condition_family") or "").strip()
-        if condition_family == "goal":
-            print(
-                "  unmet goal: {entity}.{field} expected={expected!r} actual={actual!r}".format(
-                    entity=entry.get("entity") or "?",
-                    field=entry.get("field") or "?",
-                    expected=entry.get("expected"),
-                    actual=entry.get("actual"),
-                )
-            )
-            continue
-        print(
-            "  unmet continuation: {entity}.{field} expected={expected!r} actual={actual!r} "
-            "derived_from={derived_from}".format(
-                entity=entry.get("entity") or "?",
-                field=entry.get("field") or "?",
-                expected=entry.get("expected"),
-                actual=entry.get("actual"),
-                derived_from=_derived_from(entry),
-            )
-        )
 
 
 def _print_llm_input(llm_input: dict[str, Any]) -> None:
@@ -3400,20 +1811,9 @@ def _print_llm_input(llm_input: dict[str, Any]) -> None:
     print(json.dumps(llm_input, indent=2, default=str))
 
 
-def _extract_latest_prompt_text(result: dict[str, Any]) -> str:
-    reasoning_mode = str(result.get("reasoning_mode") or "").strip().lower()
-    if reasoning_mode == "multi_turn":
-        multi_turn_session = dict(result.get("multi_turn_session") or {})
-        turns = list(multi_turn_session.get("turns") or [])
-        if turns:
-            latest_turn = dict(turns[-1] or {})
-            return str(latest_turn.get("prompt_text") or "")
-    return str(result.get("single_shot_prompt_text") or "")
-
-
-def _print_prompt(prompt_text: str, *, reasoning_mode: str) -> None:
+def _print_prompt(prompt_text: str) -> None:
     print()
-    print(f"Prompt ({reasoning_mode or 'single_shot'})")
+    print("Prompt")
     print(prompt_text or "")
 
 
@@ -3422,204 +1822,85 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
     latest_prompt_artifact_path = result.get("latest_prompt_artifact_path")
     response_artifact_path = result.get("response_artifact_path")
     latest_response_artifact_path = result.get("latest_response_artifact_path")
-    session_transcript_artifact_path = result.get("session_transcript_artifact_path")
-    latest_session_transcript_artifact_path = result.get(
-        "latest_session_transcript_artifact_path"
-    )
-    if (
-        not prompt_artifact_path
-        and not latest_prompt_artifact_path
-        and not response_artifact_path
-        and not latest_response_artifact_path
-        and not session_transcript_artifact_path
-        and not latest_session_transcript_artifact_path
+    if not any(
+        (
+            prompt_artifact_path,
+            latest_prompt_artifact_path,
+            response_artifact_path,
+            latest_response_artifact_path,
+        )
     ):
         return
     print()
     if prompt_artifact_path:
-        print("Prompt artifact:            ", prompt_artifact_path)
+        print("Prompt artifact:          ", prompt_artifact_path)
     if latest_prompt_artifact_path:
-        print("Latest prompt artifact:     ", latest_prompt_artifact_path)
+        print("Latest prompt artifact:   ", latest_prompt_artifact_path)
     if response_artifact_path:
-        print("Response artifact:          ", response_artifact_path)
+        print("Response artifact:        ", response_artifact_path)
     if latest_response_artifact_path:
-        print("Latest response artifact:   ", latest_response_artifact_path)
-    if session_transcript_artifact_path:
-        print("Session artifact:           ", session_transcript_artifact_path)
-    if latest_session_transcript_artifact_path:
-        print("Latest session artifact:    ", latest_session_transcript_artifact_path)
+        print("Latest response artifact: ", latest_response_artifact_path)
 
 
-def _assert_completed_parts_drop_out_of_unsatisfied_goals(
-    planner: ProcessPlannerPrepareTrace,
-    fixture: dict[str, Any],
-    prepared_bridge_request: dict[str, Any],
-) -> None:
-    variant_request = deepcopy(prepared_bridge_request)
-    variant_request["part_tracker"]["MCP"] = {
-        **dict(variant_request.get("part_tracker", {}).get("MCP") or {}),
-        "state": GOAL_STATE,
-        "location": "assembly_board-v1",
-        "last_known_location": "assembly_board-v1",
-    }
-    variant_parts = dict((variant_request.get("grounding_context") or {}).get("parts") or {})
-    variant_parts["MCP"] = {
-        **dict(variant_parts.get("MCP") or {}),
-        "state": GOAL_STATE,
-        "location": "assembly_board-v1",
-    }
-    variant_request["grounding_context"] = {
-        **dict(variant_request.get("grounding_context") or {}),
-        "parts": variant_parts,
-    }
-    context_summary = planner._build_context_summary(
-        variant_request,
-        input_bridge_safety_context=deepcopy(fixture.get("bridge_safety_context") or {}),
-    )
-    modeled_gap = context_summary.get("modeled_continuation_gap") or {}
-    unsatisfied_goal_conditions = modeled_gap.get("unsatisfied_goal_conditions") or []
-    unsatisfied_mcp_conditions = [
-        entry
-        for entry in unsatisfied_goal_conditions
-        if isinstance(entry, dict) and entry.get("entity") == "MCP"
-    ]
-    assert not unsatisfied_mcp_conditions, "completed MCP predicates should not remain unsatisfied"
-    unsatisfied_lg_conditions = [
-        entry
-        for entry in unsatisfied_goal_conditions
-        if isinstance(entry, dict) and entry.get("entity") == "LG"
-    ]
-    assert unsatisfied_lg_conditions, "unfinished LG predicates should remain unsatisfied"
+def test_case3_write_debug_artifacts_disables_latest_aliases() -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_write_bridge_artifacts(
+        payload: dict[str, Any],
+        *,
+        phase_label: str,
+        debug_dir: str | Path | None = None,
+        write_latest: bool = False,
+        filename_prefix: str | None = None,
+    ) -> dict[str, str]:
+        captured["payload"] = payload
+        captured["phase_label"] = phase_label
+        captured["debug_dir"] = debug_dir
+        captured["write_latest"] = write_latest
+        captured["filename_prefix"] = filename_prefix
+        return {"prompt_artifact_path": "/tmp/prompt.txt"}
+
+    with patch.object(sys.modules[__name__], "write_bridge_artifacts", side_effect=_fake_write_bridge_artifacts):
+        artifact_paths = _write_debug_artifacts({"reasoning_mode": "multi_turn"})
+
+    assert artifact_paths == {"prompt_artifact_path": "/tmp/prompt.txt"}
+    assert captured["write_latest"] is False
 
 
-def _assert_requirement_filtering(
-    planner: ProcessPlannerPrepareTrace,
-    fixture: dict[str, Any],
-    prepared_bridge_request: dict[str, Any],
-) -> None:
-    variant_request = deepcopy(prepared_bridge_request)
-    variant_request["P_id"] = ["LG"]
-    variant_request["part_tracker"]["MCP"] = {
-        **dict(variant_request.get("part_tracker", {}).get("MCP") or {}),
-        "state": GOAL_STATE,
-        "location": "assembly_board-v1",
-        "last_known_location": "assembly_board-v1",
-    }
-    variant_parts = dict((variant_request.get("grounding_context") or {}).get("parts") or {})
-    variant_parts["MCP"] = {
-        **dict(variant_parts.get("MCP") or {}),
-        "state": GOAL_STATE,
-        "location": "assembly_board-v1",
-    }
-    variant_request["grounding_context"] = {
-        **dict(variant_request.get("grounding_context") or {}),
-        "parts": variant_parts,
-    }
-    variant_bridge_resources = dict(variant_request.get("bridge_resources") or {})
-    variant_bridge_resources["ur5e@localhost"] = {
-        **dict(variant_bridge_resources.get("ur5e@localhost") or {}),
-        "pending_tasks": [],
-    }
-    variant_request["bridge_resources"] = variant_bridge_resources
-    context_summary = planner._build_context_summary(
-        variant_request,
-        input_bridge_safety_context=deepcopy(fixture.get("bridge_safety_context") or {}),
-    )
-    relevant_assembly_requirements = context_summary.get("relevant_assembly_requirements") or []
-    requirement_ids = [
-        str(entry.get("requirement_id") or "")
-        for entry in relevant_assembly_requirements
-        if isinstance(entry, dict) and str(entry.get("requirement_id") or "")
-    ]
-    assert requirement_ids == ["REQ_2"], "only the LG requirement should remain relevant"
+def test_bridge_session_artifact_surfaces_final_accepted_outline_summary() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import bridge_artifacts
 
-
-def _assert_synthetic_safety_rules_render() -> None:
-    fixture = _build_synthetic_slippage_fixture()
-    context_summary = {
-        "fault_event": {},
-        "current_product_state": {
-            "resources": [],
-            "parts": [],
-            "active_safety_diagnosis": {
-                "obligation_targets": deepcopy(fixture.get("obligation_targets") or []),
-                "rule_ids": deepcopy(
-                    (fixture.get("bridge_safety_context") or {}).get("rule_ids") or []
-                ),
-                "active_rules": [
+    transcript = bridge_artifacts._extract_session_transcript({
+        "bridge_debug": {
+            "multi_turn_session": {
+                "session_id": "session",
+                "turn_index": 10,
+                "current_phase": "primitive_generation",
+                "accepted_outline_prefix": [
                     {
-                        "rule_id": str(rule.get("id") or "").strip(),
-                        "constraint_type": str(rule.get("constraint_type") or "").strip(),
-                        "summary": str(
-                            rule.get("generated_interpretation")
-                            or rule.get("text")
-                            or rule.get("raw_text")
-                            or ""
-                        ).strip(),
-                    }
-                    for rule in ((fixture.get("bridge_safety_context") or {}).get("safety_rules") or [])
-                    if isinstance(rule, dict)
+                        "outline_id": "RECOVERY_SEQ1",
+                        "resource_jid": "xarm6@localhost",
+                        "action_type": "recover_resource",
+                    },
+                    {
+                        "outline_id": "RECOVERY_SEQ2",
+                        "resource_jid": "ur5e@localhost",
+                        "action_type": "release_part",
+                        "part_name": "MCP",
+                        "target_ref": "prusa-mk4-2",
+                    },
                 ],
-            },
-            "loaded_safety_rules": [
-                {
-                    "rule_id": str(CASE3_BOARD_MUTEX_RULE.get("id") or "").strip(),
-                    "constraint_type": str(CASE3_BOARD_MUTEX_RULE.get("constraint_type") or "").strip(),
-                    "summary": str(
-                        CASE3_BOARD_MUTEX_RULE.get("generated_interpretation")
-                        or CASE3_BOARD_MUTEX_RULE.get("text")
-                        or CASE3_BOARD_MUTEX_RULE.get("raw_text")
-                        or ""
-                    ).strip(),
-                }
-            ],
-            "formal_state": {},
-        },
-        "relevant_assembly_requirements": [
-            {
-                "requirement_id": "REQ_2",
-                "summary": "xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.",
-                "status": "pending",
+                "turns": [{"turn_index": 10, "phase": "outline"}],
             }
-        ],
-        "modeled_continuation_gap": {},
-    }
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        _print_prepare_context_summary(context_summary)
-    rendered = buffer.getvalue()
-    assert "active_rule:" in rendered, "active safety rule lines should render when rules are present"
-    assert "loaded_rule:" in rendered, "loaded safety rule lines should render when rules are present"
-    assert "Relevant Assembly Requirements" in rendered
-    assert CASE3_LG_BEFORE_MCP_RULE_ID in rendered
-    assert CASE3_BOARD_MUTEX_RULE_ID in rendered
+        }
+    })
 
-
-# ---------------------------------------------------------------------------
-# pytest entry
-# ---------------------------------------------------------------------------
-
-
-def test_case3_bridge_prepare_trace() -> None:
-    result = asyncio.run(run_case3_bridge_prepare_trace(write_debug=False))
-    _assert_bridge_prepare_trace(result)
-    fixture, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-        )
-    )
-    _assert_completed_parts_drop_out_of_unsatisfied_goals(
-        planner=planner,
-        fixture=fixture,
-        prepared_bridge_request=prepared_bridge_request,
-    )
-    _assert_requirement_filtering(
-        planner=planner,
-        fixture=fixture,
-        prepared_bridge_request=prepared_bridge_request,
-    )
-    _assert_synthetic_safety_rules_render()
+    parsed = json.loads(transcript)
+    assert parsed["final_accepted_outline_summary"] == [
+        "RECOVERY_SEQ1 / xarm6@localhost -> recover resource",
+        "RECOVERY_SEQ2 / ur5e@localhost / MCP -> release MCP to prusa-mk4-2",
+    ]
+    assert len(parsed["accepted_outline_prefix"]) == 2
 
 
 def test_case3_bridge_dryrun() -> None:
@@ -3643,6 +1924,7 @@ def test_case3_bridge_dryrun() -> None:
 
     with patch.object(FakeProductAgent, "ask_llm", new=_mock_ask_llm):
         result = asyncio.run(run_case3_bridge_dryrun(write_debug=False))
+
     _assert_bridge_dryrun(result)
     llm_input = result.get("llm_input") or {}
     fault_event = llm_input.get("fault_event") or {}
@@ -3650,3584 +1932,2301 @@ def test_case3_bridge_dryrun() -> None:
     assert fault_event.get("blocked_at_function") == "place_insert"
 
 
-def test_case3_bridge_debug_sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "DEBUG_DIR", tmp_path)
-    async def _mock_ask_llm(
-        self: FakeProductAgent,
-        *,
-        prompt: str,
-        with_functions: bool = False,
-        temperature: float = 0.0,
-    ) -> str:
-        del prompt, with_functions, temperature
-        self._turn_index += 1
-        self.turn_log.append(
-            {
-                "turn_index": self._turn_index,
-                "prompt": "<mocked>",
-                "response": MOCK_SINGLE_SHOT_RESPONSE,
-            }
+def test_v2_grounding_repeated_observe_request_becomes_grounded() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
         )
-        return MOCK_SINGLE_SHOT_RESPONSE
-
-    with patch.object(FakeProductAgent, "ask_llm", new=_mock_ask_llm):
-        result = asyncio.run(run_case3_bridge_dryrun(write_debug=True))
-
-    prompt_artifact_path = Path(str(result.get("prompt_artifact_path") or ""))
-    latest_prompt_artifact_path = Path(str(result.get("latest_prompt_artifact_path") or ""))
-    response_artifact_path = Path(str(result.get("response_artifact_path") or ""))
-    latest_response_artifact_path = Path(str(result.get("latest_response_artifact_path") or ""))
-
-    assert prompt_artifact_path.exists()
-    assert prompt_artifact_path.name.startswith("single_shot_prompt_")
-    assert prompt_artifact_path.suffix == ".txt"
-    assert prompt_artifact_path.read_text(encoding="utf-8") == str(
-        result.get("single_shot_prompt_text") or ""
-    )
-    assert latest_prompt_artifact_path.exists()
-    assert latest_prompt_artifact_path.name == "single_shot_prompt_latest.txt"
-    assert latest_prompt_artifact_path.read_text(encoding="utf-8") == str(
-        result.get("single_shot_prompt_text") or ""
-    )
-    assert response_artifact_path.exists()
-    assert response_artifact_path.name.startswith("single_shot_response_")
-    assert response_artifact_path.suffix == ".txt"
-    assert response_artifact_path.read_text(encoding="utf-8") == str(
-        result.get("raw_response") or ""
-    )
-    assert latest_response_artifact_path.exists()
-    assert latest_response_artifact_path.name == "single_shot_response_latest.txt"
-    assert latest_response_artifact_path.read_text(encoding="utf-8") == str(
-        result.get("raw_response") or ""
-    )
-
-
-def test_case3_bridge_multi_turn_override() -> None:
-    fixture, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
+        fact_key = json.dumps(
+            {"entity": "LG", "fact_type": "part_pose"},
+            sort_keys=True,
+            ensure_ascii=True,
         )
-    )
-    bridge_session = prepared_bridge_request.get("bridge_session") or {}
-    assert bridge_session.get("reasoning_mode") == "multi_turn"
-    assert "single_shot_prompt_input" not in prepared_bridge_request
-    assert "single_shot_prompt_text" not in prepared_bridge_request
-    session_seed = prepared_bridge_request.get("multi_turn_session_seed") or {}
-    assert session_seed.get("current_phase") == "grounding"
-    assert session_seed.get("observation_store") == {}
-    assert session_seed.get("accepted_outline") is None
-    llm_input = prepared_bridge_request.get("llm_input") or {}
-    assert llm_input.get("part_facts"), "multi-turn should reuse the shared single-shot grounding package"
-    llm_parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in (llm_input.get("part_facts") or [])
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    assert (llm_parts_by_name.get("LG") or {}).get("observed_pose") is None
-
-    scripted_responses = iter(deepcopy(MOCK_MULTI_TURN_RESPONSES))
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        response = deepcopy(next(scripted_responses))
-        self._turn_index += 1
-        self.turn_log.append(
-            {
-                "turn_index": self._turn_index,
-                "prompt": "<mocked-structured>",
-                "response": deepcopy(response),
-            }
-        )
-        return response
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal == MOCK_MULTI_TURN_FINAL_PROPOSAL
-    bridge_debug = planner.get_last_bridge_debug()
-    assert bridge_debug.get("status") == "final_proposal_recorded"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "final_proposal_recorded"
-    assert multi_turn_session.get("observation_count") == 1
-    assert len(multi_turn_session.get("observation_history") or []) == 1
-    assert multi_turn_session.get("accepted_outline") == MOCK_MULTI_TURN_OUTLINE_TASKS
-    accepted_outline = list(multi_turn_session.get("accepted_outline") or [])
-    assert len(accepted_outline) > 1
-    outline_by_id = {
-        str(row.get("outline_id") or ""): dict(row)
-        for row in accepted_outline
-        if isinstance(row, dict) and str(row.get("outline_id") or "")
-    }
-    assert outline_by_id["outline_return_mcp_to_printer"]["depends_on"] == [
-        "outline_clear_xarm6"
-    ]
-    assert outline_by_id["outline_pick_lg_with_ur5e"]["resource_jid"] == "ur5e@localhost"
-    assert outline_by_id["outline_place_lg_with_ur5e"]["depends_on"] == [
-        "outline_pick_lg_with_ur5e"
-    ]
-    assert outline_by_id["outline_resume_mcp_assembly"]["depends_on"] == [
-        "outline_place_lg_with_ur5e"
-    ]
-    assert not any(
-        "diagnose failure" in str(dict(row).get("description") or "").lower()
-        for row in accepted_outline
-        if isinstance(row, dict)
-    )
-    assert not any(
-        dict(row).get("resource_jid") == "xarm6@localhost"
-        and dict(row).get("part_name") == "LG"
-        for row in accepted_outline
-        if isinstance(row, dict)
-    )
-    assert multi_turn_session.get("proposal_draft") == {
-        "thought": MOCK_MULTI_TURN_RESPONSES[3]["thought"],
-        "macro_tasks": MOCK_MULTI_TURN_MACRO_TASKS,
-    }
-    assert multi_turn_session.get("final_proposal") == MOCK_MULTI_TURN_FINAL_PROPOSAL
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [
-        turn.get("phase")
-        for turn in turns
-    ] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "primitive_generation",
-        "finalize",
-    ]
-    outline_turn = dict(turns[2] or {})
-    outline_task_types = list(outline_turn.get("outline_task_types") or [])
-    assert any(
-        dict(row).get("outline_id") == "outline_clear_xarm6"
-        and dict(row).get("task_type") == "resource_only"
-        for row in outline_task_types
-        if isinstance(row, dict)
-    )
-    first_turn = dict(turns[0] or {})
-    first_prompt_input = dict(first_turn.get("prompt_input") or {})
-    world_observation_surface = dict(first_prompt_input.get("world_observation_surface") or {})
-    fact_rows = [
-        dict(row)
-        for row in (world_observation_surface.get("observation_facts") or [])
-        if isinstance(row, dict)
-    ]
-    assert fact_rows, "grounding world observation surface should be present"
-    fact_types = {str(row.get("fact_type") or "").strip() for row in fact_rows}
-    assert fact_types == {"part_pose"}
-    part_pose_entry = next(
-        row for row in fact_rows if str(row.get("fact_type") or "").strip() == "part_pose"
-    )
-    assert part_pose_entry.get("entity_kind") == "part"
-    assert part_pose_entry.get("request_fields") == ["fact_type", "entity"]
-    assert part_pose_entry.get("optional_request_fields") == ["scope", "reason"]
-    assert part_pose_entry.get("output_fields") == ["part_name", "x", "y", "z", "pose", "orientation"]
-    first_prompt_text = str(first_turn.get("prompt_text") or "")
-    assert "Session Observation Store" not in first_prompt_text
-    assert "Observation Fact Ledger" not in first_prompt_text
-    assert "Latest Session Delta" not in first_prompt_text
-    assert "Session Turn History" not in first_prompt_text
-    assert "World Observation Surface" in first_prompt_text
-    assert "\"observed_pose\": null" in first_prompt_text
-    assert "observed_pose_LG" not in first_prompt_text
-    assert "\"store_as\"" not in first_prompt_text
-    second_turn = dict(turns[1] or {})
-    second_prompt_input = dict(second_turn.get("prompt_input") or {})
-    second_llm_parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in (dict(second_prompt_input.get("llm_input") or {}).get("part_facts") or [])
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    second_lg_row = dict(second_llm_parts_by_name.get("LG") or {})
-    assert second_lg_row.get("current_state") == "misplaced"
-    assert second_lg_row.get("observed_pose") == {"x": 0.0, "y": 0.2, "z": 1.035}
-    assert second_lg_row.get("location_basis") == "session_observation"
-    assert second_lg_row.get("observation_status") == "observed"
-    assert second_lg_row.get("observed_in_session") is True
-    assert second_lg_row.get("observed_by") == "detect_parts"
-    assert second_lg_row.get("observed_by_primitive") == "detect_parts"
-    assert second_lg_row.get("observed_fact_type") == "part_pose"
-    assert second_lg_row.get("observed_store_as") == "observed_pose_LG"
-    assert second_lg_row.get("observed_aliases") == ["observed_pose_LG"]
-    assert second_lg_row.get("observed_turn_index") == 1
-    second_prompt_text = str(second_turn.get("prompt_text") or "")
-    assert "Observation Fulfillment Status" in second_prompt_text
-    assert "Latest Session Delta" in second_prompt_text
-    assert "Session Observation Store" not in second_prompt_text
-    assert "Observation Fact Ledger" not in second_prompt_text
-    assert "Session Turn History" not in second_prompt_text
-    assert "Phase Feedback" not in second_prompt_text
-    assert '"observation_status": "observed"' in second_prompt_text
-    assert '"fact_type": "part_pose"' in second_prompt_text
-    assert "\"observed_pose\": {\n      \"x\": 0.0,\n      \"y\": 0.2,\n      \"z\": 1.035\n    }" in second_prompt_text
-    assert "\"observed_store_as\"" not in second_prompt_text
-    assert "\"observed_aliases\"" not in second_prompt_text
-    assert "\"store_as\"" not in second_prompt_text
-    observation_history = multi_turn_session.get("observation_history") or []
-    assert observation_history[0].get("store_as") == "observed_pose_LG"
-    assert observation_history[0].get("fact_type") == "part_pose"
-    assert observation_history[0].get("entity") == "LG"
-    assert "resource_jid" not in observation_history[0]
-    assert (multi_turn_session.get("observation_store") or {}).get("observed_pose_LG")
-    fact_ledger = dict(multi_turn_session.get("observation_fact_ledger") or {})
-    assert fact_ledger
-    ledger_values = [dict(row) for row in fact_ledger.values() if isinstance(row, dict)]
-    assert any(
-        row.get("fact_type") == "part_pose"
-        and row.get("entity") == "LG"
-        and row.get("aliases") == ["observed_pose_LG"]
-        for row in ledger_values
-    )
-    assert fixture.get("part_tracker", {}).get("LG"), "fixture sanity check failed"
-
-
-def test_case3_bridge_multi_turn_can_ground_without_observation() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "The failure state and symbolic continuation gaps are already sufficient to move into outline planning.",
-                "decision": "grounded",
-                "blocking_reasons": [
-                    "xarm6 is failed.",
-                    "ur5e holds MCP while LG still needs assembly.",
-                ],
-                "grounded_facts": [
-                    "xarm6 is failed and cannot complete its nominal tail.",
-                    "SAFE_1 keeps MCP blocked until LG is placed.",
-                ],
-                "recovery_implications": [
-                    "Grounding is already sufficient to begin outlining a replacement sequence without new observation.",
-                ],
-                "sufficient_grounding": True,
-                "observe_requests": [],
-            },
-            {
-                "thought": "The recovery still needs one macro to clear xarm6 and one macro to restore the blocked ordering.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-            {
-                "thought": "The accepted outline resolves into primitive-connected macro tasks.",
-                "decision": "draft_ready",
-                "macro_tasks": deepcopy(MOCK_MULTI_TURN_MACRO_TASKS),
-            },
-            {
-                "thought": "The draft is now packaged as the final bridge proposal.",
-                "decision": "final_ready",
-                "final_proposal": deepcopy(MOCK_MULTI_TURN_FINAL_PROPOSAL),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal == MOCK_MULTI_TURN_FINAL_PROPOSAL
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("observation_count") == 0
-    assert [
-        turn.get("phase")
-        for turn in (multi_turn_session.get("turns") or [])
-    ] == [
-        "grounding",
-        "outline",
-        "primitive_generation",
-        "finalize",
-    ]
-
-
-def test_case3_bridge_multi_turn_can_pause_after_grounding() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(deepcopy(MOCK_MULTI_TURN_RESPONSES))
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_grounding"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_grounding"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding", "grounding"]
-    last_response = dict(turns[-1].get("raw_response") or {})
-    assert last_response.get("decision") == "grounded"
-    assert last_response.get("grounded_facts")
-    assert last_response.get("recovery_implications")
-
-
-def test_case3_bridge_multi_turn_normalizes_contradictory_grounded_boolean() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_turns = deepcopy(MOCK_MULTI_TURN_RESPONSES[:2])
-    scripted_turns[1]["sufficient_grounding"] = False
-    scripted_responses = iter(scripted_turns)
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_grounding"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_grounding"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding", "grounding"]
-
-    last_turn = dict(turns[-1] or {})
-    assert last_turn.get("decision") == "grounded"
-    assert last_turn.get("sufficient_grounding") is True
-    assert dict(last_turn.get("raw_response") or {}).get("sufficient_grounding") is False
-    normalization = dict(last_turn.get("grounding_decision_normalization") or {})
-    assert normalization.get("field") == "sufficient_grounding"
-    assert normalization.get("from") is False
-    assert normalization.get("to") is True
-
-
-def test_case3_bridge_multi_turn_grounding_observation_surfaces_mcp_location_in_dry_run() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "Grounding still needs the live LG pose and the currently held MCP pose before recovery can proceed.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "LG is still misplaced.",
-                    "MCP remains held by ur5e while recovery sequencing is unresolved.",
-                ],
-                "grounded_facts": [
-                    "xarm6 is failed at the blocked LG suffix.",
-                ],
-                "recovery_implications": [
-                    "Grounding needs both part poses so the next step can reason over the actual recovery geometry.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "Observe both LG and MCP before finalizing the grounded recovery state.",
-                "observe_requests": [
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "LG",
-                        "store_as": "lg_detection_seed",
-                    },
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "MCP",
-                        "store_as": "mcp_detection_seed",
-                    },
-                ],
-            },
-            {
-                "thought": "The stored LG and MCP observations now make grounding sufficient for the next outline turn.",
-                "decision": "grounded",
-                "blocking_reasons": [
-                    "xarm6 is failed.",
-                    "ur5e still holds MCP while LG needs recovery.",
-                ],
-                "grounded_facts": [
-                    "LG has a grounded runtime pose.",
-                    "MCP is observed in ur5e's gripper.",
-                ],
-                "recovery_implications": [
-                    "The outline can now reason over both the misplaced LG and the held MCP.",
-                ],
-                "sufficient_grounding": True,
-                "observe_requests": [],
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_grounding"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_grounding"
-    assert multi_turn_session.get("observation_count") == 2
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding", "grounding"]
-
-    observation_history = list(multi_turn_session.get("observation_history") or [])
-    assert {row.get("entity") for row in observation_history} == {"LG", "MCP"}
-    mcp_observation = next(
-        dict(row)
-        for row in observation_history
-        if str(row.get("entity") or "").strip() == "MCP"
-    )
-    assert dict(mcp_observation.get("output") or {}) == {
-        "part_name": "MCP",
-        "x": 0.0,
-        "y": -0.08,
-        "z": 1.025,
-        "pose": {"x": 0.0, "y": -0.08, "z": 1.025},
-        "current_location": "ur5e@localhost_gripper",
-        "current_holder_resource_jid": "ur5e@localhost",
-    }
-
-    second_turn = dict(turns[1] or {})
-    second_prompt_input = dict(second_turn.get("prompt_input") or {})
-    second_llm_parts_by_name = {
-        str(row.get("part_name") or ""): row
-        for row in (dict(second_prompt_input.get("llm_input") or {}).get("part_facts") or [])
-        if isinstance(row, dict) and str(row.get("part_name") or "")
-    }
-    second_mcp_row = dict(second_llm_parts_by_name.get("MCP") or {})
-    assert second_mcp_row.get("observed_pose") == {"x": 0.0, "y": -0.08, "z": 1.025}
-    assert second_mcp_row.get("current_location") == "ur5e@localhost_gripper"
-    assert second_mcp_row.get("current_holder_resource_jid") == "ur5e@localhost"
-    assert second_mcp_row.get("location_basis") == "session_observation"
-    assert second_mcp_row.get("observation_status") == "observed"
-    assert second_mcp_row.get("observed_store_as") == "observed_pose_MCP"
-
-    second_prompt_text = str(second_turn.get("prompt_text") or "")
-    assert '"current_location": "ur5e@localhost_gripper"' in second_prompt_text
-    assert '"current_holder_resource_jid": "ur5e@localhost"' in second_prompt_text
-
-
-def test_case3_bridge_multi_turn_fact_request_resolves_to_detect_parts() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    session_state = build_multi_turn_session_seed(prepared_bridge_request)
-    session_state["turn_index"] = 1
-
-    observation_results, observe_error = asyncio.run(
-        _execute_observe_requests(
-            planner,
-            prepared_bridge_request,
-            session_state,
-            [
-                {
-                    "fact_type": "part_pose",
-                    "entity": "LG",
-                    "store_as": "observed_lg_pose",
-                }
-            ],
-        )
-    )
-
-    assert observe_error is None
-    assert len(observation_results) == 1
-    observation_row = dict(observation_results[0] or {})
-    assert observation_row.get("fact_type") == "part_pose"
-    assert observation_row.get("entity") == "LG"
-    assert observation_row.get("primitive") == "detect_parts"
-    assert observation_row.get("params") == {"part_name": "LG"}
-    assert dict(observation_row.get("output") or {}).get("pose") == {
-        "x": 0.0,
-        "y": 0.2,
-        "z": 1.035,
-    }
-
-
-def test_case3_bridge_multi_turn_observe_request_without_store_as_is_supported() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    session_state = build_multi_turn_session_seed(prepared_bridge_request)
-    session_state["turn_index"] = 1
-
-    observation_results, observe_error = asyncio.run(
-        _execute_observe_requests(
-            planner,
-            prepared_bridge_request,
-            session_state,
-            [
-                {
-                    "fact_type": "part_pose",
-                    "entity": "LG",
-                }
-            ],
-        )
-    )
-
-    assert observe_error is None
-    assert len(observation_results) == 1
-    observation_row = dict(observation_results[0] or {})
-    assert observation_row.get("store_as") == "observed_pose_LG"
-    assert observation_row.get("fact_type") == "part_pose"
-    assert observation_row.get("entity") == "LG"
-
-
-def test_case3_bridge_multi_turn_fact_request_resolves_held_mcp_with_location() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    session_state = build_multi_turn_session_seed(prepared_bridge_request)
-    session_state["turn_index"] = 1
-
-    observation_results, observe_error = asyncio.run(
-        _execute_observe_requests(
-            planner,
-            prepared_bridge_request,
-            session_state,
-            [
-                {
-                    "fact_type": "part_pose",
-                    "entity": "MCP",
-                    "store_as": "observed_mcp_pose",
-                }
-            ],
-        )
-    )
-
-    assert observe_error is None
-    assert len(observation_results) == 1
-    observation_row = dict(observation_results[0] or {})
-    assert observation_row.get("fact_type") == "part_pose"
-    assert observation_row.get("entity") == "MCP"
-    assert observation_row.get("primitive") == "detect_parts"
-    assert observation_row.get("params") == {"part_name": "MCP"}
-    assert dict(observation_row.get("output") or {}) == {
-        "part_name": "MCP",
-        "x": 0.0,
-        "y": -0.08,
-        "z": 1.025,
-        "pose": {"x": 0.0, "y": -0.08, "z": 1.025},
-        "current_location": "ur5e@localhost_gripper",
-        "current_holder_resource_jid": "ur5e@localhost",
-    }
-
-
-def test_case3_bridge_multi_turn_repeated_observation_is_semantic_duplicate() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    session_state = build_multi_turn_session_seed(prepared_bridge_request)
-    session_state["observation_store"] = {
-        "observed_lg_pose": {
-            "part_name": "LG",
-            "x": 0.0,
-            "y": 0.2,
-            "z": 1.035,
-            "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-        }
-    }
-    session_state["observation_fact_ledger"] = {
-        "{\"entity\": \"LG\", \"fact_type\": \"part_pose\"}": {
-            "fact_key": "{\"entity\": \"LG\", \"fact_type\": \"part_pose\"}",
-            "fact_type": "part_pose",
-            "entity": "LG",
-            "entity_kind": "part",
-            "primitive": "detect_parts",
-            "params": {"part_name": "LG"},
-            "output": {
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
                 "part_name": "LG",
                 "x": 0.0,
                 "y": 0.2,
                 "z": 1.035,
                 "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-            },
-            "turn_index": 1,
-            "validity": "current",
-            "freshness": "current_session",
-            "aliases": ["observed_lg_pose"],
-        }
-    }
-    session_state["observation_history"] = [
-        {
-            "turn_index": 1,
-            "phase": "grounding",
-            "fact_key": "{\"entity\": \"LG\", \"fact_type\": \"part_pose\"}",
-            "fact_type": "part_pose",
-            "entity": "LG",
-            "entity_kind": "part",
-            "primitive": "detect_parts",
-            "params": {"part_name": "LG"},
-            "store_as": "observed_lg_pose",
-            "output": {
-                "part_name": "LG",
-                "x": 0.0,
-                "y": 0.2,
-                "z": 1.035,
-                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-            },
-        }
-    ]
-
-    observation_results, observe_error = asyncio.run(
-        _execute_observe_requests(
-            planner,
-            prepared_bridge_request,
-            session_state,
-            [
-                {
-                    "fact_type": "part_pose",
-                    "entity": "LG",
-                    "store_as": "observed_lg_pose_v2",
-                }
-            ],
-        )
-    )
-
-    assert observation_results == []
-    assert observe_error
-    assert "part_pose" in observe_error
-    assert "LG" in observe_error
-
-
-def test_case3_bridge_multi_turn_duplicate_observe_request_becomes_repair_feedback() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "LG still needs a runtime pose observation before recovery can be grounded.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "LG is not yet assembled on the board.",
-                ],
-                "grounded_facts": [
-                    "xarm6 is failed at the blocked LG suffix.",
-                ],
-                "recovery_implications": [
-                    "Recovery planning still needs a concrete LG pose.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "Grounding is not yet sufficient because LG still needs a runtime pose observation.",
-                "observe_requests": [
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "LG",
-                        "scope": "environment",
-                    }
-                ],
-            },
-            {
-                "thought": "The same LG observation is being requested again.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "LG is still misplaced.",
-                ],
-                "grounded_facts": [
-                    "LG was already observed once.",
-                ],
-                "recovery_implications": [
-                    "The loop should repair the duplicate observation request instead of stopping.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "The same fact is requested again.",
-                "observe_requests": [
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "LG",
-                        "scope": "environment",
-                    }
-                ],
-            },
-            {
-                "thought": "The fulfilled LG observation is already in session state, so grounding can now move to outline.",
-                "decision": "grounded",
-                "blocking_reasons": [
-                    "xarm6 remains failed.",
-                ],
-                "grounded_facts": [
-                    "LG has already been observed in the session.",
-                ],
-                "recovery_implications": [
-                    "The outline phase can use the fulfilled LG pose fact without another observation.",
-                ],
-                "observe_requests": [],
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_grounding"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_grounding"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding", "grounding", "grounding"]
-    repair_turn = dict(turns[1] or {})
-    assert "already succeeded earlier" in str(repair_turn.get("error") or "")
-    grounding_contract = dict(repair_turn.get("grounding_contract") or {})
-    assert grounding_contract.get("status") == "failed"
-    assert grounding_contract.get("reason") == "observe_already_fulfilled"
-    fulfillment = dict(grounding_contract.get("observation_fulfillment") or {})
-    assert fulfillment.get("fulfilled_count") == 1
-    assert fulfillment.get("unfulfilled_count") == 0
-    third_prompt_text = str(turns[2].get("prompt_text") or "")
-    assert "Grounding Contract" in third_prompt_text
-    assert "\"observe_already_fulfilled\"" in third_prompt_text
-    phase_feedback = list(multi_turn_session.get("phase_feedback") or [])
-    assert any(
-        dict(dict(row).get("detail") or {}).get("grounding_contract", {}).get("reason")
-        == "observe_already_fulfilled"
-        for row in phase_feedback
-        if isinstance(row, dict)
-    )
-
-
-def test_case3_bridge_multi_turn_invalid_part_pose_entity_stops_session() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "Grounding still needs live confirmation of LG and xarm6 before recovery can proceed.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "xarm6 is failed.",
-                    "LG remains misplaced.",
-                ],
-                "grounded_facts": [
-                    "xarm6 failed during LG placement.",
-                ],
-                "recovery_implications": [
-                    "Recovery still needs a grounded LG pose.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "Confirm LG pose and xarm6 positioning.",
-                "observe_requests": [
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "LG",
-                        "store_as": "lg_pose",
-                    },
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "xarm6",
-                        "store_as": "xarm6_pose",
-                    },
-                ],
             }
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "invalid_observe_request"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "invalid_observe_request"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding"]
-    assert "expects a part entity" in str(turns[-1].get("error") or "")
-    assert "'xarm6'" in str(turns[-1].get("error") or "")
-
-
-def test_case3_bridge_multi_turn_empty_observe_after_fulfilled_fact_stays_in_grounding() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "LG still needs a runtime pose observation before recovery can be grounded.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "LG is not yet assembled on the board.",
-                ],
-                "grounded_facts": [
-                    "xarm6 is failed at the blocked LG suffix.",
-                ],
-                "recovery_implications": [
-                    "Recovery planning still needs a concrete LG pose.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "Grounding is not yet sufficient because LG still needs a runtime pose observation.",
-                "observe_requests": [
-                    {
-                        "fact_type": "part_pose",
-                        "entity": "LG",
-                        "scope": "environment",
-                        "store_as": "actual_lg_position",
-                    }
-                ],
-            },
-            {
-                "thought": "The LG observation is already available in the session facts, so grounding can advance.",
-                "decision": "observe",
-                "blocking_reasons": [
-                    "xarm6 remains failed.",
-                ],
-                "grounded_facts": [
-                    "LG has already been observed in the session.",
-                ],
-                "recovery_implications": [
-                    "The outline phase can now use the fulfilled LG pose fact.",
-                ],
-                "sufficient_grounding": False,
-                "observe_reason": "The needed observation has already been completed.",
-                "observe_requests": [],
-            },
-            {
-                "thought": "The fulfilled LG observation is already in the session store, so grounding is now sufficient to move to outline.",
-                "decision": "grounded",
-                "blocking_reasons": [
-                    "xarm6 remains failed.",
-                ],
-                "grounded_facts": [
-                    "LG has already been observed in the session.",
-                ],
-                "recovery_implications": [
-                    "The outline phase can now use the fulfilled LG pose fact.",
-                ],
-                "sufficient_grounding": True,
-                "observe_requests": [],
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_grounding"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_grounding"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == ["grounding", "grounding", "grounding"]
-    contract_turn = dict(turns[1] or {})
-    assert contract_turn.get("decision") == "observe"
-    assert dict(contract_turn.get("raw_response") or {}).get("decision") == "observe"
-    assert contract_turn.get("decision_compatibility") is None
-    grounding_contract = dict(contract_turn.get("grounding_contract") or {})
-    assert grounding_contract.get("status") == "failed"
-    assert grounding_contract.get("reason") == "observe_without_requests"
-    fulfillment = dict(grounding_contract.get("observation_fulfillment") or {})
-    assert fulfillment.get("fulfilled_count") == 1
-    assert fulfillment.get("unfulfilled_count") == 0
-    third_prompt_text = str(turns[2].get("prompt_text") or "")
-    assert "Grounding Contract" in third_prompt_text
-    assert "\"observe_without_requests\"" in third_prompt_text
-    phase_feedback = list(multi_turn_session.get("phase_feedback") or [])
-    assert any(
-        dict(dict(row).get("detail") or {}).get("grounding_contract", {}).get("reason")
-        == "observe_without_requests"
-        for row in phase_feedback
-        if isinstance(row, dict)
-    )
-
-
-def test_case3_bridge_multi_turn_accepts_legacy_blocking_summary() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "grounding"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            {
-                "thought": "Legacy grounding response still uses blocking_summary.",
-                "decision": "grounded",
-                "blocking_summary": [
-                    "xarm6 is failed.",
-                    "LG still needs recovery planning.",
-                ],
-                "grounded_facts": [
-                    "The symbolic failure context is already enough to begin outlining recovery.",
-                ],
-                "recovery_implications": [
-                    "Grounding may proceed without additional observation in this scripted case.",
-                ],
-                "sufficient_grounding": True,
-                "observe_requests": [],
+        }
+        session_state["observation_fact_ledger"] = {
+            fact_key: {
+                "fact_key": fact_key,
+                "fact_type": "part_pose",
+                "entity": "LG",
+                "entity_kind": "part",
+                "primitive": "detect_parts",
+                "params": {"part_name": "LG"},
+                "output": deepcopy(session_state["observation_store"]["observed_pose_LG"]),
+                "turn_index": 1,
+                "validity": "current",
+                "freshness": "current_session",
+                "aliases": ["observed_pose_LG"],
             }
-        ]
-    )
+        }
 
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
+        async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise AssertionError("_execute_observe_requests should not be called")
 
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    turns = list(((planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}).get("turns") or [])
-    assert turns
-    assert turns[0].get("blocking_reasons") == [
-        "xarm6 is failed.",
-        "LG still needs recovery planning.",
-    ]
-    assert "blocking_summary" not in dict(turns[0] or {})
-
-
-def test_case3_bridge_multi_turn_transitions() -> None:
-    assert transition_multi_turn_phase("grounding", "observe") == "grounding"
-    assert transition_multi_turn_phase("grounding", "grounded") == "outline"
-    assert transition_multi_turn_phase("outline", "need_revision") == "outline"
-    assert transition_multi_turn_phase("outline", "outline_ready") == "primitive_generation"
-    assert transition_multi_turn_phase("primitive_generation", "need_outline_revision") == "outline"
-    assert transition_multi_turn_phase("primitive_generation", "draft_ready") == "finalize"
-    assert transition_multi_turn_phase("finalize", "need_outline_revision") == "outline"
-    assert (
-        transition_multi_turn_phase("finalize", "need_primitive_revision")
-        == "primitive_generation"
-    )
-    assert transition_multi_turn_phase("finalize", "final_ready") == "finalize"
-    with pytest.raises(ValueError, match="unsupported multi-turn transition"):
-        transition_multi_turn_phase("outline", "need_grounding")
-    with pytest.raises(ValueError, match="unsupported multi-turn transition"):
-        transition_multi_turn_phase("primitive_generation", "need_grounding")
-    with pytest.raises(ValueError, match="unsupported multi-turn transition"):
-        transition_multi_turn_phase("finalize", "need_grounding")
-
-
-def test_case3_bridge_multi_turn_post_grounding_schemas_close_grounding() -> None:
-    grounding_schema = ((multi_turn_phase_response_schema("grounding") or {}).get("schema") or {})
-    outline_schema = ((multi_turn_phase_response_schema("outline") or {}).get("schema") or {})
-    grounding_properties = dict(grounding_schema.get("properties") or {})
-    grounding_required = list(grounding_schema.get("required") or [])
-    grounding_observe_item_schema = dict(
-        dict(grounding_properties.get("observe_requests") or {}).get("items") or {}
-    )
-    grounding_observe_properties = dict(grounding_observe_item_schema.get("properties") or {})
-    grounding_observe_required = list(grounding_observe_item_schema.get("required") or [])
-    primitive_enum = (
-        ((multi_turn_phase_response_schema("primitive_generation") or {}).get("schema") or {})
-        .get("properties", {})
-        .get("decision", {})
-        .get("enum", [])
-    )
-    finalize_enum = (
-        ((multi_turn_phase_response_schema("finalize") or {}).get("schema") or {})
-        .get("properties", {})
-        .get("decision", {})
-        .get("enum", [])
-    )
-    outline_properties = dict(outline_schema.get("properties") or {})
-    outline_task_schema = dict(
-        dict(outline_properties.get("outline_tasks") or {}).get("items") or {}
-    )
-    outline_task_properties = dict(outline_task_schema.get("properties") or {})
-    outline_task_required = list(outline_task_schema.get("required") or [])
-    outline_required = list(outline_schema.get("required") or [])
-    assert "sufficient_grounding" not in grounding_properties
-    assert "sufficient_grounding" not in grounding_required
-    assert "store_as" not in grounding_observe_properties
-    assert grounding_observe_required == ["fact_type", "entity"]
-    assert "decision" not in outline_properties
-    assert "addressed_validation_findings" in outline_properties
-    assert "addressed_validation_findings" in outline_required
-    assert "macro_name" not in outline_task_properties
-    assert "task_action" not in outline_task_properties
-    assert "task_action" not in outline_task_required
-    assert "closes_condition_ids" not in outline_task_properties
-    assert primitive_enum == ["need_outline_revision", "draft_ready"]
-    assert finalize_enum == [
-        "final_ready",
-        "need_outline_revision",
-        "need_primitive_revision",
-    ]
-    assert "need_grounding" not in primitive_enum
-    assert "need_grounding" not in finalize_enum
-
-
-def test_case3_bridge_multi_turn_outline_validation_reprompts_in_outline() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This draft incorrectly keeps LG recovery on xarm6.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_INVALID_XARM_OUTLINE_TASKS),
-            },
-            {
-                "thought": "The outline should stay in outline and reassign LG recovery to ur5e using the existing grounded facts.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_INVALID_XARM_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_outline"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    assert multi_turn_session.get("current_phase") == "outline"
-    assert multi_turn_session.get("paused_before_phase_transition") == "primitive_generation"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-    ]
-    assert turns[2].get("decision") == "need_revision"
-    assert turns[2].get("validation_violations")
-    assert dict(turns[2].get("outline_validation") or {}).get("status") == "failed"
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "Available Resource Task Actions" not in fourth_prompt_text
-    assert "\"task_action\":" not in fourth_prompt_text
-    assert "Repair Contract" in fourth_prompt_text
-    assert "\"required_addressed_validation_findings\"" in fourth_prompt_text
-    assert "Blocked Nominal Tasks" in fourth_prompt_text
-    assert "Unmet Continuation Conditions" in fourth_prompt_text
-    assert "Outline Validation Violations" not in fourth_prompt_text
-    assert "ur5e@localhost" in fourth_prompt_text
-    assert "Current Resource Facts" in fourth_prompt_text
-    assert "Current Part Facts" in fourth_prompt_text
-    assert "\"failed_axes\"" in fourth_prompt_text
-    assert "\"failed_reason\"" in fourth_prompt_text
-    assert "\"addressed_validation_findings\"" in fourth_prompt_text
-    assert "\"workspace_contains_observed_pose\"" not in fourth_prompt_text
-    assert "\"currently_ready_to_acquire\"" not in fourth_prompt_text
-    assert "\"readiness_blockers\"" not in fourth_prompt_text
-    assert "\"temporary_state_blockers\"" not in fourth_prompt_text
-    assert "\"required_condition_ids_to_clear\"" not in fourth_prompt_text
-    assert "\"condition_id\"" not in fourth_prompt_text
-    assert "\"guidance\"" not in fourth_prompt_text
-    assert "Part Reachability Matrix" not in fourth_prompt_text
-    assert "\"reachable_resource_jids\"" not in fourth_prompt_text
-    assert "\"workspace_reachable_resource_jids\"" not in fourth_prompt_text
-    assert "grounding is closed" not in fourth_prompt_text.lower()
-    assert "each outline macro must be state-consistent" in fourth_prompt_text.lower()
-    assert (
-        "resource-limit or safety failures are not resolved by only changing a resource's internal state, labels, or expected values"
-        in fourth_prompt_text.lower()
-    )
-    assert "robot-only recovery tasks must not name a part" not in fourth_prompt_text.lower()
-    assert "cannot be resolved by adjusting expected states" not in fourth_prompt_text.lower()
-    assert "\"need_grounding\"" not in fourth_prompt_text
-    assert "Grounded Feasibility Facts" not in fourth_prompt_text
-    assert "Recovery Gap State" not in fourth_prompt_text
-    assert "Previous Outline Attempt" not in fourth_prompt_text
-    assert "Session Turn History" not in fourth_prompt_text
-    assert "Session State" not in fourth_prompt_text
-    assert "Session Observation Store" not in fourth_prompt_text
-    assert fourth_prompt_text.index("Unmet Continuation Conditions") < fourth_prompt_text.index(
-        "Repair Contract"
-    )
-
-
-def test_case3_bridge_multi_turn_outline_validation_runs_on_every_outline_turn() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This draft still incorrectly keeps LG recovery on xarm6.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_INVALID_XARM_OUTLINE_TASKS),
-            },
-            {
-                "thought": "The outline now uses ur5e for LG recovery while keeping the same grounded facts.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_INVALID_XARM_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    bridge_debug = planner.get_last_bridge_debug() or {}
-    assert bridge_debug.get("status") == "paused_after_outline"
-    multi_turn_session = bridge_debug.get("multi_turn_session") or {}
-    assert multi_turn_session.get("current_phase") == "outline"
-    assert multi_turn_session.get("paused_before_phase_transition") == "primitive_generation"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-    ]
-    third_outline_validation = dict(turns[2].get("outline_validation") or {})
-    assert third_outline_validation.get("status") == "failed"
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "Repair Contract" in fourth_prompt_text
-    assert "\"required_addressed_validation_findings\"" in fourth_prompt_text
-    assert "Grounded Feasibility Facts" not in fourth_prompt_text
-    assert "Recovery Gap State" not in fourth_prompt_text
-    assert "Previous Outline Attempt" not in fourth_prompt_text
-    assert "Session Turn History" not in fourth_prompt_text
-    fourth_outline_validation = dict(turns[3].get("outline_validation") or {})
-    assert fourth_outline_validation.get("status") == "passed"
-    assert all(
-        dict(turn.get("outline_validation") or {}).get("status") != "not_run"
-        for turn in turns
-        if turn.get("phase") == "outline"
-    )
-
-
-def test_case3_bridge_multi_turn_outline_revision_requires_addressed_validation_findings() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This draft still incorrectly keeps LG recovery on xarm6.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_INVALID_XARM_OUTLINE_TASKS),
-            },
-            {
-                "thought": "This revision fixes the resource assignment but does not explicitly acknowledge the prior validator finding refs.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-            {
-                "thought": "This revision explicitly addresses the outstanding validator finding refs and keeps LG recovery on ur5e.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_INVALID_XARM_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-        "outline",
-    ]
-    assert turns[2].get("decision") == "need_revision"
-    assert turns[3].get("decision") == "need_revision"
-    coverage = dict(turns[3].get("outline_revision_coverage") or {})
-    assert coverage.get("status") == "failed"
-    assert any(
-        "missing required refs" in str(item)
-        for item in (coverage.get("violations") or [])
-    )
-    fifth_prompt_text = str(turns[4].get("prompt_text") or "")
-    assert "Repair Contract" in fifth_prompt_text
-    assert "\"revision_feedback\"" in fifth_prompt_text
-    assert "\"required_addressed_validation_findings\"" in fifth_prompt_text
-    assert "outline_recover_lg_with_xarm6" in fifth_prompt_text
-    assert "\"addressed_validation_findings\"" in fifth_prompt_text
-    assert dict(turns[4].get("outline_validation") or {}).get("status") == "passed"
-
-
-def test_case3_bridge_multi_turn_outline_validation_accepts_condition_closure_annotations() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-    condition_ids = _case3_continuation_condition_ids(prepared_bridge_request)
-
-    valid_outline = deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS)
-    valid_outline[0]["closes_condition_ids"] = [condition_ids["xarm6_idle"]]
-    valid_outline[3]["closes_condition_ids"] = [condition_ids["mcp_safe1"]]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline explicitly labels which continuation blockers each recovery macro clears.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": valid_outline,
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    accepted_outline = list(multi_turn_session.get("accepted_outline") or [])
-    assert accepted_outline == valid_outline
-    turns = list(multi_turn_session.get("turns") or [])
-    outline_turn = dict(turns[2] or {})
-    assert outline_turn.get("decision") == "outline_ready"
-    assert not outline_turn.get("validation_violations")
-    assert dict(outline_turn.get("outline_validation") or {}).get("status") == "passed"
-
-
-def test_case3_bridge_multi_turn_outline_validation_ignores_extra_closes_condition_ids() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-    condition_ids = _case3_continuation_condition_ids(prepared_bridge_request)
-
-    invalid_outline = deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS)
-    invalid_outline[0]["closes_condition_ids"] = [condition_ids["mcp_safe1"]]
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline still adds legacy closes_condition_ids fields, but the runtime should derive continuation semantics from the rollout.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline,
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    outline_turn = dict(turns[2] or {})
-    assert outline_turn.get("decision") == "outline_ready"
-    assert dict(outline_turn.get("outline_validation") or {}).get("status") == "passed"
-    findings = list(outline_turn.get("outline_validation_findings") or [])
-    assert not any(
-        "claimed_condition_not_cleared" in str(dict(item).get("failed_axes") or [])
-        or "claimed_condition_not_currently_unmet" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-
-
-def test_case3_bridge_multi_turn_outline_validation_accepts_uniquely_inferable_part_binding() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline omits task.part_name even though the task clearly references LG.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": [
-                    {
-                        "outline_id": "OT1",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Recover the xarm6 robot to a functioning state to resume operations.",
-                        "rationale": "xarm6 is blocked in a failed state and must be restored first.",
-                        "action_target": {
-                            "named_pose": "home",
-                        },
-                        "expected_start_state": {
-                            "current_state": "failed",
-                            "held_part": None,
-                            "position": {
-                                "x": 0.1,
-                                "y": 0.08,
-                                "z": 1.1994999760206477,
-                            },
-                            "gripper_state": "open",
-                        },
-                        "expected_end_state": {
-                            "current_state": "idle",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "depends_on": [],
-                    },
-                    {
-                        "outline_id": "OT2",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Pick LG from the grounded misplaced pose after xarm6 recovers.",
-                        "rationale": "Positioning LG properly is required before downstream work can continue.",
-                        "action_target": {
-                            "source_location": "observed_pose",
-                            "target_location": "assembly_board-v1",
-                        },
-                        "expected_start_state": {
-                            "position": {"x": 0.0, "y": 0.2, "z": 1.035},
-                            "current_state": "idle",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "expected_end_state": {
-                            "current_state": "busy",
-                            "held_part": "LG",
-                            "gripper_state": "closed",
-                        },
-                        "depends_on": ["OT1"],
-                    },
-                ],
-            },
-                {
-                    "thought": "The revised outline keeps the semantically inferable LG task but reassigns the unreachable pickup away from xarm6.",
-                    "addressed_validation_findings": [
-                        _outline_validation_ref(
-                            task_id="OT2",
-                            resource_jid="xarm6@localhost",
-                            pose_source="resource_feasibility",
-                            failed_axes=["workspace_unreachable"],
-                        ),
+        with patch.object(
+            multi_turn_v2_mode,
+            "_execute_observe_requests",
+            new=_fail_if_called,
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_grounding_phase(
+                session_state=session_state,
+                parsed_response={
+                    "decision": "observe",
+                    "observe_requests": [
+                        {"fact_type": "part_pose", "entity": "LG", "reason": "repeat"}
                     ],
-                    "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
                 },
-            ]
-    )
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
 
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-    ]
-    assert turns[2].get("decision") == "need_revision"
-    violations = [str(item) for item in (turns[2].get("validation_violations") or [])]
-    assert any("pose outside workspace" in item for item in violations)
-    findings = list(turns[2].get("outline_validation_findings") or [])
-    assert not any(
-        "ambiguous_part_reference" in str(dict(item).get("failed_axes") or [])
-        or "unbound_part_reference" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"ambiguous_part_reference\"" not in fourth_prompt_text
-    assert "\"unbound_part_reference\"" not in fourth_prompt_text
-    assert "Repair Contract" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_accepts_resource_only_task_with_stray_part_tag() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
+        assert decision == "grounded"
+        assert turn_entry.get("grounding_override_reason") == (
+            "all_observe_requests_resolved: already_fulfilled"
         )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
+        assert turn_entry.get("already_fulfilled_observe_requests")
+        assert session_state.get("observation_count") == 0
 
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly tags the robot-only move-home recovery step as an LG manipulation task.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": [
-                    {
-                        "outline_id": "OT1",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Move xarm6 from failed to idle by returning it to home.",
-                        "rationale": "The failed robot must clear its blocked posture before any downstream recovery can proceed.",
-                        "part_name": "LG",
-                        "action_target": {
-                            "named_pose": "home",
-                        },
-                        "expected_start_state": {
-                            "current_state": "failed",
-                            "held_part": None,
-                            "gripper_state": "open",
-                            "position": {
-                                "x": 0.1,
-                                "y": 0.08,
-                                "z": 1.1994999760206477,
-                            },
-                        },
-                        "expected_end_state": {
-                            "current_state": "idle",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "depends_on": [],
-                    }
-                ],
-            },
-            ]
+    asyncio.run(_run())
+
+
+def test_v2_grounding_unresolved_observe_request_still_executes() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
         )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "outline_ready"
-    assert any(
-        dict(row).get("outline_id") == "OT1" and dict(row).get("task_type") == "resource_only"
-        for row in (invalid_turn.get("outline_task_types") or [])
-        if isinstance(row, dict)
-    )
-    assert not (invalid_turn.get("validation_violations") or [])
-    assert dict(invalid_turn.get("outline_validation") or {}).get("status") == "passed"
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_held_part_conflict() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
+        captured_requests: list[dict[str, Any]] = []
+        fact_key = json.dumps(
+            {"entity": "LG", "fact_type": "part_pose"},
+            sort_keys=True,
+            ensure_ascii=True,
         )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        {
-            "outline_id": "OT2",
-            "resource_jid": "ur5e@localhost",
-            "description": "Use ur5e to pick LG immediately while still holding MCP.",
-            "rationale": "This intentionally exercises held-part conflict validation.",
-            "part_name": "LG",
-            "action_target": {
-                "source_location": "observed_pose",
-                "requirement_id": "REQ_2",
-            },
-            "expected_start_state": {
-                "current_state": "picked",
-                "gripper_state": "closed",
-                "held_part": "MCP",
+        fake_result = {
+            "fact_key": fact_key,
+            "fact_type": "part_pose",
+            "entity": "LG",
+            "entity_kind": "part",
+            "scope": None,
+            "reason": "needed",
+            "primitive": "detect_parts",
+            "params": {"part_name": "LG"},
+            "store_as": "observed_pose_LG",
+            "output": {
                 "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
             },
-            "expected_end_state": {
-                "held_part": "LG",
-                "gripper_state": "closed",
-                "current_state": "picked",
-            },
-            "depends_on": ["outline_clear_xarm6"],
-        },
-    ]
+        }
 
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly asks ur5e to manipulate LG while it is still holding MCP.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-            {
-                "thought": "The revised outline frees ur5e before assigning it LG recovery work.",
-                "addressed_validation_findings": [
-                    {
-                        "task_id": "OT2",
-                        "pose_source": "resource_feasibility",
-                        "failed_axes": ["holder_conflict"],
-                        "resource_jid": "ur5e@localhost",
-                    }
-                ],
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
+        async def _fake_execute_observe_requests(
+            planner: Any,
+            prepared_bridge_request: dict[str, Any],
+            session_state: dict[str, Any],
+            observe_requests: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            del planner, prepared_bridge_request, session_state
+            captured_requests.extend(deepcopy(observe_requests))
+            return [deepcopy(fake_result)], None
+
+        with patch.object(
+            multi_turn_v2_mode,
+            "_execute_observe_requests",
+            new=_fake_execute_observe_requests,
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_grounding_phase(
+                session_state=session_state,
+                parsed_response={
+                    "decision": "observe",
+                    "observe_requests": [
+                        {"fact_type": "part_pose", "entity": "LG", "reason": "needed"}
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+
+        assert decision == "observe"
+        assert captured_requests == [
+            {"fact_type": "part_pose", "entity": "LG", "reason": "needed"}
         ]
-    )
+        assert turn_entry.get("observation_results") == [fake_result]
+        assert session_state.get("observation_count") == 1
+        assert session_state["observation_fact_ledger"][fact_key]["validity"] == "current"
 
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("already holds 'MCP'" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "OT2"
-        and "holder_conflict" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"holder_conflict\"" in fourth_prompt_text
-    assert "Repair Contract" in fourth_prompt_text
+    asyncio.run(_run())
 
 
-def test_case3_bridge_grounding_compiler_rejects_target_only_part_move_without_current_source() -> None:
-    _, _, _, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
+def test_v2_outline_validation_findings_persist_until_resolved() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
         )
-    )
-    _, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    lg_row = dict(parts_by_name.get("LG") or {})
-    lg_row["observed_pose"] = None
-    lg_row["current_location"] = None
-    lg_row["current_holder_resource_jid"] = None
-    parts_by_name["LG"] = lg_row
+        workspace_finding = {
+            "constraint_owner": "resource",
+            "constraint_code": "workspace_unreachable",
+            "resource_jid": "xarm6@localhost",
+            "part_name": "LG",
+            "reason": (
+                "Part 'LG' observed pose {'x': 0.0, 'y': 0.2, 'z': 1.035} is outside "
+                "'xarm6@localhost' workspace bounds"
+            ),
+            "evidence": {
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+                "bounds": {
+                    "x_min_m": -0.6,
+                    "x_max_m": 0.6,
+                    "y_min_m": -1.0,
+                    "y_max_m": 0.1,
+                    "z_min_m": 0.9,
+                    "z_max_m": 1.5,
+                },
+            },
+        }
+        session_state["outline_validation_findings"] = [deepcopy(workspace_finding)]
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
 
+        decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "next_task": {
+                    "outline_id": "FIX_XARM6",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Diagnose and recover xarm6 from failed to idle.",
+                    "expected_start_state": {"resource_state": "failed"},
+                    "expected_end_state": {"resource_state": "idle"},
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "outline_ready"
+        assert session_state.get("outline_validation_findings") == [workspace_finding]
+
+    asyncio.run(_run())
+
+
+def test_v2_outline_validation_findings_clear_once_resolved() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+        finding = {
+            "constraint_owner": "resource",
+            "constraint_code": "required_part_not_held",
+            "resource_jid": "xarm6@localhost",
+            "part_name": "LG",
+            "reason": "Task expects 'xarm6@localhost' to hold 'LG' but it currently holds nothing",
+            "evidence": {"expected": "LG", "actual": ""},
+        }
+        session_state["outline_validation_findings"] = [deepcopy(finding)]
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": -0.1,
+                "z": 1.0,
+                "pose": {"x": 0.0, "y": -0.1, "z": 1.0},
+            }
+        }
+
+        decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "next_task": {
+                    "outline_id": "PICK_LG",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Acquire LG so later part-changing actions are feasible.",
+                    "part_name": "LG",
+                    "expected_start_state": {"resource_state": "idle"},
+                    "expected_end_state": {
+                        "resource_state": "idle",
+                        "held_part": "LG",
+                        "part_state": "in_gripper",
+                        "part_location": "xarm6@localhost_gripper",
+                        "part_holder_resource_jid": "xarm6@localhost",
+                    },
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "outline_ready"
+        assert session_state.get("outline_validation_findings") == []
+
+    asyncio.run(_run())
+
+
+def test_v2_outline_prompt_uses_projected_symbolic_state_after_acceptance() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "llm_input": {
+            "observed_runtime_state": {
+                "resources": [
+                    {
+                        "resource_jid": "xarm6@localhost",
+                        "current_state": "failed",
+                        "availability": "available",
+                        "current_pose": {"x": 0.1, "y": 0.0, "z": 1.0},
+                    }
+                ]
+            },
+            "part_facts": [
+                {
+                    "part_name": "LG",
+                    "current_state": "misplaced",
+                    "current_location": None,
+                    "goal_location": "assembly_board-v1",
+                    "goal_requirement_id": "REQ_2",
+                }
+            ],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [
+                {
+                    "requirement_id": "REQ_2",
+                    "status": "failed",
+                    "summary": "xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.",
+                }
+            ],
+        },
+        "session_state": {
+            "outline_mode": "incremental_validated",
+            "accepted_outline_prefix": [
+                {
+                    "outline_id": "FIX_XARM6",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Reset xarm6 from failed to idle.",
+                    "expected_start_state": {"resource_state": "failed"},
+                    "expected_end_state": {"resource_state": "idle"},
+                }
+            ],
+            "symbolic_resources": {
+                "xarm6@localhost": {
+                    "resource_jid": "xarm6@localhost",
+                    "current_state": "idle",
+                }
+            },
+            "symbolic_parts": {
+                "LG": {
+                    "part_name": "LG",
+                    "current_state": "misplaced",
+                    "current_location": None,
+                    "goal_location": "assembly_board-v1",
+                    "goal_requirement_id": "REQ_2",
+                }
+            },
+        },
+    })
+
+    resource_section = prompt.split("Current Resource State", 1)[1].split(
+        "Current Part State", 1,
+    )[0]
+    accepted_prefix_section = prompt.split(
+        "Accepted Outline Prefix (keep exactly, do not modify)", 1,
+    )[1].split("Current Resource State", 1)[0]
+    assert '"current_state": "idle"' in resource_section
+    assert '"current_state": "failed"' not in resource_section
+    assert '"availability"' not in resource_section
+    assert '"current_pose"' not in resource_section
+    assert "FIX_XARM6 / xarm6@localhost -> failed -> idle" in accepted_prefix_section
+    assert "Reset xarm6 from failed to idle." not in accepted_prefix_section
+    assert "Recovery Objectives" in prompt
+    assert "restore LG to assembly_board-v1" in prompt
+    assert "Assembly Requirements" not in prompt
+    assert "Do not assume a task is restricted to its nominal resource." in prompt
+    assert "Do not change a part or resource location by declaration alone." in prompt
+
+
+def test_v2_compiler_rejects_disallowed_resource_location_field() -> None:
     result = compile_grounded_outline_task(
         {
-            "outline_id": "OT_missing_source",
-            "resource_jid": "ur5e@localhost",
-            "description": "Place LG on the board without first binding where it is now.",
-            "rationale": "This intentionally omits the concrete current source reference.",
-            "part_name": "LG",
-            "action_target": {
-                "target_location": "assembly_board-v1",
-                "requirement_id": "REQ_2",
-            },
-            "expected_end_state": {
-                "part_name": "LG",
-                "location": "assembly_board-v1",
-            },
-            "depends_on": [],
-        },
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-
-    assert result.get("status") == "task_not_projectable"
-    finding = dict(result.get("finding") or {})
-    assert finding.get("constraint_code") == "task_not_projectable"
-    assert "source reference" in str(finding.get("reason") or "").lower()
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_target_only_lg_move_while_ur5e_holds_mcp() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        {
-            "outline_id": "recovery_03",
-            "resource_jid": "ur5e@localhost",
-            "description": "Relocate LG to assembly_board-v1 directly.",
-            "rationale": "This incorrectly assumes ur5e can move LG without first releasing MCP.",
-            "part_name": "LG",
-            "action_target": {
-                "target_location": "assembly_board-v1",
-                "requirement_id": "REQ_2",
-            },
-            "expected_start_state": {
-                "part_location": "prusa-mk4-1",
-            },
-            "expected_end_state": {
-                "part_location": "assembly_board-v1",
-            },
-            "depends_on": ["outline_clear_xarm6"],
-        },
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly treats LG relocation as a direct placement even though ur5e is still holding MCP.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-            {
-                "thought": "The revised outline frees ur5e before assigning it LG recovery work.",
-                "addressed_validation_findings": [
-                    {
-                        "task_id": "recovery_03",
-                        "pose_source": "resource_feasibility",
-                        "failed_axes": ["holder_conflict"],
-                        "resource_jid": "ur5e@localhost",
-                    }
-                ],
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("already holds 'MCP'" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "recovery_03"
-        and "holder_conflict" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_unsupported_resource_target_state() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        {
-            "outline_id": "recovery_01",
+            "outline_id": "MOVE_XARM6",
             "resource_jid": "xarm6@localhost",
-            "description": "Perform self-diagnosis to transition from failed to safe.",
-            "rationale": "This intentionally uses an unsupported abstract resource target.",
+            "description": "Move xarm6 to a new location.",
+            "expected_start_state": {"resource_state": "idle"},
+            "expected_end_state": {"resource_location": "home"},
+        },
+        resources_by_jid={
+            "xarm6@localhost": {
+                "resource_jid": "xarm6@localhost",
+                "current_state": "idle",
+                "current_location": "home",
+            }
+        },
+        parts_by_name={},
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    finding = dict(result.get("finding") or {})
+    assert result.get("status") == "outline_contract_violation"
+    assert finding.get("constraint_code") == "disallowed_outline_state_field"
+    assert finding.get("constraint_owner") == "binding"
+
+
+def test_v2_compiler_rejects_no_state_change() -> None:
+    result = compile_grounded_outline_task(
+        {
+            "outline_id": "ADJUST_XARM_POSE",
+            "resource_jid": "xarm6@localhost",
+            "description": "No-op prep step.",
+            "expected_start_state": {"resource_state": "idle"},
+            "expected_end_state": {"resource_state": "idle"},
+        },
+        resources_by_jid={
+            "xarm6@localhost": {
+                "resource_jid": "xarm6@localhost",
+                "current_state": "idle",
+            }
+        },
+        parts_by_name={},
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    finding = dict(result.get("finding") or {})
+    assert result.get("status") == "outline_contract_violation"
+    assert finding.get("constraint_code") == "no_state_change"
+    assert finding.get("constraint_owner") == "binding"
+
+
+def test_v2_compiler_rejects_expected_start_state_mismatch() -> None:
+    result = compile_grounded_outline_task(
+        {
+            "outline_id": "FOLLOWUP_MCP",
+            "resource_jid": "ur5e@localhost",
+            "description": "Continue holding MCP.",
+            "part_name": "MCP",
             "expected_start_state": {
-                "current_state": "failed",
+                "resource_state": "idle",
+                "held_part": "MCP",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
             },
             "expected_end_state": {
-                "current_state": "safe",
+                "resource_state": "busy",
+                "held_part": "MCP",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
             },
-            "depends_on": [],
+        },
+        resources_by_jid={
+            "ur5e@localhost": {
+                "resource_jid": "ur5e@localhost",
+                "current_state": "idle",
+                "held_part": None,
+            }
+        },
+        parts_by_name={
+            "MCP": {
+                "part_name": "MCP",
+                "current_state": "misplaced",
+                "current_location": "prusa-mk4-2",
+                "current_holder_resource_jid": None,
+            }
+        },
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    finding = dict(result.get("finding") or {})
+    assert result.get("status") == "outline_contract_violation"
+    assert finding.get("constraint_code") == "expected_start_state_mismatch"
+    assert finding.get("constraint_owner") == "binding"
+
+
+def test_v2_compiler_accepts_observed_pose_as_current_part_location() -> None:
+    result = compile_grounded_outline_task(
+        {
+            "outline_id": "ACQUIRE_LG",
+            "resource_jid": "ur5e@localhost",
+            "description": "Acquire LG from observed pose.",
+            "part_name": "LG",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "misplaced",
+                "part_location": "observed_pose",
+                "part_holder_resource_jid": None,
+            },
+            "expected_end_state": {
+                "resource_state": "picked",
+                "held_part": "LG",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
+            },
+            "action_target": {
+                "source_location": "observed_pose",
+            },
+        },
+        resources_by_jid={
+            "ur5e@localhost": {
+                "resource_jid": "ur5e@localhost",
+                "current_state": "idle",
+                "held_part": None,
+                "gripper_state": "open",
+            }
+        },
+        parts_by_name={
+            "LG": {
+                "part_name": "LG",
+                "current_state": "misplaced",
+                "current_location": None,
+                "observed_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+                "current_holder_resource_jid": None,
+            }
+        },
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    assert result.get("status") == "grounded"
+    assert dict(result.get("finding") or {}) == {}
+
+
+def test_v2_compiler_rejects_release_without_destination() -> None:
+    result = compile_grounded_outline_task(
+        {
+            "outline_id": "DROP_MCP",
+            "resource_jid": "ur5e@localhost",
+            "description": "Release MCP without destination.",
+            "part_name": "MCP",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "held_part": "MCP",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_location": None,
+                "part_holder_resource_jid": None,
+            },
+        },
+        resources_by_jid={
+            "ur5e@localhost": {
+                "resource_jid": "ur5e@localhost",
+                "current_state": "picked",
+                "held_part": "MCP",
+            }
+        },
+        parts_by_name={
+            "MCP": {
+                "part_name": "MCP",
+                "current_state": "in_gripper",
+                "current_location": "ur5e@localhost_gripper",
+                "current_holder_resource_jid": "ur5e@localhost",
+            }
+        },
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    finding = dict(result.get("finding") or {})
+    assert result.get("status") == "outline_contract_violation"
+    assert finding.get("constraint_code") == "missing_release_destination"
+    assert finding.get("constraint_owner") == "binding"
+
+
+def test_v2_compiler_rejects_relocation_without_carrier() -> None:
+    result = compile_grounded_outline_task(
+        {
+            "outline_id": "REQ_2_T2_reposition",
+            "resource_jid": "xarm6@localhost",
+            "description": "Reposition LG without carrying it.",
+            "part_name": "LG",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_location": None,
+                "part_holder_resource_jid": None,
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_location": "assembly_board-v1",
+                "part_holder_resource_jid": None,
+            },
+        },
+        resources_by_jid={
+            "xarm6@localhost": {
+                "resource_jid": "xarm6@localhost",
+                "current_state": "idle",
+                "held_part": None,
+            }
+        },
+        parts_by_name={
+            "LG": {
+                "part_name": "LG",
+                "current_state": "misplaced",
+                "current_location": None,
+                "current_holder_resource_jid": None,
+                "goal_location": "assembly_board-v1",
+            }
+        },
+        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
+    )
+
+    finding = dict(result.get("finding") or {})
+    assert result.get("status") == "outline_contract_violation"
+    assert finding.get("constraint_code") == "part_relocation_without_carrier"
+    assert finding.get("constraint_owner") == "binding"
+
+
+def test_v2_outline_rejects_noop_resource_prep_task() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "next_task": {
+                    "outline_id": "ADJUST_XARM_POSE",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Move xarm6 to a suitable pose within workspace bounds.",
+                    "part_name": None,
+                    "expected_start_state": {"resource_state": "idle"},
+                    "expected_end_state": {"resource_state": "idle"},
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        finding_codes = {
+            str(row.get("constraint_code") or "")
+            for row in (turn_entry.get("validation_findings") or [])
+            if isinstance(row, dict)
+        }
+        assert decision == "need_revision"
+        assert "no_state_change" in finding_codes
+        assert any(
+            str(row.get("constraint_owner") or "") == "binding"
+            and str(row.get("constraint_code") or "") == "no_state_change"
+            for row in (turn_entry.get("validation_findings") or [])
+            if isinstance(row, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_outline_rejects_relocation_without_carrier() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "next_task": {
+                    "outline_id": "REQ_2_T2_reposition",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Reposition the LG part within xarm6 workspace bounds.",
+                    "part_name": "LG",
+                    "expected_start_state": {
+                        "resource_state": "idle",
+                        "held_part": None,
+                        "part_state": "misplaced",
+                        "part_location": None,
+                        "part_holder_resource_jid": None,
+                    },
+                    "expected_end_state": {
+                        "resource_state": "idle",
+                        "held_part": None,
+                        "part_state": "placed",
+                        "part_location": "assembly_board-v1",
+                        "part_holder_resource_jid": None,
+                    },
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        finding_codes = [
+            str(row.get("constraint_code") or "")
+            for row in (turn_entry.get("validation_findings") or [])
+            if isinstance(row, dict)
+        ]
+        assert decision == "need_revision"
+        assert "part_relocation_without_carrier" in finding_codes
+        assert any(
+            str(row.get("constraint_owner") or "") == "binding"
+            and str(row.get("constraint_code") or "") == "part_relocation_without_carrier"
+            for row in (turn_entry.get("validation_findings") or [])
+            if isinstance(row, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_outline_surfaces_ra_workspace_unreachable_after_compiler_grounding() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "next_task": {
+                    "outline_id": "PICK_LG",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Acquire LG with xarm6.",
+                    "part_name": "LG",
+                    "expected_start_state": {"resource_state": "idle"},
+                    "expected_end_state": {
+                        "resource_state": "idle",
+                        "held_part": "LG",
+                        "part_state": "in_gripper",
+                        "part_location": "xarm6@localhost_gripper",
+                        "part_holder_resource_jid": "xarm6@localhost",
+                    },
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "need_revision"
+        assert any(
+            str(row.get("constraint_owner") or "") == "resource"
+            and str(row.get("constraint_code") or "") == "workspace_unreachable"
+            for row in (turn_entry.get("validation_findings") or [])
+            if isinstance(row, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_release_to_assembly_board_is_rejected_by_cca() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "RECOVERY_SEQ1",
+                "resource_jid": "xarm6@localhost",
+                "action_type": "recover_resource",
+                "expected_end_state": {"resource_state": "idle"},
+            },
+            session_state,
+        )
+
+        normalized_task, schema_findings = multi_turn_v2_mode._derive_candidate_outline_task(
+            candidate_task={
+                "outline_id": "RECOVERY_SEQ2_2",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "release_part",
+                "part_name": "MCP",
+                "target_ref": "assembly_board-v1",
+                "description": "Place MCP at the assembly board before LG is restored.",
+            },
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert schema_findings == []
+        findings, grounded_action = multi_turn_v2_mode._validate_single_outline_task(
+            planner=planner,
+            task=dict(normalized_task or {}),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert grounded_action is not None
+        assert any(
+            str(row.get("constraint_owner") or "") == "cca"
+            and str(row.get("constraint_code") or "") == "safety_rule_violation"
+            and str(row.get("rule_id") or "") == "SAFE_1"
+            for row in findings
+            if isinstance(row, dict)
+        )
+        assert any(
+            str(row.get("constraint_owner") or "") == "cca"
+            and str(row.get("constraint_code") or "") == "blocker_open"
+            for row in findings
+            if isinstance(row, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_outline_prompt_stacks_rejected_outline_history_with_findings() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_validated",
+            "outline_validation_findings": [
+                {
+                    "constraint_code": "workspace_unreachable",
+                    "resource_jid": "xarm6@localhost",
+                    "part_name": "LG",
+                }
+            ],
+            "turns": [
+                {
+                    "turn_index": 3,
+                    "phase": "outline",
+                    "decision": "need_revision",
+                    "next_task": {
+                        "outline_id": "REQ_2_T1",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Bad attempt 1",
+                    },
+                    "validation_findings": [
+                        {
+                            "constraint_code": "workspace_unreachable",
+                            "resource_jid": "xarm6@localhost",
+                            "part_name": "LG",
+                        }
+                    ],
+                },
+                {
+                    "turn_index": 4,
+                    "phase": "outline",
+                    "decision": "need_revision",
+                    "next_task": {
+                        "outline_id": "REQ_2_T2",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Bad attempt 2",
+                    },
+                    "validation_findings": [
+                        {
+                            "constraint_code": "workspace_unreachable",
+                            "resource_jid": "xarm6@localhost",
+                            "part_name": "LG",
+                        }
+                    ],
+                },
+            ],
+        },
+    })
+
+    assert "Active Validation Findings (still unresolved)" in prompt
+    assert "Rejected Outline Attempts And Validation Feedback" in prompt
+    assert "REQ_2_T1 / xarm6@localhost" in prompt
+    assert "REQ_2_T2 / xarm6@localhost" in prompt
+
+
+def test_v2_candidate_prompt_pruned_actions_drop_stale_holder_conflict() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "current_recovery_blockers": [],
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_candidates_validated",
+            "symbolic_resources": {
+                "ur5e@localhost": {
+                    "resource_jid": "ur5e@localhost",
+                    "current_state": "idle",
+                    "current_location": "prusa-mk4-2",
+                    "held_part": None,
+                    "gripper_state": "open",
+                }
+            },
+            "symbolic_parts": {
+                "LG": {
+                    "part_name": "LG",
+                    "current_state": "misplaced",
+                    "current_location": None,
+                    "current_holder_resource_jid": None,
+                    "goal_location": "assembly_board-v1",
+                }
+            },
+            "turns": [
+                {
+                    "turn_index": 8,
+                    "phase": "outline",
+                    "candidate_evaluations": [
+                        {
+                            "candidate_index": 0,
+                            "task": {
+                                "outline_id": "RECOVERY_SEQ2_1",
+                                "resource_jid": "ur5e@localhost",
+                                "action_type": "acquire_part",
+                                "part_name": "LG",
+                            },
+                            "valid": False,
+                            "validation_findings": [
+                                {
+                                    "constraint_code": "holder_conflict",
+                                    "resource_jid": "ur5e@localhost",
+                                    "part_name": "LG",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    })
+
+    assert "holder_conflict" not in prompt
+    assert "ur5e@localhost / LG -> acquire LG" not in prompt
+
+
+def test_v2_candidate_prompt_pruned_actions_omit_selector_only_rejections() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "current_recovery_blockers": [
+            {"summary": "LG must be at assembly_board-v1 before MCP place_approach can resume"}
+        ],
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_candidates_validated",
+            "symbolic_resources": {
+                "ur5e@localhost": {
+                    "resource_jid": "ur5e@localhost",
+                    "current_state": "idle",
+                    "current_location": "prusa-mk4-2",
+                    "held_part": None,
+                    "gripper_state": "open",
+                }
+            },
+            "symbolic_parts": {
+                "MCP": {
+                    "part_name": "MCP",
+                    "current_state": "placed",
+                    "current_location": "prusa-mk4-2",
+                    "current_holder_resource_jid": None,
+                }
+            },
+            "turns": [
+                {
+                    "turn_index": 9,
+                    "phase": "outline",
+                    "candidate_evaluations": [
+                        {
+                            "candidate_index": 0,
+                            "task": {
+                                "outline_id": "RECOVERY_SEQ3_1",
+                                "resource_jid": "ur5e@localhost",
+                                "action_type": "release_part",
+                                "part_name": "MCP",
+                                "target_ref": "prusa-mk4-2",
+                            },
+                            "valid": False,
+                            "validation_findings": [
+                                {
+                                    "constraint_code": "no_blocker_reduction",
+                                    "resource_jid": "ur5e@localhost",
+                                    "part_name": "MCP",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    })
+
+    assert "no_blocker_reduction" not in prompt
+    assert "release MCP to prusa-mk4-2" not in prompt
+
+
+def test_v2_candidate_prompt_pruned_actions_keep_only_durable_recent_rows() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    pruned_actions = [
+        {
+            "constraint_code": "unknown_location_token",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "task": {
+                "resource_jid": "ur5e@localhost",
+                "part_name": "MCP",
+                "action_type": "release_part",
+                "target_ref": "unknown_slot",
+            },
+            "summary": "release MCP to unknown_slot",
+        },
+        {
+            "constraint_code": "part_unbound",
+            "resource_jid": "xarm6@localhost",
+            "task": {
+                "resource_jid": "xarm6@localhost",
+                "action_type": "recover_resource",
+                "target_ref": "pose_a",
+            },
+            "summary": "recover resource via pose_a",
+        },
+        {
+            "constraint_code": "part_ambiguous",
+            "resource_jid": "xarm6@localhost",
+            "task": {
+                "resource_jid": "xarm6@localhost",
+                "action_type": "recover_resource",
+                "target_ref": "assembly_board-v1",
+            },
+            "summary": "recover resource via assembly_board-v1",
+        },
+        {
+            "constraint_code": "no_blocker_reduction",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "LG",
+            "task": {
+                "resource_jid": "ur5e@localhost",
+                "part_name": "LG",
+                "action_type": "acquire_part",
+            },
+            "summary": "acquire LG",
+        },
+    ] + [
+        {
+            "constraint_code": "workspace_unreachable",
+            "resource_jid": "xarm6@localhost",
+            "part_name": "LG",
+            "task": {
+                "resource_jid": "xarm6@localhost",
+                "part_name": "LG",
+                "action_type": "acquire_part",
+            },
+            "summary": f"attempt workspace recovery {idx}",
+        }
+        for idx in range(1, 9)
+    ] + [
+        {
+            "constraint_code": "safety_rule_violation",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "task": {
+                "resource_jid": "ur5e@localhost",
+                "part_name": "MCP",
+                "action_type": "release_part",
+                "target_ref": "assembly_board-v1",
+            },
+            "summary": "release MCP to assembly_board-v1",
         }
     ]
 
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "current_recovery_blockers": [
+            {"summary": "LG must be at assembly_board-v1 before MCP place_approach can resume"}
+        ],
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_candidates_validated",
+            "pruned_actions": pruned_actions,
+            "symbolic_resources": {
+                "xarm6@localhost": {
+                    "resource_jid": "xarm6@localhost",
+                    "current_state": "idle",
+                    "current_location": None,
+                    "held_part": None,
+                    "gripper_state": "open",
+                },
+                "ur5e@localhost": {
+                    "resource_jid": "ur5e@localhost",
+                    "current_state": "idle",
+                    "current_location": "prusa-mk4-2",
+                    "held_part": None,
+                    "gripper_state": "open",
+                },
+            },
+            "symbolic_parts": {
+                "LG": {
+                    "part_name": "LG",
+                    "current_state": "misplaced",
+                    "current_location": None,
+                    "current_holder_resource_jid": None,
+                    "goal_location": "assembly_board-v1",
+                },
+                "MCP": {
+                    "part_name": "MCP",
+                    "current_state": "misplaced",
+                    "current_location": "prusa-mk4-2",
+                    "current_holder_resource_jid": None,
+                    "goal_location": "assembly_board-v1",
+                },
+            },
+        },
+    })
+
+    assert "unknown_location_token" not in prompt
+    assert "part_unbound" not in prompt
+    assert "part_ambiguous" not in prompt
+    assert "no_blocker_reduction" not in prompt
+    assert "workspace_unreachable" in prompt
+    assert "safety_rule_violation" in prompt
+
+    pruned_section = prompt.split(
+        "Pruned Actions (derived from rejected history; do not re-propose these)\n",
+        1,
+    )[1].split("\n\n", 1)[0]
+    assert len([line for line in pruned_section.splitlines() if line.startswith("- ")]) == 8
+
+
+def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
+    async def _run() -> None:
+        responses = [
             {
-                "thought": "This outline uses an invented resource-only target state without a grounded recovery target.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-            {
-                "thought": "The revised outline uses a concrete home pose instead of an invented state target.",
-                "addressed_validation_findings": [
-                    {
-                        "task_id": "recovery_01",
-                        "pose_source": "resource_feasibility",
-                        "failed_axes": ["unsupported_resource_target"],
-                        "resource_jid": "xarm6@localhost",
-                    }
-                ],
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "recovery_01"
-        and "unsupported_resource_target" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-
-
-def test_case3_bridge_state_guarded_pruning_reenables_after_holder_state_changes() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    task = {
-        "outline_id": "OT2",
-        "resource_jid": "ur5e@localhost",
-        "description": "Use ur5e to pick LG immediately while still holding MCP.",
-        "rationale": "This intentionally exercises held-part conflict validation.",
-        "part_name": "LG",
-        "action_target": {
-            "source_location": "observed_pose",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "gripper_state": "closed",
-            "held_part": "MCP",
-            "part_name": "LG",
-        },
-        "expected_end_state": {
-            "held_part": "LG",
-            "gripper_state": "closed",
-            "current_state": "picked",
-        },
-        "depends_on": ["outline_clear_xarm6"],
-    }
-
-    findings = _build_outline_validation_findings([task], llm_input, planner=planner)
-    pruned_actions = _build_pruned_actions(
-        existing_pruned_actions=[],
-        outline_tasks=[task],
-        validation_findings=findings,
-        llm_input=llm_input,
-    )
-
-    assert any(
-        "MCP" in str(dict(row).get("reason") or "")
-        and str(dict(row).get("reason") or "").strip()
-        for row in pruned_actions
-    )
-
-    released_llm_input = deepcopy(llm_input)
-    for row in (dict(released_llm_input.get("observed_runtime_state") or {}).get("resources") or []):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("resource_jid") or "").strip() != "ur5e@localhost":
-            continue
-        row["held_part"] = None
-        row["gripper_state"] = "open"
-        row["current_state"] = "idle"
-
-    refreshed_resources, refreshed_parts = _outline_bridge_validation_context(
-        {"llm_input": released_llm_input}
-    )[1:]
-    refreshed_pruned_actions = _active_pruned_actions_for_state(
-        pruned_actions,
-        resources_by_jid=refreshed_resources,
-        parts_by_name=refreshed_parts,
-        llm_input=released_llm_input,
-    )
-    assert refreshed_pruned_actions == []
-
-
-def test_case3_bridge_state_guarded_pruning_skips_non_stateful_binding_cases() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, _, _ = _outline_bridge_validation_context(prepared_bridge_request)
-    task = {
-        "outline_id": "OT2",
-        "resource_jid": "xarm6@localhost",
-        "description": "Pick LG from the grounded misplaced pose after xarm6 recovers.",
-        "rationale": "Positioning LG properly is required before downstream work can continue.",
-        "action_target": {
-            "source_location": "observed_pose",
-            "target_location": "assembly_board-v1",
-        },
-        "expected_start_state": {
-            "position": {"x": 0.0, "y": 0.2, "z": 1.035},
-            "current_state": "idle",
-            "held_part": None,
-            "gripper_state": "open",
-        },
-        "expected_end_state": {
-            "current_state": "busy",
-            "held_part": "LG",
-            "gripper_state": "closed",
-        },
-        "depends_on": ["OT1"],
-    }
-
-    findings = _build_outline_validation_findings([task], llm_input, planner=planner)
-    assert not any(
-        "ambiguous_part_reference" in str(dict(row).get("failed_axes") or [])
-        or "unbound_part_reference" in str(dict(row).get("failed_axes") or [])
-        for row in findings
-        if isinstance(row, dict)
-    )
-    pruned_actions = _build_pruned_actions(
-        existing_pruned_actions=[],
-        outline_tasks=[task],
-        validation_findings=findings,
-        llm_input=llm_input,
-    )
-    assert pruned_actions == []
-
-
-def test_case3_bridge_state_guarded_pruning_repeated_blocked_action_gets_prune_finding() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, _, _ = _outline_bridge_validation_context(prepared_bridge_request)
-    task = {
-        "outline_id": "OT2",
-        "resource_jid": "ur5e@localhost",
-        "description": "Use ur5e to pick LG immediately while still holding MCP.",
-        "rationale": "This intentionally exercises held-part conflict validation.",
-        "part_name": "LG",
-        "action_target": {
-            "source_location": "observed_pose",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "gripper_state": "closed",
-            "held_part": "MCP",
-            "part_name": "LG",
-        },
-        "expected_end_state": {
-            "held_part": "LG",
-            "gripper_state": "closed",
-            "current_state": "picked",
-        },
-        "depends_on": ["outline_clear_xarm6"],
-    }
-
-    initial_findings = _build_outline_validation_findings([task], llm_input, planner=planner)
-    pruned_actions = _build_pruned_actions(
-        existing_pruned_actions=[],
-        outline_tasks=[task],
-        validation_findings=initial_findings,
-        llm_input=llm_input,
-    )
-    repeated_findings = _build_outline_validation_findings(
-        [task],
-        llm_input,
-        pruned_actions=pruned_actions,
-        planner=planner,
-    )
-
-    assert any(
-        dict(row).get("validation_status") == "state_infeasible"
-        and list(dict(row).get("failed_axes") or []) == ["pruned_action"]
-        for row in repeated_findings
-        if isinstance(row, dict)
-    )
-
-
-def test_case3_bridge_outline_prompt_lists_currently_pruned_actions() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, _, _ = _outline_bridge_validation_context(prepared_bridge_request)
-    task = {
-        "outline_id": "OT2",
-        "resource_jid": "ur5e@localhost",
-        "description": "Use ur5e to pick LG immediately while still holding MCP.",
-        "rationale": "This intentionally exercises held-part conflict validation.",
-        "part_name": "LG",
-        "action_target": {
-            "source_location": "observed_pose",
-            "requirement_id": "REQ_2",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "gripper_state": "closed",
-            "held_part": "MCP",
-            "part_name": "LG",
-        },
-        "expected_end_state": {
-            "held_part": "LG",
-            "gripper_state": "closed",
-            "current_state": "picked",
-        },
-        "depends_on": ["outline_clear_xarm6"],
-    }
-    findings = _build_outline_validation_findings([task], llm_input, planner=planner)
-    pruned_actions = _build_pruned_actions(
-        existing_pruned_actions=[],
-        outline_tasks=[task],
-        validation_findings=findings,
-        llm_input=llm_input,
-    )
-    session_state = build_multi_turn_session_seed(prepared_bridge_request)
-    session_state["current_phase"] = "outline"
-    session_state["pruned_actions"] = deepcopy(pruned_actions)
-    session_state["outline_validation_findings"] = deepcopy(findings)
-
-    prompt_input = build_multi_turn_phase_prompt_input(
-        phase="outline",
-        llm_input=llm_input,
-        session_state=session_state,
-        pruned_actions=pruned_actions,
-    )
-    prompt_text = render_multi_turn_phase_prompt(prompt_input)
-
-    assert "Repair Contract" in prompt_text
-    assert "\"active_pruned_actions\"" in prompt_text
-    assert "already holds 'MCP'" in prompt_text
-
-
-def test_case3_bridge_ap_projection_skips_part_manipulation_for_resource_only_reset() -> None:
-    _, _, _, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    task = deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0])
-    signature = _infer_outline_macro_signature(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    projected_resources = deepcopy(resources_by_jid)
-    projected_parts = deepcopy(parts_by_name)
-    _apply_outline_task_effects(
-        task,
-        resources_by_jid=projected_resources,
-        parts_by_name=projected_parts,
-        task_type=str(signature.get("task_kind") or ""),
-    )
-    projection = project_outline_macro_bridge_aps(
-        task=task,
-        signature=signature,
-        pre_resources=resources_by_jid,
-        pre_parts=parts_by_name,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=llm_input,
-    )
-    assert projection.get("candidate_aps") == []
-    assert "ap003" not in (projection.get("candidate_aps") or [])
-    assert "ap004" not in (projection.get("candidate_aps") or [])
-
-
-def test_case3_bridge_generic_cca_safety_violation_for_safe1_unload_to_board() -> None:
-    _, _, _, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    condition_ids = _case3_continuation_condition_ids(prepared_bridge_request)
-    task = {
-        "outline_id": "OT_SAFE1",
-        "resource_jid": "ur5e@localhost",
-        "description": "Unload MCP to the protected assembly board destination.",
-        "part_name": "MCP",
-        "action_target": {
-            "target_location": "assembly_board-v1",
-            "requirement_id": "REQ_1",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "gripper_state": "closed",
-            "held_part": "MCP",
-            "part_name": "MCP",
-        },
-        "expected_end_state": {
-            "current_state": "idle",
-            "gripper_state": "released",
-            "held_part": None,
-            "part_name": "MCP",
-            "location": "assembly_board-v1",
-        },
-        "closes_condition_ids": [condition_ids["mcp_safe1"]],
-    }
-    signature = _infer_outline_macro_signature(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    projected_resources = deepcopy(resources_by_jid)
-    projected_parts = deepcopy(parts_by_name)
-    _apply_outline_task_effects(
-        task,
-        resources_by_jid=projected_resources,
-        parts_by_name=projected_parts,
-        task_type=str(signature.get("task_kind") or ""),
-    )
-    result = validate_outline_macro_bridge_safety(
-        task=task,
-        signature=signature,
-        pre_resources=resources_by_jid,
-        pre_parts=parts_by_name,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=llm_input,
-    )
-    findings = list(result.get("findings") or [])
-    assert result.get("is_safe") is False
-    assert any(
-        dict(item).get("rule_id") == "SAFE_1"
-        and "safety_rule_violation" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-
-
-def test_case3_bridge_generic_cca_safety_allows_return_mcp_to_printer() -> None:
-    _, _, _, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    task = deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[1])
-    signature = _infer_outline_macro_signature(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    projected_resources = deepcopy(resources_by_jid)
-    projected_parts = deepcopy(parts_by_name)
-    _apply_outline_task_effects(
-        task,
-        resources_by_jid=projected_resources,
-        parts_by_name=projected_parts,
-        task_type=str(signature.get("task_kind") or ""),
-    )
-    result = validate_outline_macro_bridge_safety(
-        task=task,
-        signature=signature,
-        pre_resources=resources_by_jid,
-        pre_parts=parts_by_name,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=llm_input,
-    )
-    assert result.get("is_safe") is True
-    assert not (result.get("findings") or [])
-
-
-def test_case3_bridge_generic_cca_safety_violation_for_safe2_destination_overlap() -> None:
-    _, _, _, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    llm_input, resources_by_jid, parts_by_name = _outline_bridge_validation_context(
-        prepared_bridge_request
-    )
-    resources_by_jid["xarm6@localhost"]["current_location"] = "assembly_board-v1"
-    task = {
-        "outline_id": "OT_SAFE2",
-        "resource_jid": "ur5e@localhost",
-        "description": "Move ur5e into the assembly board destination zone while xarm6 is still there.",
-        "action_target": {
-            "target_location": "assembly_board-v1",
-        },
-        "expected_start_state": {
-            "current_state": "picked",
-            "held_part": "MCP",
-        },
-        "expected_end_state": {
-            "current_state": "positioned",
-            "location": "assembly_board-v1",
-            "held_part": "MCP",
-        },
-    }
-    signature = _infer_outline_macro_signature(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    projected_resources = deepcopy(resources_by_jid)
-    projected_parts = deepcopy(parts_by_name)
-    _apply_outline_task_effects(
-        task,
-        resources_by_jid=projected_resources,
-        parts_by_name=projected_parts,
-        task_type=str(signature.get("task_kind") or ""),
-    )
-    result = validate_outline_macro_bridge_safety(
-        task=task,
-        signature=signature,
-        pre_resources=resources_by_jid,
-        pre_parts=parts_by_name,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=llm_input,
-    )
-    findings = list(result.get("findings") or [])
-    assert result.get("is_safe") is False
-    assert any(
-        dict(item).get("rule_id") == "SAFE_2"
-        and "safety_rule_violation" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-
-
-def test_case3_bridge_multi_turn_invalid_task_does_not_get_condition_credit() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-    condition_ids = _case3_continuation_condition_ids(prepared_bridge_request)
-
-    invalid_outline_tasks = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        {
-            "outline_id": "OT2",
-            "resource_jid": "ur5e@localhost",
-            "description": "Move MCP toward assembly_board-v1 and claim that this clears the safety blocker.",
-            "rationale": "This intentionally mirrors the bad turn-3 shape where the blocked suffix interaction is reused and incorrectly credited with clearing SAFE_1.",
-            "part_name": "MCP",
-            "action_target": {
-                "target_location": "assembly_board-v1",
-                "source_location": "ur5e@localhost_gripper",
-                "requirement_id": "REQ_1",
-            },
-            "expected_start_state": {
-                "current_state": "picked",
-                "gripper_state": "closed",
-                "held_part": "MCP",
-                "part_name": "MCP",
-                "current_location": "prusa-mk4-2",
-            },
-            "expected_end_state": {
-                "current_state": "idle",
-                "gripper_state": "open",
-                "held_part": None,
-                "location": "assembly_board-v1",
-                "part_name": "MCP",
-            },
-            "depends_on": ["outline_clear_xarm6"],
-            "closes_condition_ids": [condition_ids["mcp_safe1"]],
-        },
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly assumes the still-blocked MCP suffix interaction can clear its own safety blocker.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-                {
-                    "thought": "The revised outline frees ur5e and restores LG before resuming the blocked MCP suffix interaction.",
-                    "addressed_validation_findings": [
-                        _outline_validation_ref(
-                            task_id="OT2",
-                            resource_jid="ur5e@localhost",
-                            pose_source="task_contract",
-                            failed_axes=["blocker_open"],
-                        ),
-                        _outline_validation_ref(
-                            task_id="OT2",
-                            resource_jid="ur5e@localhost",
-                            pose_source="bridge_safety_rule",
-                            failed_axes=["safety_rule_violation"],
-                    ),
-                ],
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("safety rule 'SAFE_1'" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "OT2"
-        and "safety_rule_violation" in str(dict(item).get("failed_axes") or [])
-        and str(dict(item).get("rule_id") or "") == "SAFE_1"
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"safety_rule_violation\"" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_illegal_holder_swap() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        {
-            "outline_id": "OT2",
-            "resource_jid": "ur5e@localhost",
-            "description": "Swap directly from MCP recovery to LG recovery in one macro-step.",
-            "rationale": "This intentionally exercises illegal holder swap validation.",
-            "action_target": {
-                "source_location": "observed_pose",
-                "requirement_id": "REQ_2",
-            },
-            "expected_start_state": {
-                "current_state": "picked",
-                "gripper_state": "closed",
-                "held_part": "MCP",
-            },
-            "expected_end_state": {
-                "current_state": "picked",
-                "gripper_state": "closed",
-                "held_part": "LG",
-            },
-            "depends_on": ["outline_clear_xarm6"],
-        },
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly swaps ur5e directly from MCP to LG.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-            {
-                "thought": "The revised outline releases MCP before assigning LG to ur5e.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_ILLEGAL_HOLDER_SWAP_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("already holds 'MCP'" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "OT2"
-        and "holder_conflict" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"holder_conflict\"" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_unknown_named_pose() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline names a robot pose that does not exist.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": [
-                    {
-                        "outline_id": "OT1",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Move xarm6 to a nonexistent named pose before recovery.",
-                        "rationale": "This intentionally exercises named-pose validation.",
-                        "action_target": {
-                            "named_pose": "service_bay",
-                        },
-                        "expected_start_state": {
-                            "current_state": "failed",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "expected_end_state": {
-                            "current_state": "idle",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "depends_on": [],
-                    }
+                "thought": "Need LG pose.",
+                "decision": "observe",
+                "blocking_reasons": ["LG pose unknown"],
+                "grounded_facts": [],
+                "recovery_implications": [],
+                "observe_reason": "Need LG pose",
+                "observe_requests": [
+                    {"fact_type": "part_pose", "entity": "LG", "reason": "Need LG pose"}
                 ],
             },
             {
-                "thought": "The revised outline uses an available named pose.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_NAMED_POSE_NOT_AVAILABLE_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("named pose 'service_bay' is not available" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "OT1"
-        and "named_pose_unavailable" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"named_pose_unavailable\"" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_missing_post_task_anchor() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[1]),
-        {
-            "outline_id": "OT2",
-            "resource_jid": "ur5e@localhost",
-            "description": "Reposition LG somewhere more convenient for later recovery.",
-            "rationale": "This intentionally leaves the post-task LG holder/location unspecified.",
-            "part_name": "LG",
-            "expected_start_state": {
-                "part_name": "LG",
-                "current_state": "misplaced",
-            },
-            "expected_end_state": {
-                "held_part": None,
-                "gripper_state": "open",
-            },
-            "depends_on": ["outline_return_mcp_to_printer"],
-        },
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline tries to move LG without making the resulting LG state explicit.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
+                "thought": "Now grounded.",
+                "decision": "grounded",
+                "blocking_reasons": [],
+                "grounded_facts": ["LG pose observed"],
+                "recovery_implications": [],
+                "observe_reason": "",
+                "observe_requests": [],
             },
             {
-                "thought": "The revised outline makes LG's post-task holder and destination explicit.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_MISSING_POST_TASK_ANCHOR_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("does not specify enough target or effect information" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "OT2"
-        and "task_not_projectable" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"task_not_projectable\"" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_continuation_before_prerequisites() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    invalid_outline_tasks = [
-        {
-            "outline_id": "resume_mcp",
-            "resource_jid": "ur5e@localhost",
-            "description": "Resume MCP assembly immediately.",
-            "rationale": "This incorrectly attempts to continue the blocked nominal suffix before recovery prerequisites clear.",
-            "part_name": "MCP",
-            "action_target": {
-                "target_location": "assembly_board-v1",
-                "requirement_id": "REQ_1",
-            },
-            "expected_start_state": {
-                "current_state": "idle",
-                "held_part": None,
-                "part_name": "MCP",
-            },
-            "expected_end_state": {
-                "current_state": "idle",
-                "held_part": None,
-                "part_name": "MCP",
-                "location": "assembly_board-v1",
-            },
-            "depends_on": [],
-        },
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[1]),
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[2]),
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[3]),
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline incorrectly resumes the blocked MCP continuation before the factual blockers are cleared.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": invalid_outline_tasks,
-            },
-            {
-                "thought": "The revised outline restores the factual prerequisites before resuming MCP.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_CONTINUATION_PREREQUISITE_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    assert any(
-        dict(row).get("outline_id") == "resume_mcp"
-        and dict(row).get("task_type") == "continuation_resume"
-        for row in (invalid_turn.get("outline_task_types") or [])
-        if isinstance(row, dict)
-    )
-    violations = [str(item) for item in (invalid_turn.get("validation_violations") or [])]
-    assert any("missing prerequisite dependencies" in item for item in violations)
-    assert any("appears before prerequisite tasks" in item for item in violations)
-    assert any("continuation blockers are still uncleared" in item for item in violations)
-    findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        dict(item).get("task_id") == "resume_mcp"
-        and "dependency_unsatisfied" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    assert any(
-        dict(item).get("task_id") == "resume_mcp"
-        and "order_violation" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    assert any(
-        dict(item).get("task_id") == "resume_mcp"
-        and "blocker_open" in str(dict(item).get("failed_axes") or [])
-        for item in findings
-        if isinstance(item, dict)
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "\"dependency_unsatisfied\"" in fourth_prompt_text
-    assert "\"order_violation\"" in fourth_prompt_text
-    assert "\"blocker_open\"" in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_outline_validation_uses_predecessor_symbolic_part_state() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    symbolic_rollout_outline = [
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[0]),
-        deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS[1]),
-        {
-            "outline_id": "outline_reposition_lg_for_xarm6",
-            "resource_jid": "ur5e@localhost",
-            "description": "Move LG from the observed slip pose to a reachable recovery pose for xarm6.",
-            "rationale": "This task makes LG reachable to xarm6 without adding prompt-side hints.",
-            "part_name": "LG",
-            "expected_start_state": {
-                "part_name": "LG",
-                "current_state": "misplaced",
-                "position": {"x": 0.0, "y": 0.2, "z": 1.035},
-                "held_part": None,
-                "gripper_state": "open",
-            },
-            "expected_end_state": {
-                "part_name": "LG",
-                "current_state": "placed",
-                "location": "recovery_buffer",
-                "position": {"x": 0.0, "y": 0.05, "z": 1.035},
-                "held_part": None,
-                "gripper_state": "open",
-            },
-            "depends_on": ["outline_return_mcp_to_printer"],
-        },
-        {
-            "outline_id": "outline_pick_lg_with_xarm6",
-            "resource_jid": "xarm6@localhost",
-            "description": "Pick LG from the explicit recovery pose prepared for xarm6.",
-            "rationale": "Once LG has been concretely repositioned, xarm6 can finish the recovery locally.",
-            "part_name": "LG",
-            "expected_start_state": {
-                "current_state": "idle",
-                "gripper_state": "open",
-                "position": {"named_pose": "home"},
-            },
-            "expected_end_state": {
-                "part_name": "LG",
-                "current_state": "picked",
-                "held_part": "LG",
-                "gripper_state": "closed",
-            },
-            "depends_on": ["outline_reposition_lg_for_xarm6"],
-        },
-        {
-            "outline_id": "outline_place_lg_with_xarm6",
-            "resource_jid": "xarm6@localhost",
-            "description": "Place LG at assembly_board-v1 after grasping it from the recovery pose.",
-            "rationale": "This clears SAFE_1 using the predecessor-produced symbolic LG pose.",
-            "part_name": "LG",
-            "action_target": {
-                "target_location": "assembly_board-v1",
-                "requirement_id": "REQ_2",
-            },
-            "expected_start_state": {
-                "part_name": "LG",
-                "held_part": "LG",
-                "gripper_state": "closed",
-                "current_state": "picked",
-            },
-            "expected_end_state": {
-                "part_name": "LG",
-                "current_state": "assembled",
-                "held_part": None,
-                "gripper_state": "open",
-                "location": "assembly_board-v1",
-            },
-            "depends_on": ["outline_pick_lg_with_xarm6"],
-        },
-    ]
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline first changes LG's concrete state, then has xarm6 act on the new pose.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": symbolic_rollout_outline,
-            },
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    accepted_outline = list(multi_turn_session.get("accepted_outline") or [])
-    assert accepted_outline == symbolic_rollout_outline
-    turns = list(multi_turn_session.get("turns") or [])
-    outline_turn = dict(turns[2] or {})
-    assert outline_turn.get("decision") == "outline_ready"
-    assert not outline_turn.get("validation_violations")
-    assert dict(outline_turn.get("outline_validation") or {}).get("status") == "passed"
-
-
-def test_case3_bridge_multi_turn_outline_validation_does_not_reenter_grounding() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This draft incorrectly keeps LG recovery on xarm6.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_INVALID_XARM_OUTLINE_TASKS),
-            },
-            {
-                "thought": "The revised outline reassigns LG recovery to ur5e while keeping xarm6 limited to clearing the failed state.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_INVALID_XARM_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[3]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[4]),
-        ]
-    )
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal == MOCK_MULTI_TURN_FINAL_PROPOSAL
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-        "primitive_generation",
-        "finalize",
-    ]
-    assert all(turn.get("phase") != "grounding" for turn in turns[2:])
-    assert turns[2].get("decision") == "need_revision"
-    assert turns[2].get("validation_violations")
-
-
-def test_case3_bridge_multi_turn_outline_validation_rejects_abstract_task() -> None:
-    _, _, planner, prepared_bridge_request = asyncio.run(
-        _prepare_bridge_dryrun_harness(
-            configure_live=False,
-            fixture_mode="live",
-            bridge_reasoning_mode="multi_turn",
-        )
-    )
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["stop_after_phase"] = "outline"
-    prepared_bridge_request["bridge_session"] = bridge_session
-    prepared_bridge_request["multi_turn_session_seed"] = build_multi_turn_session_seed(
-        prepared_bridge_request
-    )
-
-    scripted_responses = iter(
-        [
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[0]),
-            deepcopy(MOCK_MULTI_TURN_RESPONSES[1]),
-            {
-                "thought": "This outline includes an abstract diagnosis step instead of a grounded recovery task.",
-                "decision": "need_grounding",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_EMPTY_ADDRESSED_VALIDATION_FINDINGS
-                ),
-                "outline_tasks": [
+                "thought": "Accept reset.",
+                "candidate_tasks": [
                     {
-                        "outline_id": "OT1",
+                        "outline_id": "BAD_3A",
                         "resource_jid": "xarm6@localhost",
-                        "description": "Move xarm6 out of the failed posture.",
-                        "rationale": "The failed robot must clear its blocked posture first.",
-                        "action_target": {
-                            "named_pose": "home",
-                        },
-                        "expected_start_state": {
-                            "current_state": "failed",
-                            "held_part": None,
-                            "position": {
-                                "x": 0.1,
-                                "y": 0.08,
-                                "z": 1.1994999760206477,
-                            },
-                            "gripper_state": "open",
-                        },
-                        "expected_end_state": {
-                            "current_state": "idle",
-                            "held_part": None,
-                            "gripper_state": "open",
-                        },
-                        "depends_on": [],
+                        "description": "No-op prep step.",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {"resource_state": "failed"},
                     },
                     {
-                        "outline_id": "OT2",
+                        "outline_id": "FIX_XARM6",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Reset xarm6 to idle.",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    },
+                    {
+                        "outline_id": "BAD_3C",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Relocate LG without carrying it.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {
+                            "resource_state": "failed",
+                            "part_location": "assembly_board-v1",
+                        },
+                    },
+                ],
+            },
+            {
+                "thought": "Rejected turn 4.",
+                "candidate_tasks": [
+                    {
+                        "outline_id": "BAD_4A",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Pick unreachable LG.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "holding",
+                            "held_part": "LG",
+                            "part_state": "picked",
+                            "part_location": "xarm6@localhost_gripper",
+                            "part_holder_resource_jid": "xarm6@localhost",
+                        },
+                    },
+                    {
+                        "outline_id": "BAD_4B",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "No-op prep step.",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    },
+                    {
+                        "outline_id": "BAD_4C",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Relocate LG without carrying it.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "idle",
+                            "part_state": "placed",
+                            "part_location": "assembly_board-v1",
+                        },
+                    },
+                ],
+            },
+            {
+                "thought": "Rejected turn 5.",
+                "candidate_tasks": [
+                    {
+                        "outline_id": "BAD_5A",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "No-op prep step.",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    },
+                    {
+                        "outline_id": "BAD_5B",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Pick unreachable LG again.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "holding",
+                            "held_part": "LG",
+                            "part_state": "picked",
+                            "part_location": "xarm6@localhost_gripper",
+                            "part_holder_resource_jid": "xarm6@localhost",
+                        },
+                    },
+                    {
+                        "outline_id": "BAD_5C",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Relocate LG without carrying it.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "idle",
+                            "part_state": "placed",
+                            "part_location": "assembly_board-v1",
+                        },
+                    },
+                ],
+            },
+            {
+                "thought": "Rejected turn 6.",
+                "candidate_tasks": [
+                    {
+                        "outline_id": "BAD_6A",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Relocate LG without carrying it.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "idle",
+                            "part_state": "placed",
+                            "part_location": "assembly_board-v1",
+                        },
+                    },
+                    {
+                        "outline_id": "BAD_6B",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "No-op prep step.",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    },
+                    {
+                        "outline_id": "BAD_6C",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Pick unreachable LG.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "holding",
+                            "held_part": "LG",
+                            "part_state": "picked",
+                            "part_location": "xarm6@localhost_gripper",
+                            "part_holder_resource_jid": "xarm6@localhost",
+                        },
+                    },
+                ],
+            },
+            {
+                "thought": "Turn 7 arrives before stop.",
+                "candidate_tasks": [
+                    {
+                        "outline_id": "BAD_7A",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Pick unreachable LG again.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "holding",
+                            "held_part": "LG",
+                            "part_state": "picked",
+                            "part_location": "xarm6@localhost_gripper",
+                            "part_holder_resource_jid": "xarm6@localhost",
+                        },
+                    },
+                    {
+                        "outline_id": "BAD_7B",
                         "resource_jid": "ur5e@localhost",
-                        "description": "Diagnose the failure and decide the next recovery step.",
-                        "rationale": "This intentionally exercises abstract-task validation.",
-                        "expected_start_state": {},
-                        "expected_end_state": {},
-                        "depends_on": ["OT1"],
+                        "description": "Hold position while xarm6 recovery remains unresolved.",
+                        "expected_start_state": {"resource_state": "picked"},
+                        "expected_end_state": {"resource_state": "picked"},
+                    },
+                    {
+                        "outline_id": "BAD_7C",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Relocate LG without carrying it.",
+                        "part_name": "LG",
+                        "expected_start_state": {"resource_state": "idle"},
+                        "expected_end_state": {
+                            "resource_state": "idle",
+                            "part_state": "placed",
+                            "part_location": "assembly_board-v1",
+                        },
                     },
                 ],
             },
-            {
-                "thought": "The revised outline replaces the abstract diagnosis row with grounded recovery tasks without reopening grounding.",
-                "addressed_validation_findings": deepcopy(
-                    MOCK_ABSTRACT_TASK_REQUIRED_FINDING_REFS
-                ),
-                "outline_tasks": deepcopy(MOCK_MULTI_TURN_OUTLINE_TASKS),
-            },
         ]
-    )
 
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        return deepcopy(next(scripted_responses))
+        async def _fake_ask_llm_structured(
+            self: FakeProductAgent,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del self, prompt, response_format, tools, tool_executor, max_tool_rounds
+            if not responses:
+                raise RuntimeError("ran out of mocked responses")
+            return responses.pop(0)
 
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        proposal = asyncio.run(planner.execute_prepared_bridge_request(prepared_bridge_request))
-
-    assert proposal is None
-    multi_turn_session = (planner.get_last_bridge_debug() or {}).get("multi_turn_session") or {}
-    assert multi_turn_session.get("status") == "paused_after_outline"
-    assert multi_turn_session.get("current_phase") == "outline"
-    turns = list(multi_turn_session.get("turns") or [])
-    assert [turn.get("phase") for turn in turns] == [
-        "grounding",
-        "grounding",
-        "outline",
-        "outline",
-    ]
-    invalid_turn = dict(turns[2] or {})
-    assert invalid_turn.get("decision") == "need_revision"
-    assert dict(invalid_turn.get("raw_response") or {}).get("decision") == "need_grounding"
-    assert invalid_turn.get("decision_compatibility") is None
-    invalid_findings = list(invalid_turn.get("outline_validation_findings") or [])
-    assert any(
-        "task_not_projectable" in str(dict(item).get("failed_axes") or [])
-        for item in invalid_findings
-    )
-    fourth_prompt_text = str(turns[3].get("prompt_text") or "")
-    assert "Repair Contract" in fourth_prompt_text
-    assert "Grounded Feasibility Facts" not in fourth_prompt_text
-    assert "Recovery Gap State" not in fourth_prompt_text
-    assert "\"task_not_projectable\"" in fourth_prompt_text
-    assert "\"outline_id\": \"OT2\"" not in fourth_prompt_text
-
-
-def test_case3_bridge_multi_turn_debug_sidecars(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "DEBUG_DIR", tmp_path)
-    scripted_responses = iter(deepcopy(MOCK_MULTI_TURN_RESPONSES))
-
-    async def _mock_ask_llm_structured(
-        self: FakeProductAgent,
-        prompt: str,
-        *,
-        response_format: dict[str, Any],
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
-        max_tool_rounds: int = 3,
-    ) -> dict[str, Any]:
-        del prompt, response_format, tools, tool_executor, max_tool_rounds
-        response = deepcopy(next(scripted_responses))
-        self._turn_index += 1
-        self.turn_log.append(
-            {
-                "turn_index": self._turn_index,
-                "prompt": "<mocked-structured>",
-                "response": deepcopy(response),
-            }
-        )
-        return response
-
-    with patch.object(FakeProductAgent, "ask_llm_structured", new=_mock_ask_llm_structured):
-        result = asyncio.run(
-            run_case3_bridge_dryrun(
-                write_debug=True,
-                bridge_reasoning_mode="multi_turn",
-                multi_turn_stop_after_phase="",
+        with patch.object(
+            FakeProductAgent,
+            "ask_llm_structured",
+            new=_fake_ask_llm_structured,
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                llm_model="mock",
+                stop_before_primitive_generation=False,
             )
+
+        session = result.get("multi_turn_session") or {}
+        assert session.get("turn_index") == 7
+        assert str(session.get("status") or "") == "paused_after_outline_turn"
+
+    asyncio.run(_run())
+
+
+def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
+    async def _run() -> None:
+        prepared_bridge_request = {
+            "bridge_session": {"max_turns": 20},
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
+                "status": "paused_after_outline_turn",
+                "current_phase": "outline",
+                "turn_index": 4,
+                "max_turns": 20,
+            },
+            "context_summary": {},
+            "llm_input": {},
+        }
+
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(self, _prepared: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
+                }
+
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
+
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
+
+        async def _fake_resume_bridge(
+            planner: Any,
+            prepared_request: dict[str, Any],
+            *,
+            session_state: dict[str, Any],
+        ) -> dict[str, Any]:
+            del planner, session_state
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
+            state["turn_index"] = int(state.get("turn_index") or 0) + 1
+            state["status"] = (
+                "completed"
+                if int(state.get("turn_index") or 0) >= int(state.get("max_turns") or 0)
+                else "paused_after_outline_turn"
+            )
+            prepared_request["multi_turn_session_state"] = state
+            return {"turn_index": state["turn_index"]}
+
+        with patch.object(
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=_fake_resume_bridge,
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                stop_before_primitive_generation=False,
+            )
+
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
+        assert int(session_state.get("turn_index") or 0) == 20
+        assert str(session_state.get("status") or "") == "completed"
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_schema_requires_three_candidate_tasks() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        multi_turn_v2_phase_response_schema,
+    )
+
+    schema = multi_turn_v2_phase_response_schema(
+        "outline",
+        outline_mode="incremental_candidates_validated",
+    )
+
+    properties = dict(schema.get("schema") or {}).get("properties") or {}
+    candidate_tasks = dict(properties.get("candidate_tasks") or {})
+    assert "candidate_tasks" in properties
+    assert "next_task" not in properties
+    assert candidate_tasks.get("minItems") == 3
+    assert candidate_tasks.get("maxItems") == 3
+    item_schema = dict(candidate_tasks.get("items") or {})
+    item_properties = dict(item_schema.get("properties") or {})
+    assert "resource_jid" in item_properties
+    assert "action_type" in item_properties
+    assert set(item_schema.get("required") or []) == {"resource_jid", "action_type"}
+
+
+def test_v2_candidate_outline_prompt_renders_feedback_without_previous_lookahead() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [
+                {
+                    "part_name": "MCP",
+                    "current_state": "in_gripper",
+                    "current_location": "ur5e@localhost_gripper",
+                    "current_holder_resource_jid": "ur5e@localhost",
+                    "origin_location": "prusa-mk4-2",
+                    "goal_location": "assembly_board-v1",
+                    "goal_requirement_id": "REQ_1",
+                }
+            ],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_candidates_validated",
+            "outline_lookahead": [
+                {
+                    "outline_id": "STALE",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "stale lookahead",
+                    "expected_start_state": {},
+                    "expected_end_state": {},
+                }
+            ],
+            "observation_store": {
+                "observed_pose_LG": {
+                    "part_name": "LG",
+                    "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+                    "x": 0.0,
+                    "y": 0.2,
+                    "z": 1.035,
+                }
+            },
+            "candidate_rejection_feedback": [
+                {
+                    "candidate_index": 0,
+                    "task": {
+                        "outline_id": "BAD_1",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "bad candidate",
+                    },
+                    "validation_findings": [
+                        {
+                            "constraint_code": "workspace_unreachable",
+                            "resource_jid": "xarm6@localhost",
+                            "part_name": "LG",
+                            "reason": "pose outside workspace",
+                        }
+                    ],
+                }
+            ],
+            "turns": [
+                {
+                    "turn_index": 4,
+                    "phase": "outline",
+                    "candidate_evaluations": [
+                        {
+                            "candidate_index": 0,
+                            "task": {
+                                "outline_id": "RECOVERY_SEQ2_1",
+                                "resource_jid": "xarm6@localhost",
+                                "description": "older bad candidate",
+                            },
+                            "valid": False,
+                            "validation_findings": [
+                                {
+                                    "constraint_code": "workspace_unreachable",
+                                    "resource_jid": "xarm6@localhost",
+                                    "part_name": "LG",
+                                    "reason": "pose outside workspace",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        "current_recovery_blockers": [
+            {
+                "kind": "resource_terminal_state",
+                "summary": "xarm6@localhost must reach idle",
+            },
+            {
+                "kind": "safety_blocked_suffix_task",
+                "summary": "LG must be at assembly_board-v1 before MCP place_approach can resume",
+            },
+        ],
+    })
+
+    assert "Propose exactly 3 distinct candidate next tasks" in prompt
+    assert "Current Recovery Blockers" in prompt
+    assert "- xarm6@localhost must reach idle" in prompt
+    assert "- LG must be at assembly_board-v1 before MCP place_approach can resume" in prompt
+    assert "A candidate does not need to complete recovery in one step." in prompt
+    assert "Action Shape Example (shape only; use actual grounded values from this prompt)" in prompt
+    assert '"action_type": "recover_resource | acquire_part | release_part"' in prompt
+    assert '"target_ref": "GROUNDED_DESTINATION_REF or omit"' in prompt
+    assert "expected_start_state" not in prompt
+    assert "expected_end_state" not in prompt
+    assert "Last Rejection Feedback" in prompt
+    assert "Grounded Location Tokens" not in prompt
+    assert '"observed_pose": {' in prompt
+    assert '"y": 0.2' in prompt
+    assert "Grounded Observations" not in prompt
+    assert "Your Previous Lookahead" not in prompt
+    assert "Active Validation Findings (still unresolved)" not in prompt
+    assert "Modeled Continuation Gap" not in prompt
+    assert "Rejected Candidate History And Validation Feedback" not in prompt
+    assert "Safety Rules" not in prompt
+
+
+def test_v2_candidate_outline_prompt_renders_pruned_actions_from_rejected_history() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        render_multi_turn_v2_phase_prompt,
+    )
+
+    prompt = render_multi_turn_v2_phase_prompt({
+        "phase": "outline",
+        "llm_input": {
+            "observed_runtime_state": {"resources": []},
+            "part_facts": [],
+            "loaded_safety_rules": [],
+            "relevant_assembly_requirements": [],
+        },
+        "session_state": {
+            "outline_mode": "incremental_candidates_validated",
+            "turns": [
+                {
+                    "turn_index": 3,
+                    "phase": "outline",
+                    "candidate_evaluations": [
+                        {
+                            "candidate_index": 0,
+                            "task": {
+                                "outline_id": "RECOVERY_SEQ1_1",
+                                "resource_jid": "xarm6@localhost",
+                                "part_name": "LG",
+                                "expected_start_state": {"resource_state": "idle"},
+                                "expected_end_state": {"resource_state": "idle"},
+                            },
+                            "valid": False,
+                            "validation_findings": [
+                                {
+                                    "constraint_code": "workspace_unreachable",
+                                    "resource_jid": "xarm6@localhost",
+                                    "part_name": "LG",
+                                }
+                            ],
+                        },
+                        {
+                            "candidate_index": 1,
+                            "task": {
+                                "outline_id": "RECOVERY_SEQ1_2",
+                                "resource_jid": "xarm6@localhost",
+                                "part_name": "LG",
+                                "expected_start_state": {"resource_state": "idle"},
+                                "expected_end_state": {"resource_state": "idle"},
+                            },
+                            "valid": False,
+                            "validation_findings": [
+                                {
+                                    "constraint_code": "workspace_unreachable",
+                                    "resource_jid": "xarm6@localhost",
+                                    "part_name": "LG",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        },
+    })
+
+    assert "Pruned Actions (derived from rejected history; do not re-propose these)" in prompt
+    assert "- xarm6@localhost / LG -> state transition [workspace_unreachable]" in prompt
+    assert prompt.count("- xarm6@localhost / LG -> state transition [workspace_unreachable]") == 1
+
+
+def test_v2_candidate_progress_score_counts_resolved_continuation_condition() -> None:
+    async def _run() -> None:
+        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        score, detail = multi_turn_v2_mode._candidate_progress_score(
+            task={
+                "outline_id": "FIX_XARM6",
+                "resource_jid": "xarm6@localhost",
+                "description": "Reset xarm6 to idle.",
+                "expected_start_state": {"resource_state": "failed"},
+                "expected_end_state": {"resource_state": "idle"},
+            },
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
         )
 
-    prompt_artifact_path = Path(str(result.get("prompt_artifact_path") or ""))
-    latest_prompt_artifact_path = Path(str(result.get("latest_prompt_artifact_path") or ""))
-    response_artifact_path = Path(str(result.get("response_artifact_path") or ""))
-    latest_response_artifact_path = Path(str(result.get("latest_response_artifact_path") or ""))
-    session_artifact_path = Path(str(result.get("session_transcript_artifact_path") or ""))
-    latest_session_artifact_path = Path(
-        str(result.get("latest_session_transcript_artifact_path") or "")
+        assert score >= 1
+        assert detail.get("resolved_continuation_conditions", 0) >= 1
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_progress_score_counts_release_that_frees_resource_for_blocker() -> None:
+    async def _run() -> None:
+        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "FIX_XARM6",
+                "resource_jid": "xarm6@localhost",
+                "expected_end_state": {"resource_state": "idle"},
+            },
+            session_state,
+        )
+
+        normalized_task, findings = multi_turn_v2_mode._derive_candidate_outline_task(
+            candidate_task={
+                "outline_id": "RELEASE_MCP",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "release_part",
+                "part_name": "MCP",
+                "target_ref": "prusa-mk4-2",
+            },
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert findings == []
+        score, detail = multi_turn_v2_mode._candidate_progress_score(
+            task=dict(normalized_task or {}),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert score >= 1
+        assert detail.get("resolved_direct_blockers") == 0
+        assert detail.get("freed_resource_for_blocker") == 1
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_progress_score_counts_blocker_part_acquisition() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "FIX_XARM6",
+                "resource_jid": "xarm6@localhost",
+                "action_type": "recover_resource",
+                "expected_end_state": {"resource_state": "idle"},
+            },
+            session_state,
+        )
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "RELEASE_MCP",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "release_part",
+                "part_name": "MCP",
+                "target_ref": "prusa-mk4-2",
+                "expected_end_state": {
+                    "resource_state": "idle",
+                    "held_part": None,
+                    "part_location": "prusa-mk4-2",
+                    "part_holder_resource_jid": None,
+                },
+            },
+            session_state,
+        )
+
+        normalized_task, findings = multi_turn_v2_mode._derive_candidate_outline_task(
+            candidate_task={
+                "outline_id": "ACQUIRE_LG",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "acquire_part",
+                "part_name": "LG",
+            },
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert findings == []
+        validation_findings, grounded_action = multi_turn_v2_mode._validate_single_outline_task(
+            planner=planner,
+            task=dict(normalized_task or {}),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        assert validation_findings == []
+        assert grounded_action is not None
+
+        score, detail = multi_turn_v2_mode._candidate_progress_score(
+            task=dict(normalized_task or {}),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+
+        assert score >= 1
+        assert detail.get("resolved_direct_blockers") == 0
+        assert detail.get("blocker_part_acquired") == 1
+        assert detail.get("freed_resource_for_blocker") == 0
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_selects_highest_progress_then_order() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        candidates = {
+            "RESET_XARM6": ([], {"resource_jid": "xarm6@localhost"}),
+            "WAIT_UR5E": ([], {"resource_jid": "ur5e@localhost"}),
+            "SHIFT_UR5E": ([], {"resource_jid": "ur5e@localhost"}),
+        }
+
+        def _fake_validate_single_outline_task(
+            *,
+            planner: Any,
+            task: dict[str, Any],
+            session_state: dict[str, Any],
+            prepared_bridge_request: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+            del planner, session_state, prepared_bridge_request
+            task_key = str(task.get("llm_outline_id") or task.get("outline_id") or "")
+            return candidates[task_key]
+
+        with patch.object(
+            multi_turn_v2_mode,
+            "_validate_single_outline_task",
+            side_effect=_fake_validate_single_outline_task,
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "candidate_tasks": [
+                        {
+                            "outline_id": "WAIT_UR5E",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "acquire_part",
+                            "part_name": "MCP",
+                            "description": "Hold current MCP state.",
+                        },
+                        {
+                            "outline_id": "RESET_XARM6",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "Reset xarm6 to idle.",
+                        },
+                        {
+                            "outline_id": "SHIFT_UR5E",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "release_part",
+                            "part_name": "MCP",
+                            "target_ref": "prusa-mk4-2",
+                            "description": "Shift ur5e locally.",
+                        },
+                    ]
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+
+        assert decision == "need_next_task"
+        assert turn_entry.get("selected_candidate_index") == 1
+        assert dict(turn_entry.get("selected_candidate_task") or {}).get("outline_id") == "RECOVERY_SEQ1_2"
+        assert dict(turn_entry.get("selected_candidate_task") or {}).get("llm_outline_id") == "RESET_XARM6"
+        assert dict(turn_entry.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
+        assert dict(turn_entry.get("selected_next_task") or {}).get("candidate_outline_id") == "RECOVERY_SEQ1_2"
+        assert dict(turn_entry.get("selected_next_task") or {}).get("llm_outline_id") == "RESET_XARM6"
+        assert session_state.get("accepted_outline_prefix") == [turn_entry.get("selected_next_task")]
+        assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == "idle"
+        assert session_state["symbolic_resources"]["ur5e@localhost"]["current_state"] == "picked"
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_tie_uses_earliest_candidate_order() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        def _fake_validate_single_outline_task(
+            *,
+            planner: Any,
+            task: dict[str, Any],
+            session_state: dict[str, Any],
+            prepared_bridge_request: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+            del planner, session_state, prepared_bridge_request
+            return [], {"resource_jid": str(task.get("resource_jid") or "")}
+
+        with patch.object(
+            multi_turn_v2_mode,
+            "_validate_single_outline_task",
+            side_effect=_fake_validate_single_outline_task,
+        ), patch.object(
+            multi_turn_v2_mode,
+            "_candidate_progress_score",
+            side_effect=[
+                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
+                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
+                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
+                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
+                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
+                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
+            ],
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "candidate_tasks": [
+                        {
+                            "outline_id": "FIRST",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "acquire_part",
+                            "part_name": "MCP",
+                            "description": "first valid option",
+                        },
+                        {
+                            "outline_id": "SECOND",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "second valid option",
+                        },
+                        {
+                            "outline_id": "THIRD",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "third valid option",
+                        },
+                    ]
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+
+        assert decision == "need_next_task"
+        assert turn_entry.get("selected_candidate_index") == 0
+        assert dict(turn_entry.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
+        assert dict(turn_entry.get("selected_next_task") or {}).get("llm_outline_id") == "FIRST"
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_all_rejected_sets_feedback_and_commits_nothing() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        def _fake_validate_single_outline_task(
+            *,
+            planner: Any,
+            task: dict[str, Any],
+            session_state: dict[str, Any],
+            prepared_bridge_request: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+            del planner, session_state, prepared_bridge_request
+            task_id = str(task.get("outline_id") or "")
+            return ([{
+                "constraint_owner": "binding",
+                "constraint_code": "no_state_change",
+                "task_id": task_id,
+                "reason": f"{task_id} does not change projected state",
+                "evidence": {"token": task_id},
+            }], None)
+
+        with patch.object(
+            multi_turn_v2_mode,
+            "_validate_single_outline_task",
+            side_effect=_fake_validate_single_outline_task,
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "candidate_tasks": [
+                        {
+                            "outline_id": "BAD_1",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "bad one",
+                        },
+                        {
+                            "outline_id": "BAD_2",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "acquire_part",
+                            "part_name": "MCP",
+                            "description": "bad two",
+                        },
+                        {
+                            "outline_id": "BAD_3",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "bad three",
+                        },
+                    ]
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+
+        assert decision == "need_revision"
+        assert session_state.get("accepted_outline_prefix") == []
+        assert len(session_state.get("candidate_rejection_feedback") or []) == 3
+        assert dict((session_state.get("candidate_rejection_feedback") or [])[0].get("task") or {}).get("outline_id") == "RECOVERY_SEQ1_1"
+        assert "selected_next_task" not in turn_entry
+        assert len(session_state.get("outline_validation_findings") or []) == 0
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_rejects_valid_zero_blocker_reduction() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        def _fake_validate_single_outline_task(
+            *,
+            planner: Any,
+            task: dict[str, Any],
+            session_state: dict[str, Any],
+            prepared_bridge_request: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+            del planner, session_state, prepared_bridge_request
+            return [], {"resource_jid": str(task.get("resource_jid") or "")}
+
+        with patch.object(
+            multi_turn_v2_mode,
+            "_validate_single_outline_task",
+            side_effect=_fake_validate_single_outline_task,
+        ), patch.object(
+            multi_turn_v2_mode,
+            "_candidate_progress_score",
+            side_effect=[
+                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
+                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
+                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
+                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
+                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
+                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
+            ],
+        ):
+            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "candidate_tasks": [
+                        {
+                            "outline_id": "FIRST",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "acquire_part",
+                            "part_name": "MCP",
+                            "description": "first valid option",
+                        },
+                        {
+                            "outline_id": "SECOND",
+                            "resource_jid": "xarm6@localhost",
+                            "action_type": "recover_resource",
+                            "description": "second valid option",
+                        },
+                        {
+                            "outline_id": "THIRD",
+                            "resource_jid": "ur5e@localhost",
+                            "action_type": "release_part",
+                            "part_name": "MCP",
+                            "target_ref": "prusa-mk4-2",
+                            "description": "third valid option",
+                        },
+                    ]
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+
+        assert decision == "need_revision"
+        assert "selected_next_task" not in turn_entry
+        assert session_state.get("accepted_outline_prefix") == []
+        assert len(session_state.get("candidate_rejection_feedback") or []) == 3
+        assert all(
+            any(
+                str(item.get("constraint_code") or "") == "no_blocker_reduction"
+                for item in (row.get("validation_findings") or [])
+                if isinstance(item, dict)
+            )
+            for row in (turn_entry.get("candidate_evaluations") or [])
+            if isinstance(row, dict)
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_followup_rejects_contradictory_mcp_start_state() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "RELEASED_MCP",
+                "resource_jid": "ur5e@localhost",
+                "part_name": "MCP",
+                "expected_end_state": {
+                    "resource_state": "idle",
+                    "held_part": None,
+                    "part_state": "misplaced",
+                    "part_location": "prusa-mk4-2",
+                    "part_holder_resource_jid": None,
+                },
+            },
+            session_state,
+        )
+
+        decision_2, turn_entry_2 = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "candidate_tasks": [
+                    {
+                        "outline_id": "REGRASP_MCP",
+                        "resource_jid": "ur5e@localhost",
+                        "description": "Keep holding MCP after release.",
+                        "part_name": "MCP",
+                        "expected_start_state": {
+                            "resource_state": "idle",
+                            "held_part": "MCP",
+                            "part_state": "misplaced",
+                            "part_location": "ur5e@localhost_gripper",
+                            "part_holder_resource_jid": "ur5e@localhost",
+                        },
+                        "expected_end_state": {
+                            "resource_state": "busy",
+                            "held_part": "MCP",
+                            "part_state": "misplaced",
+                            "part_location": "ur5e@localhost_gripper",
+                            "part_holder_resource_jid": "ur5e@localhost",
+                        },
+                    },
+                    {
+                        "outline_id": "RESET_XARM6",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Reset xarm6 to idle.",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    },
+                    {
+                        "outline_id": "BAD_3",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "No-op reset three.",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {"resource_state": "failed"},
+                    },
+                ]
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision_2 == "need_next_task"
+        candidate_1 = next(
+            row for row in (turn_entry_2.get("candidate_evaluations") or [])
+            if int(row.get("candidate_index") or 0) == 0
+        )
+        assert not any(
+            str(item.get("constraint_code") or "") == "expected_start_state_mismatch"
+            for item in (candidate_1.get("validation_findings") or [])
+            if isinstance(item, dict)
+        )
+        assert dict(turn_entry_2.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
+        assert dict(turn_entry_2.get("selected_next_task") or {}).get("candidate_outline_id") == "RECOVERY_SEQ1_2"
+
+    asyncio.run(_run())
+
+
+def test_v2_apply_task_effects_normalizes_release_part_state() -> None:
+    async def _run() -> None:
+        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "RELEASED_MCP",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "release_part",
+                "part_name": "MCP",
+                "target_ref": "prusa-mk4-2",
+                "expected_end_state": {
+                    "resource_state": "idle",
+                    "held_part": None,
+                    "part_location": "prusa-mk4-2",
+                    "part_holder_resource_jid": None,
+                },
+            },
+            session_state,
+        )
+
+        assert session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] is None
+        assert session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] == "open"
+        assert session_state["symbolic_parts"]["MCP"]["current_holder_resource_jid"] is None
+        assert session_state["symbolic_parts"]["MCP"]["current_location"] == "prusa-mk4-2"
+        assert session_state["symbolic_parts"]["MCP"]["current_state"] == "misplaced"
+
+    asyncio.run(_run())
+
+
+def test_v2_apply_task_effects_normalizes_acquire_part_state() -> None:
+    async def _run() -> None:
+        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+
+        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
+            {
+                "outline_id": "ACQUIRED_LG",
+                "resource_jid": "ur5e@localhost",
+                "action_type": "acquire_part",
+                "part_name": "LG",
+                "expected_end_state": {
+                    "resource_state": "picked",
+                    "held_part": "LG",
+                    "part_location": "ur5e@localhost_gripper",
+                    "part_holder_resource_jid": "ur5e@localhost",
+                },
+            },
+            session_state,
+        )
+
+        assert session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] == "LG"
+        assert session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] == "closed"
+        assert session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] == "ur5e@localhost"
+        assert session_state["symbolic_parts"]["LG"]["current_location"] == "ur5e@localhost_gripper"
+        assert session_state["symbolic_parts"]["LG"]["current_state"] == "in_gripper"
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_response_artifact_uses_normalized_ids() -> None:
+    payload = multi_turn_v2_mode._normalized_response_artifact_payload(
+        phase="outline",
+        session_state={"outline_mode": "incremental_candidates_validated"},
+        parsed_response={
+            "thought": "raw llm response",
+            "candidate_tasks": [
+                {"outline_id": "candidate_1", "resource_jid": "xarm6@localhost", "action_type": "recover_resource"},
+                {"outline_id": "candidate_2", "resource_jid": "ur5e@localhost", "action_type": "acquire_part", "part_name": "MCP"},
+                {"outline_id": "candidate_3", "resource_jid": "ur5e@localhost", "action_type": "release_part", "part_name": "MCP", "target_ref": "prusa-mk4-2"},
+            ],
+        },
+        turn_entry={
+            "candidate_tasks": [
+                {"outline_id": "RECOVERY_SEQ1_1", "llm_outline_id": "candidate_1", "resource_jid": "xarm6@localhost", "action_type": "recover_resource"},
+                {"outline_id": "RECOVERY_SEQ1_2", "llm_outline_id": "candidate_2", "resource_jid": "ur5e@localhost", "action_type": "acquire_part", "part_name": "MCP"},
+                {"outline_id": "RECOVERY_SEQ1_3", "llm_outline_id": "candidate_3", "resource_jid": "ur5e@localhost", "action_type": "release_part", "part_name": "MCP", "target_ref": "prusa-mk4-2"},
+            ]
+        },
     )
 
-    assert prompt_artifact_path.exists()
-    assert prompt_artifact_path.name.startswith("multi_turn_turn05_finalize_prompt_")
-    assert latest_prompt_artifact_path.exists()
-    assert latest_prompt_artifact_path.name == "multi_turn_turn05_finalize_prompt_latest.txt"
-    assert response_artifact_path.exists()
-    assert response_artifact_path.name.startswith("multi_turn_turn05_finalize_response_")
-    assert latest_response_artifact_path.exists()
-    assert latest_response_artifact_path.name == "multi_turn_turn05_finalize_response_latest.txt"
-    assert session_artifact_path.exists()
-    assert session_artifact_path.name.startswith("multi_turn_session_prepare_")
-    assert latest_session_artifact_path.exists()
-    assert latest_session_artifact_path.name.startswith("multi_turn_session_prepare_")
-    assert latest_session_artifact_path.name.endswith("_latest.txt")
-    turn01_response_latest_path = tmp_path / "multi_turn_turn01_grounding_response_latest.txt"
-    turn02_prompt_latest_path = tmp_path / "multi_turn_turn02_grounding_prompt_latest.txt"
-    assert turn01_response_latest_path.exists()
-    assert turn02_prompt_latest_path.exists()
-    turn01_response_text = turn01_response_latest_path.read_text(encoding="utf-8")
-    turn02_prompt_text = turn02_prompt_latest_path.read_text(encoding="utf-8")
-    assert "\"z\": 1.035" not in turn01_response_text
-    assert "\"z\": 1.035" in turn02_prompt_text
-    assert "Observation Fulfillment Status" in turn02_prompt_text
-    assert "Latest Session Delta" in turn02_prompt_text
-    assert "Session Observation Store" not in turn02_prompt_text
-    assert "Observation Fact Ledger" not in turn02_prompt_text
-    assert "Session Turn History" not in turn02_prompt_text
-    assert turn02_prompt_text.find("Observation Fulfillment Status") < turn02_prompt_text.find(
-        "Current Resource Facts"
-    )
-    session_text = latest_session_artifact_path.read_text(encoding="utf-8")
-    assert "\"current_phase\": \"finalize\"" in session_text
-    assert "\"final_proposal\"" in session_text
+    assert payload.get("thought") == "raw llm response"
+    assert [
+        dict(row).get("outline_id")
+        for row in (payload.get("candidate_tasks") or [])
+    ] == ["RECOVERY_SEQ1_1", "RECOVERY_SEQ1_2", "RECOVERY_SEQ1_3"]
 
-
-# ---------------------------------------------------------------------------
-# CLI entry  (F5 / python test/test_case3_bridge_dryrun.py)
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Case 3 LG-slippage bridge dry-run harness"
     )
     parser.add_argument("--model", default=DEFAULT_LIVE_MODEL, help="OpenAI model name")
-    parser.add_argument(
-        "--reasoning-mode",
-        choices=("single_shot", "multi_turn"),
-        default="multi_turn",
-        help="Bridge reasoning mode to exercise when running the script directly",
-    )
-    parser.add_argument(
-        "--stop-after-phase",
-        choices=("grounding", "outline", "primitive_generation", "finalize"),
-        default=None,
-        help="Optional multi-turn pause point for debugging.",
-    )
-    parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifact")
-    parser.add_argument(
-        "--prepare-only",
-        action="store_true",
-        help="Prepare and log the context trace, then exit before any LLM stage",
-    )
-    parser.add_argument(
-        "--full-run",
-        action="store_true",
-        help="Disable the default multi-turn grounding pause and continue through later phases.",
-    )
+    parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifacts")
     parser.add_argument(
         "--show-llm-input",
-        dest="show_llm_input",
         action="store_true",
-        help="Print the full prepared llm_input JSON in the terminal",
-    )
-    parser.add_argument(
-        "--hide-llm-input",
-        dest="show_llm_input",
-        action="store_false",
-        help=argparse.SUPPRESS,
+        help="Print the prepared llm_input JSON",
     )
     parser.add_argument(
         "--show-prompt",
-        dest="show_prompt",
         action="store_true",
-        help="Print the current mode prompt text in the terminal",
+        help="Print the rendered single-shot prompt",
     )
-    parser.add_argument(
-        "--hide-prompt",
-        dest="show_prompt",
-        action="store_false",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--show-single-shot-prompt",
-        dest="show_prompt",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--hide-single-shot-prompt",
-        dest="show_prompt",
-        action="store_false",
-        help=argparse.SUPPRESS,
-    )
-    parser.set_defaults(show_llm_input=False, show_prompt=False)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-
-    if args.prepare_only:
-        result = asyncio.run(
-            run_case3_bridge_prepare_trace(
-                write_debug=not args.no_debug,
-                llm_model=args.model,
-                bridge_reasoning_mode=args.reasoning_mode,
-            )
-        )
-        print()
-        print(f"Prepare-trace context build completed ({args.reasoning_mode}).")
-        _print_prepare_context_summary(result.get("context_summary") or {})
-        if args.show_llm_input:
-            _print_llm_input(result.get("llm_input") or {})
-        if args.show_prompt:
-            _print_prompt(
-                _extract_latest_prompt_text(result),
-                reasoning_mode=str(result.get("reasoning_mode") or args.reasoning_mode),
-            )
-        _print_debug_artifact_paths(result)
-        sys.exit(0)
-
-    effective_stop_after_phase = args.stop_after_phase
-    if args.reasoning_mode == "multi_turn" and args.full_run and effective_stop_after_phase is None:
-        effective_stop_after_phase = ""
-
     result = asyncio.run(
         run_case3_bridge_dryrun(
             write_debug=not args.no_debug,
             llm_model=args.model,
-            bridge_reasoning_mode=args.reasoning_mode,
-            multi_turn_stop_after_phase=effective_stop_after_phase,
         )
     )
 
     print()
-    print(f"Bridge status ({result.get('reasoning_mode') or args.reasoning_mode}):", result.get("status") or "-")
+    print(f"Bridge status: {result.get('status') or '-'}")
     _print_prepare_context_summary(result.get("context_summary") or {})
     if args.show_prompt:
-        _print_prompt(
-            _extract_latest_prompt_text(result),
-            reasoning_mode=str(result.get("reasoning_mode") or args.reasoning_mode),
-        )
+        turns = result.get("turns") or []
+        if turns:
+            _print_prompt(str(turns[0].get("prompt_text") or ""))
     if args.show_llm_input:
         _print_llm_input(result.get("llm_input") or {})
     _print_debug_artifact_paths(result)

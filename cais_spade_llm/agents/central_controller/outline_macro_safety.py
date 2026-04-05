@@ -56,6 +56,26 @@ def _task_dependency_ids(task: dict[str, Any]) -> list[str]:
     ]
 
 
+def _task_closes_condition_ids(task: dict[str, Any]) -> list[str]:
+    return _dedupe_tokens(
+        [
+            str(item).strip()
+            for item in (task.get("closes_condition_ids") or [])
+            if str(item).strip()
+        ]
+    )
+
+
+def _task_enables_task_ids(task: dict[str, Any]) -> list[str]:
+    return _dedupe_tokens(
+        [
+            str(item).strip()
+            for item in (task.get("enables_task_ids") or [])
+            if str(item).strip()
+        ]
+    )
+
+
 def _task_part_names(task: dict[str, Any], grounded_action: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
     for candidate in (
@@ -261,8 +281,10 @@ def _sequence_finding(
     part_name: str | None = None,
     resource_jid: str | None = None,
     evidence: dict[str, Any] | None = None,
+    claimed_condition_ids: list[str] | None = None,
+    claimed_task_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    finding = {
         "task_id": str(task.get("outline_id") or "").strip(),
         "resource_jid": str(resource_jid or task.get("resource_jid") or "").strip() or None,
         "part_name": str(part_name or task.get("part_name") or "").strip() or None,
@@ -276,6 +298,35 @@ def _sequence_finding(
         "reason": reason,
         "evidence": deepcopy(evidence or {}),
     }
+    if claimed_condition_ids:
+        finding["claimed_condition_ids"] = _dedupe_tokens(claimed_condition_ids)
+    if claimed_task_ids:
+        finding["claimed_task_ids"] = _dedupe_tokens(claimed_task_ids)
+    return finding
+
+
+def _projected_enabled_task_ids(
+    *,
+    pending_tasks_by_id: dict[str, dict[str, Any]],
+    projected_cleared_condition_ids: list[str],
+) -> list[str]:
+    enabled_task_ids: list[str] = []
+    cleared_set = {
+        str(condition_id).strip()
+        for condition_id in projected_cleared_condition_ids
+        if str(condition_id).strip()
+    }
+    for task_id, pending_task in pending_tasks_by_id.items():
+        blocked_by_condition_ids = [
+            str(item).strip()
+            for item in (dict(pending_task).get("blocked_by_condition_ids") or [])
+            if str(item).strip()
+        ]
+        if not blocked_by_condition_ids:
+            continue
+        if all(condition_id in cleared_set for condition_id in blocked_by_condition_ids):
+            enabled_task_ids.append(task_id)
+    return _dedupe_tokens(enabled_task_ids)
 
 
 def _effective_task_part_name(task: dict[str, Any], signature: dict[str, Any]) -> str:
@@ -290,16 +341,10 @@ def _bridge_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(raw_rule, dict):
             continue
         ap_scope = str(raw_rule.get("ap_scope") or "").strip().lower()
-        if ap_scope not in {"bridge", "both"}:
+        if ap_scope not in {"bridge", "both", "nominal"}:
             continue
         dfa_dot = str(raw_rule.get("dfa_dot") or "").strip()
-        bridge_aps = [
-            deepcopy(ap)
-            for ap in (raw_rule.get("bridge_aps") or [])
-            if isinstance(ap, dict)
-            and str(ap.get("label") or "").strip()
-            and str(ap.get("full") or "").strip()
-        ]
+        bridge_aps = _bridge_rule_aps(raw_rule)
         if not dfa_dot or not bridge_aps:
             continue
         rule = deepcopy(raw_rule)
@@ -308,6 +353,91 @@ def _bridge_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
         rule["dfa_dot"] = dfa_dot
         selected.append(rule)
     return selected
+
+
+def _parse_bridge_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
+    full = str(ap_full or "").strip()
+    if not full:
+        return None
+    segments = [segment.strip() for segment in full.split("/") if segment.strip()]
+    if len(segments) < 5:
+        return None
+    ap_kind = segments[0]
+    part = segments[2] if len(segments) > 2 else "any"
+    resource = segments[3] if len(segments) > 3 else "any"
+    verb = segments[4] if len(segments) > 4 else ""
+    params: dict[str, str] = {}
+    for segment in segments[5:]:
+        if "=" not in segment:
+            continue
+        key, value = segment.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            params[key] = value
+    destination = str(params.get("destination") or "").strip()
+    if ap_kind == "ap_event":
+        if verb == "place_approach":
+            return {
+                "mode": (
+                    "move_part_to_destination"
+                    if part not in {"", "any"}
+                    else "resource_move_to_destination"
+                ),
+                "part": part or "any",
+                "resource": resource or "any",
+                "destination": destination,
+            }
+        return None
+    if ap_kind != "ap_state":
+        return None
+    if verb in {"assembled", "placed"} and part not in {"", "any"}:
+        return {
+            "mode": "part_goal_satisfied",
+            "part": part,
+            "resource": resource or "any",
+            "destination": destination,
+            "states": [verb],
+        }
+    if verb in {"positioned", "placed"}:
+        return {
+            "mode": "resource_in_destination",
+            "part": part or "any",
+            "resource": resource or "any",
+            "destination": destination,
+        }
+    return None
+
+
+def _bridge_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit_bridge_aps = [
+        deepcopy(ap)
+        for ap in (raw_rule.get("bridge_aps") or [])
+        if isinstance(ap, dict)
+        and str(ap.get("label") or "").strip()
+        and str(ap.get("full") or "").strip()
+    ]
+    if explicit_bridge_aps:
+        return explicit_bridge_aps
+    derived_aps: list[dict[str, Any]] = []
+    for raw_ap in (raw_rule.get("aps") or []):
+        if not isinstance(raw_ap, dict):
+            continue
+        label = str(raw_ap.get("label") or "").strip()
+        full = str(raw_ap.get("full") or "").strip()
+        selector = dict(raw_ap.get("selector") or {})
+        if not selector:
+            selector = dict(_parse_bridge_selector_from_ap_full(full) or {})
+        if not label or not full or not selector:
+            continue
+        derived_aps.append(
+            {
+                "label": label,
+                "full": full,
+                "selector": selector,
+            }
+        )
+    return derived_aps
 
 
 def _bridge_monitor_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -851,12 +981,31 @@ def validate_outline_macro_cca_constraints(
 ) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     condition_lookup = _modeled_gap_unmet_conditions_by_id(llm_input)
+    pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
     fallback_parts = _fault_event_fallback_parts(llm_input)
     task_type = _task_type_for_cca(
         task,
         task_types_by_id=task_types_by_id,
         grounded_action=grounded_action,
     )
+    invalid_dependency_ids = [
+        dependency_id
+        for dependency_id in _task_dependency_ids(task)
+        if dependency_id not in task_index_by_id
+    ]
+    if invalid_dependency_ids:
+        finding = _sequence_finding(
+            task=task,
+            constraint_code="invalid_dependency_reference",
+            reason=(
+                "depends_on may reference only outline_id values from outline rows in "
+                f"this same response ({', '.join(invalid_dependency_ids)})"
+            ),
+            part_name=grounded_action.get("part_name"),
+            evidence={"dependency_ids": deepcopy(invalid_dependency_ids)},
+        )
+        finding["dependency_ids"] = deepcopy(invalid_dependency_ids)
+        findings.append(finding)
 
     if task_type == "continuation_resume":
         prerequisite_ids = _continuation_prerequisite_task_ids(
@@ -943,6 +1092,117 @@ def validate_outline_macro_cca_constraints(
             fallback_parts=fallback_parts,
         )
     ]
+    claimed_condition_ids = _task_closes_condition_ids(task)
+    if claimed_condition_ids:
+        not_currently_unmet = [
+            condition_id
+            for condition_id in claimed_condition_ids
+            if condition_id not in condition_lookup
+        ]
+        if not_currently_unmet:
+            findings.append(
+                _sequence_finding(
+                    task=task,
+                    constraint_code="claimed_condition_not_currently_unmet",
+                    reason=(
+                        "closes_condition_ids references continuation condition ids "
+                        "that are not currently unmet "
+                        f"({', '.join(not_currently_unmet)})"
+                    ),
+                    part_name=grounded_action.get("part_name"),
+                    evidence={"claimed_condition_ids": deepcopy(not_currently_unmet)},
+                    claimed_condition_ids=not_currently_unmet,
+                )
+            )
+        not_cleared = [
+            condition_id
+            for condition_id in claimed_condition_ids
+            if condition_id in condition_lookup
+            and condition_id not in projected_cleared_condition_ids
+        ]
+        if not_cleared:
+            findings.append(
+                _sequence_finding(
+                    task=task,
+                    constraint_code="claimed_condition_not_cleared",
+                    reason=(
+                        "closes_condition_ids claims continuation conditions that remain "
+                        f"unmet after projection ({', '.join(not_cleared)})"
+                    ),
+                    part_name=grounded_action.get("part_name"),
+                    evidence={"claimed_condition_ids": deepcopy(not_cleared)},
+                    claimed_condition_ids=not_cleared,
+                )
+            )
+    claimed_task_ids = _task_enables_task_ids(task)
+    if claimed_task_ids:
+        not_pending = [
+            task_id
+            for task_id in claimed_task_ids
+            if task_id not in pending_tasks_by_id
+        ]
+        if not_pending:
+            findings.append(
+                _sequence_finding(
+                    task=task,
+                    constraint_code="claimed_task_not_pending",
+                    reason=(
+                        "enables_task_ids references task ids that are not pending "
+                        f"nominal tasks ({', '.join(not_pending)})"
+                    ),
+                    part_name=grounded_action.get("part_name"),
+                    evidence={"claimed_task_ids": deepcopy(not_pending)},
+                    claimed_task_ids=not_pending,
+                )
+            )
+        not_currently_blocked = [
+            task_id
+            for task_id in claimed_task_ids
+            if task_id in pending_tasks_by_id
+            and not [
+                str(item).strip()
+                for item in (dict(pending_tasks_by_id.get(task_id) or {}).get("blocked_by_condition_ids") or [])
+                if str(item).strip()
+            ]
+        ]
+        if not_currently_blocked:
+            findings.append(
+                _sequence_finding(
+                    task=task,
+                    constraint_code="claimed_task_not_currently_blocked",
+                    reason=(
+                        "enables_task_ids references nominal tasks that are not currently "
+                        f"blocked in recovery gap state ({', '.join(not_currently_blocked)})"
+                    ),
+                    part_name=grounded_action.get("part_name"),
+                    evidence={"claimed_task_ids": deepcopy(not_currently_blocked)},
+                    claimed_task_ids=not_currently_blocked,
+                )
+            )
+        projected_enabled_task_ids = _projected_enabled_task_ids(
+            pending_tasks_by_id=pending_tasks_by_id,
+            projected_cleared_condition_ids=projected_cleared_condition_ids,
+        )
+        not_enabled = [
+            task_id
+            for task_id in claimed_task_ids
+            if task_id in pending_tasks_by_id
+            and task_id not in projected_enabled_task_ids
+        ]
+        if not_enabled:
+            findings.append(
+                _sequence_finding(
+                    task=task,
+                    constraint_code="claimed_task_not_enabled",
+                    reason=(
+                        "enables_task_ids claims blocked nominal tasks that remain blocked "
+                        f"after projection ({', '.join(not_enabled)})"
+                    ),
+                    part_name=grounded_action.get("part_name"),
+                    evidence={"claimed_task_ids": deepcopy(not_enabled)},
+                    claimed_task_ids=not_enabled,
+                )
+            )
     if previously_cleared_condition_ids:
         reopened_condition_ids = [
             condition_id

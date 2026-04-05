@@ -2220,6 +2220,10 @@ class RobotAgent(ResourceAgent):
         desired_part_location = str(expected_part.get("location") or "").strip()
         desired_resource_location = str(expected_resource.get("location") or "").strip()
         desired_resource_state = str(expected_resource.get("current_state") or "").strip()
+        allows_abstract_idle_recovery = (
+            effect_scope == "resource_only"
+            and desired_resource_state.lower() == "idle"
+        )
         part_affecting = bool(
             effect_scope in {"part_only", "resource_and_part"}
             or any(
@@ -2235,6 +2239,7 @@ class RobotAgent(ResourceAgent):
         if (
             effect_scope == "resource_only"
             and desired_resource_state
+            and not allows_abstract_idle_recovery
             and not (
                 named_pose
                 or target_info.get("pose")

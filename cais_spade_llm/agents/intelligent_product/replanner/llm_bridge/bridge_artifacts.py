@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -39,6 +40,37 @@ def _bridge_debug_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(prepared_bridge_request, dict):
         return dict(prepared_bridge_request.get("bridge_debug") or {})
     return {}
+
+
+def _artifact_task_action_summary(task: dict[str, Any]) -> str:
+    action_type = str(task.get("action_type") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    target_ref = str(task.get("target_ref") or "").strip()
+    if action_type == "recover_resource":
+        return f"recover resource via {target_ref}" if target_ref else "recover resource"
+    if action_type == "acquire_part":
+        return f"acquire {part_name}" if part_name else "acquire part"
+    if action_type == "release_part":
+        if part_name and target_ref:
+            return f"release {part_name} to {target_ref}"
+        if part_name:
+            return f"release {part_name}"
+        return "release part"
+    return str(task.get("description") or "").strip() or "state transition"
+
+
+def _artifact_outline_sequence_summary(tasks: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        outline_id = str(task.get("outline_id") or "").strip()
+        resource_jid = str(task.get("resource_jid") or "").strip()
+        part_name = str(task.get("part_name") or "").strip()
+        label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
+        label = " / ".join(label_parts) if label_parts else "accepted task"
+        lines.append(f"{label} -> {_artifact_task_action_summary(task)}")
+    return lines
 
 
 def _multi_turn_artifact_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -157,8 +189,17 @@ def _extract_session_transcript(payload: dict[str, Any]) -> str:
         return ""
     if not list(multi_turn_session.get("turns") or []):
         return ""
+    accepted_prefix = [
+        deepcopy(row)
+        for row in (multi_turn_session.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    artifact_session = {
+        "final_accepted_outline_summary": _artifact_outline_sequence_summary(accepted_prefix),
+        **multi_turn_session,
+    }
     return json.dumps(
-        multi_turn_session,
+        artifact_session,
         indent=2,
         default=str,
         ensure_ascii=True,

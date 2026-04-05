@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.shared import (
@@ -62,6 +63,169 @@ def _compact_outline_tasks(outline_tasks: list[dict[str, Any]]) -> list[dict[str
             row["depends_on"] = depends_on
         compact_tasks.append(row)
     return compact_tasks
+
+
+def _outline_task_summary(raw_task: dict[str, Any]) -> str:
+    if not isinstance(raw_task, dict):
+        return ""
+    outline_id = str(raw_task.get("outline_id") or "").strip()
+    description = str(raw_task.get("description") or "").strip()
+    resource_jid = str(raw_task.get("resource_jid") or "").strip()
+    part_name = str(raw_task.get("part_name") or "").strip()
+    if description:
+        prefix = f"{outline_id}: " if outline_id else ""
+        return f"{prefix}{description}"
+    fallback_bits = [bit for bit in (resource_jid, part_name) if bit]
+    if not fallback_bits and outline_id:
+        return outline_id
+    fallback = " / ".join(fallback_bits)
+    if outline_id and fallback:
+        return f"{outline_id}: {fallback}"
+    return fallback
+
+
+def _outline_memory_sanitize_reason(reason: Any) -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"cond_[A-Za-z0-9]+", "<condition>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _outline_memory_reason_task_id(reason: Any) -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"task '([^']+)':", text)
+    return str(match.group(1) or "").strip() if match else ""
+
+
+def _outline_memory_from_session_state(
+    session_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    memory: list[dict[str, Any]] = []
+    for raw_turn in reversed(list(session_state.get("turns") or [])):
+        if not isinstance(raw_turn, dict):
+            continue
+        if str(raw_turn.get("phase") or "").strip().lower() != "outline":
+            continue
+        turn_index = int(raw_turn.get("turn_index") or 0)
+        outline_tasks = [
+            deepcopy(row)
+            for row in (raw_turn.get("outline_tasks") or [])
+            if isinstance(row, dict)
+        ]
+        accepted_rows_source = [
+            deepcopy(row)
+            for row in (raw_turn.get("accepted_prefix") or [])
+            if isinstance(row, dict)
+        ]
+        outline_validation = dict(raw_turn.get("outline_validation") or {})
+        if (
+            not accepted_rows_source
+            and str(outline_validation.get("status") or "").strip().lower() == "passed"
+        ):
+            accepted_rows_source = deepcopy(outline_tasks)
+
+        accepted_rows = [
+            _outline_task_summary(row)
+            for row in accepted_rows_source
+            if _outline_task_summary(row)
+        ]
+        accepted_ids = {
+            str(dict(row).get("outline_id") or "").strip()
+            for row in accepted_rows_source
+            if str(dict(row).get("outline_id") or "").strip()
+        }
+        outline_rows_by_id = {
+            str(dict(row).get("outline_id") or "").strip(): deepcopy(row)
+            for row in outline_tasks
+            if isinstance(row, dict) and str(dict(row).get("outline_id") or "").strip()
+        }
+        rejected_ids: list[str] = []
+        for finding in (
+            list(raw_turn.get("task_outline_validation_findings") or [])
+            + list(raw_turn.get("outline_validation_findings") or [])
+        ):
+            if not isinstance(finding, dict):
+                continue
+            task_id = str(finding.get("task_id") or "").strip()
+            if task_id and task_id in outline_rows_by_id and task_id not in rejected_ids:
+                rejected_ids.append(task_id)
+        if not rejected_ids and outline_tasks:
+            for row in outline_tasks:
+                outline_id = str(dict(row).get("outline_id") or "").strip()
+                if outline_id and outline_id not in accepted_ids:
+                    rejected_ids.append(outline_id)
+                    break
+
+        rejected_rows = [
+            _outline_task_summary(outline_rows_by_id[row_id])
+            for row_id in rejected_ids
+            if row_id in outline_rows_by_id and _outline_task_summary(outline_rows_by_id[row_id])
+        ]
+        reasons: list[str] = []
+        raw_reasons = [
+            _outline_memory_sanitize_reason(item)
+            for item in (raw_turn.get("validation_violations") or [])
+            if _outline_memory_sanitize_reason(item)
+        ]
+        if rejected_ids:
+            for reason in raw_reasons:
+                task_id = _outline_memory_reason_task_id(reason)
+                if task_id and task_id not in rejected_ids:
+                    continue
+                if reason not in reasons:
+                    reasons.append(reason)
+        else:
+            reasons = raw_reasons
+
+        row: dict[str, Any] = {"turn": turn_index}
+        if accepted_rows:
+            row["accepted_rows"] = accepted_rows
+        if rejected_rows:
+            row["rejected_rows"] = rejected_rows
+        if reasons:
+            row["reasons"] = reasons
+        if len(row) > 1:
+            memory.append(row)
+    return memory
+
+
+def _outline_memory_text(memory: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in (memory or []):
+        turn_index = int(row.get("turn") or 0)
+        lines.append(f"Turn {turn_index}")
+        accepted_rows = [
+            str(item).strip()
+            for item in (row.get("accepted_rows") or [])
+            if str(item).strip()
+        ]
+        if accepted_rows:
+            lines.append("Accepted:")
+            lines.extend(f"- {item}" for item in accepted_rows)
+        rejected_rows = [
+            str(item).strip()
+            for item in (row.get("rejected_rows") or [])
+            if str(item).strip()
+        ]
+        if rejected_rows:
+            lines.append("Rejected:")
+            lines.extend(f"- {item}" for item in rejected_rows)
+        reasons = [
+            str(item).strip()
+            for item in (row.get("reasons") or [])
+            if str(item).strip()
+        ]
+        if reasons:
+            lines.append("Why:")
+            lines.extend(f"- {item}" for item in reasons)
+        lines.append("")
+    while lines and not str(lines[-1]).strip():
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _compact_turn_history(session_state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -260,101 +424,164 @@ def _outline_prompt_llm_input(llm_input: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _outline_prompt_grounded_feasibility_facts(
-    grounded_feasibility_facts: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    rendered_rows: list[dict[str, Any]] = []
-    for raw_row in (grounded_feasibility_facts or []):
-        if not isinstance(raw_row, dict):
-            continue
-        row = {
-            "part_name": deepcopy(raw_row.get("part_name")),
-            "pose_source": deepcopy(raw_row.get("pose_source")),
-            "pose": deepcopy(raw_row.get("pose")),
-            "resource_evidence": [],
-        }
-        for raw_evidence in (raw_row.get("resource_evidence") or []):
-            if not isinstance(raw_evidence, dict):
-                continue
-            evidence = {
-                "resource_jid": deepcopy(raw_evidence.get("resource_jid")),
-                "workspace_bounds": deepcopy(raw_evidence.get("workspace_bounds")),
-                "workspace_contains_observed_pose": bool(
-                    raw_evidence.get("workspace_contains_observed_pose")
-                ),
-                "workspace_violations": deepcopy(raw_evidence.get("workspace_violations") or []),
-            }
-            temporary_state_blockers = [
-                str(item).strip()
-                for item in (raw_evidence.get("readiness_blockers") or [])
-                if str(item).strip()
-            ]
-            if temporary_state_blockers:
-                evidence["temporary_state_blockers"] = temporary_state_blockers
-            row["resource_evidence"].append(evidence)
-        rendered_rows.append(row)
-    return rendered_rows
-
-
 def _outline_prompt_validation_findings(
     outline_validation_findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    scalar_fields = (
+        "task_id",
+        "resource_jid",
+        "part_name",
+        "constraint_family",
+        "constraint_code",
+        "constraint_owner",
+        "validation_status",
+        "pose_source",
+        "kind",
+        "entity",
+        "expected",
+        "actual",
+        "blocking_rule_id",
+        "blocked_nominal_task_id",
+        "failed_reason",
+        "named_pose",
+        "conflicting_part",
+        "current_holder_resource_jid",
+        "blocked_task_id",
+        "blocked_part_name",
+        "blocked_resource_jid",
+        "rule_id",
+    )
+    list_fields = (
+        "failed_axes",
+        "required_dependency_ids",
+        "dependency_ids",
+        "claimed_task_ids",
+        "state_tokens",
+    )
+    object_fields = ("pose", "workspace_bounds")
     rendered_rows: list[dict[str, Any]] = []
     for raw_row in (outline_validation_findings or []):
         if not isinstance(raw_row, dict):
             continue
-        row = deepcopy(raw_row)
-        failed_axes = [
-            str(item).strip()
-            for item in (row.get("failed_axes") or [])
-            if str(item).strip()
-        ]
-        if failed_axes == ["named_pose_not_available"]:
-            rendered_rows.append(
-                {
-                    "task_id": str(row.get("task_id") or "").strip(),
-                    "resource_jid": str(row.get("resource_jid") or "").strip(),
-                    "part_name": str(row.get("part_name") or "").strip() or None,
-                    "pose_source": str(row.get("pose_source") or "").strip(),
-                    "finding_kind": "contract_violation",
-                    "contract_violation": "named_pose_not_available",
-                    "named_pose": deepcopy(row.get("named_pose")),
-                }
-            )
-            continue
-        rendered_rows.append(row)
+        row = dict(raw_row)
+        rendered_row: dict[str, Any] = {}
+        for field_name in scalar_fields:
+            value = row.get(field_name)
+            if value not in (None, "", [], {}):
+                rendered_row[field_name] = deepcopy(value)
+        for field_name in list_fields:
+            values = [
+                str(item).strip()
+                for item in (row.get(field_name) or [])
+                if str(item).strip()
+            ]
+            if values:
+                rendered_row[field_name] = values
+        for field_name in object_fields:
+            value = row.get(field_name)
+            if value not in (None, "", [], {}):
+                rendered_row[field_name] = deepcopy(value)
+        if rendered_row:
+            rendered_rows.append(rendered_row)
     return rendered_rows
 
 
 def _outline_prompt_pruned_actions(
     pruned_actions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    rendered_rows: list[dict[str, Any]] = []
+) -> list[str]:
+    rendered_rows: list[str] = []
+    inferred_constraint_codes = {
+        "observed_pose_unreachable": "workspace_unreachable",
+        "resource_holds_part": "holder_conflict",
+        "part_held_by_other": "resource_holds_other_part",
+        "required_part_not_held": "required_part_not_held",
+        "source_reference_unavailable": "source_reference_unavailable",
+        "unsupported_resource_target": "unsupported_resource_target",
+        "gripper_closed_without_target_part": "gripper_occupancy_conflict",
+        "condition_unmet": "blocker_open",
+        "named_pose_unavailable": "named_pose_unavailable",
+    }
     for raw_row in (pruned_actions or []):
         if not isinstance(raw_row, dict):
             continue
+        if str(raw_row.get("summary") or "").strip():
+            rendered_rows.append(str(raw_row.get("summary") or "").strip())
+            continue
         action = dict(raw_row.get("action") or {})
-        row: dict[str, Any] = {}
-        for field_name in (
-            "resource_jid",
-            "task_kind",
-            "part_name",
-            "named_pose",
-            "source_location",
-            "target_location",
-            "end_resource_state",
-            "end_gripper_state",
-            "end_held_part",
-        ):
-            value = action.get(field_name)
-            if value not in (None, "", [], {}):
-                row[field_name] = deepcopy(value)
+        guard = dict(raw_row.get("guard") or {})
+        summary = _outline_task_summary(dict(raw_row.get("task") or {}))
+        if not summary:
+            summary = _outline_task_summary(
+                {
+                    "outline_id": str(action.get("resource_jid") or "").strip(),
+                    "description": str(raw_row.get("reason") or "").strip(),
+                }
+            )
+        constraint_code = str(guard.get("constraint_code") or "").strip()
+        if not constraint_code:
+            constraint_code = str(
+                inferred_constraint_codes.get(str(guard.get("kind") or "").strip(), "")
+            ).strip()
         reason = str(raw_row.get("reason") or "").strip()
-        if reason:
-            row["reason"] = reason
-        if row:
-            rendered_rows.append(row)
+        if not reason and constraint_code:
+            reason = constraint_code.replace("_", " ")
+        if summary and reason:
+            rendered_rows.append(f"{summary} — {reason}")
+        elif summary:
+            rendered_rows.append(summary)
+        elif reason:
+            rendered_rows.append(reason)
     return rendered_rows
+
+
+_PERSISTENT_PRUNE_CONSTRAINT_CODES = {
+    "workspace_unreachable",
+    "unsupported_resource_target",
+    "named_pose_unavailable",
+}
+
+
+def _outline_prompt_grouped_pruned_actions(
+    pruned_actions: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {
+        "temporary": [],
+        "persistent": [],
+    }
+    inferred_constraint_codes = {
+        "observed_pose_unreachable": "workspace_unreachable",
+        "resource_holds_part": "holder_conflict",
+        "part_held_by_other": "resource_holds_other_part",
+        "required_part_not_held": "required_part_not_held",
+        "source_reference_unavailable": "source_reference_unavailable",
+        "unsupported_resource_target": "unsupported_resource_target",
+        "gripper_closed_without_target_part": "gripper_occupancy_conflict",
+        "condition_unmet": "blocker_open",
+        "named_pose_unavailable": "named_pose_unavailable",
+    }
+    for raw_row in (pruned_actions or []):
+        if not isinstance(raw_row, dict):
+            continue
+        constraint_code = str(dict(raw_row.get("guard") or {}).get("constraint_code") or "").strip()
+        if not constraint_code:
+            constraint_code = str(
+                inferred_constraint_codes.get(
+                    str(dict(raw_row.get("guard") or {}).get("kind") or "").strip(),
+                    str(dict(raw_row).get("constraint_code") or "").strip(),
+                )
+            ).strip()
+        bucket = (
+            "persistent"
+            if constraint_code in _PERSISTENT_PRUNE_CONSTRAINT_CODES
+            else "temporary"
+        )
+        summary_rows = _outline_prompt_pruned_actions([raw_row])
+        grouped[bucket].extend(summary_rows)
+    return {
+        key: value
+        for key, value in grouped.items()
+        if value
+    }
 
 
 def _outline_prompt_blocked_nominal_tasks(
@@ -371,29 +598,6 @@ def _outline_prompt_blocked_nominal_tasks(
     return rendered_rows
 
 
-def _outline_prompt_condition_summary(condition_row: dict[str, Any]) -> str:
-    kind = str(condition_row.get("kind") or "").strip()
-    source_task_id = str(condition_row.get("source_task_id") or "").strip()
-    entity = str(condition_row.get("entity") or "").strip()
-    expected = str(condition_row.get("expected") or "").strip()
-    blocking_reason = str(condition_row.get("blocking_reason") or "").strip()
-
-    if kind == "focused_resource_terminal_state":
-        task_text = f" before nominal task '{source_task_id}' can resume" if source_task_id else ""
-        if entity and expected:
-            return f"{entity} must reach state '{expected}'{task_text}."
-        if entity:
-            return f"{entity} must recover to its required terminal state{task_text}."
-    if kind == "safety_blocked_suffix_task":
-        if source_task_id and blocking_reason:
-            return f"Nominal task '{source_task_id}' remains blocked: {blocking_reason}"
-        if blocking_reason:
-            return blocking_reason
-        if source_task_id:
-            return f"Nominal task '{source_task_id}' remains blocked until its factual blocker is cleared."
-    return blocking_reason or ""
-
-
 def _outline_prompt_unmet_continuation_conditions(
     recovery_gap_state: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -401,27 +605,394 @@ def _outline_prompt_unmet_continuation_conditions(
     for raw_row in (recovery_gap_state.get("unmet_continuation_conditions") or []):
         if not isinstance(raw_row, dict):
             continue
-        summary = _outline_prompt_condition_summary(raw_row)
         row: dict[str, Any] = {}
-        if summary:
-            row["summary"] = summary
-        kind = str(raw_row.get("kind") or "").strip()
-        if kind:
-            row["kind"] = kind
-        entity = str(raw_row.get("entity") or "").strip()
-        if entity:
-            row["entity"] = entity
-        expected = str(raw_row.get("expected") or "").strip()
-        if expected:
-            row["expected"] = expected
+        for field_name in (
+            "kind",
+            "entity",
+            "expected",
+            "actual",
+            "part_name",
+            "resource_jid",
+            "target_location",
+            "requirement_id",
+        ):
+            value = raw_row.get(field_name)
+            if value not in (None, "", [], {}):
+                row[field_name] = deepcopy(value)
         source_task_id = str(raw_row.get("source_task_id") or "").strip()
         if source_task_id:
             row["blocked_nominal_task_id"] = source_task_id
-        blocking_reason = str(raw_row.get("blocking_reason") or "").strip()
-        if blocking_reason:
-            row["blocking_reason"] = blocking_reason
+        blocking_rule_id = str(
+            raw_row.get("blocking_rule_id") or raw_row.get("rule_id") or ""
+        ).strip()
+        if blocking_rule_id:
+            row["blocking_rule_id"] = blocking_rule_id
         if row:
             rendered_rows.append(row)
+    return rendered_rows
+
+
+def _outline_prompt_current_blockers(
+    llm_input: dict[str, Any],
+    recovery_gap_state: dict[str, Any],
+) -> list[str]:
+    observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
+    resource_rows_by_jid = {
+        str(row.get("resource_jid") or "").strip(): dict(row)
+        for row in (observed_runtime_state.get("resources") or [])
+        if isinstance(row, dict) and str(row.get("resource_jid") or "").strip()
+    }
+    part_rows_by_name = {
+        str(row.get("part_name") or "").strip(): dict(row)
+        for row in (llm_input.get("part_facts") or [])
+        if isinstance(row, dict) and str(row.get("part_name") or "").strip()
+    }
+    blocked_tasks_by_id = {
+        str(row.get("id") or "").strip(): dict(row)
+        for row in (recovery_gap_state.get("blocked_nominal_tasks") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    fallback_parts = _outline_fault_event_fallback_parts(llm_input)
+    lines: list[str] = []
+
+    for raw_condition in (recovery_gap_state.get("unmet_continuation_conditions") or []):
+        if not isinstance(raw_condition, dict):
+            continue
+        kind = str(raw_condition.get("kind") or "").strip()
+        blocked_task_id = str(raw_condition.get("source_task_id") or "").strip()
+        blocked_task = dict(blocked_tasks_by_id.get(blocked_task_id) or {})
+        blocked_part_name = str(
+            raw_condition.get("part_name") or blocked_task.get("part") or ""
+        ).strip()
+        if kind == "focused_resource_terminal_state":
+            resource_jid = str(
+                raw_condition.get("entity") or raw_condition.get("resource_jid") or ""
+            ).strip()
+            actual_state = str(raw_condition.get("actual") or "").strip()
+            expected_state = str(raw_condition.get("expected") or "").strip()
+            prefix = (
+                f"{blocked_task_id} remains blocked because "
+                if blocked_task_id
+                else "A blocked recovery step remains blocked because "
+            )
+            current_text = (
+                f"{resource_jid}.current_state is '{actual_state}'"
+                if resource_jid and actual_state
+                else f"{resource_jid} has not reached the required recovery state"
+                if resource_jid
+                else "the focused resource has not reached the required recovery state"
+            )
+            target_text = (
+                f" and must become '{expected_state}'." if expected_state else "."
+            )
+            lines.append(prefix + current_text + target_text)
+            continue
+        if kind == "safety_blocked_suffix_task":
+            blocker_part_names = _outline_extract_blocker_part_names(
+                blocking_reason=str(raw_condition.get("blocking_reason") or "").strip(),
+                part_rows_by_name=part_rows_by_name,
+                fallback_parts=fallback_parts,
+            )
+            blocker_part_name = blocker_part_names[0] if blocker_part_names else ""
+            blocker_part_row = dict(part_rows_by_name.get(blocker_part_name) or {})
+            blocker_goal_location = str(blocker_part_row.get("goal_location") or "").strip()
+            target_text = (
+                f" on '{blocker_goal_location}'" if blocker_goal_location else ""
+            )
+            blocked_task_text = (
+                f"{blocked_task_id} for '{blocked_part_name}'"
+                if blocked_task_id and blocked_part_name
+                else blocked_task_id
+                if blocked_task_id
+                else f"the blocked suffix for '{blocked_part_name}'"
+                if blocked_part_name
+                else "the blocked suffix"
+            )
+            if blocker_part_name:
+                lines.append(
+                    f"{blocked_task_text} remains blocked until '{blocker_part_name}' "
+                    f"is placed or assembled{target_text}."
+                )
+            continue
+
+    for raw_task in (recovery_gap_state.get("blocked_nominal_tasks") or []):
+        if not isinstance(raw_task, dict):
+            continue
+        task_id = str(raw_task.get("id") or "").strip()
+        resource_jid = str(raw_task.get("resource") or "").strip()
+        part_name = str(raw_task.get("part") or "").strip()
+        resource_row = dict(resource_rows_by_jid.get(resource_jid) or {})
+        held_part = str(resource_row.get("held_part") or "").strip()
+        if task_id and resource_jid and part_name and held_part and held_part != part_name:
+            lines.append(
+                f"{task_id} for '{part_name}' cannot start because '{resource_jid}' "
+                f"is currently holding '{held_part}'."
+            )
+
+    deduped_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        text = str(line).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped_lines.append(text)
+    return deduped_lines
+
+
+def _outline_fault_event_fallback_parts(llm_input: dict[str, Any]) -> list[str]:
+    fault_event = dict(llm_input.get("fault_event") or {})
+    return [
+        str(item).strip()
+        for item in (fault_event.get("affected_part_names") or [])
+        if str(item).strip()
+    ]
+
+
+def _outline_extract_blocker_part_names(
+    *,
+    blocking_reason: str,
+    part_rows_by_name: dict[str, dict[str, Any]],
+    fallback_parts: list[str],
+) -> list[str]:
+    preferred_fallback = [
+        str(part_name).strip()
+        for part_name in fallback_parts
+        if str(part_name).strip()
+    ]
+    if preferred_fallback:
+        return preferred_fallback
+    blocker_text = str(blocking_reason or "").strip().lower()
+    blocker_parts = [
+        part_name
+        for part_name in part_rows_by_name
+        if part_name and part_name.lower() in blocker_text
+    ]
+    return blocker_parts or preferred_fallback
+
+
+def _outline_prompt_continuation_clearance_facts(
+    llm_input: dict[str, Any],
+    recovery_gap_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    part_rows_by_name = {
+        str(row.get("part_name") or "").strip(): dict(row)
+        for row in (llm_input.get("part_facts") or [])
+        if isinstance(row, dict) and str(row.get("part_name") or "").strip()
+    }
+    fallback_parts = _outline_fault_event_fallback_parts(llm_input)
+    rendered_rows: list[dict[str, Any]] = []
+    for raw_condition in (recovery_gap_state.get("unmet_continuation_conditions") or []):
+        if not isinstance(raw_condition, dict):
+            continue
+        row: dict[str, Any] = {}
+        condition_id = str(raw_condition.get("condition_id") or "").strip()
+        if condition_id:
+            row["condition_id"] = condition_id
+        kind = str(raw_condition.get("kind") or "").strip()
+        if kind:
+            row["kind"] = kind
+        blocked_nominal_task_id = str(raw_condition.get("source_task_id") or "").strip()
+        if blocked_nominal_task_id:
+            row["blocked_nominal_task_id"] = blocked_nominal_task_id
+        blocking_rule_id = str(
+            raw_condition.get("blocking_rule_id") or raw_condition.get("rule_id") or ""
+        ).strip()
+        if blocking_rule_id:
+            row["blocking_rule_id"] = blocking_rule_id
+
+        if kind == "focused_resource_terminal_state":
+            resource_jid = str(
+                raw_condition.get("entity") or raw_condition.get("resource_jid") or ""
+            ).strip()
+            expected_state = str(raw_condition.get("expected") or "").strip()
+            if resource_jid and expected_state:
+                row["clear_when"] = {
+                    "entity_kind": "resource",
+                    "entity": resource_jid,
+                    "field": "current_state",
+                    "equals": expected_state,
+                }
+        elif kind == "safety_blocked_suffix_task":
+            blocker_part_names = _outline_extract_blocker_part_names(
+                blocking_reason=str(raw_condition.get("blocking_reason") or "").strip(),
+                part_rows_by_name=part_rows_by_name,
+                fallback_parts=fallback_parts,
+            )
+            blocker_part_name = blocker_part_names[0] if blocker_part_names else ""
+            part_row = dict(part_rows_by_name.get(blocker_part_name) or {})
+            goal_location = str(part_row.get("goal_location") or "").strip()
+            satisfies_any = [
+                {"field": "current_state", "equals": "placed"},
+                {"field": "current_state", "equals": "assembled"},
+            ]
+            if goal_location:
+                satisfies_any.append(
+                    {"field": "current_location", "equals": goal_location}
+                )
+            if blocker_part_name and satisfies_any:
+                row["clear_when"] = {
+                    "entity_kind": "part",
+                    "entity": blocker_part_name,
+                    "satisfies_any": satisfies_any,
+                }
+        if row:
+            rendered_rows.append(row)
+    return rendered_rows
+
+
+def _outline_prompt_resource_transition_facts(
+    llm_input: dict[str, Any],
+) -> list[dict[str, Any]]:
+    observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
+    part_facts = [
+        dict(row)
+        for row in (llm_input.get("part_facts") or [])
+        if isinstance(row, dict)
+    ]
+    rendered_rows: list[dict[str, Any]] = []
+    for raw_resource in (observed_runtime_state.get("resources") or []):
+        if not isinstance(raw_resource, dict):
+            continue
+        resource_row = dict(raw_resource)
+        resource_jid = str(resource_row.get("resource_jid") or "").strip()
+        if not resource_jid:
+            continue
+        row: dict[str, Any] = {"resource_jid": resource_jid}
+        resource_type = str(resource_row.get("resource_type") or "").strip()
+        if resource_type:
+            row["resource_type"] = resource_type
+
+        tracked_state_fields = [
+            field_name
+            for field_name in (
+                "current_state",
+                "gripper_state",
+                "held_part",
+                "current_location",
+                "current_pose",
+            )
+            if field_name in resource_row
+        ]
+        if tracked_state_fields:
+            row["tracked_state_fields"] = tracked_state_fields
+
+        valid_reference_families: list[str] = []
+        if list(resource_row.get("named_poses") or []) or list(
+            resource_row.get("available_named_poses") or []
+        ):
+            valid_reference_families.append("named_pose")
+        if (
+            str(resource_row.get("current_location") or "").strip()
+            or tracked_state_fields
+        ):
+            valid_reference_families.append("location")
+        if isinstance(resource_row.get("current_pose"), dict) or isinstance(
+            resource_row.get("workspace_bounds"), dict
+        ):
+            valid_reference_families.append("pose")
+        if valid_reference_families:
+            row["valid_reference_families"] = valid_reference_families
+
+        has_holder_semantics = bool(
+            "held_part" in resource_row
+            or "gripper_state" in resource_row
+            or any(
+                str(dict(part_row).get("current_holder_resource_jid") or "").strip()
+                == resource_jid
+                for part_row in part_facts
+            )
+        )
+        modeled_invariants: list[dict[str, Any]] = []
+        modeled_transitions: list[dict[str, Any]] = []
+        if has_holder_semantics:
+            modeled_invariants.append(
+                {
+                    "kind": "single_part_occupancy",
+                    "field": "held_part",
+                    "max_items": 1,
+                }
+            )
+            modeled_transitions.extend(
+                [
+                    {
+                        "kind": "holder_clearance",
+                        "pre_state": {"held_part": "<part>"},
+                        "post_state": {"held_part": None},
+                    },
+                    {
+                        "kind": "holder_assignment",
+                        "pre_state": {"held_part": None},
+                        "post_state": {"held_part": "<part>"},
+                    },
+                ]
+            )
+        mutable_resource_fields = [
+            field_name
+            for field_name in ("current_state", "current_location", "current_pose")
+            if field_name in tracked_state_fields
+        ]
+        if mutable_resource_fields:
+            modeled_transitions.append(
+                {
+                    "kind": "resource_state_update",
+                    "fields": mutable_resource_fields,
+                }
+            )
+        if modeled_invariants:
+            row["modeled_invariants"] = modeled_invariants
+        if modeled_transitions:
+            row["modeled_transitions"] = modeled_transitions
+        rendered_rows.append(row)
+    return rendered_rows
+
+
+def _outline_prompt_blocked_task_dependency_facts(
+    recovery_gap_state: dict[str, Any],
+    *,
+    continuation_clearance_facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    clearance_by_id = {
+        str(dict(row).get("condition_id") or "").strip(): dict(row)
+        for row in (continuation_clearance_facts or [])
+        if isinstance(row, dict) and str(dict(row).get("condition_id") or "").strip()
+    }
+    rendered_rows: list[dict[str, Any]] = []
+    for raw_row in (recovery_gap_state.get("blocked_nominal_tasks") or []):
+        if not isinstance(raw_row, dict):
+            continue
+        blocked_by_condition_ids = [
+            str(item).strip()
+            for item in (
+                raw_row.get("blocked_by_condition_ids")
+                or raw_row.get("blocking_condition_ids")
+                or []
+            )
+            if str(item).strip()
+        ]
+        if not blocked_by_condition_ids:
+            continue
+        row: dict[str, Any] = {
+            "task_id": str(raw_row.get("id") or "").strip() or None,
+            "resource_jid": str(raw_row.get("resource") or "").strip() or None,
+            "part_name": str(raw_row.get("part") or "").strip() or None,
+            "blocked_by_condition_ids": blocked_by_condition_ids,
+            "clearance_dependencies": [],
+        }
+        for condition_id in blocked_by_condition_ids:
+            dependency = {"condition_id": condition_id}
+            matched_condition = clearance_by_id.get(condition_id) or {}
+            clear_when = deepcopy(matched_condition.get("clear_when"))
+            if clear_when not in (None, "", [], {}):
+                dependency["clear_when"] = clear_when
+            row["clearance_dependencies"].append(dependency)
+        rendered_rows.append(
+            {
+                key: deepcopy(value)
+                for key, value in row.items()
+                if value not in (None, "", [], {})
+            }
+        )
     return rendered_rows
 
 
@@ -440,30 +1011,54 @@ def _outline_prompt_repair_contract(
             required_addressed_validation_findings
         )
     if pruned_actions:
-        repair_contract["active_pruned_actions"] = deepcopy(pruned_actions)
-    accepted_prefix = _compact_outline_tasks(
-        list(
+        grouped_pruned_actions = _outline_prompt_grouped_pruned_actions(pruned_actions)
+        if grouped_pruned_actions:
+            repair_contract["active_pruned_actions"] = grouped_pruned_actions
+    accepted_prefix = [
+        _outline_task_summary(row)
+        for row in (
             session_state.get("accepted_outline_prefix")
             or session_state.get("accepted_prefix")
             or []
         )
-    )
+        if isinstance(row, dict) and _outline_task_summary(row)
+    ]
     if accepted_prefix:
         repair_contract["accepted_prefix"] = accepted_prefix
     outline_revision_coverage = deepcopy(session_state.get("outline_revision_coverage") or {})
     if outline_revision_coverage not in ({}, [], "", None):
-        repair_contract["revision_feedback"] = outline_revision_coverage
+        revision_feedback = {
+            "status": str(outline_revision_coverage.get("status") or "").strip(),
+            "required_addressed_validation_findings": deepcopy(
+                outline_revision_coverage.get("required_addressed_validation_findings") or []
+            ),
+            "provided_addressed_validation_findings": deepcopy(
+                outline_revision_coverage.get("provided_addressed_validation_findings") or []
+            ),
+        }
+        if outline_revision_coverage.get("missing_required_refs"):
+            revision_feedback["missing_required_refs"] = deepcopy(
+                outline_revision_coverage.get("missing_required_refs") or []
+            )
+        if outline_revision_coverage.get("unexpected_refs"):
+            revision_feedback["unexpected_refs"] = deepcopy(
+                outline_revision_coverage.get("unexpected_refs") or []
+            )
+        repair_contract["revision_feedback"] = revision_feedback
     return repair_contract or None
 
 
 def _build_outline_fact_sections(
     llm_input: dict[str, Any],
     *,
+    session_state: dict[str, Any],
     recovery_gap_state: dict[str, Any],
     repair_contract: dict[str, Any] | None,
 ) -> list[str]:
     payload = dict(llm_input or {})
     observed_runtime_state = dict(payload.get("observed_runtime_state") or {})
+    outline_memory = _outline_memory_from_session_state(session_state)
+    current_blockers = _outline_prompt_current_blockers(payload, recovery_gap_state)
     safety_section = {
         "obligation_targets": deepcopy(payload.get("obligation_targets") or []),
         "loaded_safety_rules": deepcopy(payload.get("loaded_safety_rules") or []),
@@ -471,25 +1066,39 @@ def _build_outline_fact_sections(
     sections: list[str] = [
         "Fault Event",
         json_block(payload.get("fault_event") or {}),
-        "",
-        "Current Resource Facts",
-        json_block(observed_runtime_state.get("resources") or []),
-        "",
-        "Current Part Facts",
-        json_block(prompt_part_facts(payload.get("part_facts") or [])),
-        "",
-        "Loaded Safety Rules",
-        json_block(safety_section),
-        "",
-        "Relevant Assembly Requirements",
-        json_block(payload.get("relevant_assembly_requirements") or []),
-        "",
-        "Blocked Nominal Tasks",
-        json_block(_outline_prompt_blocked_nominal_tasks(recovery_gap_state)),
-        "",
-        "Unmet Continuation Conditions",
-        json_block(_outline_prompt_unmet_continuation_conditions(recovery_gap_state)),
     ]
+    if outline_memory:
+        sections.extend(["", "Outline Memory", _outline_memory_text(outline_memory)])
+    sections.extend(
+        [
+            "",
+            "Resources",
+            json_block(observed_runtime_state.get("resources") or []),
+            "",
+            "Parts",
+            json_block(prompt_part_facts(payload.get("part_facts") or [])),
+        ]
+    )
+    sections.extend(
+        [
+            "",
+            "Safety Rules",
+            json_block(safety_section),
+            "",
+            "Assembly Requirements",
+            json_block(payload.get("relevant_assembly_requirements") or []),
+        ]
+    )
+    sections.extend(
+        [
+            "",
+            "Blocked Tasks",
+            json_block(_outline_prompt_blocked_nominal_tasks(recovery_gap_state)),
+            "",
+            "Current Blockers",
+            json_block(current_blockers),
+        ]
+    )
     if repair_contract not in ({}, [], "", None):
         sections.extend(["", "Repair Contract", json_block(repair_contract)])
     return sections
@@ -703,6 +1312,18 @@ def _outline_validation_ref(finding: dict[str, Any]) -> dict[str, Any]:
     resource_jid = str(finding.get("resource_jid") or "").strip()
     if resource_jid:
         ref["resource_jid"] = resource_jid
+    for field_name in (
+        "kind",
+        "entity",
+        "expected",
+        "actual",
+        "blocking_rule_id",
+        "blocked_nominal_task_id",
+        "claimed_task_ids",
+    ):
+        value = finding.get(field_name)
+        if value not in (None, "", [], {}):
+            ref[field_name] = deepcopy(value)
     failed_reason = str(finding.get("failed_reason") or "").strip()
     if failed_reason:
         ref["failed_reason"] = failed_reason
@@ -714,7 +1335,18 @@ def _outline_contract() -> dict[str, Any]:
         "required_fields": ["thought", "addressed_validation_findings", "outline_tasks"],
         "addressed_validation_findings": {
             "required_fields": ["task_id", "pose_source", "failed_axes"],
-            "optional_fields": ["resource_jid", "failed_reason"],
+            "optional_fields": [
+                "resource_jid",
+                "failed_reason",
+                "kind",
+                "entity",
+                "expected",
+                "actual",
+                "blocking_rule_id",
+                "blocked_nominal_task_id",
+                "condition_id",
+                "claimed_task_ids",
+            ],
             "usage": (
                 "Use the exact refs listed in Repair Contract.required_addressed_validation_findings. "
                 "Use [] when no outstanding validation findings are present."
@@ -730,8 +1362,26 @@ def _outline_contract() -> dict[str, Any]:
                 "expected_end_state",
                 "depends_on",
             ],
-            "optional_fields": ["part_name", "action_target"],
+            "optional_fields": [
+                "part_name",
+                "action_target",
+                "closes_condition_ids",
+                "enables_task_ids",
+            ],
+            "expected_state_fields": [
+                "resource_state",
+                "resource_location",
+                "held_part",
+                "part_state",
+                "part_location",
+                "part_holder_resource_jid",
+            ],
         },
+        "outline_tasks_usage": (
+            "If Repair Contract.accepted_prefix is present, return only the replacement suffix "
+            "that follows that accepted prefix. Returning the full outline is still allowed "
+            "only when it begins with the same accepted prefix."
+        ),
     }
 
 
@@ -789,7 +1439,6 @@ def build_multi_turn_phase_prompt_input(
     session_state: dict[str, Any],
     world_observation_surface: dict[str, Any] | None = None,
     recovery_gap_state: dict[str, Any] | None = None,
-    grounded_feasibility_facts: list[dict[str, Any]] | None = None,
     pruned_actions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_phase = str(phase or "").strip().lower()
@@ -800,7 +1449,6 @@ def build_multi_turn_phase_prompt_input(
         "session_state": deepcopy(session_state or {}),
         "world_observation_surface": deepcopy(world_observation_surface or {}),
         "recovery_gap_state": deepcopy(recovery_gap_state or {}),
-        "grounded_feasibility_facts": deepcopy(grounded_feasibility_facts or []),
         "pruned_actions": deepcopy(pruned_actions or []),
         "response_contract": _contract_for_phase(normalized_phase),
     }
@@ -821,7 +1469,6 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
     pruned_actions = deepcopy(payload.get("pruned_actions") or [])
     if phase == "outline":
         llm_input = _outline_prompt_llm_input(llm_input)
-        pruned_actions = _outline_prompt_pruned_actions(pruned_actions)
     outline_validation_findings = [
         deepcopy(row)
         for row in (session_state.get("outline_validation_findings") or [])
@@ -890,6 +1537,7 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
             else (
                 _build_outline_fact_sections(
                     llm_input,
+                    session_state=session_state,
                     recovery_gap_state=recovery_gap_state,
                     repair_contract=repair_contract,
                 )
@@ -919,14 +1567,20 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
         sections.extend(
             [
                 "- addressed_validation_findings must exactly match Repair Contract.required_addressed_validation_findings when that field is present; otherwise use [].",
-                "- If Repair Contract is present, thought must summarize the factual outline changes made to resolve its unresolved findings.",
-                "- Produce a sequence of concrete physical recovery macro-steps; each outline row should represent one task for one resource.",
-                "- Each outline task must describe a real grounded state transition using facts already present in the prompt.",
-                "- Each outline macro must be state-consistent with the current grounded resource/part state and with the projected state produced by predecessor macros.",
-                "- Actions listed in Repair Contract.active_pruned_actions are blocked in the current state; do not reuse them until earlier recovery steps change the blocking state.",
-                "- Resource-limit or safety failures are not resolved by only changing a resource's internal state, labels, or expected values; the outline must change the assignment or grounded interaction that causes the failure.",
-                "- Continuation or resume tasks must depend on the concrete recovery tasks that clear the factual blockers shown in Unmet Continuation Conditions.",
-                "- Do not emit raw continuation condition ids; describe recovery steps in natural physical terms.",
+                "- Each outline row must be one concrete physical recovery task for one listed resource.",
+                "- Each outline task must use grounded start and end states consistent with the prompt and predecessor-projected state.",
+                "- expected_start_state and expected_end_state may use only: resource_state, resource_location, held_part, part_state, part_location, part_holder_resource_jid.",
+                "- Resource-only recovery rows may end in grounded terminal state 'idle' without naming the concrete home primitive; primitive generation will choose the concrete controller action.",
+                "- rationale must be one short factual cause-to-effect explanation tied to the row's grounded state change, claimed closes_condition_ids, or claimed enables_task_ids.",
+                "- closes_condition_ids may list only currently unmet continuation condition ids that the projected row actually clears.",
+                "- enables_task_ids may list only blocked nominal task ids that become unblocked after the projected row.",
+                "- depends_on may reference only outline_id values from outline rows in this same response; never use nominal task ids, condition ids, or free-form markers.",
+                "- If a task stops holding a part, make the part's resulting holder, location, or pose explicit in grounded state.",
+                "- Do not use robot-specific state fields such as gripper_state, current_pose, position, pose, current_location, or current_holder_resource_jid inside outline state objects.",
+                "- Do not use abstract blocker states such as blocked/unblocked/safe/unsafe or invented lifecycle tokens such as placed_approached.",
+                "- Do not invent any fact, location, observation, or state not already grounded in the prompt.",
+                "- If Repair Contract.accepted_prefix is present, return only the replacement suffix after that accepted prefix unless you intentionally repeat the full outline with the same prefix unchanged.",
+                "- Actions listed in Repair Contract.active_pruned_actions are blocked in the current state; treat temporary entries as state-dependent and persistent entries as still invalid until their blocker changes.",
                 "- Outline is always validated after this phase response; do not emit a phase decision field.",
             ]
         )
@@ -996,6 +1650,30 @@ def multi_turn_phase_response_schema(phase: str) -> dict[str, Any]:
             },
         }
     if normalized == "outline":
+        outline_state_schema = {
+            "type": "object",
+            "properties": {
+                "resource_state": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "resource_location": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "held_part": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "part_state": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "part_location": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+                "part_holder_resource_jid": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}]
+                },
+            },
+            "additionalProperties": False,
+        }
         return {
             "name": "multi_turn_outline_response",
             "strict": False,
@@ -1016,6 +1694,10 @@ def multi_turn_phase_response_schema(phase: str) -> dict[str, Any]:
                                     "items": {"type": "string"},
                                 },
                                 "failed_reason": {"type": "string"},
+                                "claimed_task_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
                             },
                             "required": ["task_id", "pose_source", "failed_axes"],
                         },
@@ -1030,6 +1712,14 @@ def multi_turn_phase_response_schema(phase: str) -> dict[str, Any]:
                                 "description": {"type": "string"},
                                 "rationale": {"type": "string"},
                                 "part_name": {"type": "string"},
+                                "closes_condition_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "enables_task_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
                                 "action_target": {
                                     "type": "object",
                                     "properties": {
@@ -1039,8 +1729,8 @@ def multi_turn_phase_response_schema(phase: str) -> dict[str, Any]:
                                         "requirement_id": {"type": "string"},
                                     },
                                 },
-                                "expected_start_state": {"type": "object"},
-                                "expected_end_state": {"type": "object"},
+                                "expected_start_state": deepcopy(outline_state_schema),
+                                "expected_end_state": deepcopy(outline_state_schema),
                                 "depends_on": {
                                     "type": "array",
                                     "items": {"type": "string"},

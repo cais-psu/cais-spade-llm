@@ -42,6 +42,7 @@ def _state_location_token(state: dict[str, Any]) -> str:
         _first_non_empty(
             state,
             "part_location",
+            "resource_location",
             "location",
             "current_location",
             "named_pose",
@@ -82,7 +83,7 @@ def _state_resource_state_token(state: dict[str, Any]) -> str:
 
 def _state_part_state_token(state: dict[str, Any]) -> str:
     return str(
-        _first_non_empty(state, "part_state", "part_status") or ""
+        _first_non_empty(state, "part_state", "part_status", "current_state", "state") or ""
     ).strip()
 
 
@@ -100,10 +101,15 @@ def _state_effect_part_state_token(state: dict[str, Any]) -> str:
 
 
 def _part_row_location_token(part_row: dict[str, Any]) -> str:
-    return str(
+    token = str(
         _first_non_empty(part_row, "current_location", "location", "current_pose_ref")
         or ""
     ).strip()
+    if token:
+        return token
+    if _part_row_pose_value(part_row) is not None:
+        return "observed_pose"
+    return ""
 
 
 def _part_row_pose_value(part_row: dict[str, Any]) -> dict[str, Any] | None:
@@ -118,6 +124,129 @@ def _part_row_holder_token(part_row: dict[str, Any]) -> str:
         _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid")
         or ""
     ).strip()
+
+
+def _state_part_holder_token(state: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty(state, "part_holder_resource_jid", "current_holder_resource_jid")
+        or ""
+    ).strip()
+
+
+def _part_row_observed_pose_aliases(part_row: dict[str, Any]) -> set[str]:
+    aliases = {
+        "observed_pose",
+    }
+    observed_store_as = str(part_row.get("observed_store_as") or "").strip()
+    if observed_store_as:
+        aliases.add(observed_store_as)
+    for raw_alias in (part_row.get("observed_aliases") or []):
+        alias = str(raw_alias or "").strip()
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
+def _canonicalize_observed_pose_location_token(
+    location_token: str,
+    *,
+    part_row: dict[str, Any],
+) -> str:
+    normalized_location = str(location_token or "").strip()
+    if not normalized_location:
+        return ""
+    if normalized_location in _part_row_observed_pose_aliases(part_row):
+        return "observed_pose"
+    return normalized_location
+
+
+def _resource_named_pose_tokens(resource_row: dict[str, Any]) -> list[str]:
+    named_pose_tokens: list[str] = []
+    raw_named_poses = resource_row.get("named_poses")
+    if isinstance(raw_named_poses, dict):
+        named_pose_tokens.extend(
+            str(pose_name).strip()
+            for pose_name in raw_named_poses.keys()
+            if str(pose_name).strip()
+        )
+    else:
+        named_pose_tokens.extend(
+            str(pose_name).strip()
+            for pose_name in (raw_named_poses or [])
+            if str(pose_name).strip()
+        )
+    named_pose_tokens.extend(
+        str(pose_name).strip()
+        for pose_name in (resource_row.get("available_named_poses") or [])
+        if str(pose_name).strip()
+    )
+    return _dedupe_tokens(named_pose_tokens)
+
+
+def _resource_state_tokens(
+    resource_row: dict[str, Any],
+    *,
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    state_tokens: list[str] = [
+        str(resource_row.get("current_state") or "").strip(),
+    ]
+    for raw_resource_row in (resources_by_jid or {}).values():
+        state_token = str(dict(raw_resource_row or {}).get("current_state") or "").strip()
+        if state_token:
+            state_tokens.append(state_token)
+    state_tokens.extend(
+        str(state_token).strip()
+        for state_token in (
+            resource_row.get("supported_recovery_states")
+            or resource_row.get("available_recovery_states")
+            or []
+        )
+        if str(state_token).strip()
+    )
+    return _dedupe_tokens(state_tokens)
+
+
+def _explicit_state_location_tokens(state: dict[str, Any]) -> list[str]:
+    return _dedupe_tokens(
+        [
+            str(state.get("part_location") or "").strip(),
+            str(state.get("resource_location") or "").strip(),
+            str(state.get("location") or "").strip(),
+            str(state.get("current_location") or "").strip(),
+        ]
+    )
+
+
+def _known_location_tokens(
+    *,
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+    part_name: str = "",
+) -> list[str]:
+    location_tokens: list[str] = []
+    part_names = [part_name] if part_name else list(parts_by_name)
+    for candidate_part_name in part_names:
+        row = dict(parts_by_name.get(candidate_part_name) or {})
+        if not row:
+            continue
+        location_tokens.extend(
+            str(row.get(field_name) or "").strip()
+            for field_name in ("current_location", "location", "origin_location", "goal_location")
+            if str(row.get(field_name) or "").strip()
+        )
+        holder = _part_row_holder_token(row)
+        if holder:
+            location_tokens.extend([holder, f"{holder}_gripper"])
+        location_tokens.extend(_part_row_observed_pose_aliases(row))
+    for resource_jid, raw_resource_row in (resources_by_jid or {}).items():
+        resource_row = dict(raw_resource_row or {})
+        if resource_jid:
+            location_tokens.extend([resource_jid, f"{resource_jid}_gripper"])
+        current_location = str(resource_row.get("current_location") or "").strip()
+        if current_location:
+            location_tokens.append(current_location)
+    return _dedupe_tokens(location_tokens)
 
 
 def _task_part_references(task: dict[str, Any]) -> list[str]:
@@ -149,6 +278,13 @@ def _part_names_matching_location(
     matches: list[str] = []
     for part_name, raw_row in (parts_by_name or {}).items():
         row = dict(raw_row or {})
+        canonical_location = _canonicalize_observed_pose_location_token(
+            normalized_location,
+            part_row=row,
+        )
+        if canonical_location == "observed_pose" and _part_row_pose_value(row) is not None:
+            matches.append(str(part_name))
+            continue
         current_location = str(
             row.get("current_location") or row.get("location") or ""
         ).strip()
@@ -249,7 +385,7 @@ def _task_has_part_semantics(
             if (
                 state_part_name
                 or held_part in set(part_binding.get("candidate_part_names") or [])
-                or str(state.get("current_holder_resource_jid") or "").strip()
+                or _state_part_holder_token(state)
                 or _state_part_state_token(state)
                 or _state_location_token(state)
                 or (_state_pose_value(state) and state_part_name)
@@ -313,7 +449,7 @@ def _is_structured_continuation_resume(
         return False
     if str(end_state.get("held_part") or "").strip() == part_name:
         return False
-    if str(end_state.get("current_holder_resource_jid") or "").strip():
+    if _state_part_holder_token(end_state):
         return False
 
     part_pending = {
@@ -359,7 +495,7 @@ def _infer_operation_kind(
         part_name
         and (
             end_held_part == part_name
-            or str(end_state.get("current_holder_resource_jid") or "").strip()
+            or _state_part_holder_token(end_state)
         )
         and start_held_part != part_name
     )
@@ -408,9 +544,9 @@ def _task_is_projectable(
         or str(action_target.get("target_location") or "").strip()
         or str(action_target.get("named_pose") or "").strip()
         or _state_part_state_token(start_state)
-        or _state_part_state_token(end_state)
-        or str(start_state.get("current_holder_resource_jid") or "").strip()
-        or str(end_state.get("current_holder_resource_jid") or "").strip()
+            or _state_part_state_token(end_state)
+        or _state_part_holder_token(start_state)
+        or _state_part_holder_token(end_state)
         or _state_pose_value(start_state)
         or _state_pose_value(end_state)
         or _state_pose_ref_token(start_state)
@@ -428,7 +564,10 @@ def _infer_source_ref(
     part_row: dict[str, Any],
     fallback_start_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    requested_source_location = str(requested_source_location or "").strip()
+    requested_source_location = _canonicalize_observed_pose_location_token(
+        requested_source_location,
+        part_row=part_row,
+    )
     fallback_start_state = dict(fallback_start_state or {})
     holder = _part_row_holder_token(part_row)
     current_location = _part_row_location_token(part_row)
@@ -528,7 +667,16 @@ def _build_preconditions_and_effects(
         key: deepcopy(value)
         for key, value in (
             ("current_state", _state_resource_state_token(end_state) or None),
-            ("gripper_state", end_state.get("gripper_state")),
+            (
+                "gripper_state",
+                end_state.get("gripper_state")
+                if "gripper_state" in end_state
+                else "closed"
+                if "held_part" in end_state and str(end_state.get("held_part") or "").strip()
+                else "open"
+                if "held_part" in end_state
+                else None,
+            ),
             ("held_part", end_state.get("held_part")),
             (
                 "location",
@@ -574,10 +722,10 @@ def _build_preconditions_and_effects(
     if part_pose is not None:
         expected_part_effect["pose"] = deepcopy(part_pose)
 
-    explicit_holder = str(end_state.get("current_holder_resource_jid") or "").strip()
+    explicit_holder = _state_part_holder_token(end_state)
     if explicit_holder:
         expected_part_effect["holder"] = explicit_holder
-    elif "current_holder_resource_jid" in end_state:
+    elif "current_holder_resource_jid" in end_state or "part_holder_resource_jid" in end_state:
         expected_part_effect["holder"] = None
     elif "held_part" in end_state:
         end_held_part = str(end_state.get("held_part") or "").strip()
@@ -676,6 +824,11 @@ def _grounded_action(
         ("named_pose", "named_pose"),
     ):
         token = str(action_target.get(field_name) or "").strip()
+        if field_name == "source_location":
+            token = _canonicalize_observed_pose_location_token(
+                token,
+                part_row=part_row,
+            )
         if token:
             target[key] = token
     pose_ref = _state_pose_ref_token(end_state) or _state_pose_ref_token(start_state)
@@ -758,11 +911,341 @@ def _binding_finding(
     }
 
 
+def _outline_contract_finding(
+    *,
+    task: dict[str, Any],
+    outline_contract: dict[str, Any] | None,
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    contract = dict(outline_contract or {})
+    start_state = dict(task.get("expected_start_state") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+    action_target = _task_action_target(task)
+
+    if bool(contract.get("disallow_unknown_state_fields")):
+        allowed_state_fields = {
+            str(field_name or "").strip()
+            for field_name in list(contract.get("allowed_state_fields") or [])
+            if str(field_name or "").strip()
+        }
+        if allowed_state_fields:
+            invalid_fields = [
+                f"{state_key}.{field_name}"
+                for state_key in ("expected_start_state", "expected_end_state")
+                for field_name in dict(task.get(state_key) or {})
+                if str(field_name or "").strip()
+                and str(field_name or "").strip() not in allowed_state_fields
+            ]
+            if invalid_fields:
+                invalid_fields = sorted(dict.fromkeys(invalid_fields))
+                return _binding_finding(
+                    task=task,
+                    constraint_code="disallowed_outline_state_field",
+                    resource_jid=resource_jid or None,
+                    part_name=part_name or None,
+                    reason=(
+                        "outline state objects may use only "
+                        f"{', '.join(sorted(allowed_state_fields))} "
+                        f"({', '.join(invalid_fields)})"
+                    ),
+                    evidence={"state_fields": deepcopy(invalid_fields)},
+                )
+
+    if bool(contract.get("require_expected_start_match")):
+        mismatches: list[dict[str, Any]] = []
+        for field_name, actual in (
+            ("resource_state", _first_non_empty(resource_row, "current_state", "state")),
+            ("held_part", _first_non_empty(resource_row, "held_part")),
+        ):
+            if field_name not in start_state:
+                continue
+            expected = start_state.get(field_name)
+            expected_token = None if expected in (None, "") else str(expected).strip()
+            actual_token = None if actual in (None, "") else str(actual).strip()
+            if expected_token != actual_token:
+                mismatches.append({
+                    "field": field_name,
+                    "expected": deepcopy(expected),
+                    "actual": deepcopy(actual),
+                })
+
+        if part_name:
+            for field_name, actual in (
+                ("part_state", _first_non_empty(part_row, "current_state", "state")),
+                ("part_location", _part_row_location_token(part_row)),
+                (
+                    "part_holder_resource_jid",
+                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
+                ),
+            ):
+                if field_name not in start_state:
+                    continue
+                expected = start_state.get(field_name)
+                expected_token = None if expected in (None, "") else str(expected).strip()
+                actual_token = None if actual in (None, "") else str(actual).strip()
+                if field_name == "part_location" and {expected_token, actual_token} <= {None, "observed_pose"}:
+                    continue
+                if expected_token != actual_token:
+                    mismatches.append({
+                        "field": field_name,
+                        "expected": deepcopy(expected),
+                        "actual": deepcopy(actual),
+                    })
+
+        if mismatches:
+            field_names = ", ".join(
+                sorted({str(item.get("field") or "").strip() for item in mismatches if str(item.get("field") or "").strip()})
+            )
+            return _binding_finding(
+                task=task,
+                constraint_code="expected_start_state_mismatch",
+                resource_jid=resource_jid or None,
+                part_name=part_name or None,
+                reason=(
+                    "expected_start_state does not match the projected current state"
+                    + (f" for {field_names}" if field_names else "")
+                ),
+                evidence={"mismatches": deepcopy(mismatches)},
+            )
+
+    if bool(contract.get("require_meaningful_delta")):
+        has_delta = False
+        for field_name, before in (
+            ("resource_state", _first_non_empty(resource_row, "current_state", "state")),
+            ("held_part", _first_non_empty(resource_row, "held_part")),
+            ("part_state", _first_non_empty(part_row, "current_state", "state")),
+            ("part_location", _first_non_empty(part_row, "current_location", "location")),
+            (
+                "part_holder_resource_jid",
+                _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
+            ),
+        ):
+            if field_name not in end_state:
+                continue
+            if before != end_state.get(field_name):
+                has_delta = True
+                break
+        if not has_delta:
+            return _binding_finding(
+                task=task,
+                constraint_code="no_state_change",
+                resource_jid=resource_jid or None,
+                part_name=part_name or None,
+                reason="Task does not change the projected symbolic state.",
+                evidence={"field": "expected_end_state", "deltas": []},
+            )
+
+    if bool(contract.get("require_release_destination_for_release")) and resource_jid and part_name:
+        current_holder = str(
+            _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid") or ""
+        ).strip()
+        current_held_part = str(resource_row.get("held_part") or "").strip()
+        start_holder = str(start_state.get("part_holder_resource_jid") or "").strip()
+        start_held_part = str(start_state.get("held_part") or "").strip()
+        release_requested = (
+            ("held_part" in end_state and end_state.get("held_part") in (None, ""))
+            or (
+                "part_holder_resource_jid" in end_state
+                and end_state.get("part_holder_resource_jid") in (None, "")
+            )
+        ) and (
+            current_held_part == part_name
+            or current_holder == resource_jid
+            or start_held_part == part_name
+            or start_holder == resource_jid
+        )
+        if release_requested:
+            has_release_destination = bool(
+                _state_location_token(end_state)
+                or str(action_target.get("target_location") or "").strip()
+                or str(action_target.get("named_pose") or "").strip()
+                or _state_pose_ref_token(end_state)
+                or _state_pose_value(end_state) is not None
+                or action_target.get("pose") is not None
+                or action_target.get("slot_pose") is not None
+            )
+            if not has_release_destination:
+                return _binding_finding(
+                    task=task,
+                    constraint_code="missing_release_destination",
+                    resource_jid=resource_jid,
+                    part_name=part_name,
+                    reason=(
+                        f"Task releases '{part_name}' without specifying a concrete grounded "
+                        "destination."
+                    ),
+                    evidence={"field": "expected_end_state", "release_destination": None},
+                )
+
+    if bool(contract.get("require_carrier_for_part_relocation")) and resource_jid and part_name:
+        changed_part_fields = [
+            field_name
+            for field_name, before in (
+                ("part_location", _first_non_empty(part_row, "current_location", "location")),
+                (
+                    "part_holder_resource_jid",
+                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
+                ),
+            )
+            if field_name in end_state and before != end_state.get(field_name)
+        ]
+        if changed_part_fields:
+            resource_controls_part = any(
+                str(value or "").strip() == part_name
+                for value in (
+                    resource_row.get("held_part"),
+                    start_state.get("held_part"),
+                    end_state.get("held_part"),
+                )
+            ) or any(
+                str(value or "").strip() == resource_jid
+                for value in (
+                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
+                    start_state.get("part_holder_resource_jid"),
+                    end_state.get("part_holder_resource_jid"),
+                )
+            )
+            if not resource_controls_part:
+                return _binding_finding(
+                    task=task,
+                    constraint_code="part_relocation_without_carrier",
+                    resource_jid=resource_jid,
+                    part_name=part_name,
+                    reason=(
+                        f"Task changes part '{part_name}' location/holder without the named "
+                        f"resource '{resource_jid}' carrying or holding it."
+                    ),
+                    evidence={"field": "part_motion", "changed_fields": changed_part_fields},
+                )
+
+    return None
+
+
+def _binding_token_findings(
+    *,
+    task: dict[str, Any],
+    task_kind: str,
+    resource_jid: str,
+    resource_row: dict[str, Any],
+    part_name: str,
+    part_row: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    action_target = _task_action_target(task)
+    start_state = dict(task.get("expected_start_state") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+
+    requested_named_pose = str(action_target.get("named_pose") or "").strip()
+    if not requested_named_pose and task_kind == "resource_only":
+        requested_named_pose = (
+            _state_pose_ref_token(end_state) or _state_pose_ref_token(start_state)
+        )
+    if requested_named_pose:
+        available_named_poses = set(_resource_named_pose_tokens(resource_row))
+        if requested_named_pose not in available_named_poses:
+            return [
+                _binding_finding(
+                    task=task,
+                    constraint_code="unknown_named_pose",
+                    resource_jid=resource_jid,
+                    part_name=part_name or None,
+                    reason=(
+                        f"task '{str(task.get('outline_id') or '').strip()}' references unknown "
+                        f"named pose '{requested_named_pose}' for resource '{resource_jid}'"
+                    ),
+                    evidence={"named_pose": requested_named_pose},
+                )
+            ]
+
+    if task_kind == "resource_only":
+        requested_resource_state = _state_resource_state_token(end_state)
+        known_resource_states = set(
+            _resource_state_tokens(
+                resource_row,
+                resources_by_jid=resources_by_jid,
+            )
+        )
+        advertised_recovery_states = {
+            str(state_token).strip()
+            for state_token in (
+                resource_row.get("supported_recovery_states")
+                or resource_row.get("available_recovery_states")
+                or []
+            )
+            if str(state_token).strip()
+        }
+        if (
+            requested_resource_state
+            and advertised_recovery_states
+            and requested_resource_state not in known_resource_states
+        ):
+            return [
+                _binding_finding(
+                    task=task,
+                    constraint_code="unknown_state_token",
+                    resource_jid=resource_jid,
+                    part_name=part_name or None,
+                    reason=(
+                        f"task '{str(task.get('outline_id') or '').strip()}' references unknown "
+                        f"resource state '{requested_resource_state}' for '{resource_jid}'"
+                    ),
+                    evidence={"state_token": requested_resource_state},
+                )
+            ]
+
+    location_candidates: list[tuple[str, str]] = []
+    for field_name in ("source_location", "target_location"):
+        token = str(action_target.get(field_name) or "").strip()
+        if token:
+            location_candidates.append((field_name, token))
+    for state_name, state in (
+        ("expected_start_state", start_state),
+        ("expected_end_state", end_state),
+    ):
+        for token in _explicit_state_location_tokens(state):
+            location_candidates.append((state_name, token))
+
+    known_locations = set(
+        _known_location_tokens(
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+            part_name=part_name,
+        )
+    )
+    for field_name, raw_token in location_candidates:
+        token = str(raw_token or "").strip()
+        if not token:
+            continue
+        if part_row:
+            token = _canonicalize_observed_pose_location_token(token, part_row=part_row)
+        if token and token not in known_locations:
+            return [
+                _binding_finding(
+                    task=task,
+                    constraint_code="unknown_location_token",
+                    resource_jid=resource_jid,
+                    part_name=part_name or None,
+                    reason=(
+                        f"task '{str(task.get('outline_id') or '').strip()}' references unknown "
+                        f"location token '{token}' in {field_name}"
+                    ),
+                    evidence={"location_token": token, "location_field": field_name},
+                )
+            ]
+
+    return []
+
+
 def compile_grounded_outline_task(
     task: dict[str, Any],
     *,
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
+    outline_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_id = str(task.get("outline_id") or "").strip()
     resource_jid = str(task.get("resource_jid") or "").strip()
@@ -843,6 +1326,38 @@ def compile_grounded_outline_task(
         task_kind=task_kind,
         part_name=effective_part_name,
     )
+    outline_contract_finding = _outline_contract_finding(
+        task=task,
+        outline_contract=outline_contract,
+        resource_jid=resource_jid,
+        part_name=effective_part_name,
+        resource_row=resource_row,
+        part_row=dict(parts_by_name.get(effective_part_name) or {}),
+    )
+    if outline_contract_finding:
+        return {
+            "status": "outline_contract_violation",
+            "grounded_action": None,
+            "candidate_bindings": candidate_bindings,
+            "finding": deepcopy(outline_contract_finding),
+        }
+    binding_token_findings = _binding_token_findings(
+        task=task,
+        task_kind=task_kind,
+        resource_jid=resource_jid,
+        resource_row=resource_row,
+        part_name=effective_part_name,
+        part_row=dict(parts_by_name.get(effective_part_name) or {}),
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
+    if binding_token_findings:
+        return {
+            "status": "binding_token_unresolved",
+            "grounded_action": None,
+            "candidate_bindings": candidate_bindings,
+            "finding": deepcopy(binding_token_findings[0]),
+        }
     if not operation_kind or not _task_is_projectable(task, task_kind=task_kind):
         reason = (
             f"task '{task_id}' does not specify enough target or effect information "

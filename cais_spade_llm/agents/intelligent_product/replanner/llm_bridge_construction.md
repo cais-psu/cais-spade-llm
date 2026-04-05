@@ -248,7 +248,65 @@ If you only want the runtime control flow, start with:
 3. `primitive_semantics.py`
 4. `test_case3_bridge_dryrun.py`
 
-## 8. Current Practical Takeaway
+## 8. Why The LLM — Architectural Justification
+
+### The core separation
+
+| Layer | Owner | Role |
+|---|---|---|
+| Successor generation | LLM | Synthesize plausible recovery actions for novel/partially-modeled failures |
+| State evolution | DES (deterministic) | Project symbolic state forward |
+| Validation | Feasibility oracle + safety checker | Accept/reject each candidate |
+| Selection | Search / scoring | Pick the best valid candidate |
+
+### Why MCTS or graph search alone is not enough
+
+MCTS and classical planners require a complete successor function `next_states(s)`.
+In this system, the recovery successor set is **not fully enumerable** because:
+
+- **Failure modes are open-ended.** The system handles novel disruptions that
+  are not covered by pre-authored recovery templates.
+- **Cross-resource reassignment is not trivially enumerable.** Recovering from a
+  fault on one resource may require recruiting a different resource type with a
+  different capability vocabulary.
+- **Heterogeneous resources expose different state vocabularies.** A robot
+  profile and a printer profile have different facets, primitives, and state
+  projections. The combinatorial cross-product is too large and too sparse to
+  enumerate manually for every failure/resource combination.
+- **Recovery strategies require domain reasoning** that is not captured in the
+  JSON manifests alone — for example, deciding that a part stuck in a failed
+  gripper should be re-approached from a different angle rather than retried.
+
+### What the LLM actually contributes
+
+The LLM acts as a **learned approximate successor generator**: given the current
+symbolic state, the failure context, and the allowed execution surface, it
+proposes plausible recovery actions that were not explicitly hand-authored.
+
+It does **not** own selection, validation, or state evolution. Those are
+deterministic and must remain so.
+
+A weak justification would be: "the LLM picks the best next step."
+
+A strong justification is: **"the LLM expands the recovery successor set under
+novel, heterogeneous, partially modeled failures; deterministic mechanisms then
+filter and choose."**
+
+### What the deterministic machinery owns
+
+Once the LLM proposes candidate recovery actions:
+
+1. The **grounding compiler** resolves symbolic references to concrete runtime
+   values.
+2. The **feasibility oracle** validates workspace reachability, gripper
+   occupancy, part-holder compatibility, and resource availability.
+3. The **safety checker** validates against LTL/FSA safety rules.
+4. The **DES state projector** applies symbolic effects to advance the state.
+5. The **selector** (scoring or search) commits the best valid candidate.
+
+The LLM proposes; formal methods dispose.
+
+## 9. Current Practical Takeaway
 
 The active bridge is now a compact v4 path made of:
 

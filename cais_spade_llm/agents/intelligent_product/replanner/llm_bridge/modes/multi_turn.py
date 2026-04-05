@@ -39,6 +39,7 @@ from cais_spade_llm.resources.resource_profile import (
 _DEFAULT_MAX_TURNS = 8
 _DEFAULT_MAX_OBSERVATIONS = 3
 _DEFAULT_MAX_OBSERVE_BATCH = 3
+_OUTLINE_STAGNATION_LIMIT = 2
 
 _PHASE_SEQUENCE = (
     "grounding",
@@ -157,6 +158,9 @@ def build_multi_turn_session_seed(
         "observation_fact_ledger": {},
         "observation_history": [],
         "accepted_outline": None,
+        "accepted_outline_prefix": [],
+        "outline_progress_signature": None,
+        "outline_stagnation_count": 0,
         "proposal_draft": None,
         "phase_feedback": [],
         "pruned_actions": [],
@@ -1234,6 +1238,88 @@ def _record_observation_fact(
     session_state["observation_fact_ledger"] = ledger
 
 
+def _seed_grounded_part_pose_observations(
+    prepared_bridge_request: dict[str, Any],
+    session_state: dict[str, Any],
+) -> None:
+    part_tracker = {
+        str(part_name or "").strip(): dict(raw_entry or {})
+        for part_name, raw_entry in dict(prepared_bridge_request.get("part_tracker") or {}).items()
+        if str(part_name or "").strip() and isinstance(raw_entry, dict)
+    }
+    if not part_tracker:
+        return
+
+    llm_part_facts = {
+        str(dict(row).get("part_name") or "").strip(): dict(row)
+        for row in (dict(prepared_bridge_request.get("llm_input") or {}).get("part_facts") or [])
+        if isinstance(row, dict) and str(dict(row).get("part_name") or "").strip()
+    }
+    observation_store = dict(session_state.get("observation_store") or {})
+    seen_aliases = set(observation_store)
+
+    for part_name, tracker_entry in part_tracker.items():
+        pose = _observation_pose(
+            {"pose": deepcopy(tracker_entry.get("observed_pose"))}
+        ) or _observation_pose(tracker_entry)
+        if pose is None:
+            continue
+        existing_part_aliases = [
+            str(alias).strip()
+            for alias, payload in observation_store.items()
+            if isinstance(payload, dict)
+            and str(payload.get("part_name") or "").strip() == part_name
+            and str(alias).strip()
+        ]
+        alias = (
+            existing_part_aliases[-1]
+            if existing_part_aliases
+            else _default_observe_store_as(
+                {
+                    "fact_type": "part_pose",
+                    "entity": part_name,
+                    "primitive": "grounding_context",
+                },
+                session_state=session_state,
+                seen_aliases=seen_aliases,
+            )
+        )
+        current_part_row = dict(llm_part_facts.get(part_name) or {})
+        payload: dict[str, Any] = {
+            "part_name": part_name,
+            "pose": deepcopy(pose),
+        }
+        for axis in ("x", "y", "z", "qx", "qy", "qz", "qw"):
+            value = pose.get(axis)
+            if value is not None:
+                payload[axis] = deepcopy(value)
+        current_location = current_part_row.get("current_location")
+        if current_location not in (None, ""):
+            payload["current_location"] = deepcopy(current_location)
+        holder_resource_jid = str(current_part_row.get("current_holder_resource_jid") or "").strip()
+        if holder_resource_jid:
+            payload["current_holder_resource_jid"] = holder_resource_jid
+        observation_store[alias] = deepcopy(payload)
+        seen_aliases.add(alias)
+        _record_observation_fact(
+            session_state,
+            {
+                "fact_key": _observation_fact_key("part_pose", part_name, None),
+                "fact_type": "part_pose",
+                "entity": part_name,
+                "entity_kind": "part",
+                "scope": None,
+                "primitive": "grounding_context",
+                "params": {"part_name": part_name},
+                "store_as": alias,
+                "output": deepcopy(payload),
+                "turn_index": int(session_state.get("turn_index") or 0),
+            },
+        )
+
+    session_state["observation_store"] = observation_store
+
+
 def _is_pose_in_workspace(
     pose: dict[str, Any],
     bounds: dict[str, Any],
@@ -1599,79 +1685,6 @@ def _build_recovery_gap_state(
     }
 
 
-def _build_grounded_feasibility_facts(
-    llm_input: dict[str, Any],
-    *,
-    resources_by_jid: dict[str, dict[str, Any]] | None = None,
-    parts_by_name: dict[str, dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    if resources_by_jid is None or parts_by_name is None:
-        resources_by_jid, parts_by_name = _outline_validation_context(llm_input)
-    observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
-    ordered_resource_jids = [
-        str(row.get("resource_jid") or "").strip()
-        for row in (observed_runtime_state.get("resources") or [])
-        if isinstance(row, dict) and str(row.get("resource_jid") or "").strip()
-    ]
-    fault_event = dict(llm_input.get("fault_event") or {})
-    target_part_names = [
-        str(item).strip()
-        for item in (fault_event.get("affected_part_names") or [])
-        if str(item).strip()
-    ]
-    if not target_part_names:
-        target_part_names = list(parts_by_name)
-    facts: list[dict[str, Any]] = []
-    for part_name in target_part_names:
-        part_row = dict(parts_by_name.get(part_name) or {})
-        observed_pose = dict(part_row.get("observed_pose") or {})
-        if not observed_pose:
-            continue
-        resource_evidence: list[dict[str, Any]] = []
-        for resource_jid in ordered_resource_jids:
-            resource_row = dict(resources_by_jid.get(resource_jid) or {})
-            bounds = dict(resource_row.get("workspace_bounds") or {})
-            if bounds:
-                workspace_contains_observed_pose, workspace_violations = _is_pose_in_workspace(
-                    observed_pose,
-                    bounds,
-                )
-            else:
-                workspace_contains_observed_pose = False
-                workspace_violations = ["missing_workspace_bounds"]
-            readiness_blockers = (
-                _outline_part_readiness_blockers(
-                    resource_jid=resource_jid,
-                    part_name=part_name,
-                    resources_by_jid=resources_by_jid,
-                    parts_by_name=parts_by_name,
-                )
-                if workspace_contains_observed_pose
-                else []
-            )
-            resource_evidence.append(
-                {
-                    "resource_jid": resource_jid,
-                    "workspace_bounds": deepcopy(bounds),
-                    "workspace_contains_observed_pose": workspace_contains_observed_pose,
-                    "workspace_violations": deepcopy(workspace_violations),
-                    "currently_ready_to_acquire": bool(
-                        workspace_contains_observed_pose and not readiness_blockers
-                    ),
-                    "readiness_blockers": deepcopy(readiness_blockers),
-                }
-            )
-        facts.append(
-            {
-                "part_name": part_name,
-                "pose_source": "observed_pose",
-                "pose": deepcopy(observed_pose),
-                "resource_evidence": resource_evidence,
-            }
-        )
-    return facts
-
-
 def _outline_action_lookup(
     llm_input: dict[str, Any],
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -1705,6 +1718,16 @@ def _first_non_empty_state_value(state: dict[str, Any], *field_names: str) -> An
     return None
 
 
+_ALLOWED_OUTLINE_STATE_FIELDS = {
+    "resource_state",
+    "resource_location",
+    "held_part",
+    "part_state",
+    "part_location",
+    "part_holder_resource_jid",
+}
+
+
 def _outline_state_resource_state_token(state: dict[str, Any]) -> str:
     return str(
         _first_non_empty_state_value(state, "current_state", "state", "resource_state") or ""
@@ -1720,7 +1743,8 @@ def _outline_state_part_state_token(
     if state_part_name and candidate_part_name and state_part_name != candidate_part_name:
         return ""
     token = str(
-        _first_non_empty_state_value(state, "current_state", "state") or ""
+        _first_non_empty_state_value(state, "part_state", "part_status", "current_state", "state")
+        or ""
     ).strip()
     if _is_part_lifecycle_state(token):
         return token
@@ -1732,6 +1756,7 @@ def _outline_state_location_token(state: dict[str, Any]) -> str:
         _first_non_empty_state_value(
             state,
             "part_location",
+            "resource_location",
             "location",
             "current_location",
             "named_pose",
@@ -1751,14 +1776,52 @@ def _outline_state_pose_value(state: dict[str, Any]) -> dict[str, Any] | None:
     return dict(pose)
 
 
+def _outline_state_named_pose_value(state: dict[str, Any]) -> str:
+    if not isinstance(state, dict):
+        return ""
+    direct_named_pose = str(state.get("named_pose") or "").strip()
+    if direct_named_pose:
+        return direct_named_pose
+    current_pose = state.get("current_pose")
+    if isinstance(current_pose, str):
+        current_pose_token = current_pose.strip()
+        if current_pose_token:
+            return current_pose_token
+    for field_name in ("current_pose", "pose", "position"):
+        nested_pose = state.get(field_name)
+        if not isinstance(nested_pose, dict):
+            continue
+        nested_named_pose = str(nested_pose.get("named_pose") or "").strip()
+        if nested_named_pose:
+            return nested_named_pose
+    return ""
+
+
 def _outline_resource_named_pose_token(
     *,
     state: dict[str, Any],
     action_target: dict[str, Any],
 ) -> str:
     return str(
-        _first_non_empty_state_value(state, "named_pose", "location", "current_location")
+        _first_non_empty_state_value(
+            state,
+            "named_pose",
+            "resource_location",
+            "location",
+            "current_location",
+        )
         or action_target.get("named_pose")
+        or ""
+    ).strip()
+
+
+def _outline_state_part_holder_token(state: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty_state_value(
+            state,
+            "part_holder_resource_jid",
+            "current_holder_resource_jid",
+        )
         or ""
     ).strip()
 
@@ -1898,7 +1961,13 @@ def _outline_task_symbolic_anchors(task: dict[str, Any]) -> list[tuple[str, str]
         state = task.get(state_key)
         if not isinstance(state, dict):
             continue
-        for field_name in ("position", "pose", "current_pose", "location", "current_location", "named_pose"):
+        for field_name in (
+            "resource_location",
+            "part_location",
+            "location",
+            "current_location",
+            "named_pose",
+        ):
             value = state.get(field_name)
             token = str(value or "").strip() if not isinstance(value, dict) else ""
             if token:
@@ -1911,20 +1980,12 @@ def _outline_task_state_transition_fields(task: dict[str, Any]) -> list[str]:
     end_state = dict(task.get("expected_end_state") or {})
     changed_fields: list[str] = []
     significant_fields = (
-        "current_state",
-        "state",
         "resource_state",
-        "gripper_state",
+        "resource_location",
         "held_part",
-        "part_name",
-        "current_holder_resource_jid",
-        "location",
-        "current_location",
+        "part_state",
         "part_location",
-        "position",
-        "pose",
-        "current_pose",
-        "named_pose",
+        "part_holder_resource_jid",
     )
     for field_name in significant_fields:
         start_value = deepcopy(start_state.get(field_name))
@@ -1955,11 +2016,56 @@ def _outline_task_has_physical_anchor(
 
 
 def _outline_task_depends_on(task: dict[str, Any]) -> list[str]:
-    return [
-        str(item).strip()
-        for item in (task.get("depends_on") or [])
-        if str(item).strip()
-    ]
+    dependency_ids: list[str] = []
+    for item in (task.get("depends_on") or []):
+        token = str(item).strip()
+        if token and token not in dependency_ids:
+            dependency_ids.append(token)
+    return dependency_ids
+
+
+def _outline_task_id(raw_task: dict[str, Any], index: int) -> str:
+    return str(raw_task.get("outline_id") or "").strip() or f"task_{index}"
+
+
+def _outline_known_task_ids(outline_tasks: list[dict[str, Any]]) -> set[str]:
+    known_ids: set[str] = set()
+    for index, raw_task in enumerate(outline_tasks):
+        if not isinstance(raw_task, dict):
+            continue
+        known_ids.add(_outline_task_id(raw_task, index))
+    return known_ids
+
+
+def _validated_outline_dependency_map(
+    outline_tasks: list[dict[str, Any]],
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    known_ids = _outline_known_task_ids(outline_tasks)
+    dependency_map: dict[str, list[str]] = {}
+    findings: list[dict[str, Any]] = []
+    for index, raw_task in enumerate(outline_tasks):
+        if not isinstance(raw_task, dict):
+            continue
+        outline_id = _outline_task_id(raw_task, index)
+        dependency_ids = _outline_task_depends_on(raw_task)
+        valid_dependency_ids: list[str] = []
+        invalid_dependency_ids: list[str] = []
+        for dependency_id in dependency_ids:
+            if dependency_id in known_ids:
+                if dependency_id not in valid_dependency_ids:
+                    valid_dependency_ids.append(dependency_id)
+                continue
+            if dependency_id not in invalid_dependency_ids:
+                invalid_dependency_ids.append(dependency_id)
+        dependency_map[outline_id] = valid_dependency_ids
+        if invalid_dependency_ids:
+            findings.append(
+                _invalid_dependency_reference_finding(
+                    task=raw_task,
+                    dependency_ids=invalid_dependency_ids,
+                )
+            )
+    return dependency_map, findings
 
 
 def _outline_task_requirement_id(
@@ -1994,9 +2100,10 @@ def _outline_task_target_locations(task: dict[str, Any]) -> list[str]:
     end_state = dict(task.get("expected_end_state") or {})
     tokens = [
         str(action_target.get("target_location") or "").strip(),
+        str(end_state.get("part_location") or "").strip(),
+        str(end_state.get("resource_location") or "").strip(),
         str(end_state.get("location") or "").strip(),
         str(end_state.get("current_location") or "").strip(),
-        str(end_state.get("part_location") or "").strip(),
     ]
     deduped: list[str] = []
     for token in tokens:
@@ -2025,7 +2132,10 @@ def _outline_task_matches_pending_nominal_suffix(
     target_locations = set(_outline_task_target_locations(task))
     end_state = dict(task.get("expected_end_state") or {})
     end_state_token = str(
-        end_state.get("current_state") or end_state.get("state") or ""
+        end_state.get("part_state")
+        or end_state.get("current_state")
+        or end_state.get("state")
+        or ""
     ).strip().lower()
     for pending_task in _modeled_gap_pending_nominal_tasks(llm_input):
         pending_part = str(pending_task.get("part") or "").strip()
@@ -2041,10 +2151,12 @@ def _outline_task_matches_pending_nominal_suffix(
         if requirement_id and goal_requirement_id and requirement_id != goal_requirement_id:
             continue
         goal_location = str(part_row.get("goal_location") or "").strip()
-        if goal_location and goal_location in target_locations:
-            return True
-        if goal_location and _outline_state_location_token(end_state) == goal_location:
-            return True
+        if goal_location:
+            if goal_location in target_locations:
+                return True
+            if _outline_state_location_token(end_state) == goal_location:
+                return True
+            continue
         if end_state_token in {"placed", "assembled"}:
             return True
     return False
@@ -2066,13 +2178,10 @@ def _outline_task_has_part_flow(
             token = str(state.get(field_name) or "").strip()
             if token and token in part_tokens:
                 return True
-        current_state = str(state.get("current_state") or state.get("state") or "").strip().lower()
-        if current_state in {"misplaced", "picked", "placed", "assembled", "in_gripper"}:
+        current_state = _outline_state_part_state_token(state, candidate_part_name="")
+        if current_state:
             return True
-        if any(
-            str(state.get(field_name) or "").strip()
-            for field_name in ("location", "current_location")
-        ):
+        if _outline_state_location_token(state):
             return True
     if any(
         str(action_target.get(field_name) or "").strip()
@@ -2118,11 +2227,6 @@ def _infer_outline_macro_signature(
         or resource_row.get("gripper_state")
         or ""
     ).strip()
-    after_gripper_state = str(
-        _first_non_empty_state_value(end_state, "gripper_state")
-        or before_gripper_state
-        or ""
-    ).strip()
     if "held_part" in start_state:
         before_held_part = str(start_state.get("held_part") or "").strip()
     else:
@@ -2131,6 +2235,12 @@ def _infer_outline_macro_signature(
         after_held_part = str(end_state.get("held_part") or "").strip()
     else:
         after_held_part = before_held_part
+    after_gripper_state = str(
+        _first_non_empty_state_value(end_state, "gripper_state")
+        or ("closed" if "held_part" in end_state and after_held_part else "open" if "held_part" in end_state else "")
+        or before_gripper_state
+        or ""
+    ).strip()
     before_named_pose = _outline_resource_named_pose_token(
         state=start_state,
         action_target={},
@@ -2203,7 +2313,7 @@ def _infer_outline_macro_signature(
         if not before_holder and before_held_part == part_name:
             before_holder = resource_jid
         after_holder = before_holder
-        explicit_end_holder = str(end_state.get("current_holder_resource_jid") or "").strip()
+        explicit_end_holder = _outline_state_part_holder_token(end_state)
         if explicit_end_holder:
             after_holder = explicit_end_holder
         elif after_held_part == part_name:
@@ -2286,7 +2396,7 @@ def _infer_outline_macro_signature(
             if (
                 _outline_state_pose_value(state)
                 or _outline_state_location_token(state)
-                or str(state.get("current_holder_resource_jid") or "").strip()
+                or _outline_state_part_holder_token(state)
                 or str(state.get("held_part") or "").strip() == primary_part_for_intent
             ):
                 state_scoped_part_anchor = True
@@ -2391,7 +2501,21 @@ def _build_outline_task_type_lookup(
     return task_types
 
 
-def _outline_dependency_map(outline_tasks: list[dict[str, Any]]) -> dict[str, list[str]]:
+def _outline_dependency_map(
+    outline_tasks: list[dict[str, Any]],
+    *,
+    dependency_map: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    if dependency_map is not None:
+        return {
+            str(outline_id).strip(): [
+                str(item).strip()
+                for item in (dependency_ids or [])
+                if str(item).strip()
+            ]
+            for outline_id, dependency_ids in dependency_map.items()
+            if str(outline_id).strip()
+        }
     dependency_map: dict[str, list[str]] = {}
     for index, raw_task in enumerate(outline_tasks):
         if not isinstance(raw_task, dict):
@@ -2420,7 +2544,11 @@ def _outline_dependency_reaches(
     return False
 
 
-def _outline_rollout_tasks(outline_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _outline_rollout_tasks(
+    outline_tasks: list[dict[str, Any]],
+    *,
+    dependency_map: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
     indexed_tasks: list[tuple[int, str, dict[str, Any]]] = []
     task_index_by_id: dict[str, int] = {}
     tasks_by_id: dict[str, dict[str, Any]] = {}
@@ -2434,7 +2562,10 @@ def _outline_rollout_tasks(outline_tasks: list[dict[str, Any]]) -> list[dict[str
 
     indegree = {outline_id: 0 for _, outline_id, _ in indexed_tasks}
     outgoing: dict[str, list[str]] = {outline_id: [] for _, outline_id, _ in indexed_tasks}
-    dependency_map = _outline_dependency_map(outline_tasks)
+    dependency_map = _outline_dependency_map(
+        outline_tasks,
+        dependency_map=dependency_map,
+    )
     for _, outline_id, _ in indexed_tasks:
         for dependency_id in dependency_map.get(outline_id) or []:
             if dependency_id not in indegree:
@@ -2504,7 +2635,7 @@ def _outline_task_has_post_task_anchor(
         return True
     if any(
         str(end_state.get(field_name) or "").strip()
-        for field_name in ("part_location", "location", "current_location")
+        for field_name in ("part_location", "resource_location", "location", "current_location")
     ):
         return True
     if any(
@@ -2514,9 +2645,98 @@ def _outline_task_has_post_task_anchor(
         return True
     if str(end_state.get("held_part") or "").strip() == task_part_name:
         return True
-    if str(end_state.get("current_holder_resource_jid") or "").strip():
+    if _outline_state_part_holder_token(end_state):
         return True
     return False
+
+
+def _outline_task_has_grounded_part_fate_anchor(
+    task: dict[str, Any],
+    *,
+    task_part_name: str,
+) -> bool:
+    if not task_part_name:
+        return True
+    end_state = dict(task.get("expected_end_state") or {})
+    action_target = _outline_task_action_target(task)
+    end_pose = (
+        end_state.get("position")
+        or end_state.get("pose")
+        or end_state.get("current_pose")
+    )
+    if isinstance(end_pose, dict) and "x" in end_pose:
+        return True
+    if any(
+        str(end_state.get(field_name) or "").strip()
+        for field_name in ("part_location", "resource_location", "location", "current_location")
+    ):
+        return True
+    if str(action_target.get("target_location") or "").strip():
+        return True
+    if _outline_state_part_holder_token(end_state):
+        return True
+    if str(end_state.get("held_part") or "").strip() == task_part_name:
+        return True
+    return False
+
+
+def _outline_task_releases_primary_part(
+    signature: dict[str, Any],
+    *,
+    task_part_name: str,
+) -> bool:
+    before_held_part = str(
+        dict(signature.get("resource_before") or {}).get("held_part") or ""
+    ).strip()
+    after_held_part = str(
+        dict(signature.get("resource_after") or {}).get("held_part") or ""
+    ).strip()
+    return bool(
+        task_part_name
+        and before_held_part == task_part_name
+        and after_held_part != task_part_name
+    )
+
+
+def _outline_task_disallowed_state_tokens(task: dict[str, Any]) -> list[str]:
+    disallowed_tokens = {
+        "blocked",
+        "unblocked",
+        "safe",
+        "unsafe",
+        "cleared",
+        "verified",
+        "placed_approached",
+    }
+    matched_tokens: list[str] = []
+    for state_key in ("expected_start_state", "expected_end_state"):
+        state = dict(task.get(state_key) or {})
+        for field_name in (
+            "current_state",
+            "state",
+            "resource_state",
+            "part_state",
+            "part_status",
+        ):
+            token = str(state.get(field_name) or "").strip()
+            if token and token.lower() in disallowed_tokens and token not in matched_tokens:
+                matched_tokens.append(token)
+    return matched_tokens
+
+
+def _outline_task_disallowed_state_fields(task: dict[str, Any]) -> dict[str, list[str]]:
+    disallowed: dict[str, list[str]] = {}
+    for state_key in ("expected_start_state", "expected_end_state"):
+        state = dict(task.get(state_key) or {})
+        invalid_fields = [
+            str(field_name).strip()
+            for field_name in state.keys()
+            if str(field_name).strip()
+            and str(field_name).strip() not in _ALLOWED_OUTLINE_STATE_FIELDS
+        ]
+        if invalid_fields:
+            disallowed[state_key] = sorted(set(invalid_fields))
+    return disallowed
 
 
 def _apply_outline_task_effects(
@@ -2569,13 +2789,21 @@ def _apply_outline_task_effects(
     elif "held_part" in end_state:
         held_part = str(end_state.get("held_part") or "").strip()
         resource_row["held_part"] = held_part or None
+    if "held_part" in resource_effect or "held_part" in end_state:
+        resource_row["gripper_state"] = "closed" if resource_row.get("held_part") else "open"
     if "location" in resource_effect:
         resource_row["current_location"] = str(
             resource_effect.get("location") or ""
         ).strip() or None
-    elif "current_location" in end_state or "location" in end_state or "named_pose" in end_state:
+    elif (
+        "resource_location" in end_state
+        or "current_location" in end_state
+        or "location" in end_state
+        or "named_pose" in end_state
+    ):
         resource_row["current_location"] = str(
-            end_state.get("current_location")
+            end_state.get("resource_location")
+            or end_state.get("current_location")
             or end_state.get("location")
             or end_state.get("named_pose")
             or ""
@@ -2622,15 +2850,23 @@ def _apply_outline_task_effects(
             ).strip():
                 part_row["observed_pose"] = None
     else:
-        if "current_state" in end_state or "state" in end_state:
-            candidate_state = str(
-                end_state.get("current_state") or end_state.get("state") or ""
-            ).strip()
-            if _is_part_lifecycle_state(candidate_state):
-                part_row["current_state"] = candidate_state
-        if "part_location" in end_state or "location" in end_state or "current_location" in end_state:
+        candidate_state = str(
+            end_state.get("part_state")
+            or end_state.get("current_state")
+            or end_state.get("state")
+            or ""
+        ).strip() or None
+        if _is_part_lifecycle_state(candidate_state):
+            part_row["current_state"] = candidate_state
+        if (
+            "part_location" in end_state
+            or "resource_location" in end_state
+            or "location" in end_state
+            or "current_location" in end_state
+        ):
             part_row["current_location"] = str(
                 end_state.get("part_location")
+                or end_state.get("resource_location")
                 or end_state.get("location")
                 or end_state.get("current_location")
                 or ""
@@ -2644,10 +2880,8 @@ def _apply_outline_task_effects(
                 part_row["current_location"] = f"{resource_jid}_gripper"
             elif not held_part:
                 part_row["current_holder_resource_jid"] = None
-        elif str(end_state.get("current_holder_resource_jid") or "").strip():
-            part_row["current_holder_resource_jid"] = str(
-                end_state.get("current_holder_resource_jid") or ""
-            ).strip()
+        elif _outline_state_part_holder_token(end_state):
+            part_row["current_holder_resource_jid"] = _outline_state_part_holder_token(end_state)
         part_end_pose = (
             end_state.get("position")
             or end_state.get("pose")
@@ -2736,7 +2970,7 @@ def _continuation_prerequisite_task_ids(
                 if str(raw_task.get("resource_jid") or "").strip() != resource_jid:
                     continue
                 end_state = dict(raw_task.get("expected_end_state") or {})
-                if str(end_state.get("current_state") or end_state.get("state") or "").strip() == expected_state:
+                if _outline_state_resource_state_token(end_state) == expected_state:
                     prerequisite_ids.append(outline_id)
         elif kind == "safety_blocked_suffix_task":
             source_task_id = str(condition.get("source_task_id") or "").strip()
@@ -2760,12 +2994,11 @@ def _continuation_prerequisite_task_ids(
                     if str(raw_task.get("part_name") or "").strip() != blocker_part:
                         continue
                     end_state = dict(raw_task.get("expected_end_state") or {})
-                    end_current_state = str(
-                        end_state.get("current_state") or end_state.get("state") or ""
-                    ).strip().lower()
-                    end_location = str(
-                        end_state.get("location") or end_state.get("current_location") or ""
-                    ).strip()
+                    end_current_state = _outline_state_part_state_token(
+                        end_state,
+                        candidate_part_name=blocker_part,
+                    ).lower()
+                    end_location = _outline_state_location_token(end_state)
                     if end_current_state in {"placed", "assembled"} or (
                         goal_location and end_location == goal_location
                     ):
@@ -2874,6 +3107,18 @@ def _outline_validation_ref(finding: dict[str, Any]) -> dict[str, Any]:
     resource_jid = str(finding.get("resource_jid") or "").strip()
     if resource_jid:
         ref["resource_jid"] = resource_jid
+    for field_name in (
+        "kind",
+        "entity",
+        "expected",
+        "actual",
+        "blocking_rule_id",
+        "blocked_nominal_task_id",
+        "condition_id",
+    ):
+        value = finding.get(field_name)
+        if value not in (None, "", [], {}):
+            ref[field_name] = deepcopy(value)
     failed_reason = str(finding.get("failed_reason") or "").strip()
     if failed_reason:
         ref["failed_reason"] = failed_reason
@@ -2927,6 +3172,17 @@ def _extract_addressed_validation_findings(
         resource_jid = str(row.get("resource_jid") or "").strip()
         if resource_jid:
             ref["resource_jid"] = resource_jid
+        for field_name in (
+            "kind",
+            "entity",
+            "expected",
+            "actual",
+            "blocking_rule_id",
+            "blocked_nominal_task_id",
+        ):
+            value = row.get(field_name)
+            if value not in (None, "", [], {}):
+                ref[field_name] = deepcopy(value)
         addressed_refs.append(ref)
     return addressed_refs
 
@@ -3018,7 +3274,25 @@ def _outline_pruned_action_descriptor(
         parts_by_name=parts_by_name,
     )
     action_target = _outline_task_action_target(task)
-    end_state = dict(task.get("expected_end_state") or {})
+    raw_end_state = task.get("expected_end_state")
+    end_state = dict(raw_end_state) if isinstance(raw_end_state, dict) else {}
+    action_pose = dict(action_target.get("pose") or {}) if isinstance(action_target.get("pose"), dict) else {}
+    slot_pose = (
+        dict(action_target.get("slot_pose") or {})
+        if isinstance(action_target.get("slot_pose"), dict)
+        else {}
+    )
+    end_pose = (
+        action_pose
+        or slot_pose
+        or _outline_state_pose_value(end_state)
+        or {}
+    )
+    named_pose = str(
+        action_target.get("named_pose")
+        or _outline_state_named_pose_value(end_state)
+        or ""
+    ).strip()
     descriptor: dict[str, Any] = {
         "resource_jid": str(task.get("resource_jid") or "").strip() or None,
         "task_kind": str(signature.get("task_kind") or "").strip() or None,
@@ -3027,13 +3301,14 @@ def _outline_pruned_action_descriptor(
             or str(signature.get("inferable_primary_part") or "").strip()
             or None
         ),
-        "named_pose": str(action_target.get("named_pose") or "").strip() or None,
+        "named_pose": named_pose or None,
         "source_location": str(action_target.get("source_location") or "").strip() or None,
         "target_location": (
             str(action_target.get("target_location") or "").strip()
             or _outline_state_location_token(end_state)
             or None
         ),
+        "target_pose": end_pose if isinstance(end_pose, dict) and "x" in end_pose else None,
         "end_resource_state": _outline_state_resource_state_token(end_state) or None,
         "end_gripper_state": str(end_state.get("gripper_state") or "").strip() or None,
         "end_held_part": str(end_state.get("held_part") or "").strip() or None,
@@ -3043,6 +3318,19 @@ def _outline_pruned_action_descriptor(
         for key, value in descriptor.items()
         if value not in (None, "", [], {})
     }
+
+
+def _pruned_action_has_concrete_target(action: dict[str, Any]) -> bool:
+    if not isinstance(action, dict):
+        return False
+    if str(action.get("named_pose") or "").strip():
+        return True
+    if str(action.get("source_location") or "").strip():
+        return True
+    if str(action.get("target_location") or "").strip():
+        return True
+    target_pose = dict(action.get("target_pose") or {})
+    return bool(target_pose) and "x" in target_pose
 
 
 def _outline_pruned_action_key(action: dict[str, Any]) -> str:
@@ -3057,6 +3345,8 @@ def _outline_pruned_action_key(action: dict[str, Any]) -> str:
 def _outline_validation_finding_status(finding: dict[str, Any]) -> str:
     constraint_owner = str(finding.get("constraint_owner") or "").strip().lower()
     if constraint_owner == "binding":
+        return "binding_invalid"
+    if str(finding.get("constraint_code") or "").strip() == "no_state_change":
         return "binding_invalid"
     failed_axes = [
         str(item).strip()
@@ -3082,6 +3372,8 @@ def _outline_validation_guard(finding: dict[str, Any]) -> dict[str, Any] | None:
     constraint_code = str(finding.get("constraint_code") or "").strip() or (
         failed_axes[0] if len(failed_axes) == 1 else ""
     )
+    if constraint_code:
+        guard["constraint_code"] = constraint_code
     claimed_condition_ids = _finding_claimed_condition_ids(finding)
     if constraint_code in {"holder_conflict", "resource_holds_other_part"}:
         conflicting_part = str(finding.get("conflicting_part") or "").strip()
@@ -3203,6 +3495,7 @@ def _outline_validation_guard(finding: dict[str, Any]) -> dict[str, Any] | None:
             guard[field_name] = deepcopy(value)
     for field_name in (
         "claimed_condition_ids",
+        "claimed_task_ids",
         "blocking_condition_ids",
         "reopened_condition_ids",
     ):
@@ -3226,6 +3519,229 @@ def _annotate_outline_validation_finding(
     annotated["guard"] = _outline_validation_guard(annotated)
     annotated["validator_reason"] = _format_outline_validation_finding(annotated)
     return annotated
+
+
+def _outline_signature_has_state_change(signature: dict[str, Any]) -> bool:
+    return bool(
+        dict(signature.get("resource_delta") or {})
+        or dict(signature.get("part_deltas") or {})
+    )
+
+
+def _no_state_change_finding(
+    *,
+    task: dict[str, Any],
+    signature: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "task_id": str(task.get("outline_id") or "").strip(),
+        "resource_jid": str(task.get("resource_jid") or "").strip() or None,
+        "part_name": str(
+            task.get("part_name") or signature.get("inferable_primary_part") or ""
+        ).strip()
+        or None,
+        "pose_source": "task_contract",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["no_state_change"],
+        "constraint_owner": "cca",
+        "constraint_family": "sequence",
+        "constraint_code": "no_state_change",
+        "evidence": {
+            "resource_delta": deepcopy(signature.get("resource_delta") or {}),
+            "part_deltas": deepcopy(signature.get("part_deltas") or {}),
+        },
+    }
+
+
+def _abstract_state_token_finding(
+    *,
+    task: dict[str, Any],
+    signature: dict[str, Any],
+    state_tokens: list[str],
+) -> dict[str, Any]:
+    return {
+        "task_id": str(task.get("outline_id") or "").strip(),
+        "resource_jid": str(task.get("resource_jid") or "").strip() or None,
+        "part_name": str(
+            task.get("part_name") or signature.get("inferable_primary_part") or ""
+        ).strip()
+        or None,
+        "pose_source": "task_contract",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["abstract_state_token"],
+        "constraint_owner": "cca",
+        "constraint_family": "sequence",
+        "constraint_code": "abstract_state_token",
+        "reason": (
+            "task uses abstract or invented state tokens instead of grounded state "
+            f"({', '.join(state_tokens)})"
+        ),
+        "state_tokens": deepcopy(state_tokens),
+    }
+
+
+def _disallowed_outline_state_fields_finding(
+    *,
+    task: dict[str, Any],
+    disallowed_fields: dict[str, list[str]],
+) -> dict[str, Any]:
+    invalid_fields = [
+        f"{state_key}.{field_name}"
+        for state_key, field_names in disallowed_fields.items()
+        for field_name in field_names
+    ]
+    return {
+        "task_id": str(task.get("outline_id") or "").strip(),
+        "resource_jid": str(task.get("resource_jid") or "").strip() or None,
+        "part_name": str(task.get("part_name") or "").strip() or None,
+        "pose_source": "task_contract",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["disallowed_outline_state_field"],
+        "constraint_owner": "cca",
+        "constraint_family": "sequence",
+        "constraint_code": "disallowed_outline_state_field",
+        "reason": (
+            "outline state objects may use only resource_state, resource_location, held_part, "
+            "part_state, part_location, and part_holder_resource_jid "
+            f"({', '.join(invalid_fields)})"
+        ),
+        "state_fields": deepcopy(invalid_fields),
+    }
+
+
+def _missing_part_fate_anchor_finding(
+    *,
+    task: dict[str, Any],
+    signature: dict[str, Any],
+    task_part_name: str,
+) -> dict[str, Any]:
+    return {
+        "task_id": str(task.get("outline_id") or "").strip(),
+        "resource_jid": str(task.get("resource_jid") or "").strip() or None,
+        "part_name": task_part_name or None,
+        "pose_source": "task_contract",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["missing_part_fate_anchor"],
+        "constraint_owner": "cca",
+        "constraint_family": "sequence",
+        "constraint_code": "missing_part_fate_anchor",
+        "reason": (
+            f"task clears held part '{task_part_name}' without grounding the part's "
+            "resulting holder, location, or pose"
+        ),
+        "evidence": {
+            "resource_before": deepcopy(signature.get("resource_before") or {}),
+            "resource_after": deepcopy(signature.get("resource_after") or {}),
+        },
+    }
+
+
+def _invalid_dependency_reference_finding(
+    *,
+    task: dict[str, Any],
+    dependency_ids: list[str],
+) -> dict[str, Any]:
+    return {
+        "task_id": str(task.get("outline_id") or "").strip(),
+        "resource_jid": str(task.get("resource_jid") or "").strip() or None,
+        "part_name": str(task.get("part_name") or "").strip() or None,
+        "pose_source": "task_contract",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["invalid_dependency_reference"],
+        "constraint_owner": "cca",
+        "constraint_family": "sequence",
+        "constraint_code": "invalid_dependency_reference",
+        "reason": (
+            "depends_on may reference only outline_id values from outline rows in "
+            f"this same response ({', '.join(dependency_ids)})"
+        ),
+        "dependency_ids": deepcopy(dependency_ids),
+    }
+
+
+def _continuation_gap_finding(condition: dict[str, Any]) -> dict[str, Any]:
+    condition_id = str(condition.get("condition_id") or "").strip()
+    blocked_nominal_task_id = str(
+        condition.get("blocked_nominal_task_id")
+        or condition.get("source_task_id")
+        or ""
+    ).strip()
+    task_id = blocked_nominal_task_id or str(condition.get("entity") or "").strip()
+    blocking_rule_id = str(
+        condition.get("blocking_rule_id") or condition.get("rule_id") or ""
+    ).strip()
+    finding: dict[str, Any] = {
+        "task_id": task_id,
+        "resource_jid": str(condition.get("resource_jid") or "").strip() or None,
+        "part_name": str(condition.get("part_name") or "").strip() or None,
+        "pose_source": "modeled_gap",
+        "pose": None,
+        "workspace_bounds": None,
+        "failed_axes": ["blocker_open"],
+        "constraint_owner": "cca",
+        "constraint_family": "continuation",
+        "constraint_code": "blocker_open",
+        "kind": str(condition.get("kind") or "").strip() or None,
+        "entity": str(condition.get("entity") or "").strip() or None,
+        "expected": deepcopy(condition.get("expected")),
+        "actual": deepcopy(condition.get("actual")),
+        "evidence": {
+            "condition_ids": [condition_id] if condition_id else [],
+        },
+    }
+    if blocking_rule_id:
+        finding["blocking_rule_id"] = blocking_rule_id
+    if blocked_nominal_task_id:
+        finding["blocked_nominal_task_id"] = blocked_nominal_task_id
+    if condition_id:
+        finding["condition_id"] = condition_id
+        finding["blocking_condition_ids"] = [condition_id]
+    return {
+        key: deepcopy(value)
+        for key, value in finding.items()
+        if value not in (None, "", [], {})
+    }
+
+
+_GAP_REANCHOR_CONSTRAINT_CODES = {
+    "workspace_unreachable",
+    "dependency_unsatisfied",
+    "order_violation",
+    "blocker_open",
+    "safety_rule_violation",
+    "condition_reopened",
+}
+
+
+def _should_reanchor_outline_repair_to_gap(
+    *,
+    accepted_prefix: list[dict[str, Any]],
+    task_validation_findings: list[dict[str, Any]],
+    gap_validation_findings: list[dict[str, Any]],
+    stagnation_count: int = 0,
+) -> bool:
+    if not gap_validation_findings:
+        return False
+    if stagnation_count >= _OUTLINE_STAGNATION_LIMIT:
+        return True
+    if not accepted_prefix:
+        return False
+    if not task_validation_findings:
+        return True
+    for finding in task_validation_findings:
+        if not isinstance(finding, dict):
+            return False
+        if _outline_validation_finding_status(finding) == "binding_invalid":
+            continue
+        constraint_code = str(finding.get("constraint_code") or "").strip()
+        if constraint_code not in _GAP_REANCHOR_CONSTRAINT_CODES:
+            return False
+    return True
 
 
 def _guard_matches_validation_finding(
@@ -3288,6 +3804,7 @@ def _replay_outline_task_validation(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    planner: Any | None = None,
 ) -> list[dict[str, Any]]:
     replay_task = deepcopy(task or {})
     task_id = str(replay_task.get("outline_id") or "").strip() or "task_0"
@@ -3307,6 +3824,189 @@ def _replay_outline_task_validation(
         task_index_by_id={task_id: 0},
         dependency_map={task_id: _outline_task_depends_on(replay_task)},
         active_pruned_actions=None,
+        planner=planner,
+    )
+
+
+def _task_part_name_for_pruned_match(
+    task: dict[str, Any],
+    *,
+    grounded_action: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> str:
+    inferred_part_name = str(grounded_action.get("part_name") or "").strip()
+    if inferred_part_name:
+        return inferred_part_name
+    signature = _infer_outline_macro_signature(
+        task,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
+    return str(
+        task.get("part_name")
+        or signature.get("inferable_primary_part")
+        or ""
+    ).strip()
+
+
+def _task_pose_candidates_for_pruned_match(
+    *,
+    part_name: str,
+    grounded_action: dict[str, Any],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    source_ref = dict(dict(grounded_action.get("preconditions") or {}).get("source_ref") or {})
+    source_pose = dict(source_ref.get("pose") or {})
+    if source_pose and "x" in source_pose:
+        candidates.append(deepcopy(source_pose))
+    target = dict(grounded_action.get("target") or {})
+    for field_name in ("pose", "source_pose", "slot_pose"):
+        pose = dict(target.get(field_name) or {})
+        if pose and "x" in pose:
+            candidates.append(deepcopy(pose))
+    part_row = dict(parts_by_name.get(part_name) or {})
+    observed_pose = dict(part_row.get("observed_pose") or {})
+    if observed_pose and "x" in observed_pose:
+        candidates.append(deepcopy(observed_pose))
+
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for pose in candidates:
+        pose_key = json.dumps(pose, sort_keys=True, default=str, ensure_ascii=True)
+        if pose_key in seen_keys:
+            continue
+        seen_keys.add(pose_key)
+        deduped.append(pose)
+    return deduped
+
+
+def _task_matches_resource_feasibility_guard(
+    task: dict[str, Any],
+    *,
+    guard: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    kind = str(guard.get("kind") or "").strip()
+    if kind not in {
+        "unsupported_resource_target",
+        "observed_pose_unreachable",
+        "named_pose_unavailable",
+        "resource_not_available",
+        "resource_missing_workspace_bounds",
+    }:
+        return False
+
+    grounding_result = compile_grounded_outline_task(
+        task,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
+    grounded_action = dict(grounding_result.get("grounded_action") or {})
+    normalized_task = _task_with_grounded_defaults(task, grounded_action)
+    resource_jid = str(
+        grounded_action.get("resource_jid")
+        or normalized_task.get("resource_jid")
+        or ""
+    ).strip()
+    guarded_resource_jid = str(guard.get("resource_jid") or "").strip()
+    if guarded_resource_jid and resource_jid != guarded_resource_jid:
+        return False
+
+    if kind == "unsupported_resource_target":
+        task_kind = str(
+            grounded_action.get("task_kind")
+            or _infer_outline_macro_signature(
+                normalized_task,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            ).get("task_kind")
+            or ""
+        ).strip()
+        if task_kind != "resource_only":
+            return False
+        task_action = _outline_pruned_action_descriptor(
+            normalized_task,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
+        if not _pruned_action_has_concrete_target(task_action):
+            return False
+        desired_resource_state = str(
+            dict(dict(grounded_action.get("expected_effect") or {}).get("resource") or {}).get(
+                "current_state"
+            )
+            or ""
+        ).strip()
+        guarded_state = str(guard.get("resource_state") or "").strip()
+        return not guarded_state or desired_resource_state == guarded_state
+
+    if kind == "observed_pose_unreachable":
+        part_name = _task_part_name_for_pruned_match(
+            normalized_task,
+            grounded_action=grounded_action,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
+        guarded_part_name = str(guard.get("part_name") or "").strip()
+        if guarded_part_name and part_name != guarded_part_name:
+            return False
+        guarded_pose = dict(guard.get("pose") or {})
+        if not guarded_pose or "x" not in guarded_pose:
+            return False
+        return any(
+            candidate_pose == guarded_pose
+            for candidate_pose in _task_pose_candidates_for_pruned_match(
+                part_name=part_name,
+                grounded_action=grounded_action,
+                parts_by_name=parts_by_name,
+            )
+        )
+
+    if kind == "named_pose_unavailable":
+        target = dict(grounded_action.get("target") or {})
+        return str(target.get("named_pose") or "").strip() == str(guard.get("named_pose") or "").strip()
+
+    if kind in {"resource_not_available", "resource_missing_workspace_bounds"}:
+        return bool(resource_jid) and resource_jid == guarded_resource_jid
+
+    return False
+
+
+def _task_matches_active_pruned_action(
+    task: dict[str, Any],
+    pruned_action: dict[str, Any],
+    *,
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    stored_action = dict(pruned_action.get("action") or {})
+    if (
+        str(stored_action.get("task_kind") or "").strip() == "resource_only"
+        and not _pruned_action_has_concrete_target(stored_action)
+    ):
+        return False
+    task_action = _outline_pruned_action_descriptor(
+        task,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
+    if (
+        str(task_action.get("task_kind") or "").strip() == "resource_only"
+        and not _pruned_action_has_concrete_target(task_action)
+    ):
+        return False
+    if _outline_pruned_action_key(task_action) == _outline_pruned_action_key(
+        stored_action
+    ):
+        return True
+    return _task_matches_resource_feasibility_guard(
+        task,
+        guard=dict(pruned_action.get("guard") or {}),
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
     )
 
 
@@ -3316,6 +4016,7 @@ def _pruned_action_is_active(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    planner: Any | None = None,
 ) -> bool:
     guard = dict(pruned_action.get("guard") or {})
     if not guard:
@@ -3350,6 +4051,7 @@ def _pruned_action_is_active(
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
             llm_input=llm_input,
+            planner=planner,
         )
         return any(
             dict(finding).get("constraint_code") == "source_reference_unavailable"
@@ -3365,6 +4067,7 @@ def _pruned_action_is_active(
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
             llm_input=llm_input,
+            planner=planner,
         )
         return any(
             dict(finding).get("constraint_code") == "unsupported_resource_target"
@@ -3439,6 +4142,7 @@ def _pruned_action_is_active(
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=llm_input,
+        planner=planner,
     )
     return any(
         _guard_matches_validation_finding(guard, finding)
@@ -3453,17 +4157,21 @@ def _active_pruned_actions_for_state(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    planner: Any | None = None,
 ) -> list[dict[str, Any]]:
     active_rows: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
     for raw_row in (pruned_actions or []):
         if not isinstance(raw_row, dict):
             continue
+        if not _pruned_action_is_reusable_blocker(raw_row):
+            continue
         if not _pruned_action_is_active(
             raw_row,
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
             llm_input=llm_input,
+            planner=planner,
         ):
             continue
         action_key = _outline_pruned_action_key(dict(raw_row.get("action") or {}))
@@ -3481,12 +4189,49 @@ def _active_pruned_actions_for_state(
     return active_rows
 
 
+_PRUNE_EXCLUDED_CONSTRAINT_CODES = {
+    "claimed_condition_not_currently_unmet",
+    "claimed_condition_not_cleared",
+    "claimed_task_not_pending",
+    "claimed_task_not_currently_blocked",
+    "invalid_dependency_reference",
+}
+
+_PRUNE_REUSABLE_GUARD_KINDS = {
+    "resource_holds_part",
+    "part_held_by_other",
+    "required_part_not_held",
+    "source_reference_unavailable",
+    "unsupported_resource_target",
+    "gripper_closed_without_target_part",
+    "condition_unmet",
+    "named_pose_unavailable",
+    "observed_pose_unreachable",
+    "explicit_pose_out_of_bounds",
+    "part_not_in_current_facts",
+    "resource_not_available",
+    "resource_missing_workspace_bounds",
+}
+
+
+def _pruned_action_is_reusable_blocker(row: dict[str, Any]) -> bool:
+    guard = dict(row.get("guard") or {})
+    constraint_code = str(guard.get("constraint_code") or "").strip()
+    if constraint_code in _PRUNE_EXCLUDED_CONSTRAINT_CODES:
+        return False
+    guard_kind = str(guard.get("kind") or "").strip()
+    if guard_kind == "validation_replay":
+        return False
+    return guard_kind in _PRUNE_REUSABLE_GUARD_KINDS
+
+
 def _build_pruned_actions(
     *,
     existing_pruned_actions: list[dict[str, Any]],
     outline_tasks: list[dict[str, Any]],
     validation_findings: list[dict[str, Any]],
     llm_input: dict[str, Any],
+    planner: Any | None = None,
 ) -> list[dict[str, Any]]:
     resources_by_jid, parts_by_name = _outline_validation_context(llm_input)
     merged_rows = _active_pruned_actions_for_state(
@@ -3494,6 +4239,7 @@ def _build_pruned_actions(
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=llm_input,
+        planner=planner,
     )
     tasks_by_id = {
         str(dict(task or {}).get("outline_id") or "").strip(): dict(task or {})
@@ -3524,11 +4270,18 @@ def _build_pruned_actions(
         guard = dict(finding.get("guard") or {})
         if not task or not guard:
             continue
+        if not _pruned_action_is_reusable_blocker({"guard": guard}):
+            continue
         action = _outline_pruned_action_descriptor(
             task,
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
         )
+        if (
+            str(action.get("task_kind") or "").strip() == "resource_only"
+            and not _pruned_action_has_concrete_target(action)
+        ):
+            continue
         dedupe_key = (
             _outline_pruned_action_key(action),
             json.dumps(guard, sort_keys=True, default=str, ensure_ascii=True),
@@ -3549,6 +4302,7 @@ def _build_pruned_actions(
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=llm_input,
+        planner=planner,
     )
 
 
@@ -3559,23 +4313,24 @@ def _matching_active_pruned_action(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    planner: Any | None = None,
 ) -> dict[str, Any] | None:
-    task_action = _outline_pruned_action_descriptor(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    task_key = _outline_pruned_action_key(task_action)
     for raw_row in (pruned_actions or []):
         if not isinstance(raw_row, dict):
             continue
-        if _outline_pruned_action_key(dict(raw_row.get("action") or {})) != task_key:
+        if not _task_matches_active_pruned_action(
+            task,
+            raw_row,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        ):
             continue
         if _pruned_action_is_active(
             raw_row,
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
             llm_input=llm_input,
+            planner=planner,
         ):
             return deepcopy(raw_row)
     return None
@@ -3621,6 +4376,30 @@ _CONSTRAINT_CODE_FALLBACKS: dict[str, str] = {
     "condition_reopened": (
         "projected state transition reopens previously cleared "
         "continuation conditions"
+    ),
+    "no_state_change": (
+        "projected macro does not change any grounded resource or part state"
+    ),
+    "abstract_state_token": (
+        "outline task uses abstract or invented state tokens instead of grounded state"
+    ),
+    "disallowed_outline_state_field": (
+        "outline task uses disallowed state fields instead of the minimal generic outline state contract"
+    ),
+    "missing_part_fate_anchor": (
+        "task clears a held part without grounding where that part ends up"
+    ),
+    "invalid_dependency_reference": (
+        "depends_on references ids that are not outline rows in this response"
+    ),
+    "claimed_task_not_pending": (
+        "enables_task_ids references nominal task ids that are not currently pending"
+    ),
+    "claimed_task_not_currently_blocked": (
+        "enables_task_ids references nominal task ids that are not currently blocked"
+    ),
+    "claimed_task_not_enabled": (
+        "enables_task_ids claims nominal task ids that remain blocked after projection"
     ),
 }
 
@@ -3708,6 +4487,26 @@ _ENRICHED_AXIS_SPECS: dict[str, tuple[str, str, str]] = {
         "projected state transition reopens previously cleared "
         "continuation conditions",
         "reopened_condition_ids",
+        " ({ids})",
+    ),
+    "claimed_task_not_pending": (
+        "enables_task_ids references task ids that are not pending nominal tasks",
+        "claimed_task_ids",
+        " ({ids})",
+    ),
+    "claimed_task_not_currently_blocked": (
+        "enables_task_ids references nominal tasks that are not currently blocked",
+        "claimed_task_ids",
+        " ({ids})",
+    ),
+    "claimed_task_not_enabled": (
+        "enables_task_ids claims blocked nominal tasks that remain blocked after projection",
+        "claimed_task_ids",
+        " ({ids})",
+    ),
+    "invalid_dependency_reference": (
+        "depends_on references ids that are not outline rows in this response",
+        "dependency_ids",
         " ({ids})",
     ),
 }
@@ -3928,6 +4727,7 @@ def _analyze_outline_task_validation(
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=llm_input,
+        planner=planner,
     )
     if active_pruned_action is not None:
         findings.append(
@@ -3943,6 +4743,16 @@ def _analyze_outline_task_validation(
                 "failed_axes": ["pruned_action"],
                 "blocked_reason": str(active_pruned_action.get("reason") or "").strip(),
             }
+        )
+        return findings
+
+    disallowed_state_fields = _outline_task_disallowed_state_fields(task)
+    if disallowed_state_fields:
+        findings.append(
+            _disallowed_outline_state_fields_finding(
+                task=task,
+                disallowed_fields=disallowed_state_fields,
+            )
         )
         return findings
 
@@ -3972,6 +4782,46 @@ def _analyze_outline_task_validation(
         parts_by_name=parts_by_name,
         llm_input=llm_input,
     )
+    disallowed_state_tokens = _outline_task_disallowed_state_tokens(normalized_task)
+    if disallowed_state_tokens:
+        findings.append(
+            _abstract_state_token_finding(
+                task=normalized_task,
+                signature=signature,
+                state_tokens=disallowed_state_tokens,
+            )
+        )
+        return findings
+    if not _outline_signature_has_state_change(signature):
+        findings.append(
+            _no_state_change_finding(
+                task=normalized_task,
+                signature=signature,
+            )
+        )
+        return findings
+
+    effective_part_name = str(
+        grounded_action.get("part_name")
+        or signature.get("inferable_primary_part")
+        or normalized_task.get("part_name")
+        or ""
+    ).strip()
+    if _outline_task_releases_primary_part(
+        signature,
+        task_part_name=effective_part_name,
+    ) and not _outline_task_has_grounded_part_fate_anchor(
+        normalized_task,
+        task_part_name=effective_part_name,
+    ):
+        findings.append(
+            _missing_part_fate_anchor_finding(
+                task=normalized_task,
+                signature=signature,
+                task_part_name=effective_part_name,
+            )
+        )
+        return findings
 
     resource_findings = _validate_outline_task_resource_constraints(
         planner=planner,
@@ -4035,11 +4885,11 @@ def _compute_outline_validation_findings(
         for index, task in enumerate(outline_tasks)
         if isinstance(task, dict)
     }
-    dependency_map = _outline_dependency_map(outline_tasks)
+    dependency_map, _ = _validated_outline_dependency_map(outline_tasks)
     validation_findings: list[dict[str, Any]] = []
     cleared_condition_ids: list[str] = []
 
-    for task in _outline_rollout_tasks(outline_tasks):
+    for task in _outline_rollout_tasks(outline_tasks, dependency_map=dependency_map):
         if not isinstance(task, dict):
             continue
         task_findings = _analyze_outline_task_validation(
@@ -4125,9 +4975,293 @@ def _build_outline_validation_findings(
     )
 
 
+def _outline_revision_action_target_signature(task: dict[str, Any]) -> dict[str, Any]:
+    action_target = dict(task.get("action_target") or {})
+    signature: dict[str, Any] = {}
+    for field_name in ("named_pose", "source_location", "target_location"):
+        value = action_target.get(field_name)
+        if value not in (None, "", [], {}):
+            signature[field_name] = deepcopy(value)
+    return signature
+
+
+def _outline_revision_state_signature(task: dict[str, Any], *, state_key: str) -> dict[str, Any]:
+    raw_state = task.get(state_key)
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    signature: dict[str, Any] = {}
+    for field_name in (
+        "resource_state",
+        "resource_location",
+        "held_part",
+        "part_state",
+        "part_location",
+        "part_holder_resource_jid",
+    ):
+        value = state.get(field_name)
+        if value not in (None, "", [], {}):
+            signature[field_name] = deepcopy(value)
+    return signature
+
+
+def _outline_revision_task_signature(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "resource_jid": str(task.get("resource_jid") or "").strip(),
+        "part_name": str(task.get("part_name") or "").strip(),
+        "action_target": _outline_revision_action_target_signature(task),
+        "expected_start_state": _outline_revision_state_signature(
+            task,
+            state_key="expected_start_state",
+        ),
+        "expected_end_state": _outline_revision_state_signature(
+            task,
+            state_key="expected_end_state",
+        ),
+    }
+
+
+def _outline_revision_task_equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return _outline_revision_task_signature(left) == _outline_revision_task_signature(
+        right
+    )
+
+
+def _outline_revision_response_includes_prefix(
+    accepted_prefix: list[dict[str, Any]],
+    outline_tasks: list[dict[str, Any]],
+) -> bool:
+    if not accepted_prefix:
+        return False
+    if len(outline_tasks) < len(accepted_prefix):
+        return False
+    for index, prefix_task in enumerate(accepted_prefix):
+        candidate_task = dict(outline_tasks[index] or {})
+        if not _outline_revision_task_equivalent(prefix_task, candidate_task):
+            return False
+    return True
+
+
+def _merge_outline_revision_tasks(
+    *,
+    accepted_prefix: list[dict[str, Any]],
+    outline_tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    prefix_rows = [deepcopy(row) for row in (accepted_prefix or []) if isinstance(row, dict)]
+    suffix_rows = [deepcopy(row) for row in (outline_tasks or []) if isinstance(row, dict)]
+    if not prefix_rows:
+        return suffix_rows
+    if _outline_revision_response_includes_prefix(prefix_rows, suffix_rows):
+        return suffix_rows
+    existing_signatures = {
+        json.dumps(
+            _outline_revision_task_signature(row),
+            sort_keys=True,
+            default=str,
+            ensure_ascii=True,
+        )
+        for row in prefix_rows
+    }
+    merged_suffix: list[dict[str, Any]] = []
+    for row in suffix_rows:
+        signature = json.dumps(
+            _outline_revision_task_signature(row),
+            sort_keys=True,
+            default=str,
+            ensure_ascii=True,
+        )
+        if signature in existing_signatures:
+            continue
+        existing_signatures.add(signature)
+        merged_suffix.append(deepcopy(row))
+    return prefix_rows + merged_suffix
+
+
+def _outline_rollout_progress(
+    outline_tasks: list[dict[str, Any]],
+    llm_input: dict[str, Any],
+    *,
+    pruned_actions: list[dict[str, Any]] | None = None,
+    planner: Any | None = None,
+    stop_on_first_failure: bool = False,
+) -> dict[str, Any]:
+    resources_by_jid, parts_by_name = _outline_validation_context(llm_input)
+    symbolic_resources = deepcopy(resources_by_jid)
+    symbolic_parts = deepcopy(parts_by_name)
+    task_types_by_id = _build_outline_task_type_lookup(
+        outline_tasks,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+        llm_input=llm_input,
+    )
+    task_index_by_id = {
+        str(dict(task or {}).get("outline_id") or "").strip() or f"task_{index}": index
+        for index, task in enumerate(outline_tasks)
+        if isinstance(task, dict)
+    }
+    dependency_map, _ = _validated_outline_dependency_map(outline_tasks)
+    accepted_prefix: list[dict[str, Any]] = []
+    validation_findings: list[dict[str, Any]] = []
+    first_failure_findings: list[dict[str, Any]] = []
+    cleared_condition_ids: list[str] = []
+
+    for task in _outline_rollout_tasks(outline_tasks, dependency_map=dependency_map):
+        if not isinstance(task, dict):
+            continue
+        task_findings = [
+            _annotate_outline_validation_finding(finding)
+            for finding in _analyze_outline_task_validation(
+                task,
+                outline_tasks=outline_tasks,
+                resources_by_jid=symbolic_resources,
+                parts_by_name=symbolic_parts,
+                llm_input=llm_input,
+                task_types_by_id=task_types_by_id,
+                task_index_by_id=task_index_by_id,
+                dependency_map=dependency_map,
+                active_pruned_actions=pruned_actions,
+                planner=planner,
+                previously_cleared_condition_ids=cleared_condition_ids,
+            )
+        ]
+        validation_findings.extend(task_findings)
+        if task_findings:
+            if not first_failure_findings:
+                first_failure_findings = deepcopy(task_findings)
+            if stop_on_first_failure:
+                break
+            continue
+
+        accepted_prefix.append(deepcopy(task))
+        task_id = str(task.get("outline_id") or "").strip()
+        task_type = str(task_types_by_id.get(task_id) or "").strip()
+        grounding_result = compile_grounded_outline_task(
+            task,
+            resources_by_jid=symbolic_resources,
+            parts_by_name=symbolic_parts,
+        )
+        _apply_outline_task_effects(
+            task,
+            resources_by_jid=symbolic_resources,
+            parts_by_name=symbolic_parts,
+            task_type=task_type,
+            grounded_action=dict(grounding_result.get("grounded_action") or {}),
+        )
+        _, unmet_condition_ids, _ = _current_recovery_gap_condition_status(
+            resources_by_jid=symbolic_resources,
+            parts_by_name=symbolic_parts,
+            llm_input=llm_input,
+        )
+        cleared_condition_ids = [
+            condition_id
+            for condition_id in (
+                str(dict(row).get("condition_id") or "").strip()
+                for row in (
+                    dict(llm_input.get("modeled_continuation_gap") or {}).get(
+                        "unmet_continuation_conditions"
+                    )
+                    or []
+                )
+            )
+            if condition_id and condition_id not in unmet_condition_ids
+        ]
+
+    remaining_condition_rows, remaining_unmet_condition_ids, cleared_condition_ids = (
+        _current_recovery_gap_condition_status(
+            resources_by_jid=symbolic_resources,
+            parts_by_name=symbolic_parts,
+            llm_input=llm_input,
+        )
+    )
+    remaining_unmet_conditions = [
+        deepcopy(row)
+        for row in remaining_condition_rows
+        if not bool(row.get("currently_cleared"))
+    ]
+
+    return {
+        "accepted_prefix": accepted_prefix,
+        "validation_findings": validation_findings,
+        "first_failure_findings": first_failure_findings,
+        "projected_resources": deepcopy(symbolic_resources),
+        "projected_parts": deepcopy(symbolic_parts),
+        "remaining_unmet_condition_ids": deepcopy(remaining_unmet_condition_ids),
+        "remaining_unmet_conditions": remaining_unmet_conditions,
+        "cleared_condition_ids": deepcopy(cleared_condition_ids),
+    }
+
+
+def _outline_progress_signature(
+    *,
+    llm_input: dict[str, Any],
+    projected_resources: dict[str, dict[str, Any]],
+    projected_parts: dict[str, dict[str, Any]],
+    remaining_unmet_conditions: list[dict[str, Any]],
+) -> str:
+    del llm_input
+    remaining_rows = sorted(
+        [
+            {
+                key: deepcopy(value)
+                for key, value in dict(row or {}).items()
+                if key
+                in {
+                    "condition_id",
+                    "kind",
+                    "entity",
+                    "expected",
+                    "actual",
+                    "part_name",
+                    "resource_jid",
+                    "target_location",
+                    "requirement_id",
+                    "blocking_rule_id",
+                    "blocked_nominal_task_id",
+                }
+                and value not in (None, "", [], {})
+            }
+            for row in (remaining_unmet_conditions or [])
+            if isinstance(row, dict)
+        ],
+        key=lambda row: json.dumps(row, sort_keys=True, default=str, ensure_ascii=True),
+    )
+    payload = {
+        "remaining_unmet_conditions": remaining_rows,
+        "resources": sorted(
+            _compact_recovery_gap_resources(projected_resources),
+            key=lambda row: str(row.get("resource_jid") or ""),
+        ),
+        "parts": sorted(
+            _compact_recovery_gap_parts(projected_parts),
+            key=lambda row: str(row.get("part_name") or ""),
+        ),
+    }
+    return json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
+
+
+def _trim_accepted_outline_prefix_for_state(
+    accepted_prefix: list[dict[str, Any]],
+    llm_input: dict[str, Any],
+    *,
+    pruned_actions: list[dict[str, Any]] | None = None,
+    planner: Any | None = None,
+) -> list[dict[str, Any]]:
+    prefix_rows = [deepcopy(row) for row in (accepted_prefix or []) if isinstance(row, dict)]
+    if not prefix_rows:
+        return []
+    progress = _outline_rollout_progress(
+        prefix_rows,
+        llm_input,
+        pruned_actions=pruned_actions,
+        planner=planner,
+        stop_on_first_failure=True,
+    )
+    return [deepcopy(row) for row in (progress.get("accepted_prefix") or [])]
+
+
 def _build_phase_prompt_artifacts(
     prepared_bridge_request: dict[str, Any],
     session_state: dict[str, Any],
+    *,
+    planner: Any | None = None,
 ) -> tuple[dict[str, Any], str]:
     phase = str(session_state.get("current_phase") or "grounding").strip().lower()
     llm_input = _overlay_session_observations_on_llm_input(
@@ -4135,7 +5269,6 @@ def _build_phase_prompt_artifacts(
         session_state,
     )
     recovery_gap_state: dict[str, Any] = {}
-    grounded_feasibility_facts: list[dict[str, Any]] = []
     pruned_actions: list[dict[str, Any]] = []
     if phase == "outline":
         resources_by_jid, parts_by_name = _outline_validation_context(llm_input)
@@ -4144,16 +5277,18 @@ def _build_phase_prompt_artifacts(
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
         )
-        grounded_feasibility_facts = _build_grounded_feasibility_facts(
+        session_state["accepted_outline_prefix"] = _trim_accepted_outline_prefix_for_state(
+            list(session_state.get("accepted_outline_prefix") or []),
             llm_input,
-            resources_by_jid=resources_by_jid,
-            parts_by_name=parts_by_name,
+            pruned_actions=list(session_state.get("pruned_actions") or []),
+            planner=planner,
         )
         pruned_actions = _active_pruned_actions_for_state(
             list(session_state.get("pruned_actions") or []),
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
             llm_input=llm_input,
+            planner=planner,
         )
     prompt_session_state = deepcopy(session_state)
     if phase == "outline":
@@ -4164,7 +5299,6 @@ def _build_phase_prompt_artifacts(
         session_state=prompt_session_state,
         world_observation_surface=_build_world_observation_surface(prepared_bridge_request),
         recovery_gap_state=recovery_gap_state,
-        grounded_feasibility_facts=grounded_feasibility_facts,
         pruned_actions=pruned_actions,
     )
     prompt_text = render_multi_turn_phase_prompt(prompt_input)
@@ -4397,7 +5531,7 @@ def _append_turn(
                 per_turn_payload,
                 phase_label="multi_turn",
                 debug_dir=per_turn_debug_dir,
-                write_latest=True,
+                write_latest=False,
             )
         except Exception as exc:
             _logger.warning("[MultiTurn] Failed to write per-turn artifact: %s", exc)
@@ -4433,6 +5567,7 @@ async def execute_multi_turn_bridge(
         prompt_input, prompt_text = _build_phase_prompt_artifacts(
             prepared_bridge_request,
             session_state,
+            planner=planner,
         )
         raw_response = await ask_llm_structured(
             prompt=prompt_text,
@@ -4721,6 +5856,10 @@ async def execute_multi_turn_bridge(
                         },
                     )
                 )
+                _seed_grounded_part_pose_observations(
+                    prepared_bridge_request,
+                    session_state,
+                )
                 session_state.pop("grounding_contract", None)
                 stop_after_phase = str(session_state.get("stop_after_phase") or "").strip().lower()
                 if stop_after_phase == "grounding":
@@ -4742,15 +5881,28 @@ async def execute_multi_turn_bridge(
                 for row in (session_state.get("outline_validation_findings") or [])
                 if isinstance(row, dict)
             ]
+            accepted_outline_prefix = [
+                deepcopy(row)
+                for row in (session_state.get("accepted_outline_prefix") or [])
+                if isinstance(row, dict)
+            ]
             addressed_validation_findings = _extract_addressed_validation_findings(parsed_response)
             turn_entry["addressed_validation_findings"] = deepcopy(
                 addressed_validation_findings
             )
-            outline_tasks = [
+            returned_outline_tasks = [
                 deepcopy(row)
                 for row in (parsed_response.get("outline_tasks") or [])
                 if isinstance(row, dict)
             ]
+            outline_tasks = _merge_outline_revision_tasks(
+                accepted_prefix=accepted_outline_prefix,
+                outline_tasks=returned_outline_tasks,
+            )
+            if accepted_outline_prefix:
+                turn_entry["accepted_outline_prefix"] = deepcopy(accepted_outline_prefix)
+            if outline_tasks != returned_outline_tasks:
+                turn_entry["returned_outline_tasks"] = deepcopy(returned_outline_tasks)
             turn_entry["outline_tasks"] = deepcopy(outline_tasks)
             outline_llm_input = dict(prompt_input.get("llm_input") or {})
             resources_by_jid, parts_by_name = _outline_validation_context(outline_llm_input)
@@ -4777,22 +5929,96 @@ async def execute_multi_turn_bridge(
             if outline_revision_coverage is not None:
                 turn_entry["outline_revision_coverage"] = deepcopy(outline_revision_coverage)
             outline_violations = deepcopy(coverage_violations)
-            task_outline_validation_findings = _build_outline_validation_findings(
+            rollout_progress = _outline_rollout_progress(
                 outline_tasks,
                 outline_llm_input,
                 pruned_actions=list(session_state.get("pruned_actions") or []),
                 planner=planner,
+                stop_on_first_failure=True,
             )
+            accepted_prefix = [
+                deepcopy(row)
+                for row in (rollout_progress.get("accepted_prefix") or [])
+                if isinstance(row, dict)
+            ]
+            if accepted_prefix:
+                turn_entry["accepted_prefix"] = deepcopy(accepted_prefix)
+            task_outline_validation_findings = [
+                deepcopy(row)
+                for row in (rollout_progress.get("first_failure_findings") or [])
+                if isinstance(row, dict)
+            ]
+            if task_outline_validation_findings:
+                turn_entry["task_outline_validation_findings"] = deepcopy(
+                    task_outline_validation_findings
+                )
+            remaining_unmet_conditions = [
+                deepcopy(row)
+                for row in (rollout_progress.get("remaining_unmet_conditions") or [])
+                if isinstance(row, dict)
+            ]
+            if remaining_unmet_conditions:
+                turn_entry["remaining_unmet_conditions"] = deepcopy(
+                    remaining_unmet_conditions
+                )
+            progress_signature = _outline_progress_signature(
+                llm_input=outline_llm_input,
+                projected_resources=dict(rollout_progress.get("projected_resources") or {}),
+                projected_parts=dict(rollout_progress.get("projected_parts") or {}),
+                remaining_unmet_conditions=remaining_unmet_conditions,
+            )
+            previous_progress_signature = str(
+                session_state.get("outline_progress_signature") or ""
+            ).strip()
+            previous_stagnation_count = int(
+                session_state.get("outline_stagnation_count") or 0
+            )
+            if previous_progress_signature and previous_progress_signature == progress_signature:
+                stagnation_count = previous_stagnation_count + 1
+            else:
+                stagnation_count = 0
+            turn_entry["outline_progress_signature"] = progress_signature
+            turn_entry["outline_stagnation_count"] = stagnation_count
             task_outline_violations = [
                 _format_outline_validation_finding(finding)
                 for finding in task_outline_validation_findings
             ]
             outline_violations.extend(task_outline_violations)
-            if outline_violations:
-                outline_validation_findings = _merge_outline_validation_findings(
-                    carried_forward_findings,
-                    task_outline_validation_findings,
+            gap_validation_findings: list[dict[str, Any]] = []
+            if remaining_unmet_conditions:
+                gap_validation_findings = [
+                    _annotate_outline_validation_finding(
+                        _continuation_gap_finding(remaining_unmet_conditions[0])
+                    )
+                ]
+            if not outline_violations and gap_validation_findings:
+                outline_violations.extend(
+                    _format_outline_validation_finding(finding)
+                    for finding in gap_validation_findings
                 )
+            if outline_violations:
+                reanchor_to_gap = _should_reanchor_outline_repair_to_gap(
+                    accepted_prefix=accepted_prefix,
+                    task_validation_findings=task_outline_validation_findings,
+                    gap_validation_findings=gap_validation_findings,
+                    stagnation_count=stagnation_count,
+                )
+                if reanchor_to_gap:
+                    outline_validation_findings = deepcopy(gap_validation_findings)
+                    turn_entry["outline_repair_target"] = "gap"
+                    if stagnation_count >= _OUTLINE_STAGNATION_LIMIT:
+                        turn_entry["outline_reanchor_reason"] = "stagnation"
+                elif task_outline_validation_findings:
+                    outline_validation_findings = deepcopy(
+                        task_outline_validation_findings
+                    )
+                    turn_entry["outline_repair_target"] = "task_validation"
+                elif gap_validation_findings:
+                    outline_validation_findings = deepcopy(gap_validation_findings)
+                    turn_entry["outline_repair_target"] = "gap"
+                else:
+                    outline_validation_findings = deepcopy(carried_forward_findings)
+                    turn_entry["outline_repair_target"] = "carried_forward"
                 _logger.warning(
                     "[MultiTurn] Turn %d/%d | outline validation failed: %s",
                     turn_idx,
@@ -4825,12 +6051,17 @@ async def execute_multi_turn_bridge(
                 session_state["outline_validation_findings"] = deepcopy(
                     outline_validation_findings
                 )
+                session_state["outline_progress_signature"] = progress_signature
+                session_state["outline_stagnation_count"] = stagnation_count
+                session_state.pop("accepted_outline", None)
+                session_state["accepted_outline_prefix"] = deepcopy(accepted_prefix)
                 session_state["outline_task_types"] = deepcopy(outline_task_types)
                 session_state["pruned_actions"] = _build_pruned_actions(
                     existing_pruned_actions=list(session_state.get("pruned_actions") or []),
                     outline_tasks=outline_tasks,
                     validation_findings=task_outline_validation_findings,
                     llm_input=outline_llm_input,
+                    planner=planner,
                 )
             else:
                 decision = "outline_ready"
@@ -4840,12 +6071,16 @@ async def execute_multi_turn_bridge(
                 session_state.pop("outline_revision_guidance", None)
                 session_state.pop("outline_revision_coverage", None)
                 session_state.pop("outline_validation_findings", None)
+                session_state.pop("outline_progress_signature", None)
+                session_state["outline_stagnation_count"] = 0
                 session_state["outline_task_types"] = deepcopy(outline_task_types)
+                session_state["accepted_outline_prefix"] = deepcopy(outline_tasks)
                 session_state["pruned_actions"] = _active_pruned_actions_for_state(
                     list(session_state.get("pruned_actions") or []),
                     resources_by_jid=resources_by_jid,
                     parts_by_name=parts_by_name,
                     llm_input=outline_llm_input,
+                    planner=planner,
                 )
                 session_state["accepted_outline"] = deepcopy(outline_tasks)
             _logger.info(
