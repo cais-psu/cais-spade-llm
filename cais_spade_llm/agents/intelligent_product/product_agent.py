@@ -669,7 +669,8 @@ class ProductAgent(LlmAgent):
             artifact_payload,
             phase_label=phase,
             debug_dir=self._bridge_debug_directory(),
-            write_latest=True,
+            write_latest=False,
+            write_session_transcript=True,
             filename_prefix=f"bridge_runtime_{phase}",
         )
 
@@ -695,12 +696,11 @@ class ProductAgent(LlmAgent):
             bridge_artifacts=runtime_bridge_artifacts,
         )
         self.logger.info(
-            "[Product] Wrote bridge %s artifacts: prompt=%s latest_prompt=%s response=%s latest_response=%s",
+            "[Product] Wrote bridge %s artifacts: prompt=%s response=%s session=%s",
             str(phase or "").strip() or "runtime",
             artifact_paths.get("prompt_artifact_path", ""),
-            artifact_paths.get("latest_prompt_artifact_path", ""),
             artifact_paths.get("response_artifact_path", ""),
-            artifact_paths.get("latest_response_artifact_path", ""),
+            artifact_paths.get("session_transcript_artifact_path", ""),
         )
         return artifact_paths
 

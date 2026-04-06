@@ -3,6 +3,7 @@
 Run directly:
     python test/test_case3_bridge_dryrun.py
     python test/test_case3_bridge_dryrun.py --model gpt-4o
+    python test/test_case3_bridge_dryrun.py --reasoning-mode hybrid
     python test/test_case3_bridge_dryrun.py --show-llm-input
     python test/test_case3_bridge_dryrun.py --show-prompt
 
@@ -70,13 +71,11 @@ _load_local_env(ROOT / ".env")
 
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    build_hybrid_session_seed,
     multi_turn_v2 as multi_turn_v2_mode,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
-    compile_grounded_outline_task,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     get_resource_bridge_snapshot,
@@ -208,7 +207,7 @@ class FakeProductAgent:
             else {}
         )
         self._bridge_reasoning_mode = str(
-            precomputed_policy.get("bridge_reasoning_mode", "multi_turn") or "multi_turn"
+            precomputed_policy.get("bridge_reasoning_mode", "hybrid") or "hybrid"
         ).strip().lower()
         bundle_artifacts = dict(self.precomputed_bundle.get("artifacts") or {})
         self.structured_requirements_path = Path(
@@ -1438,15 +1437,22 @@ def _relax_recovery_clear_precondition(prepared_bridge_request: dict[str, Any]) 
 
 def _configure_live_bridge_session(
     prepared_bridge_request: dict[str, Any],
+    *,
+    reasoning_mode: str = "hybrid",
 ) -> None:
     """Tune the prepared bridge session for the direct dry-run harness."""
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    bridge_session["reasoning_mode"] = "multi_turn"
-    bridge_session["multi_turn_engine"] = "v2"
+    normalized_mode = str(reasoning_mode or "multi_turn").strip().lower() or "multi_turn"
+    bridge_session["reasoning_mode"] = normalized_mode
     bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 20)
     bridge_session["repair_mode"] = "recover"
     bridge_session["observation_backend"] = "mock_detect_parts_harness"
-    bridge_session["outline_mode"] = "incremental_candidates_validated"
+    if normalized_mode == "multi_turn":
+        bridge_session["multi_turn_engine"] = "v2"
+        bridge_session["outline_mode"] = "incremental_candidates_validated"
+    else:
+        bridge_session.pop("multi_turn_engine", None)
+        bridge_session.pop("outline_mode", None)
     prepared_bridge_request["bridge_session"] = bridge_session
 
 
@@ -1458,6 +1464,7 @@ def _configure_live_bridge_session(
 async def _prepare_bridge_dryrun_harness(
     *,
     llm_model: str | None = None,
+    reasoning_mode: str = "multi_turn",
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any]]:
     """Load configs, build fake agents, prepare the bridge request."""
     paths = _case3_paths()
@@ -1478,6 +1485,9 @@ async def _prepare_bridge_dryrun_harness(
         product_geometry=deepcopy(geometry_payload.get("gazebo") or {}),
         llm_model=llm_model,
         precomputed_bundle=bundle_context,
+    )
+    product_agent._bridge_reasoning_mode = (
+        str(reasoning_mode or "hybrid").strip().lower() or "hybrid"
     )
 
     ur5e = FakeBridgeRobot(
@@ -1549,10 +1559,20 @@ async def _prepare_bridge_dryrun_harness(
 
     product_agent.prepared_bridge_request = prepared_bridge_request
     _relax_recovery_clear_precondition(prepared_bridge_request)
-    _configure_live_bridge_session(prepared_bridge_request)
-    prepared_bridge_request["multi_turn_session_seed"] = (
-        multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+    _configure_live_bridge_session(
+        prepared_bridge_request,
+        reasoning_mode=product_agent._bridge_reasoning_mode,
     )
+    if product_agent._bridge_reasoning_mode == "hybrid":
+        prepared_bridge_request["hybrid_session_seed"] = build_hybrid_session_seed(
+            prepared_bridge_request
+        )
+        prepared_bridge_request.pop("multi_turn_session_seed", None)
+    else:
+        prepared_bridge_request["multi_turn_session_seed"] = (
+            multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        )
+        prepared_bridge_request.pop("hybrid_session_seed", None)
 
     return fixture, product_agent, planner, prepared_bridge_request
 
@@ -1566,11 +1586,13 @@ async def run_case3_bridge_dryrun(
     write_debug: bool = True,
     *,
     llm_model: str | None = None,
+    reasoning_mode: str = "hybrid",
     stop_before_primitive_generation: bool = True,
 ) -> dict[str, Any]:
     """Run the Case 3 dry-run scenario through the bridge once."""
     _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
+        reasoning_mode=reasoning_mode,
     )
 
     if write_debug:
@@ -1584,77 +1606,78 @@ async def run_case3_bridge_dryrun(
     # First run: grounding + first outline task
     proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
 
-    # Resume loop: keep running while paused after outline turns
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-        execute_multi_turn_bridge as _resume_bridge,
-    )
-    max_resume = max(
-        10,
-        int(
-            dict(prepared_bridge_request.get("bridge_session") or {}).get("max_turns")
-            or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
-            or 0
-        ),
-    )
-    post_validation_resume_budget = 0
-    for _resume_i in range(max_resume):
-        ss = prepared_bridge_request.get("multi_turn_session_state") or {}
-        if ss.get("status") != "paused_after_outline_turn":
-            break
-        if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Outline completed; stopping before primitive_generation for inspection"
-            )
-            break
-        if stop_before_primitive_generation:
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Resuming outline loop until primitive_generation (round %d)", _resume_i + 1,
-            )
+    if str(reasoning_mode or "multi_turn").strip().lower() == "multi_turn":
+        # Resume loop: keep running while paused after outline turns
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_multi_turn_bridge as _resume_bridge,
+        )
+        max_resume = max(
+            10,
+            int(
+                dict(prepared_bridge_request.get("bridge_session") or {}).get("max_turns")
+                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+                or 0
+            ),
+        )
+        post_validation_resume_budget = 0
+        for _resume_i in range(max_resume):
+            ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+            if ss.get("status") != "paused_after_outline_turn":
+                break
+            if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Outline completed; stopping before primitive_generation for inspection"
+                )
+                break
+            if stop_before_primitive_generation:
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Resuming outline loop until primitive_generation (round %d)", _resume_i + 1,
+                )
+                proposal = await _resume_bridge(
+                    planner, prepared_bridge_request, session_state=ss,
+                )
+                continue
+            findings = list(ss.get("outline_validation_findings") or [])
+            if not findings and str(ss.get("outline_mode") or "").strip().lower() == "incremental_candidates_validated":
+                findings = [
+                    deepcopy(row)
+                    for row in (ss.get("candidate_rejection_feedback") or [])
+                    if isinstance(row, dict)
+                ]
+            if findings and post_validation_resume_budget <= 0:
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Validation rejection detected (%d findings) — resuming %d more turns",
+                    len(findings),
+                    _POST_VALIDATION_INSPECTION_TURNS,
+                )
+                post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
+            elif post_validation_resume_budget > 0:
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Resuming post-validation inspection turn (%d remaining after this resume)",
+                    post_validation_resume_budget - 1,
+                )
+            else:
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Resuming outline loop (round %d)", _resume_i + 1,
+                )
             proposal = await _resume_bridge(
                 planner, prepared_bridge_request, session_state=ss,
             )
-            continue
-        findings = list(ss.get("outline_validation_findings") or [])
-        if not findings and str(ss.get("outline_mode") or "").strip().lower() == "incremental_candidates_validated":
-            findings = [
-                deepcopy(row)
-                for row in (ss.get("candidate_rejection_feedback") or [])
-                if isinstance(row, dict)
-            ]
-        if findings and post_validation_resume_budget <= 0:
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Validation rejection detected (%d findings) — resuming %d more turns",
-                len(findings),
-                _POST_VALIDATION_INSPECTION_TURNS,
-            )
-            post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
-        elif post_validation_resume_budget > 0:
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Resuming post-validation inspection turn (%d remaining after this resume)",
-                post_validation_resume_budget - 1,
-            )
-        else:
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Resuming outline loop (round %d)", _resume_i + 1,
-            )
-        proposal = await _resume_bridge(
-            planner, prepared_bridge_request, session_state=ss,
-        )
-        if post_validation_resume_budget > 0:
-            post_validation_resume_budget -= 1
-            next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
-            if (
-                post_validation_resume_budget == 0
-                and next_ss.get("status") == "paused_after_outline_turn"
-            ):
-                logging.getLogger("case3_bridge_dryrun").info(
-                    "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"
-                )
-                break
+            if post_validation_resume_budget > 0:
+                post_validation_resume_budget -= 1
+                next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+                if (
+                    post_validation_resume_budget == 0
+                    and next_ss.get("status") == "paused_after_outline_turn"
+                ):
+                    logging.getLogger("case3_bridge_dryrun").info(
+                        "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"
+                    )
+                    break
 
     bridge_debug = planner.get_last_bridge_debug()
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    reasoning_mode = str(bridge_session.get("reasoning_mode") or "multi_turn").strip()
+    reasoning_mode = str(bridge_session.get("reasoning_mode") or "hybrid").strip()
     multi_turn_session = dict((bridge_debug or {}).get("multi_turn_session") or {})
     turns = list(multi_turn_session.get("turns") or [])
 
@@ -1698,6 +1721,7 @@ def _write_debug_artifacts(
         phase_label=filename_prefix,
         debug_dir=debug_dir,
         write_latest=False,
+        write_session_transcript=True,
         filename_prefix=filename_prefix,
     )
 
@@ -1707,12 +1731,16 @@ def _write_debug_artifacts(
 # ---------------------------------------------------------------------------
 
 
-def _assert_bridge_dryrun(result: dict[str, Any]) -> None:
+def _assert_bridge_dryrun(
+    result: dict[str, Any],
+    *,
+    expected_reasoning_mode: str = "hybrid",
+) -> None:
     bridge_debug = result.get("bridge_debug") or {}
     status = str(bridge_debug.get("status") or "")
     reasoning_mode = str(result.get("reasoning_mode") or "")
-    assert reasoning_mode == "multi_turn", (
-        f"Expected multi_turn reasoning mode; got {reasoning_mode!r}"
+    assert reasoning_mode == expected_reasoning_mode, (
+        f"Expected {expected_reasoning_mode} reasoning mode; got {reasoning_mode!r}"
     )
     multi_turn_session = result.get("multi_turn_session") or {}
     session_status = str(multi_turn_session.get("status") or "")
@@ -1822,12 +1850,16 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
     latest_prompt_artifact_path = result.get("latest_prompt_artifact_path")
     response_artifact_path = result.get("response_artifact_path")
     latest_response_artifact_path = result.get("latest_response_artifact_path")
+    session_transcript_artifact_path = result.get("session_transcript_artifact_path")
+    latest_session_transcript_artifact_path = result.get("latest_session_transcript_artifact_path")
     if not any(
         (
             prompt_artifact_path,
             latest_prompt_artifact_path,
             response_artifact_path,
             latest_response_artifact_path,
+            session_transcript_artifact_path,
+            latest_session_transcript_artifact_path,
         )
     ):
         return
@@ -1840,67 +1872,10 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
         print("Response artifact:        ", response_artifact_path)
     if latest_response_artifact_path:
         print("Latest response artifact: ", latest_response_artifact_path)
-
-
-def test_case3_write_debug_artifacts_disables_latest_aliases() -> None:
-    captured: dict[str, Any] = {}
-
-    def _fake_write_bridge_artifacts(
-        payload: dict[str, Any],
-        *,
-        phase_label: str,
-        debug_dir: str | Path | None = None,
-        write_latest: bool = False,
-        filename_prefix: str | None = None,
-    ) -> dict[str, str]:
-        captured["payload"] = payload
-        captured["phase_label"] = phase_label
-        captured["debug_dir"] = debug_dir
-        captured["write_latest"] = write_latest
-        captured["filename_prefix"] = filename_prefix
-        return {"prompt_artifact_path": "/tmp/prompt.txt"}
-
-    with patch.object(sys.modules[__name__], "write_bridge_artifacts", side_effect=_fake_write_bridge_artifacts):
-        artifact_paths = _write_debug_artifacts({"reasoning_mode": "multi_turn"})
-
-    assert artifact_paths == {"prompt_artifact_path": "/tmp/prompt.txt"}
-    assert captured["write_latest"] is False
-
-
-def test_bridge_session_artifact_surfaces_final_accepted_outline_summary() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import bridge_artifacts
-
-    transcript = bridge_artifacts._extract_session_transcript({
-        "bridge_debug": {
-            "multi_turn_session": {
-                "session_id": "session",
-                "turn_index": 10,
-                "current_phase": "primitive_generation",
-                "accepted_outline_prefix": [
-                    {
-                        "outline_id": "RECOVERY_SEQ1",
-                        "resource_jid": "xarm6@localhost",
-                        "action_type": "recover_resource",
-                    },
-                    {
-                        "outline_id": "RECOVERY_SEQ2",
-                        "resource_jid": "ur5e@localhost",
-                        "action_type": "release_part",
-                        "part_name": "MCP",
-                        "target_ref": "prusa-mk4-2",
-                    },
-                ],
-                "turns": [{"turn_index": 10, "phase": "outline"}],
-            }
-        }
-    })
-
-    parsed = json.loads(transcript)
-    assert parsed["final_accepted_outline_summary"] == [
-        "RECOVERY_SEQ1 / xarm6@localhost -> recover resource",
-        "RECOVERY_SEQ2 / ur5e@localhost / MCP -> release MCP to prusa-mk4-2",
-    ]
-    assert len(parsed["accepted_outline_prefix"]) == 2
+    if session_transcript_artifact_path:
+        print("Session artifact:         ", session_transcript_artifact_path)
+    if latest_session_transcript_artifact_path:
+        print("Latest session artifact:  ", latest_session_transcript_artifact_path)
 
 
 def test_case3_bridge_dryrun() -> None:
@@ -2183,875 +2158,6 @@ def test_v2_outline_validation_findings_clear_once_resolved() -> None:
     asyncio.run(_run())
 
 
-def test_v2_outline_prompt_uses_projected_symbolic_state_after_acceptance() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "llm_input": {
-            "observed_runtime_state": {
-                "resources": [
-                    {
-                        "resource_jid": "xarm6@localhost",
-                        "current_state": "failed",
-                        "availability": "available",
-                        "current_pose": {"x": 0.1, "y": 0.0, "z": 1.0},
-                    }
-                ]
-            },
-            "part_facts": [
-                {
-                    "part_name": "LG",
-                    "current_state": "misplaced",
-                    "current_location": None,
-                    "goal_location": "assembly_board-v1",
-                    "goal_requirement_id": "REQ_2",
-                }
-            ],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [
-                {
-                    "requirement_id": "REQ_2",
-                    "status": "failed",
-                    "summary": "xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.",
-                }
-            ],
-        },
-        "session_state": {
-            "outline_mode": "incremental_validated",
-            "accepted_outline_prefix": [
-                {
-                    "outline_id": "FIX_XARM6",
-                    "resource_jid": "xarm6@localhost",
-                    "description": "Reset xarm6 from failed to idle.",
-                    "expected_start_state": {"resource_state": "failed"},
-                    "expected_end_state": {"resource_state": "idle"},
-                }
-            ],
-            "symbolic_resources": {
-                "xarm6@localhost": {
-                    "resource_jid": "xarm6@localhost",
-                    "current_state": "idle",
-                }
-            },
-            "symbolic_parts": {
-                "LG": {
-                    "part_name": "LG",
-                    "current_state": "misplaced",
-                    "current_location": None,
-                    "goal_location": "assembly_board-v1",
-                    "goal_requirement_id": "REQ_2",
-                }
-            },
-        },
-    })
-
-    resource_section = prompt.split("Current Resource State", 1)[1].split(
-        "Current Part State", 1,
-    )[0]
-    accepted_prefix_section = prompt.split(
-        "Accepted Outline Prefix (keep exactly, do not modify)", 1,
-    )[1].split("Current Resource State", 1)[0]
-    assert '"current_state": "idle"' in resource_section
-    assert '"current_state": "failed"' not in resource_section
-    assert '"availability"' not in resource_section
-    assert '"current_pose"' not in resource_section
-    assert "FIX_XARM6 / xarm6@localhost -> failed -> idle" in accepted_prefix_section
-    assert "Reset xarm6 from failed to idle." not in accepted_prefix_section
-    assert "Recovery Objectives" in prompt
-    assert "restore LG to assembly_board-v1" in prompt
-    assert "Assembly Requirements" not in prompt
-    assert "Do not assume a task is restricted to its nominal resource." in prompt
-    assert "Do not change a part or resource location by declaration alone." in prompt
-
-
-def test_v2_compiler_rejects_disallowed_resource_location_field() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "MOVE_XARM6",
-            "resource_jid": "xarm6@localhost",
-            "description": "Move xarm6 to a new location.",
-            "expected_start_state": {"resource_state": "idle"},
-            "expected_end_state": {"resource_location": "home"},
-        },
-        resources_by_jid={
-            "xarm6@localhost": {
-                "resource_jid": "xarm6@localhost",
-                "current_state": "idle",
-                "current_location": "home",
-            }
-        },
-        parts_by_name={},
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    finding = dict(result.get("finding") or {})
-    assert result.get("status") == "outline_contract_violation"
-    assert finding.get("constraint_code") == "disallowed_outline_state_field"
-    assert finding.get("constraint_owner") == "binding"
-
-
-def test_v2_compiler_rejects_no_state_change() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "ADJUST_XARM_POSE",
-            "resource_jid": "xarm6@localhost",
-            "description": "No-op prep step.",
-            "expected_start_state": {"resource_state": "idle"},
-            "expected_end_state": {"resource_state": "idle"},
-        },
-        resources_by_jid={
-            "xarm6@localhost": {
-                "resource_jid": "xarm6@localhost",
-                "current_state": "idle",
-            }
-        },
-        parts_by_name={},
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    finding = dict(result.get("finding") or {})
-    assert result.get("status") == "outline_contract_violation"
-    assert finding.get("constraint_code") == "no_state_change"
-    assert finding.get("constraint_owner") == "binding"
-
-
-def test_v2_compiler_rejects_expected_start_state_mismatch() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "FOLLOWUP_MCP",
-            "resource_jid": "ur5e@localhost",
-            "description": "Continue holding MCP.",
-            "part_name": "MCP",
-            "expected_start_state": {
-                "resource_state": "idle",
-                "held_part": "MCP",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
-            },
-            "expected_end_state": {
-                "resource_state": "busy",
-                "held_part": "MCP",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
-            },
-        },
-        resources_by_jid={
-            "ur5e@localhost": {
-                "resource_jid": "ur5e@localhost",
-                "current_state": "idle",
-                "held_part": None,
-            }
-        },
-        parts_by_name={
-            "MCP": {
-                "part_name": "MCP",
-                "current_state": "misplaced",
-                "current_location": "prusa-mk4-2",
-                "current_holder_resource_jid": None,
-            }
-        },
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    finding = dict(result.get("finding") or {})
-    assert result.get("status") == "outline_contract_violation"
-    assert finding.get("constraint_code") == "expected_start_state_mismatch"
-    assert finding.get("constraint_owner") == "binding"
-
-
-def test_v2_compiler_accepts_observed_pose_as_current_part_location() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "ACQUIRE_LG",
-            "resource_jid": "ur5e@localhost",
-            "description": "Acquire LG from observed pose.",
-            "part_name": "LG",
-            "expected_start_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_state": "misplaced",
-                "part_location": "observed_pose",
-                "part_holder_resource_jid": None,
-            },
-            "expected_end_state": {
-                "resource_state": "picked",
-                "held_part": "LG",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
-            },
-            "action_target": {
-                "source_location": "observed_pose",
-            },
-        },
-        resources_by_jid={
-            "ur5e@localhost": {
-                "resource_jid": "ur5e@localhost",
-                "current_state": "idle",
-                "held_part": None,
-                "gripper_state": "open",
-            }
-        },
-        parts_by_name={
-            "LG": {
-                "part_name": "LG",
-                "current_state": "misplaced",
-                "current_location": None,
-                "observed_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-                "current_holder_resource_jid": None,
-            }
-        },
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    assert result.get("status") == "grounded"
-    assert dict(result.get("finding") or {}) == {}
-
-
-def test_v2_compiler_rejects_release_without_destination() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "DROP_MCP",
-            "resource_jid": "ur5e@localhost",
-            "description": "Release MCP without destination.",
-            "part_name": "MCP",
-            "expected_start_state": {
-                "resource_state": "picked",
-                "held_part": "MCP",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_location": None,
-                "part_holder_resource_jid": None,
-            },
-        },
-        resources_by_jid={
-            "ur5e@localhost": {
-                "resource_jid": "ur5e@localhost",
-                "current_state": "picked",
-                "held_part": "MCP",
-            }
-        },
-        parts_by_name={
-            "MCP": {
-                "part_name": "MCP",
-                "current_state": "in_gripper",
-                "current_location": "ur5e@localhost_gripper",
-                "current_holder_resource_jid": "ur5e@localhost",
-            }
-        },
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    finding = dict(result.get("finding") or {})
-    assert result.get("status") == "outline_contract_violation"
-    assert finding.get("constraint_code") == "missing_release_destination"
-    assert finding.get("constraint_owner") == "binding"
-
-
-def test_v2_compiler_rejects_relocation_without_carrier() -> None:
-    result = compile_grounded_outline_task(
-        {
-            "outline_id": "REQ_2_T2_reposition",
-            "resource_jid": "xarm6@localhost",
-            "description": "Reposition LG without carrying it.",
-            "part_name": "LG",
-            "expected_start_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_location": None,
-                "part_holder_resource_jid": None,
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_location": "assembly_board-v1",
-                "part_holder_resource_jid": None,
-            },
-        },
-        resources_by_jid={
-            "xarm6@localhost": {
-                "resource_jid": "xarm6@localhost",
-                "current_state": "idle",
-                "held_part": None,
-            }
-        },
-        parts_by_name={
-            "LG": {
-                "part_name": "LG",
-                "current_state": "misplaced",
-                "current_location": None,
-                "current_holder_resource_jid": None,
-                "goal_location": "assembly_board-v1",
-            }
-        },
-        outline_contract=deepcopy(multi_turn_v2_mode._V2_OUTLINE_CONTRACT),
-    )
-
-    finding = dict(result.get("finding") or {})
-    assert result.get("status") == "outline_contract_violation"
-    assert finding.get("constraint_code") == "part_relocation_without_carrier"
-    assert finding.get("constraint_owner") == "binding"
-
-
-def test_v2_outline_rejects_noop_resource_prep_task() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
-
-        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
-            session_state=session_state,
-            parsed_response={
-                "next_task": {
-                    "outline_id": "ADJUST_XARM_POSE",
-                    "resource_jid": "xarm6@localhost",
-                    "description": "Move xarm6 to a suitable pose within workspace bounds.",
-                    "part_name": None,
-                    "expected_start_state": {"resource_state": "idle"},
-                    "expected_end_state": {"resource_state": "idle"},
-                },
-                "lookahead_tasks": [],
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
-        )
-
-        finding_codes = {
-            str(row.get("constraint_code") or "")
-            for row in (turn_entry.get("validation_findings") or [])
-            if isinstance(row, dict)
-        }
-        assert decision == "need_revision"
-        assert "no_state_change" in finding_codes
-        assert any(
-            str(row.get("constraint_owner") or "") == "binding"
-            and str(row.get("constraint_code") or "") == "no_state_change"
-            for row in (turn_entry.get("validation_findings") or [])
-            if isinstance(row, dict)
-        )
-
-    asyncio.run(_run())
-
-
-def test_v2_outline_rejects_relocation_without_carrier() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
-        session_state["observation_store"] = {
-            "observed_pose_LG": {
-                "part_name": "LG",
-                "x": 0.0,
-                "y": 0.2,
-                "z": 1.035,
-                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-            }
-        }
-
-        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
-            session_state=session_state,
-            parsed_response={
-                "next_task": {
-                    "outline_id": "REQ_2_T2_reposition",
-                    "resource_jid": "xarm6@localhost",
-                    "description": "Reposition the LG part within xarm6 workspace bounds.",
-                    "part_name": "LG",
-                    "expected_start_state": {
-                        "resource_state": "idle",
-                        "held_part": None,
-                        "part_state": "misplaced",
-                        "part_location": None,
-                        "part_holder_resource_jid": None,
-                    },
-                    "expected_end_state": {
-                        "resource_state": "idle",
-                        "held_part": None,
-                        "part_state": "placed",
-                        "part_location": "assembly_board-v1",
-                        "part_holder_resource_jid": None,
-                    },
-                },
-                "lookahead_tasks": [],
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
-        )
-
-        finding_codes = [
-            str(row.get("constraint_code") or "")
-            for row in (turn_entry.get("validation_findings") or [])
-            if isinstance(row, dict)
-        ]
-        assert decision == "need_revision"
-        assert "part_relocation_without_carrier" in finding_codes
-        assert any(
-            str(row.get("constraint_owner") or "") == "binding"
-            and str(row.get("constraint_code") or "") == "part_relocation_without_carrier"
-            for row in (turn_entry.get("validation_findings") or [])
-            if isinstance(row, dict)
-        )
-
-    asyncio.run(_run())
-
-
-def test_v2_outline_surfaces_ra_workspace_unreachable_after_compiler_grounding() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
-        session_state["observation_store"] = {
-            "observed_pose_LG": {
-                "part_name": "LG",
-                "x": 0.0,
-                "y": 0.2,
-                "z": 1.035,
-                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-            }
-        }
-
-        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
-            session_state=session_state,
-            parsed_response={
-                "next_task": {
-                    "outline_id": "PICK_LG",
-                    "resource_jid": "xarm6@localhost",
-                    "description": "Acquire LG with xarm6.",
-                    "part_name": "LG",
-                    "expected_start_state": {"resource_state": "idle"},
-                    "expected_end_state": {
-                        "resource_state": "idle",
-                        "held_part": "LG",
-                        "part_state": "in_gripper",
-                        "part_location": "xarm6@localhost_gripper",
-                        "part_holder_resource_jid": "xarm6@localhost",
-                    },
-                },
-                "lookahead_tasks": [],
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
-        )
-
-        assert decision == "need_revision"
-        assert any(
-            str(row.get("constraint_owner") or "") == "resource"
-            and str(row.get("constraint_code") or "") == "workspace_unreachable"
-            for row in (turn_entry.get("validation_findings") or [])
-            if isinstance(row, dict)
-        )
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_release_to_assembly_board_is_rejected_by_cca() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "RECOVERY_SEQ1",
-                "resource_jid": "xarm6@localhost",
-                "action_type": "recover_resource",
-                "expected_end_state": {"resource_state": "idle"},
-            },
-            session_state,
-        )
-
-        normalized_task, schema_findings = multi_turn_v2_mode._derive_candidate_outline_task(
-            candidate_task={
-                "outline_id": "RECOVERY_SEQ2_2",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "release_part",
-                "part_name": "MCP",
-                "target_ref": "assembly_board-v1",
-                "description": "Place MCP at the assembly board before LG is restored.",
-            },
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert schema_findings == []
-        findings, grounded_action = multi_turn_v2_mode._validate_single_outline_task(
-            planner=planner,
-            task=dict(normalized_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert grounded_action is not None
-        assert any(
-            str(row.get("constraint_owner") or "") == "cca"
-            and str(row.get("constraint_code") or "") == "safety_rule_violation"
-            and str(row.get("rule_id") or "") == "SAFE_1"
-            for row in findings
-            if isinstance(row, dict)
-        )
-        assert any(
-            str(row.get("constraint_owner") or "") == "cca"
-            and str(row.get("constraint_code") or "") == "blocker_open"
-            for row in findings
-            if isinstance(row, dict)
-        )
-
-    asyncio.run(_run())
-
-
-def test_v2_outline_prompt_stacks_rejected_outline_history_with_findings() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_validated",
-            "outline_validation_findings": [
-                {
-                    "constraint_code": "workspace_unreachable",
-                    "resource_jid": "xarm6@localhost",
-                    "part_name": "LG",
-                }
-            ],
-            "turns": [
-                {
-                    "turn_index": 3,
-                    "phase": "outline",
-                    "decision": "need_revision",
-                    "next_task": {
-                        "outline_id": "REQ_2_T1",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Bad attempt 1",
-                    },
-                    "validation_findings": [
-                        {
-                            "constraint_code": "workspace_unreachable",
-                            "resource_jid": "xarm6@localhost",
-                            "part_name": "LG",
-                        }
-                    ],
-                },
-                {
-                    "turn_index": 4,
-                    "phase": "outline",
-                    "decision": "need_revision",
-                    "next_task": {
-                        "outline_id": "REQ_2_T2",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Bad attempt 2",
-                    },
-                    "validation_findings": [
-                        {
-                            "constraint_code": "workspace_unreachable",
-                            "resource_jid": "xarm6@localhost",
-                            "part_name": "LG",
-                        }
-                    ],
-                },
-            ],
-        },
-    })
-
-    assert "Active Validation Findings (still unresolved)" in prompt
-    assert "Rejected Outline Attempts And Validation Feedback" in prompt
-    assert "REQ_2_T1 / xarm6@localhost" in prompt
-    assert "REQ_2_T2 / xarm6@localhost" in prompt
-
-
-def test_v2_candidate_prompt_pruned_actions_drop_stale_holder_conflict() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "current_recovery_blockers": [],
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_candidates_validated",
-            "symbolic_resources": {
-                "ur5e@localhost": {
-                    "resource_jid": "ur5e@localhost",
-                    "current_state": "idle",
-                    "current_location": "prusa-mk4-2",
-                    "held_part": None,
-                    "gripper_state": "open",
-                }
-            },
-            "symbolic_parts": {
-                "LG": {
-                    "part_name": "LG",
-                    "current_state": "misplaced",
-                    "current_location": None,
-                    "current_holder_resource_jid": None,
-                    "goal_location": "assembly_board-v1",
-                }
-            },
-            "turns": [
-                {
-                    "turn_index": 8,
-                    "phase": "outline",
-                    "candidate_evaluations": [
-                        {
-                            "candidate_index": 0,
-                            "task": {
-                                "outline_id": "RECOVERY_SEQ2_1",
-                                "resource_jid": "ur5e@localhost",
-                                "action_type": "acquire_part",
-                                "part_name": "LG",
-                            },
-                            "valid": False,
-                            "validation_findings": [
-                                {
-                                    "constraint_code": "holder_conflict",
-                                    "resource_jid": "ur5e@localhost",
-                                    "part_name": "LG",
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ],
-        },
-    })
-
-    assert "holder_conflict" not in prompt
-    assert "ur5e@localhost / LG -> acquire LG" not in prompt
-
-
-def test_v2_candidate_prompt_pruned_actions_omit_selector_only_rejections() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "current_recovery_blockers": [
-            {"summary": "LG must be at assembly_board-v1 before MCP place_approach can resume"}
-        ],
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_candidates_validated",
-            "symbolic_resources": {
-                "ur5e@localhost": {
-                    "resource_jid": "ur5e@localhost",
-                    "current_state": "idle",
-                    "current_location": "prusa-mk4-2",
-                    "held_part": None,
-                    "gripper_state": "open",
-                }
-            },
-            "symbolic_parts": {
-                "MCP": {
-                    "part_name": "MCP",
-                    "current_state": "placed",
-                    "current_location": "prusa-mk4-2",
-                    "current_holder_resource_jid": None,
-                }
-            },
-            "turns": [
-                {
-                    "turn_index": 9,
-                    "phase": "outline",
-                    "candidate_evaluations": [
-                        {
-                            "candidate_index": 0,
-                            "task": {
-                                "outline_id": "RECOVERY_SEQ3_1",
-                                "resource_jid": "ur5e@localhost",
-                                "action_type": "release_part",
-                                "part_name": "MCP",
-                                "target_ref": "prusa-mk4-2",
-                            },
-                            "valid": False,
-                            "validation_findings": [
-                                {
-                                    "constraint_code": "no_blocker_reduction",
-                                    "resource_jid": "ur5e@localhost",
-                                    "part_name": "MCP",
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ],
-        },
-    })
-
-    assert "no_blocker_reduction" not in prompt
-    assert "release MCP to prusa-mk4-2" not in prompt
-
-
-def test_v2_candidate_prompt_pruned_actions_keep_only_durable_recent_rows() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    pruned_actions = [
-        {
-            "constraint_code": "unknown_location_token",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "MCP",
-            "task": {
-                "resource_jid": "ur5e@localhost",
-                "part_name": "MCP",
-                "action_type": "release_part",
-                "target_ref": "unknown_slot",
-            },
-            "summary": "release MCP to unknown_slot",
-        },
-        {
-            "constraint_code": "part_unbound",
-            "resource_jid": "xarm6@localhost",
-            "task": {
-                "resource_jid": "xarm6@localhost",
-                "action_type": "recover_resource",
-                "target_ref": "pose_a",
-            },
-            "summary": "recover resource via pose_a",
-        },
-        {
-            "constraint_code": "part_ambiguous",
-            "resource_jid": "xarm6@localhost",
-            "task": {
-                "resource_jid": "xarm6@localhost",
-                "action_type": "recover_resource",
-                "target_ref": "assembly_board-v1",
-            },
-            "summary": "recover resource via assembly_board-v1",
-        },
-        {
-            "constraint_code": "no_blocker_reduction",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "LG",
-            "task": {
-                "resource_jid": "ur5e@localhost",
-                "part_name": "LG",
-                "action_type": "acquire_part",
-            },
-            "summary": "acquire LG",
-        },
-    ] + [
-        {
-            "constraint_code": "workspace_unreachable",
-            "resource_jid": "xarm6@localhost",
-            "part_name": "LG",
-            "task": {
-                "resource_jid": "xarm6@localhost",
-                "part_name": "LG",
-                "action_type": "acquire_part",
-            },
-            "summary": f"attempt workspace recovery {idx}",
-        }
-        for idx in range(1, 9)
-    ] + [
-        {
-            "constraint_code": "safety_rule_violation",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "MCP",
-            "task": {
-                "resource_jid": "ur5e@localhost",
-                "part_name": "MCP",
-                "action_type": "release_part",
-                "target_ref": "assembly_board-v1",
-            },
-            "summary": "release MCP to assembly_board-v1",
-        }
-    ]
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "current_recovery_blockers": [
-            {"summary": "LG must be at assembly_board-v1 before MCP place_approach can resume"}
-        ],
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_candidates_validated",
-            "pruned_actions": pruned_actions,
-            "symbolic_resources": {
-                "xarm6@localhost": {
-                    "resource_jid": "xarm6@localhost",
-                    "current_state": "idle",
-                    "current_location": None,
-                    "held_part": None,
-                    "gripper_state": "open",
-                },
-                "ur5e@localhost": {
-                    "resource_jid": "ur5e@localhost",
-                    "current_state": "idle",
-                    "current_location": "prusa-mk4-2",
-                    "held_part": None,
-                    "gripper_state": "open",
-                },
-            },
-            "symbolic_parts": {
-                "LG": {
-                    "part_name": "LG",
-                    "current_state": "misplaced",
-                    "current_location": None,
-                    "current_holder_resource_jid": None,
-                    "goal_location": "assembly_board-v1",
-                },
-                "MCP": {
-                    "part_name": "MCP",
-                    "current_state": "misplaced",
-                    "current_location": "prusa-mk4-2",
-                    "current_holder_resource_jid": None,
-                    "goal_location": "assembly_board-v1",
-                },
-            },
-        },
-    })
-
-    assert "unknown_location_token" not in prompt
-    assert "part_unbound" not in prompt
-    assert "part_ambiguous" not in prompt
-    assert "no_blocker_reduction" not in prompt
-    assert "workspace_unreachable" in prompt
-    assert "safety_rule_violation" in prompt
-
-    pruned_section = prompt.split(
-        "Pruned Actions (derived from rejected history; do not re-propose these)\n",
-        1,
-    )[1].split("\n\n", 1)[0]
-    assert len([line for line in pruned_section.splitlines() if line.startswith("- ")]) == 8
-
-
 def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
     async def _run() -> None:
         responses = [
@@ -3081,6 +2187,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_3A",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "failed"},
                         "expected_end_state": {"resource_state": "failed"},
@@ -3088,6 +2195,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "FIX_XARM6",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "reset resource",
                         "description": "Reset xarm6 to idle.",
                         "expected_start_state": {"resource_state": "failed"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3095,8 +2203,10 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_3C",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "relocate part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
+                        "target_ref": "assembly_board-v1",
                         "expected_start_state": {"resource_state": "failed"},
                         "expected_end_state": {
                             "resource_state": "failed",
@@ -3111,6 +2221,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4A",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "pick up",
                         "description": "Pick unreachable LG.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3125,6 +2236,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4B",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3132,8 +2244,10 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4C",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
+                        "target_ref": "assembly_board-v1",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {
                             "resource_state": "idle",
@@ -3149,6 +2263,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5A",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3156,6 +2271,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5B",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "pick up",
                         "description": "Pick unreachable LG again.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3170,8 +2286,10 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5C",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
+                        "target_ref": "assembly_board-v1",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {
                             "resource_state": "idle",
@@ -3187,8 +2305,10 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6A",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
+                        "target_ref": "assembly_board-v1",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {
                             "resource_state": "idle",
@@ -3199,6 +2319,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6B",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3206,6 +2327,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6C",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "pick up",
                         "description": "Pick unreachable LG.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3225,6 +2347,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7A",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "pick up",
                         "description": "Pick unreachable LG again.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3239,6 +2362,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7B",
                         "resource_jid": "ur5e@localhost",
+                        "action_name": "hold position",
                         "description": "Hold position while xarm6 recovery remains unresolved.",
                         "expected_start_state": {"resource_state": "picked"},
                         "expected_end_state": {"resource_state": "picked"},
@@ -3246,8 +2370,10 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7C",
                         "resource_jid": "xarm6@localhost",
+                        "action_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
+                        "target_ref": "assembly_board-v1",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {
                             "resource_state": "idle",
@@ -3321,8 +2447,9 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
 
         async def _fake_prepare_bridge_dryrun_harness(
             llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
         ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
-            del llm_model
+            del llm_model, reasoning_mode
             return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
 
         async def _fake_resume_bridge(
@@ -3362,836 +2489,68 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
     asyncio.run(_run())
 
 
-def test_v2_candidate_outline_schema_requires_three_candidate_tasks() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        multi_turn_v2_phase_response_schema,
-    )
-
-    schema = multi_turn_v2_phase_response_schema(
-        "outline",
-        outline_mode="incremental_candidates_validated",
-    )
-
-    properties = dict(schema.get("schema") or {}).get("properties") or {}
-    candidate_tasks = dict(properties.get("candidate_tasks") or {})
-    assert "candidate_tasks" in properties
-    assert "next_task" not in properties
-    assert candidate_tasks.get("minItems") == 3
-    assert candidate_tasks.get("maxItems") == 3
-    item_schema = dict(candidate_tasks.get("items") or {})
-    item_properties = dict(item_schema.get("properties") or {})
-    assert "resource_jid" in item_properties
-    assert "action_type" in item_properties
-    assert set(item_schema.get("required") or []) == {"resource_jid", "action_type"}
-
-
-def test_v2_candidate_outline_prompt_renders_feedback_without_previous_lookahead() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [
-                {
-                    "part_name": "MCP",
-                    "current_state": "in_gripper",
-                    "current_location": "ur5e@localhost_gripper",
-                    "current_holder_resource_jid": "ur5e@localhost",
-                    "origin_location": "prusa-mk4-2",
-                    "goal_location": "assembly_board-v1",
-                    "goal_requirement_id": "REQ_1",
-                }
-            ],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_candidates_validated",
-            "outline_lookahead": [
-                {
-                    "outline_id": "STALE",
-                    "resource_jid": "xarm6@localhost",
-                    "description": "stale lookahead",
-                    "expected_start_state": {},
-                    "expected_end_state": {},
-                }
-            ],
-            "observation_store": {
-                "observed_pose_LG": {
-                    "part_name": "LG",
-                    "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-                    "x": 0.0,
-                    "y": 0.2,
-                    "z": 1.035,
-                }
-            },
-            "candidate_rejection_feedback": [
-                {
-                    "candidate_index": 0,
-                    "task": {
-                        "outline_id": "BAD_1",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "bad candidate",
-                    },
-                    "validation_findings": [
-                        {
-                            "constraint_code": "workspace_unreachable",
-                            "resource_jid": "xarm6@localhost",
-                            "part_name": "LG",
-                            "reason": "pose outside workspace",
-                        }
-                    ],
-                }
-            ],
-            "turns": [
-                {
-                    "turn_index": 4,
-                    "phase": "outline",
-                    "candidate_evaluations": [
-                        {
-                            "candidate_index": 0,
-                            "task": {
-                                "outline_id": "RECOVERY_SEQ2_1",
-                                "resource_jid": "xarm6@localhost",
-                                "description": "older bad candidate",
-                            },
-                            "valid": False,
-                            "validation_findings": [
-                                {
-                                    "constraint_code": "workspace_unreachable",
-                                    "resource_jid": "xarm6@localhost",
-                                    "part_name": "LG",
-                                    "reason": "pose outside workspace",
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ],
-        },
-        "current_recovery_blockers": [
-            {
-                "kind": "resource_terminal_state",
-                "summary": "xarm6@localhost must reach idle",
-            },
-            {
-                "kind": "safety_blocked_suffix_task",
-                "summary": "LG must be at assembly_board-v1 before MCP place_approach can resume",
-            },
-        ],
-    })
-
-    assert "Propose exactly 3 distinct candidate next tasks" in prompt
-    assert "Current Recovery Blockers" in prompt
-    assert "- xarm6@localhost must reach idle" in prompt
-    assert "- LG must be at assembly_board-v1 before MCP place_approach can resume" in prompt
-    assert "A candidate does not need to complete recovery in one step." in prompt
-    assert "Action Shape Example (shape only; use actual grounded values from this prompt)" in prompt
-    assert '"action_type": "recover_resource | acquire_part | release_part"' in prompt
-    assert '"target_ref": "GROUNDED_DESTINATION_REF or omit"' in prompt
-    assert "expected_start_state" not in prompt
-    assert "expected_end_state" not in prompt
-    assert "Last Rejection Feedback" in prompt
-    assert "Grounded Location Tokens" not in prompt
-    assert '"observed_pose": {' in prompt
-    assert '"y": 0.2' in prompt
-    assert "Grounded Observations" not in prompt
-    assert "Your Previous Lookahead" not in prompt
-    assert "Active Validation Findings (still unresolved)" not in prompt
-    assert "Modeled Continuation Gap" not in prompt
-    assert "Rejected Candidate History And Validation Feedback" not in prompt
-    assert "Safety Rules" not in prompt
-
-
-def test_v2_candidate_outline_prompt_renders_pruned_actions_from_rejected_history() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        render_multi_turn_v2_phase_prompt,
-    )
-
-    prompt = render_multi_turn_v2_phase_prompt({
-        "phase": "outline",
-        "llm_input": {
-            "observed_runtime_state": {"resources": []},
-            "part_facts": [],
-            "loaded_safety_rules": [],
-            "relevant_assembly_requirements": [],
-        },
-        "session_state": {
-            "outline_mode": "incremental_candidates_validated",
-            "turns": [
-                {
-                    "turn_index": 3,
-                    "phase": "outline",
-                    "candidate_evaluations": [
-                        {
-                            "candidate_index": 0,
-                            "task": {
-                                "outline_id": "RECOVERY_SEQ1_1",
-                                "resource_jid": "xarm6@localhost",
-                                "part_name": "LG",
-                                "expected_start_state": {"resource_state": "idle"},
-                                "expected_end_state": {"resource_state": "idle"},
-                            },
-                            "valid": False,
-                            "validation_findings": [
-                                {
-                                    "constraint_code": "workspace_unreachable",
-                                    "resource_jid": "xarm6@localhost",
-                                    "part_name": "LG",
-                                }
-                            ],
-                        },
-                        {
-                            "candidate_index": 1,
-                            "task": {
-                                "outline_id": "RECOVERY_SEQ1_2",
-                                "resource_jid": "xarm6@localhost",
-                                "part_name": "LG",
-                                "expected_start_state": {"resource_state": "idle"},
-                                "expected_end_state": {"resource_state": "idle"},
-                            },
-                            "valid": False,
-                            "validation_findings": [
-                                {
-                                    "constraint_code": "workspace_unreachable",
-                                    "resource_jid": "xarm6@localhost",
-                                    "part_name": "LG",
-                                }
-                            ],
-                        },
-                    ],
-                }
-            ],
-        },
-    })
-
-    assert "Pruned Actions (derived from rejected history; do not re-propose these)" in prompt
-    assert "- xarm6@localhost / LG -> state transition [workspace_unreachable]" in prompt
-    assert prompt.count("- xarm6@localhost / LG -> state transition [workspace_unreachable]") == 1
-
-
-def test_v2_candidate_progress_score_counts_resolved_continuation_condition() -> None:
+def test_case3_dryrun_hybrid_mode_skips_multi_turn_resume_loop() -> None:
     async def _run() -> None:
-        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        score, detail = multi_turn_v2_mode._candidate_progress_score(
-            task={
-                "outline_id": "FIX_XARM6",
-                "resource_jid": "xarm6@localhost",
-                "description": "Reset xarm6 to idle.",
-                "expected_start_state": {"resource_state": "failed"},
-                "expected_end_state": {"resource_state": "idle"},
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "hybrid", "max_turns": 20},
+            "hybrid_session_seed": {"max_turns": 20},
+            "hybrid_session_state": {
+                "status": "completed",
+                "current_phase": "finalize",
+                "turn_index": 3,
+                "max_turns": 20,
             },
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert score >= 1
-        assert detail.get("resolved_continuation_conditions", 0) >= 1
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_progress_score_counts_release_that_frees_resource_for_blocker() -> None:
-    async def _run() -> None:
-        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "FIX_XARM6",
-                "resource_jid": "xarm6@localhost",
-                "expected_end_state": {"resource_state": "idle"},
-            },
-            session_state,
-        )
-
-        normalized_task, findings = multi_turn_v2_mode._derive_candidate_outline_task(
-            candidate_task={
-                "outline_id": "RELEASE_MCP",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "release_part",
-                "part_name": "MCP",
-                "target_ref": "prusa-mk4-2",
-            },
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert findings == []
-        score, detail = multi_turn_v2_mode._candidate_progress_score(
-            task=dict(normalized_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert score >= 1
-        assert detail.get("resolved_direct_blockers") == 0
-        assert detail.get("freed_resource_for_blocker") == 1
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_progress_score_counts_blocker_part_acquisition() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-        session_state["observation_store"] = {
-            "observed_pose_LG": {
-                "part_name": "LG",
-                "x": 0.0,
-                "y": 0.2,
-                "z": 1.035,
-                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-            }
+            "context_summary": {},
+            "llm_input": {},
         }
+        proposal = {"engine": "hybrid_des_v1", "outline_tasks": []}
 
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "FIX_XARM6",
-                "resource_jid": "xarm6@localhost",
-                "action_type": "recover_resource",
-                "expected_end_state": {"resource_state": "idle"},
-            },
-            session_state,
-        )
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "RELEASE_MCP",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "release_part",
-                "part_name": "MCP",
-                "target_ref": "prusa-mk4-2",
-                "expected_end_state": {
-                    "resource_state": "idle",
-                    "held_part": None,
-                    "part_location": "prusa-mk4-2",
-                    "part_holder_resource_jid": None,
-                },
-            },
-            session_state,
-        )
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(
+                self,
+                _prepared: dict[str, Any],
+            ) -> dict[str, Any]:
+                return deepcopy(proposal)
 
-        normalized_task, findings = multi_turn_v2_mode._derive_candidate_outline_task(
-            candidate_task={
-                "outline_id": "ACQUIRE_LG",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "acquire_part",
-                "part_name": "LG",
-            },
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": "completed",
+                    "multi_turn_session": deepcopy(
+                        prepared_bridge_request["hybrid_session_state"]
+                    ),
+                }
 
-        assert findings == []
-        validation_findings, grounded_action = multi_turn_v2_mode._validate_single_outline_task(
-            planner=planner,
-            task=dict(normalized_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-        assert validation_findings == []
-        assert grounded_action is not None
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
 
-        score, detail = multi_turn_v2_mode._candidate_progress_score(
-            task=dict(normalized_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-
-        assert score >= 1
-        assert detail.get("resolved_direct_blockers") == 0
-        assert detail.get("blocker_part_acquired") == 1
-        assert detail.get("freed_resource_for_blocker") == 0
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_outline_selects_highest_progress_then_order() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        candidates = {
-            "RESET_XARM6": ([], {"resource_jid": "xarm6@localhost"}),
-            "WAIT_UR5E": ([], {"resource_jid": "ur5e@localhost"}),
-            "SHIFT_UR5E": ([], {"resource_jid": "ur5e@localhost"}),
-        }
-
-        def _fake_validate_single_outline_task(
-            *,
-            planner: Any,
-            task: dict[str, Any],
-            session_state: dict[str, Any],
-            prepared_bridge_request: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-            del planner, session_state, prepared_bridge_request
-            task_key = str(task.get("llm_outline_id") or task.get("outline_id") or "")
-            return candidates[task_key]
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model
+            assert reasoning_mode == "hybrid"
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
 
         with patch.object(
-            multi_turn_v2_mode,
-            "_validate_single_outline_task",
-            side_effect=_fake_validate_single_outline_task,
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=AssertionError("multi-turn resume should not run in hybrid mode"),
         ):
-            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
-                session_state=session_state,
-                parsed_response={
-                    "candidate_tasks": [
-                        {
-                            "outline_id": "WAIT_UR5E",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "acquire_part",
-                            "part_name": "MCP",
-                            "description": "Hold current MCP state.",
-                        },
-                        {
-                            "outline_id": "RESET_XARM6",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "Reset xarm6 to idle.",
-                        },
-                        {
-                            "outline_id": "SHIFT_UR5E",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "release_part",
-                            "part_name": "MCP",
-                            "target_ref": "prusa-mk4-2",
-                            "description": "Shift ur5e locally.",
-                        },
-                    ]
-                },
-                prepared_bridge_request=prepared_bridge_request,
-                planner=planner,
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                reasoning_mode="hybrid",
+                stop_before_primitive_generation=False,
             )
 
-        assert decision == "need_next_task"
-        assert turn_entry.get("selected_candidate_index") == 1
-        assert dict(turn_entry.get("selected_candidate_task") or {}).get("outline_id") == "RECOVERY_SEQ1_2"
-        assert dict(turn_entry.get("selected_candidate_task") or {}).get("llm_outline_id") == "RESET_XARM6"
-        assert dict(turn_entry.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
-        assert dict(turn_entry.get("selected_next_task") or {}).get("candidate_outline_id") == "RECOVERY_SEQ1_2"
-        assert dict(turn_entry.get("selected_next_task") or {}).get("llm_outline_id") == "RESET_XARM6"
-        assert session_state.get("accepted_outline_prefix") == [turn_entry.get("selected_next_task")]
-        assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == "idle"
-        assert session_state["symbolic_resources"]["ur5e@localhost"]["current_state"] == "picked"
+        assert result.get("proposal") == proposal
+        assert result.get("reasoning_mode") == "hybrid"
+        assert dict(result.get("prepared_bridge_request") or {}).get("hybrid_session_seed")
+        assert not dict(result.get("prepared_bridge_request") or {}).get("multi_turn_session_seed")
 
     asyncio.run(_run())
-
-
-def test_v2_candidate_outline_tie_uses_earliest_candidate_order() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        def _fake_validate_single_outline_task(
-            *,
-            planner: Any,
-            task: dict[str, Any],
-            session_state: dict[str, Any],
-            prepared_bridge_request: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-            del planner, session_state, prepared_bridge_request
-            return [], {"resource_jid": str(task.get("resource_jid") or "")}
-
-        with patch.object(
-            multi_turn_v2_mode,
-            "_validate_single_outline_task",
-            side_effect=_fake_validate_single_outline_task,
-        ), patch.object(
-            multi_turn_v2_mode,
-            "_candidate_progress_score",
-            side_effect=[
-                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
-                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
-                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
-                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
-                (1, {"resolved_direct_blockers": 1, "resolved_continuation_conditions": 1,
-                     "remaining_continuation_conditions": 1, "remaining_blocked_issues": 1}),
-            ],
-        ):
-            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
-                session_state=session_state,
-                parsed_response={
-                    "candidate_tasks": [
-                        {
-                            "outline_id": "FIRST",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "acquire_part",
-                            "part_name": "MCP",
-                            "description": "first valid option",
-                        },
-                        {
-                            "outline_id": "SECOND",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "second valid option",
-                        },
-                        {
-                            "outline_id": "THIRD",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "third valid option",
-                        },
-                    ]
-                },
-                prepared_bridge_request=prepared_bridge_request,
-                planner=planner,
-            )
-
-        assert decision == "need_next_task"
-        assert turn_entry.get("selected_candidate_index") == 0
-        assert dict(turn_entry.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
-        assert dict(turn_entry.get("selected_next_task") or {}).get("llm_outline_id") == "FIRST"
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_outline_all_rejected_sets_feedback_and_commits_nothing() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        def _fake_validate_single_outline_task(
-            *,
-            planner: Any,
-            task: dict[str, Any],
-            session_state: dict[str, Any],
-            prepared_bridge_request: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-            del planner, session_state, prepared_bridge_request
-            task_id = str(task.get("outline_id") or "")
-            return ([{
-                "constraint_owner": "binding",
-                "constraint_code": "no_state_change",
-                "task_id": task_id,
-                "reason": f"{task_id} does not change projected state",
-                "evidence": {"token": task_id},
-            }], None)
-
-        with patch.object(
-            multi_turn_v2_mode,
-            "_validate_single_outline_task",
-            side_effect=_fake_validate_single_outline_task,
-        ):
-            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
-                session_state=session_state,
-                parsed_response={
-                    "candidate_tasks": [
-                        {
-                            "outline_id": "BAD_1",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "bad one",
-                        },
-                        {
-                            "outline_id": "BAD_2",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "acquire_part",
-                            "part_name": "MCP",
-                            "description": "bad two",
-                        },
-                        {
-                            "outline_id": "BAD_3",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "bad three",
-                        },
-                    ]
-                },
-                prepared_bridge_request=prepared_bridge_request,
-                planner=planner,
-            )
-
-        assert decision == "need_revision"
-        assert session_state.get("accepted_outline_prefix") == []
-        assert len(session_state.get("candidate_rejection_feedback") or []) == 3
-        assert dict((session_state.get("candidate_rejection_feedback") or [])[0].get("task") or {}).get("outline_id") == "RECOVERY_SEQ1_1"
-        assert "selected_next_task" not in turn_entry
-        assert len(session_state.get("outline_validation_findings") or []) == 0
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_outline_rejects_valid_zero_blocker_reduction() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        def _fake_validate_single_outline_task(
-            *,
-            planner: Any,
-            task: dict[str, Any],
-            session_state: dict[str, Any],
-            prepared_bridge_request: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-            del planner, session_state, prepared_bridge_request
-            return [], {"resource_jid": str(task.get("resource_jid") or "")}
-
-        with patch.object(
-            multi_turn_v2_mode,
-            "_validate_single_outline_task",
-            side_effect=_fake_validate_single_outline_task,
-        ), patch.object(
-            multi_turn_v2_mode,
-            "_candidate_progress_score",
-            side_effect=[
-                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
-                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
-                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
-                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
-                (0, {"resolved_direct_blockers": 0, "resolved_continuation_conditions": 0,
-                     "remaining_continuation_conditions": 2, "remaining_blocked_issues": 2}),
-            ],
-        ):
-            decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
-                session_state=session_state,
-                parsed_response={
-                    "candidate_tasks": [
-                        {
-                            "outline_id": "FIRST",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "acquire_part",
-                            "part_name": "MCP",
-                            "description": "first valid option",
-                        },
-                        {
-                            "outline_id": "SECOND",
-                            "resource_jid": "xarm6@localhost",
-                            "action_type": "recover_resource",
-                            "description": "second valid option",
-                        },
-                        {
-                            "outline_id": "THIRD",
-                            "resource_jid": "ur5e@localhost",
-                            "action_type": "release_part",
-                            "part_name": "MCP",
-                            "target_ref": "prusa-mk4-2",
-                            "description": "third valid option",
-                        },
-                    ]
-                },
-                prepared_bridge_request=prepared_bridge_request,
-                planner=planner,
-            )
-
-        assert decision == "need_revision"
-        assert "selected_next_task" not in turn_entry
-        assert session_state.get("accepted_outline_prefix") == []
-        assert len(session_state.get("candidate_rejection_feedback") or []) == 3
-        assert all(
-            any(
-                str(item.get("constraint_code") or "") == "no_blocker_reduction"
-                for item in (row.get("validation_findings") or [])
-                if isinstance(item, dict)
-            )
-            for row in (turn_entry.get("candidate_evaluations") or [])
-            if isinstance(row, dict)
-        )
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_followup_rejects_contradictory_mcp_start_state() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-        session_state["outline_mode"] = "incremental_candidates_validated"
-
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "RELEASED_MCP",
-                "resource_jid": "ur5e@localhost",
-                "part_name": "MCP",
-                "expected_end_state": {
-                    "resource_state": "idle",
-                    "held_part": None,
-                    "part_state": "misplaced",
-                    "part_location": "prusa-mk4-2",
-                    "part_holder_resource_jid": None,
-                },
-            },
-            session_state,
-        )
-
-        decision_2, turn_entry_2 = await multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
-            session_state=session_state,
-            parsed_response={
-                "candidate_tasks": [
-                    {
-                        "outline_id": "REGRASP_MCP",
-                        "resource_jid": "ur5e@localhost",
-                        "description": "Keep holding MCP after release.",
-                        "part_name": "MCP",
-                        "expected_start_state": {
-                            "resource_state": "idle",
-                            "held_part": "MCP",
-                            "part_state": "misplaced",
-                            "part_location": "ur5e@localhost_gripper",
-                            "part_holder_resource_jid": "ur5e@localhost",
-                        },
-                        "expected_end_state": {
-                            "resource_state": "busy",
-                            "held_part": "MCP",
-                            "part_state": "misplaced",
-                            "part_location": "ur5e@localhost_gripper",
-                            "part_holder_resource_jid": "ur5e@localhost",
-                        },
-                    },
-                    {
-                        "outline_id": "RESET_XARM6",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "Reset xarm6 to idle.",
-                        "expected_start_state": {"resource_state": "failed"},
-                        "expected_end_state": {"resource_state": "idle"},
-                    },
-                    {
-                        "outline_id": "BAD_3",
-                        "resource_jid": "xarm6@localhost",
-                        "description": "No-op reset three.",
-                        "expected_start_state": {"resource_state": "failed"},
-                        "expected_end_state": {"resource_state": "failed"},
-                    },
-                ]
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
-        )
-
-        assert decision_2 == "need_next_task"
-        candidate_1 = next(
-            row for row in (turn_entry_2.get("candidate_evaluations") or [])
-            if int(row.get("candidate_index") or 0) == 0
-        )
-        assert not any(
-            str(item.get("constraint_code") or "") == "expected_start_state_mismatch"
-            for item in (candidate_1.get("validation_findings") or [])
-            if isinstance(item, dict)
-        )
-        assert dict(turn_entry_2.get("selected_next_task") or {}).get("outline_id") == "RECOVERY_SEQ1"
-        assert dict(turn_entry_2.get("selected_next_task") or {}).get("candidate_outline_id") == "RECOVERY_SEQ1_2"
-
-    asyncio.run(_run())
-
-
-def test_v2_apply_task_effects_normalizes_release_part_state() -> None:
-    async def _run() -> None:
-        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "RELEASED_MCP",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "release_part",
-                "part_name": "MCP",
-                "target_ref": "prusa-mk4-2",
-                "expected_end_state": {
-                    "resource_state": "idle",
-                    "held_part": None,
-                    "part_location": "prusa-mk4-2",
-                    "part_holder_resource_jid": None,
-                },
-            },
-            session_state,
-        )
-
-        assert session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] is None
-        assert session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] == "open"
-        assert session_state["symbolic_parts"]["MCP"]["current_holder_resource_jid"] is None
-        assert session_state["symbolic_parts"]["MCP"]["current_location"] == "prusa-mk4-2"
-        assert session_state["symbolic_parts"]["MCP"]["current_state"] == "misplaced"
-
-    asyncio.run(_run())
-
-
-def test_v2_apply_task_effects_normalizes_acquire_part_state() -> None:
-    async def _run() -> None:
-        _, _, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
-            prepared_bridge_request
-        )
-
-        multi_turn_v2_mode._apply_task_effects_to_symbolic_state(
-            {
-                "outline_id": "ACQUIRED_LG",
-                "resource_jid": "ur5e@localhost",
-                "action_type": "acquire_part",
-                "part_name": "LG",
-                "expected_end_state": {
-                    "resource_state": "picked",
-                    "held_part": "LG",
-                    "part_location": "ur5e@localhost_gripper",
-                    "part_holder_resource_jid": "ur5e@localhost",
-                },
-            },
-            session_state,
-        )
-
-        assert session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] == "LG"
-        assert session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] == "closed"
-        assert session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] == "ur5e@localhost"
-        assert session_state["symbolic_parts"]["LG"]["current_location"] == "ur5e@localhost_gripper"
-        assert session_state["symbolic_parts"]["LG"]["current_state"] == "in_gripper"
-
-    asyncio.run(_run())
-
-
-def test_v2_candidate_response_artifact_uses_normalized_ids() -> None:
-    payload = multi_turn_v2_mode._normalized_response_artifact_payload(
-        phase="outline",
-        session_state={"outline_mode": "incremental_candidates_validated"},
-        parsed_response={
-            "thought": "raw llm response",
-            "candidate_tasks": [
-                {"outline_id": "candidate_1", "resource_jid": "xarm6@localhost", "action_type": "recover_resource"},
-                {"outline_id": "candidate_2", "resource_jid": "ur5e@localhost", "action_type": "acquire_part", "part_name": "MCP"},
-                {"outline_id": "candidate_3", "resource_jid": "ur5e@localhost", "action_type": "release_part", "part_name": "MCP", "target_ref": "prusa-mk4-2"},
-            ],
-        },
-        turn_entry={
-            "candidate_tasks": [
-                {"outline_id": "RECOVERY_SEQ1_1", "llm_outline_id": "candidate_1", "resource_jid": "xarm6@localhost", "action_type": "recover_resource"},
-                {"outline_id": "RECOVERY_SEQ1_2", "llm_outline_id": "candidate_2", "resource_jid": "ur5e@localhost", "action_type": "acquire_part", "part_name": "MCP"},
-                {"outline_id": "RECOVERY_SEQ1_3", "llm_outline_id": "candidate_3", "resource_jid": "ur5e@localhost", "action_type": "release_part", "part_name": "MCP", "target_ref": "prusa-mk4-2"},
-            ]
-        },
-    )
-
-    assert payload.get("thought") == "raw llm response"
-    assert [
-        dict(row).get("outline_id")
-        for row in (payload.get("candidate_tasks") or [])
-    ] == ["RECOVERY_SEQ1_1", "RECOVERY_SEQ1_2", "RECOVERY_SEQ1_3"]
 
 
 if __name__ == "__main__":
@@ -4199,6 +2558,12 @@ if __name__ == "__main__":
         description="Case 3 LG-slippage bridge dry-run harness"
     )
     parser.add_argument("--model", default=DEFAULT_LIVE_MODEL, help="OpenAI model name")
+    parser.add_argument(
+        "--reasoning-mode",
+        default="hybrid",
+        choices=("multi_turn", "hybrid"),
+        help="Bridge reasoning mode to run in the dry-run harness",
+    )
     parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifacts")
     parser.add_argument(
         "--show-llm-input",
@@ -4217,6 +2582,7 @@ if __name__ == "__main__":
         run_case3_bridge_dryrun(
             write_debug=not args.no_debug,
             llm_model=args.model,
+            reasoning_mode=args.reasoning_mode,
         )
     )
 

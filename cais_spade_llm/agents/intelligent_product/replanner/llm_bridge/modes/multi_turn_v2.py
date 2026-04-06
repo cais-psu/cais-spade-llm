@@ -42,11 +42,6 @@ _DEFAULT_MAX_TURNS = 20
 _DEFAULT_MAX_OBSERVATIONS = 3
 _DEFAULT_MAX_OBSERVE_BATCH = 3
 _OUTLINE_STAGNATION_LIMIT = 3
-_CANDIDATE_ACTION_TYPES = {
-    "recover_resource",
-    "acquire_part",
-    "release_part",
-}
 _V2_OUTLINE_CONTRACT = {
     "allowed_state_fields": [
         "resource_state",
@@ -1857,46 +1852,35 @@ def _resource_current_state_token(resource_row: dict[str, Any]) -> str:
     return str(resource_row.get("current_state") or resource_row.get("state") or "").strip()
 
 
-def _candidate_action_type_from_legacy_task(task: dict[str, Any]) -> str:
-    explicit = str(task.get("action_type") or "").strip().lower()
-    if explicit:
-        return explicit
-    part_name = str(task.get("part_name") or "").strip()
-    if not part_name:
-        return "recover_resource"
-    end_state = dict(task.get("expected_end_state") or {})
-    end_held_part = str(end_state.get("held_part") or "").strip()
-    end_holder = str(
-        end_state.get("part_holder_resource_jid")
-        or end_state.get("current_holder_resource_jid")
-        or ""
-    ).strip()
-    if end_held_part == part_name or end_holder:
-        return "acquire_part"
-    return "release_part"
+def _candidate_action_name_from_task(task: dict[str, Any]) -> str:
+    action_name = str(task.get("action_name") or "").strip()
+    if action_name:
+        return action_name
+    legacy_action_type = str(task.get("action_type") or "").strip().lower()
+    if legacy_action_type:
+        return legacy_action_type.replace("_", " ")
+    return ""
 
 
-def _candidate_target_ref_from_legacy_task(task: dict[str, Any], *, action_type: str) -> str:
+def _candidate_target_ref_from_surface_task(task: dict[str, Any]) -> str:
     if str(task.get("target_ref") or "").strip():
         return str(task.get("target_ref") or "").strip()
     action_target = dict(task.get("action_target") or {})
-    if action_type == "recover_resource":
-        return str(
-            action_target.get("named_pose")
-            or action_target.get("target_location")
-            or dict(task.get("expected_end_state") or {}).get("resource_location")
-            or dict(task.get("expected_end_state") or {}).get("named_pose")
-            or ""
-        ).strip()
-    if action_type == "release_part":
-        return str(
-            action_target.get("target_location")
-            or action_target.get("named_pose")
-            or dict(task.get("expected_end_state") or {}).get("part_location")
-            or dict(task.get("expected_end_state") or {}).get("named_pose")
-            or ""
-        ).strip()
-    return ""
+    return str(
+        action_target.get("target_location")
+        or action_target.get("named_pose")
+        or ""
+    ).strip()
+
+
+def _surface_candidate_hidden_action_type(
+    *,
+    part_name: str,
+    target_ref: str,
+) -> str:
+    if part_name:
+        return "release_part" if target_ref else "acquire_part"
+    return "recover_resource"
 
 
 def _normalize_candidate_task(
@@ -1907,14 +1891,15 @@ def _normalize_candidate_task(
 ) -> dict[str, Any]:
     raw_task = deepcopy(task or {})
     original_outline_id = str(raw_task.get("outline_id") or "").strip()
-    action_type = _candidate_action_type_from_legacy_task(raw_task)
     normalized: dict[str, Any] = {
         "resource_jid": str(raw_task.get("resource_jid") or "").strip(),
-        "action_type": action_type,
     }
+    action_name = _candidate_action_name_from_task(raw_task)
     description = str(raw_task.get("description") or "").strip()
     part_name = str(raw_task.get("part_name") or "").strip()
-    target_ref = _candidate_target_ref_from_legacy_task(raw_task, action_type=action_type)
+    target_ref = _candidate_target_ref_from_surface_task(raw_task)
+    if action_name:
+        normalized["action_name"] = action_name
     if description:
         normalized["description"] = description
     if part_name:
@@ -1941,43 +1926,46 @@ def _derive_candidate_outline_task(
         prepared_bridge_request=prepared_bridge_request,
     )
     resource_jid = str(candidate_task.get("resource_jid") or "").strip()
-    action_type = str(candidate_task.get("action_type") or "").strip().lower()
+    action_name = str(candidate_task.get("action_name") or "").strip()
     part_name = str(candidate_task.get("part_name") or "").strip()
     target_ref = str(candidate_task.get("target_ref") or "").strip()
     description = str(candidate_task.get("description") or "").strip()
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
 
-    if action_type not in _CANDIDATE_ACTION_TYPES:
+    if not resource_jid:
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason=(
-                    "candidate action_type must be one of recover_resource, "
-                    "acquire_part, or release_part"
-                ),
-                evidence={"field": "action_type", "token": action_type or None},
+                reason="candidate must include resource_jid",
+                evidence={"field": "resource_jid"},
             )
         ]
 
-    if action_type == "recover_resource" and part_name:
+    if not action_name:
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason="recover_resource must omit part_name",
-                evidence={"field": "part_name", "token": part_name},
+                reason="candidate must include action_name naming the physical intent",
+                evidence={"field": "action_name"},
             )
         ]
+
+    if not description:
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason="candidate must include description",
+                evidence={"field": "description"},
+            )
+        ]
+
+    action_type = _surface_candidate_hidden_action_type(
+        part_name=part_name,
+        target_ref=target_ref,
+    )
 
     if action_type == "acquire_part":
-        if not part_name:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason="acquire_part requires part_name",
-                    evidence={"field": "part_name"},
-                )
-            ]
         if part_name not in parts_by_name:
             return None, [
                 _candidate_schema_finding(
@@ -1986,24 +1974,8 @@ def _derive_candidate_outline_task(
                     evidence={"field": "part_name", "token": part_name},
                 )
             ]
-        if target_ref:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason="acquire_part must omit target_ref",
-                    evidence={"field": "target_ref", "token": target_ref},
-                )
-            ]
 
     if action_type == "release_part":
-        if not part_name:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason="release_part requires part_name",
-                    evidence={"field": "part_name"},
-                )
-            ]
         if part_name not in parts_by_name:
             return None, [
                 _candidate_schema_finding(
@@ -2077,6 +2049,7 @@ def _derive_candidate_outline_task(
     normalized_task: dict[str, Any] = {
         "outline_id": str(candidate_task.get("outline_id") or "").strip(),
         "resource_jid": resource_jid,
+        "action_name": action_name,
         "action_type": action_type,
         "description": description,
         "expected_start_state": start_state,
@@ -2582,6 +2555,7 @@ def _build_phase_prompt(
         phase=phase,
         llm_input=llm_input,
         session_state=session_state,
+        bridge_resources=dict(prepared_bridge_request.get("bridge_resources") or {}),
         world_observation_surface=world_observation_surface,
         current_recovery_blockers=current_recovery_blockers,
     )
@@ -2611,6 +2585,11 @@ def _normalized_response_artifact_payload(
     turn_entry: dict[str, Any],
 ) -> dict[str, Any]:
     """Return the response payload to persist in per-turn artifacts."""
+    def _sanitize_surface_task(task: Any) -> dict[str, Any]:
+        sanitized = deepcopy(dict(task or {}))
+        sanitized.pop("action_type", None)
+        return sanitized
+
     normalized = deepcopy(parsed_response if isinstance(parsed_response, dict) else {})
     if str(phase or "").strip().lower() != "outline":
         return normalized
@@ -2623,11 +2602,17 @@ def _normalized_response_artifact_payload(
     thought = str(parsed_response.get("thought") or "").strip()
     if thought:
         payload["thought"] = thought
-    payload["candidate_tasks"] = deepcopy(turn_entry.get("candidate_tasks") or [])
+    payload["candidate_tasks"] = [
+        _sanitize_surface_task(row)
+        for row in (turn_entry.get("candidate_tasks") or [])
+        if isinstance(row, dict)
+    ]
     if "selected_candidate_index" in turn_entry:
         payload["selected_candidate_index"] = int(turn_entry.get("selected_candidate_index") or 0)
     if isinstance(turn_entry.get("selected_next_task"), dict):
-        payload["selected_next_task"] = deepcopy(turn_entry.get("selected_next_task"))
+        payload["selected_next_task"] = _sanitize_surface_task(
+            turn_entry.get("selected_next_task")
+        )
     if isinstance(turn_entry.get("candidate_rejection_feedback"), list):
         payload["candidate_rejection_feedback"] = deepcopy(
             turn_entry.get("candidate_rejection_feedback") or []

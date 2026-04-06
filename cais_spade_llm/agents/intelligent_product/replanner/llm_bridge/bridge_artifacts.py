@@ -216,7 +216,7 @@ def _resolve_reasoning_mode(payload: dict[str, Any]) -> str:
         session_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
         if session_mode:
             return session_mode
-    return "single_shot"
+    return "hybrid"
 
 
 def write_bridge_artifacts(
@@ -226,14 +226,18 @@ def write_bridge_artifacts(
     debug_dir: str | Path | None = None,
     write_latest: bool = False,
     filename_prefix: str | None = None,
+    write_session_transcript: bool | None = None,
 ) -> dict[str, str]:
-    """Write timestamped prompt/response artifacts and optional ``latest`` aliases."""
+    """Write bridge prompt/response artifacts."""
     del phase_label, filename_prefix
     normalized_payload = payload if isinstance(payload, dict) else {"payload": payload}
     target_dir = _resolve_debug_dir(debug_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     reasoning_mode = _resolve_reasoning_mode(normalized_payload)
+    if write_session_transcript is None:
+        write_session_transcript = reasoning_mode != "multi_turn"
+    write_latest = bool(write_latest) and reasoning_mode != "multi_turn"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     if reasoning_mode == "multi_turn":
         multi_turn_ctx = _multi_turn_artifact_context(normalized_payload)
@@ -258,6 +262,30 @@ def write_bridge_artifacts(
         )
         latest_session_transcript_artifact_name = (
             f"multi_turn_session_{multi_turn_ctx['session_id']}_latest.txt"
+        )
+    elif reasoning_mode == "hybrid":
+        hybrid_ctx = _multi_turn_artifact_context(normalized_payload)
+        prompt_artifact_name = (
+            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
+            f"{hybrid_ctx['phase']}_prompt_{timestamp}.txt"
+        )
+        response_artifact_name = (
+            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
+            f"{hybrid_ctx['phase']}_response_{timestamp}.txt"
+        )
+        latest_prompt_artifact_name = (
+            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
+            f"{hybrid_ctx['phase']}_prompt_latest.txt"
+        )
+        latest_response_artifact_name = (
+            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
+            f"{hybrid_ctx['phase']}_response_latest.txt"
+        )
+        session_transcript_artifact_name = (
+            f"hybrid_session_{timestamp}.txt"
+        )
+        latest_session_transcript_artifact_name = (
+            f"hybrid_session_latest.txt"
         )
     else:
         prompt_artifact_name = f"{reasoning_mode}_prompt_{timestamp}.txt"
@@ -284,7 +312,7 @@ def write_bridge_artifacts(
         )
         artifact_paths["response_artifact_path"] = str(response_artifact_path)
     session_transcript = _extract_session_transcript(normalized_payload)
-    if session_transcript:
+    if write_session_transcript and session_transcript:
         session_transcript_artifact_path = target_dir / session_transcript_artifact_name
         session_transcript_artifact_path.write_text(
             session_transcript,
@@ -309,7 +337,7 @@ def write_bridge_artifacts(
             artifact_paths["latest_response_artifact_path"] = str(
                 latest_response_artifact_path
             )
-        if session_transcript:
+        if write_session_transcript and session_transcript:
             latest_session_transcript_artifact_path = (
                 target_dir / latest_session_transcript_artifact_name
             )

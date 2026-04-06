@@ -13,8 +13,10 @@ from typing import Any
 from uuid import uuid4
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    build_hybrid_session_seed,
     build_multi_turn_session_seed,
     build_single_shot_prompt_artifacts,
+    execute_hybrid_des_bridge,
     execute_multi_turn_bridge,
     execute_single_shot_bridge,
 )
@@ -36,8 +38,8 @@ class BridgeSessionMixin:
     @staticmethod
     def _normalize_bridge_reasoning_mode(value: Any) -> str:
         mode = str(value or "single_shot").strip().lower()
-        if mode not in {"single_shot", "multi_turn"}:
-            return "single_shot"
+        if mode not in {"single_shot", "multi_turn", "hybrid"}:
+            return "hybrid"
         return mode
 
     def _resolve_bridge_reasoning_mode(self) -> str:
@@ -52,7 +54,7 @@ class BridgeSessionMixin:
             else {}
         )
         return self._normalize_bridge_reasoning_mode(
-            precomputed_policy.get("bridge_reasoning_mode", "single_shot")
+            precomputed_policy.get("bridge_reasoning_mode", "hybrid")
         )
 
     def _bridge_artifact_path(self, artifact_key: str) -> Path | None:
@@ -2979,7 +2981,7 @@ class BridgeSessionMixin:
         )
         prepared_bridge_request["llm_input"] = self._build_llm_input(
             prepared_bridge_request,
-            preload_observed_pose=reasoning_mode != "multi_turn",
+            preload_observed_pose=reasoning_mode not in ("multi_turn", "hybrid"),
         )
         if reasoning_mode == "single_shot":
             single_shot_prompt_input, single_shot_prompt_text = (
@@ -2994,6 +2996,10 @@ class BridgeSessionMixin:
         elif reasoning_mode == "multi_turn":
             prepared_bridge_request["multi_turn_session_seed"] = deepcopy(
                 build_multi_turn_session_seed(prepared_bridge_request)
+            )
+        elif reasoning_mode == "hybrid":
+            prepared_bridge_request["hybrid_session_seed"] = deepcopy(
+                build_hybrid_session_seed(prepared_bridge_request)
             )
 
         bridge_debug = {
@@ -3016,6 +3022,10 @@ class BridgeSessionMixin:
         elif reasoning_mode == "multi_turn":
             bridge_debug["multi_turn_session"] = deepcopy(
                 prepared_bridge_request.get("multi_turn_session_seed") or {}
+            )
+        elif reasoning_mode == "hybrid":
+            bridge_debug["multi_turn_session"] = deepcopy(
+                prepared_bridge_request.get("hybrid_session_seed") or {}
             )
         prepared_bridge_request["bridge_debug"] = bridge_debug
         if hasattr(self, "_set_last_bridge_debug"):
@@ -3050,6 +3060,8 @@ class BridgeSessionMixin:
             return await execute_single_shot_bridge(self, prepared_bridge_request)
         if reasoning_mode == "multi_turn":
             return await execute_multi_turn_bridge(self, prepared_bridge_request)
+        if reasoning_mode == "hybrid":
+            return await execute_hybrid_des_bridge(self, prepared_bridge_request)
 
         bridge_debug["status"] = "unsupported_reasoning_mode"
         bridge_debug["message"] = (

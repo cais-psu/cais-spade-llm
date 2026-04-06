@@ -5,6 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Case 3 Bridge Dry-Run: Hybrid (F5 Default)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test/test_case3_bridge_dryrun.py",
+            "args": [
+                "--reasoning-mode",
+                "hybrid"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/scripts/ros_python.sh"
+        },
+        {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",

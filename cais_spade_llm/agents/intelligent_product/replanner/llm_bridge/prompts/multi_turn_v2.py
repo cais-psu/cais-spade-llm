@@ -52,15 +52,12 @@ _OUTLINE_CANDIDATE_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "resource_jid": {"type": "string"},
-        "action_type": {
-            "type": "string",
-            "enum": ["recover_resource", "acquire_part", "release_part"],
-        },
+        "action_name": {"type": "string"},
         "part_name": {"type": "string"},
         "target_ref": {"type": "string"},
         "description": {"type": "string"},
     },
-    "required": ["resource_jid", "action_type"],
+    "required": ["resource_jid", "action_name", "description"],
 }
 
 
@@ -227,6 +224,7 @@ def build_multi_turn_v2_phase_prompt_input(
     phase: str,
     llm_input: dict[str, Any],
     session_state: dict[str, Any],
+    bridge_resources: dict[str, Any] | None = None,
     world_observation_surface: dict[str, Any] | None = None,
     recovery_gap_state: dict[str, Any] | None = None,
     pruned_actions: list[dict[str, Any]] | None = None,
@@ -238,6 +236,7 @@ def build_multi_turn_v2_phase_prompt_input(
         "phase": phase,
         "llm_input": deepcopy(llm_input),
         "session_state": deepcopy(session_state),
+        "bridge_resources": deepcopy(bridge_resources or {}),
         "world_observation_surface": deepcopy(world_observation_surface or {}),
         "recovery_gap_state": deepcopy(recovery_gap_state or {}),
         "pruned_actions": deepcopy(pruned_actions or []),
@@ -388,9 +387,19 @@ def _effective_task_part_holder(
 
 
 def _structured_task_action_summary(task: dict[str, Any]) -> str:
+    action_name = str(task.get("action_name") or "").strip()
     action_type = str(task.get("action_type") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
     target_ref = str(task.get("target_ref") or "").strip()
+    if action_name:
+        summary = action_name
+        lower_summary = action_name.lower()
+        if part_name and part_name.lower() not in lower_summary:
+            summary = f"{summary} {part_name}"
+            lower_summary = summary.lower()
+        if target_ref and target_ref.lower() not in lower_summary:
+            summary = f"{summary} to {target_ref}"
+        return summary
     if action_type == "recover_resource":
         if target_ref:
             return f"recover resource via {target_ref}"
@@ -587,6 +596,114 @@ def _current_recovery_blockers_summary(blockers: list[dict[str, Any]]) -> str:
         seen.add(summary)
         lines.append(f"- {summary}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def _named_pose_tokens(value: Any) -> list[str]:
+    tokens: list[str] = []
+    if isinstance(value, dict):
+        tokens.extend(
+            str(token).strip()
+            for token in value.keys()
+            if str(token).strip()
+        )
+    else:
+        tokens.extend(
+            str(token).strip()
+            for token in (value or [])
+            if str(token).strip()
+        )
+    deduped: list[str] = []
+    for token in tokens:
+        if token not in deduped:
+            deduped.append(token)
+    return deduped
+
+
+def _workspace_capability_hint(bounds: dict[str, Any]) -> str:
+    if not isinstance(bounds, dict) or not bounds:
+        return "workspace not advertised"
+    axis_parts: list[str] = []
+    for axis in ("x", "y", "z"):
+        lo = bounds.get(f"{axis}_min_m")
+        hi = bounds.get(f"{axis}_max_m")
+        if lo is None and hi is None:
+            continue
+        lo_text = "?" if lo is None else f"{float(lo):.2f}"
+        hi_text = "?" if hi is None else f"{float(hi):.2f}"
+        axis_parts.append(f"{axis}[{lo_text},{hi_text}]")
+    if not axis_parts:
+        return "workspace not advertised"
+    return "workspace " + ", ".join(axis_parts)
+
+
+def _resource_capabilities_summary(bridge_resources: dict[str, Any]) -> str:
+    if not isinstance(bridge_resources, dict) or not bridge_resources:
+        return "(none advertised)"
+
+    lines: list[str] = []
+    for resource_jid in sorted(bridge_resources):
+        entry = dict(bridge_resources.get(resource_jid) or {})
+        bridge_snapshot = dict(entry.get("bridge_snapshot") or {})
+        static_capabilities = dict(entry.get("static_capabilities") or {})
+        bridge_adapter = dict(
+            entry.get("bridge_adapter")
+            or bridge_snapshot.get("bridge_adapter")
+            or {}
+        )
+
+        manipulation = (
+            "manipulate parts"
+            if bool(bridge_adapter.get("supports_manipulator_pick_place"))
+            else (
+                "execute bridge actions"
+                if bool(bridge_adapter.get("supports_executable_bridge"))
+                else "manipulation not advertised"
+            )
+        )
+
+        observation_families = [
+            str(token).strip()
+            for token in (bridge_adapter.get("observation_families") or [])
+            if str(token).strip()
+        ]
+        observation_text = (
+            ", ".join(observation_families)
+            if observation_families
+            else "none advertised"
+        )
+
+        recovery_states = [
+            str(token).strip()
+            for token in (
+                bridge_snapshot.get("supported_recovery_states")
+                or static_capabilities.get("supported_recovery_states")
+                or []
+            )
+            if str(token).strip()
+        ]
+        recovery_text = ", ".join(recovery_states) if recovery_states else "not advertised"
+
+        named_poses = _named_pose_tokens(
+            bridge_snapshot.get("named_poses")
+            or static_capabilities.get("named_poses")
+            or bridge_snapshot.get("available_named_poses")
+            or static_capabilities.get("available_named_poses")
+            or []
+        )
+        named_pose_text = ", ".join(named_poses) if named_poses else "none advertised"
+
+        workspace_hint = _workspace_capability_hint(
+            dict(
+                bridge_snapshot.get("workspace_bounds")
+                or static_capabilities.get("workspace_bounds")
+                or {}
+            )
+        )
+        lines.append(
+            f"- {resource_jid}: {manipulation}; observe {observation_text}; "
+            f"recovery states {recovery_text}; named poses {named_pose_text}; {workspace_hint}"
+        )
+    return "\n".join(lines) if lines else "(none advertised)"
 
 
 _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
@@ -994,6 +1111,7 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
 def _render_outline_prompt(payload: dict[str, Any]) -> str:
     llm_input = dict(payload.get("llm_input") or {})
     session_state = dict(payload.get("session_state") or {})
+    bridge_resources = dict(payload.get("bridge_resources") or {})
     current_recovery_blockers = [
         deepcopy(row)
         for row in (payload.get("current_recovery_blockers") or [])
@@ -1077,6 +1195,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "",
             "Current Recovery Blockers",
             _current_recovery_blockers_summary(current_recovery_blockers),
+            "",
+            "Resource Capabilities",
+            _resource_capabilities_summary(bridge_resources),
         ])
     elif outline_validation_findings:
         sections.extend([
@@ -1124,10 +1245,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             """```json
 {
   "resource_jid": "RESOURCE_JID",
-  "action_type": "recover_resource | acquire_part | release_part",
+  "action_name": "short action label you choose",
+  "description": "short grounded description",
   "part_name": "PART_NAME or omit",
-  "target_ref": "GROUNDED_DESTINATION_REF or omit",
-  "description": "optional short text"
+  "target_ref": "GROUNDED_DESTINATION_REF or omit"
 }
 ```""",
         ])
@@ -1178,10 +1299,11 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "- Propose exactly 3 tasks in candidate_tasks.",
             "- All candidate_tasks must start from the same current state shown in this prompt.",
             "- Make the 3 candidate_tasks meaningfully different recovery options.",
-            "- Use only these action_type values: recover_resource, acquire_part, release_part.",
-            "- recover_resource: requires resource_jid, must omit part_name, target_ref is optional and may be a grounded location or named pose.",
-            "- acquire_part: requires resource_jid and part_name, must omit target_ref.",
-            "- release_part: requires resource_jid, part_name, and a grounded destination target_ref.",
+            "- Each candidate must include resource_jid, action_name, and description.",
+            "- action_name must be an open-vocabulary label for the intended physical step, not a fixed enum token.",
+            "- Include part_name when the candidate concerns a specific part.",
+            "- Include grounded target_ref when the candidate places/releases a part or moves a resource to a grounded destination.",
+            "- Provide enough grounded detail for the runtime to infer whether the candidate is a resource-only step, a part pickup, or a part placement.",
             "- Do not include lookahead_tasks in this mode.",
         ])
     else:
