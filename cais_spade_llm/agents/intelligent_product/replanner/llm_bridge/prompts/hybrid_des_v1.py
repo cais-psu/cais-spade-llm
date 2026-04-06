@@ -171,10 +171,10 @@ def _domain_generation_response_schema() -> dict[str, Any]:
                                     "action_type": {
                                         "type": "string",
                                         "description": (
-                                            "Category of physical action (e.g., "
-                                            "'move_resource', 'pick_part', 'place_part', "
-                                            "'release_part', 'resequence', etc.). "
-                                            "Use whatever label best describes the action."
+                                            "Category of physical action. "
+                                            "You MUST strictly use one of: "
+                                            "'pick_part', 'place_prepare', 'place_part', "
+                                            "'release_part', 'move_resource', 'resequence'."
                                         ),
                                     },
                                     "part_name": {
@@ -309,7 +309,17 @@ def build_hybrid_domain_generation_prompt(
             locations.update(str(x) for x in np)
     vocab_lines.append(f"Known locations: {', '.join(sorted(locations))}")
     vocab_lines.append("Observed poses: use 'observed_pose' as target_ref for parts with observed_pose data")
-    sections.append("Available Vocabulary\n" + "\n".join(vocab_lines))
+    
+    sections.append(
+        "Available Vocabulary\n" 
+        + "\n".join(vocab_lines) + "\n\n"
+        "Strict Action Types:\n"
+        "- pick_part: Acquire a part (requires target_ref).\n"
+        "- place_prepare: Move resource to approach/hover over a target destination BEFORE placing.\n"
+        "- place_part: Physically place the part at the target_ref.\n"
+        "- release_part: Let go of the part.\n"
+        "- move_resource: Move a resource to a named pose or location."
+    )
 
     # Plant shape example
     sections.append(
@@ -335,21 +345,17 @@ def build_hybrid_domain_generation_prompt(
         "```"
     )
 
-    # Hard constraints
+    # Hard Constraints
     sections.append(
         "Hard Constraints\n"
         "- Use only the listed resources, parts, and locations.\n"
-        "- Each event must be a single physical action by one resource.\n"
-        "- The initial state must represent the current world state.\n"
-        "- Marked states must represent all recovery objectives achieved.\n"
-        "- Encode ordering dependencies as state structure (if action B requires A first, "
-        "B must only be reachable from states after A).\n"
-        "- Consider ALL intermediate steps that may be required to reach the goal, "
-        "including prerequisites that are not immediately obvious from the objectives alone.\n"
+        "- Each event must strictly represent a single physical action by one resource.\n"
+        "- You MUST use the exact strict action types.\n"
+        "- The initial state must equal the current world state.\n"
+        "- Marked states must equal all recovery objectives achieved.\n"
+        "- Ordering dependencies must be encoded structurally within the automaton state graph.\n"
         "- Every event name must be unique.\n"
-        "- The plant must be deterministic (no state has two outgoing events with the same name).\n"
-        "- Include alternative paths where multiple recovery strategies exist "
-        "(the solver will find the optimal one)."
+        "- The plant must be strictly deterministic."
     )
 
     return "\n\n".join(sections)
@@ -377,17 +383,20 @@ def build_hybrid_feedback_prompt(
         "feedback below. Generate a complete replacement plant (not a patch)."
     )
 
-    if previous_plant_json:
-        sections.append("Previous Plant (rejected)\n```json\n" + previous_plant_json + "\n```")
-
-    if plant_findings_text:
-        sections.append("Plant Validation Findings (fix these)\n" + plant_findings_text)
-
+    # Multi-turn style diagnostics blocking
     if solver_diagnostic_text:
-        sections.append("Solver Diagnostic (the solver could not find a solution)\n" + solver_diagnostic_text)
+        sections.append("--- PROPOSED SOLVER TRACE ---\n" + solver_diagnostic_text)
 
-    if feasibility_findings_text:
-        sections.append("Feasibility Findings (physical constraints violated)\n" + feasibility_findings_text)
+    if feasibility_findings_text or plant_findings_text:
+        feedback_parts = []
+        if plant_findings_text:
+            feedback_parts.append("Plant Structural Findings:\n" + plant_findings_text)
+        if feasibility_findings_text:
+            feedback_parts.append("Physical / Ordering Feasibility Findings:\n" + feasibility_findings_text)
+        sections.append("--- REJECTED VALIDATION FEEDBACK ---\n\n" + "\n\n".join(feedback_parts))
+
+    if previous_plant_json:
+        sections.append("--- PREVIOUS REJECTED PLANT ---\n```json\n" + previous_plant_json + "\n```")
 
     # Re-include the world state context
     base_prompt = build_hybrid_domain_generation_prompt(prompt_input)
@@ -395,7 +404,7 @@ def build_hybrid_feedback_prompt(
     marker = "Current Recovery Blockers"
     idx = base_prompt.find(marker)
     if idx >= 0:
-        sections.append(base_prompt[idx:])
+        sections.append("--- CONTEXT ---\n\n" + base_prompt[idx:])
 
     return "\n\n".join(sections)
 

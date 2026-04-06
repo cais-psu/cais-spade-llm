@@ -658,63 +658,19 @@ def _outline_prompt_current_blockers(
     for raw_condition in (recovery_gap_state.get("unmet_continuation_conditions") or []):
         if not isinstance(raw_condition, dict):
             continue
-        kind = str(raw_condition.get("kind") or "").strip()
-        blocked_task_id = str(raw_condition.get("source_task_id") or "").strip()
-        blocked_task = dict(blocked_tasks_by_id.get(blocked_task_id) or {})
-        blocked_part_name = str(
-            raw_condition.get("part_name") or blocked_task.get("part") or ""
-        ).strip()
-        if kind == "focused_resource_terminal_state":
-            resource_jid = str(
-                raw_condition.get("entity") or raw_condition.get("resource_jid") or ""
-            ).strip()
-            actual_state = str(raw_condition.get("actual") or "").strip()
-            expected_state = str(raw_condition.get("expected") or "").strip()
-            prefix = (
-                f"{blocked_task_id} remains blocked because "
-                if blocked_task_id
-                else "A blocked recovery step remains blocked because "
-            )
-            current_text = (
-                f"{resource_jid}.current_state is '{actual_state}'"
-                if resource_jid and actual_state
-                else f"{resource_jid} has not reached the required recovery state"
-                if resource_jid
-                else "the focused resource has not reached the required recovery state"
-            )
-            target_text = (
-                f" and must become '{expected_state}'." if expected_state else "."
-            )
-            lines.append(prefix + current_text + target_text)
-            continue
-        if kind == "safety_blocked_suffix_task":
-            blocker_part_names = _outline_extract_blocker_part_names(
-                blocking_reason=str(raw_condition.get("blocking_reason") or "").strip(),
-                part_rows_by_name=part_rows_by_name,
-                fallback_parts=fallback_parts,
-            )
-            blocker_part_name = blocker_part_names[0] if blocker_part_names else ""
-            blocker_part_row = dict(part_rows_by_name.get(blocker_part_name) or {})
-            blocker_goal_location = str(blocker_part_row.get("goal_location") or "").strip()
-            target_text = (
-                f" on '{blocker_goal_location}'" if blocker_goal_location else ""
-            )
-            blocked_task_text = (
-                f"{blocked_task_id} for '{blocked_part_name}'"
-                if blocked_task_id and blocked_part_name
-                else blocked_task_id
-                if blocked_task_id
-                else f"the blocked suffix for '{blocked_part_name}'"
-                if blocked_part_name
-                else "the blocked suffix"
-            )
-            if blocker_part_name:
-                lines.append(
-                    f"{blocked_task_text} remains blocked until '{blocker_part_name}' "
-                    f"is placed or assembled{target_text}."
-                )
-            continue
-
+        row = {
+            "kind": raw_condition.get("kind"),
+            "entity": raw_condition.get("entity"),
+            "expected": raw_condition.get("expected"),
+            "actual": raw_condition.get("actual"),
+            "part_name": raw_condition.get("part_name"),
+            "resource_jid": raw_condition.get("resource_jid"),
+            "blocking_reason": raw_condition.get("blocking_reason"),
+        }
+        filtered = {k: v for k, v in row.items() if v}
+        if filtered:
+            lines.append(str(filtered))
+            
     for raw_task in (recovery_gap_state.get("blocked_nominal_tasks") or []):
         if not isinstance(raw_task, dict):
             continue
@@ -724,20 +680,14 @@ def _outline_prompt_current_blockers(
         resource_row = dict(resource_rows_by_jid.get(resource_jid) or {})
         held_part = str(resource_row.get("held_part") or "").strip()
         if task_id and resource_jid and part_name and held_part and held_part != part_name:
-            lines.append(
-                f"{task_id} for '{part_name}' cannot start because '{resource_jid}' "
-                f"is currently holding '{held_part}'."
-            )
+            lines.append({
+                "constraint": "gripper_occupancy_conflict",
+                "resource_jid": resource_jid,
+                "held_part": held_part,
+                "requested_part": part_name
+            })
 
-    deduped_lines: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        text = str(line).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        deduped_lines.append(text)
-    return deduped_lines
+    return [str(line) for line in lines]
 
 
 def _outline_fault_event_fallback_parts(llm_input: dict[str, Any]) -> list[str]:

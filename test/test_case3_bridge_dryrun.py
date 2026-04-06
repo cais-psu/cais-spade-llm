@@ -1675,6 +1675,37 @@ async def run_case3_bridge_dryrun(
                     )
                     break
 
+    elif str(reasoning_mode or "hybrid").strip().lower() == "hybrid":
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_hybrid_des_bridge as _resume_hybrid,
+        )
+        for _resume_i in range(5):
+            ss = prepared_bridge_request.get("hybrid_session_state") or prepared_bridge_request.get("multi_turn_session_result") or {}
+            if ss.get("status") != "paused_after_grounding":
+                break
+                
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Mocking actual sensor observation for hybrid grounding block..."
+            )
+            # Mock the camera response by directly mutating the symbolic_parts in the state
+            parts = ss.get("symbolic_parts") or {}
+            if "LG" in parts:
+                parts["LG"]["observed_pose"] = {"x": 0.0, "y": 0.200, "z": 1.035, "q_x": 0, "q_y": 0, "q_z": 0, "q_w": 1}
+                # Optional: specify location if testing boundary conditions
+                parts["LG"]["current_location"] = "prusa-mk4-1"
+                
+            ss["status"] = "pending"
+            prepared_bridge_request["hybrid_session_state"] = ss
+            if "multi_turn_session_result" in prepared_bridge_request:
+                del prepared_bridge_request["multi_turn_session_result"]
+            
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Resuming hybrid bridge (round %d) after grounding...", _resume_i + 1
+            )
+            proposal = await _resume_hybrid(
+                planner, prepared_bridge_request, session_state=ss,
+            )
+
     bridge_debug = planner.get_last_bridge_debug()
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     reasoning_mode = str(bridge_session.get("reasoning_mode") or "hybrid").strip()
