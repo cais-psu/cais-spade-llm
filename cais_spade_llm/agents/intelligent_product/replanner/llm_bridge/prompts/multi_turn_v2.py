@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any
+
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+    filter_synthesis_primitive_catalog,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -166,13 +171,35 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
-                "primitives": {
-                    "type": "array",
-                    "items": {"type": "object"},
+                "decision": {
+                    "type": "string",
+                    "enum": [
+                        "primitive_event_ready",
+                        "need_primitive_revision",
+                        "need_outline_revision",
+                    ],
                 },
-                "decision": {"type": "string"},
+                "outline_id": {"type": "string"},
+                "resource_jid": {"type": "string"},
+                "primitive_steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "primitive": {"type": "string"},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["primitive", "params"],
+                    },
+                },
             },
-            "required": ["thought"],
+            "required": [
+                "thought",
+                "decision",
+                "outline_id",
+                "resource_jid",
+                "primitive_steps",
+            ],
         },
     }
 
@@ -254,7 +281,16 @@ def _compact_json(obj: Any) -> str:
     return json.dumps(obj, indent=2, default=str, ensure_ascii=False)
 
 
-def _compact_safety_rules(llm_input: dict[str, Any]) -> str:
+_RESOURCE_ACTOR_PATTERN = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9_-]*)\s+by\s+([A-Za-z][A-Za-z0-9_.@-]*)"
+)
+
+
+def _compact_safety_rules(
+    llm_input: dict[str, Any],
+    *,
+    neutralize_resource_actors: bool = False,
+) -> str:
     """Extract raw text from safety rules."""
     rules = llm_input.get("loaded_safety_rules") or []
     lines: list[str] = []
@@ -263,6 +299,11 @@ def _compact_safety_rules(llm_input: dict[str, Any]) -> str:
             continue
         rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
         raw_text = str(rule.get("raw_text") or rule.get("summary") or "").strip()
+        if neutralize_resource_actors:
+            # Candidate mode should expose safety ordering facts, not nominal
+            # resource assignments that can bias recovery away from feasible handoff.
+            raw_text = _RESOURCE_ACTOR_PATTERN.sub(r"\1", raw_text)
+            raw_text = " ".join(raw_text.split())
         if rule_id and raw_text:
             lines.append(f"- {rule_id}: {raw_text}")
     return "\n".join(lines) if lines else "(none)"
@@ -473,6 +514,9 @@ def _outline_task_sequence_summary(tasks: list[dict[str, Any]]) -> str:
         label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "accepted task"
         lines.append(f"- {label} -> {_structured_task_action_summary(task)}")
+        description = str(task.get("description") or "").strip()
+        if description:
+            lines.append(f"  ({description})")
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -504,40 +548,19 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
-def _candidate_rejection_feedback_summary(feedback_rows: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for row in feedback_rows:
-        if not isinstance(row, dict):
-            continue
-        candidate_index = int(row.get("candidate_index") or 0)
-        task = dict(row.get("task") or {})
-        outline_id = str(task.get("outline_id") or "").strip()
-        resource_jid = str(task.get("resource_jid") or "").strip()
-        part_name = str(task.get("part_name") or "").strip()
-        description = str(task.get("description") or "").strip()
-        finding_summary = _outline_validation_summary(
-            [item for item in (row.get("validation_findings") or []) if isinstance(item, dict)]
-        ).replace("\n- ", "; ")
-        finding_summary = finding_summary[2:] if finding_summary.startswith("- ") else finding_summary
-        label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
-        label = " / ".join(label_parts) if label_parts else "rejected candidate"
-        sentence = f"- Candidate {candidate_index + 1}: {label}"
-        action_summary = _structured_task_action_summary(task)
-        if action_summary:
-            sentence += f" -> {action_summary}"
-        if finding_summary and finding_summary != "(none)":
-            sentence += f". Feedback: {finding_summary}"
-        lines.append(sentence)
-    return "\n".join(lines) if lines else "(none)"
-
-
 def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return all prior rejected candidate batches with validation feedback."""
+    """Return rejected candidate batches since the last accepted outline event."""
     history: list[dict[str, Any]] = []
     for turn in (session_state.get("turns") or []):
         if not isinstance(turn, dict):
             continue
         if str(turn.get("phase") or "").strip().lower() != "outline":
+            continue
+        if (
+            isinstance(turn.get("selected_next_task"), dict)
+            or isinstance(turn.get("next_task"), dict)
+        ):
+            history = []
             continue
         candidate_evaluations = [
             deepcopy(row)
@@ -553,8 +576,63 @@ def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str
     return history
 
 
-def _candidate_rejection_history_summary(history: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
+def _candidate_rejection_learning_summary(
+    *,
+    history: list[dict[str, Any]],
+    feedback_rows: list[dict[str, Any]],
+) -> str:
+    """Summarize rejected candidate patterns without repeating action labels."""
+    line_by_key: dict[tuple[str, str, str, str, str], str] = {}
+
+    def _target_ref(task: dict[str, Any]) -> str:
+        direct_target = str(task.get("target_ref") or "").strip()
+        if direct_target:
+            return direct_target
+        action_target = task.get("action_target")
+        if isinstance(action_target, dict):
+            return str(
+                action_target.get("target_ref")
+                or action_target.get("location")
+                or ""
+            ).strip()
+        return ""
+
+    def _add_evaluation(
+        *,
+        task: dict[str, Any],
+        findings: list[dict[str, Any]],
+        turn_index: int | None = None,
+    ) -> None:
+        resource_jid = str(task.get("resource_jid") or "").strip()
+        part_name = str(task.get("part_name") or "").strip()
+        target_ref = _target_ref(task)
+        label_parts = [item for item in (resource_jid, part_name) if item]
+        label = " / ".join(label_parts) if label_parts else "candidate"
+        if target_ref:
+            label += f" to {target_ref}"
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            constraint_code = str(finding.get("constraint_code") or "").strip()
+            reason = str(finding.get("reason") or "").strip()
+            if not constraint_code and not reason:
+                continue
+            key = (resource_jid, part_name, target_ref, constraint_code, reason)
+            sentence = f"- {label}"
+            if turn_index is not None:
+                sentence += f" (turn {turn_index})"
+            if constraint_code and reason:
+                sentence += f" [{constraint_code}]: {reason}"
+            elif constraint_code:
+                sentence += f" [{constraint_code}]"
+            else:
+                sentence += f": {reason}"
+            if constraint_code == "workspace_unreachable":
+                sentence += " (persists while observed_pose and workspace_bounds are unchanged)"
+            if key in line_by_key:
+                line_by_key.pop(key, None)
+            line_by_key[key] = sentence
+
     for row in history:
         if not isinstance(row, dict):
             continue
@@ -562,25 +640,29 @@ def _candidate_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         for evaluation in (row.get("candidate_evaluations") or []):
             if not isinstance(evaluation, dict):
                 continue
-            candidate_index = int(evaluation.get("candidate_index") or 0)
-            task = dict(evaluation.get("task") or {})
-            outline_id = str(task.get("outline_id") or "").strip()
-            resource_jid = str(task.get("resource_jid") or "").strip()
-            part_name = str(task.get("part_name") or "").strip()
-            description = str(task.get("description") or "").strip()
-            finding_summary = _outline_validation_summary(
-                [item for item in (evaluation.get("validation_findings") or []) if isinstance(item, dict)]
-            ).replace("\n- ", "; ")
-            finding_summary = finding_summary[2:] if finding_summary.startswith("- ") else finding_summary
-            label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
-            label = " / ".join(label_parts) if label_parts else "rejected candidate"
-            sentence = f"- Turn {turn_index} Candidate {candidate_index + 1}: {label}"
-            action_summary = _structured_task_action_summary(task)
-            if action_summary:
-                sentence += f" -> {action_summary}"
-            if finding_summary and finding_summary != "(none)":
-                sentence += f". Feedback: {finding_summary}"
-            lines.append(sentence)
+            _add_evaluation(
+                task=dict(evaluation.get("task") or {}),
+                findings=[
+                    item
+                    for item in (evaluation.get("validation_findings") or [])
+                    if isinstance(item, dict)
+                ],
+                turn_index=turn_index or None,
+            )
+
+    for row in feedback_rows:
+        if not isinstance(row, dict):
+            continue
+        _add_evaluation(
+            task=dict(row.get("task") or {}),
+            findings=[
+                item
+                for item in (row.get("validation_findings") or [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    lines = list(line_by_key.values())[-8:]
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -636,6 +718,36 @@ def _workspace_capability_hint(bounds: dict[str, Any]) -> str:
     return "workspace " + ", ".join(axis_parts)
 
 
+def _pose_xyz_text(pose: dict[str, Any]) -> str:
+    if not isinstance(pose, dict) or not pose:
+        return "unknown"
+    parts: list[str] = []
+    for axis in ("x", "y", "z"):
+        coord = _float_or_none(pose.get(axis))
+        parts.append(f"{axis}=?" if coord is None else f"{axis}={coord:.2f}")
+    return ",".join(parts)
+
+
+def _resource_current_pose_text(
+    *,
+    entry: dict[str, Any],
+    bridge_snapshot: dict[str, Any],
+) -> str:
+    bridge_facets = dict(bridge_snapshot.get("resource_facets") or {})
+    entry_facets = dict(entry.get("resource_facets") or {})
+    bridge_manipulator = dict(bridge_facets.get("manipulator") or {})
+    entry_manipulator = dict(entry_facets.get("manipulator") or {})
+    for raw_pose in (
+        bridge_snapshot.get("current_pose"),
+        bridge_manipulator.get("current_pose"),
+        entry.get("current_pose"),
+        entry_manipulator.get("current_pose"),
+    ):
+        if isinstance(raw_pose, dict) and raw_pose:
+            return _pose_xyz_text(dict(raw_pose))
+    return "unknown"
+
+
 def _resource_capabilities_summary(bridge_resources: dict[str, Any]) -> str:
     if not isinstance(bridge_resources, dict) or not bridge_resources:
         return "(none advertised)"
@@ -661,28 +773,6 @@ def _resource_capabilities_summary(bridge_resources: dict[str, Any]) -> str:
             )
         )
 
-        observation_families = [
-            str(token).strip()
-            for token in (bridge_adapter.get("observation_families") or [])
-            if str(token).strip()
-        ]
-        observation_text = (
-            ", ".join(observation_families)
-            if observation_families
-            else "none advertised"
-        )
-
-        recovery_states = [
-            str(token).strip()
-            for token in (
-                bridge_snapshot.get("supported_recovery_states")
-                or static_capabilities.get("supported_recovery_states")
-                or []
-            )
-            if str(token).strip()
-        ]
-        recovery_text = ", ".join(recovery_states) if recovery_states else "not advertised"
-
         named_poses = _named_pose_tokens(
             bridge_snapshot.get("named_poses")
             or static_capabilities.get("named_poses")
@@ -691,6 +781,22 @@ def _resource_capabilities_summary(bridge_resources: dict[str, Any]) -> str:
             or []
         )
         named_pose_text = ", ".join(named_poses) if named_poses else "none advertised"
+        reachable_locations = [
+            str(token).strip()
+            for token in (
+                static_capabilities.get("reachability")
+                or static_capabilities.get("reachable_locations")
+                or bridge_snapshot.get("reachability")
+                or bridge_snapshot.get("reachable_locations")
+                or []
+            )
+            if str(token).strip()
+        ]
+        reachable_text = (
+            ", ".join(dict.fromkeys(reachable_locations))
+            if reachable_locations
+            else "none advertised"
+        )
 
         workspace_hint = _workspace_capability_hint(
             dict(
@@ -699,11 +805,211 @@ def _resource_capabilities_summary(bridge_resources: dict[str, Any]) -> str:
                 or {}
             )
         )
+        current_pose_text = _resource_current_pose_text(
+            entry=entry,
+            bridge_snapshot=bridge_snapshot,
+        )
         lines.append(
-            f"- {resource_jid}: {manipulation}; observe {observation_text}; "
-            f"recovery states {recovery_text}; named poses {named_pose_text}; {workspace_hint}"
+            f"- {resource_jid}: {manipulation}; named poses {named_pose_text}; "
+            f"reachable locations {reachable_text}; current_pose({current_pose_text}); "
+            f"{workspace_hint}"
         )
     return "\n".join(lines) if lines else "(none advertised)"
+
+
+def _active_primitive_outline_event(
+    session_state: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None]:
+    accepted_prefix = [
+        dict(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    cursor = int(session_state.get("primitive_generation_cursor") or 0)
+    if cursor < 0:
+        cursor = 0
+    if cursor >= len(accepted_prefix):
+        return cursor, None
+    return cursor, deepcopy(accepted_prefix[cursor])
+
+
+def _slim_primitive_catalog_for_prompt(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    slim: list[dict[str, Any]] = []
+    for raw_entry in filter_synthesis_primitive_catalog(catalog or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        name = str(raw_entry.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(
+            raw_entry.get("description")
+            or raw_entry.get("semantic_summary")
+            or ""
+        ).strip()
+        if name == "release_part":
+            description = "Release the currently held part."
+        elif name == "grasp_part":
+            description = "Secure the target part for transport."
+        entry: dict[str, Any] = {
+            "name": name,
+            "primitive_kind": str(raw_entry.get("primitive_kind") or "").strip(),
+            "description": description,
+            "params": deepcopy(raw_entry.get("params") or {}),
+            "required_params": deepcopy(raw_entry.get("required_params") or []),
+        }
+        preconditions = deepcopy(raw_entry.get("preconditions") or {})
+        effects = deepcopy(raw_entry.get("effects") or {})
+        if preconditions:
+            entry["preconditions"] = preconditions
+        if effects:
+            entry["effects"] = effects
+        slim.append(entry)
+    return slim
+
+
+def _active_event_start_facts_for_prompt(
+    *,
+    resources: list[dict[str, Any]],
+    parts: list[dict[str, Any]],
+    active_event: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(active_event, dict) or not active_event:
+        return deepcopy(resources), deepcopy(parts)
+
+    resource_jid = str(active_event.get("resource_jid") or "").strip()
+    part_name = str(active_event.get("part_name") or "").strip()
+    expected_start = dict(active_event.get("expected_start_state") or {})
+    projected_resources = [deepcopy(row) for row in resources if isinstance(row, dict)]
+    projected_parts = [deepcopy(row) for row in parts if isinstance(row, dict)]
+
+    for resource in projected_resources:
+        if str(resource.get("resource_jid") or "").strip() != resource_jid:
+            continue
+        if "resource_state" in expected_start:
+            resource["current_state"] = deepcopy(expected_start.get("resource_state"))
+        if "resource_location" in expected_start:
+            resource["current_location"] = deepcopy(expected_start.get("resource_location"))
+        if "held_part" in expected_start:
+            resource["held_part"] = deepcopy(expected_start.get("held_part"))
+            resource["gripper_state"] = (
+                "closed" if expected_start.get("held_part") not in (None, "") else "open"
+            )
+
+    for part in projected_parts:
+        if str(part.get("part_name") or "").strip() != part_name:
+            continue
+        if "part_state" in expected_start:
+            part["current_state"] = deepcopy(expected_start.get("part_state"))
+        if "part_location" in expected_start:
+            part["current_location"] = deepcopy(expected_start.get("part_location"))
+        if "part_holder_resource_jid" in expected_start:
+            part["current_holder_resource_jid"] = deepcopy(
+                expected_start.get("part_holder_resource_jid")
+            )
+    return projected_resources, projected_parts
+
+
+def _primitive_rejection_feedback_summary(rows: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        outline_id = str(row.get("outline_id") or "").strip()
+        resource_jid = str(row.get("resource_jid") or "").strip()
+        reason = str(row.get("reason") or row.get("error") or "").strip()
+        constraint_code = str(row.get("constraint_code") or "").strip()
+        label_parts = [item for item in (outline_id, resource_jid) if item]
+        label = " / ".join(label_parts) if label_parts else "primitive candidate"
+        if constraint_code and reason:
+            lines.append(f"- {label} [{constraint_code}]: {reason}")
+        elif constraint_code:
+            lines.append(f"- {label} [{constraint_code}]")
+        elif reason:
+            lines.append(f"- {label}: {reason}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pose_workspace_relation_text(
+    pose: dict[str, Any],
+    bounds: dict[str, Any],
+) -> str:
+    if not isinstance(pose, dict) or not pose:
+        return "pose_unknown"
+    if not isinstance(bounds, dict) or not bounds:
+        return "workspace_bounds_unknown"
+
+    failures: list[str] = []
+    checked_axes = 0
+    for axis in ("x", "y", "z"):
+        coord = _float_or_none(pose.get(axis))
+        lo = _float_or_none(bounds.get(f"{axis}_min_m"))
+        hi = _float_or_none(bounds.get(f"{axis}_max_m"))
+        if coord is None or (lo is None and hi is None):
+            continue
+        checked_axes += 1
+        if lo is not None and coord < lo:
+            failures.append(f"{axis}={coord:.2f} < {axis}_min_m={lo:.2f}")
+        if hi is not None and coord > hi:
+            failures.append(f"{axis}={coord:.2f} > {axis}_max_m={hi:.2f}")
+    if failures:
+        return "outside workspace (" + "; ".join(failures) + ")"
+    if checked_axes == 0:
+        return "workspace_bounds_unknown"
+    return "inside workspace"
+
+
+def _observed_part_workspace_facts_summary(
+    *,
+    llm_input: dict[str, Any],
+    projected_resources: list[dict[str, Any]],
+    projected_parts: list[dict[str, Any]],
+) -> str:
+    fault_event = dict(llm_input.get("fault_event") or {})
+    affected_parts = {
+        str(part_name).strip()
+        for part_name in (fault_event.get("affected_part_names") or [])
+        if str(part_name).strip()
+    }
+
+    lines: list[str] = []
+    for part in projected_parts:
+        if not isinstance(part, dict):
+            continue
+        part_name = str(part.get("part_name") or "").strip()
+        observed_pose = dict(part.get("observed_pose") or {})
+        if not part_name or not observed_pose:
+            continue
+        if affected_parts and part_name not in affected_parts:
+            continue
+
+        resource_relations: list[str] = []
+        for resource in projected_resources:
+            if not isinstance(resource, dict):
+                continue
+            resource_jid = str(resource.get("resource_jid") or "").strip()
+            if not resource_jid:
+                continue
+            relation = _pose_workspace_relation_text(
+                observed_pose,
+                dict(resource.get("workspace_bounds") or {}),
+            )
+            resource_relations.append(f"{resource_jid}: {relation}")
+
+        if resource_relations:
+            lines.append(
+                f"- {part_name} observed_pose({_pose_xyz_text(observed_pose)}): "
+                + "; ".join(resource_relations)
+            )
+    return "\n".join(lines) if lines else "(none)"
 
 
 _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
@@ -842,8 +1148,15 @@ def _history_derived_pruned_actions_summary(
         sentence = f"- {label}"
         if summary:
             sentence += f" -> {summary}"
+        # Show only durable constraint codes (supervisor facts, not hints).
         if reason:
-            sentence += f" [{reason}]"
+            durable_codes = {
+                code.strip()
+                for code in reason.split("/")
+                if code.strip() in _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES
+            }
+            if durable_codes:
+                sentence += f" [{'/'.join(sorted(durable_codes))}]"
         if key in line_by_key:
             line_by_key.pop(key, None)
         line_by_key[key] = sentence
@@ -939,6 +1252,7 @@ def _projected_outline_parts(
         part_name = str(entry.get("part_name") or "").strip()
         if not part_name:
             continue
+        is_new_part = part_name not in parts_by_name
         if part_name not in parts_by_name:
             parts_by_name[part_name] = {"part_name": part_name}
             order.append(part_name)
@@ -948,10 +1262,18 @@ def _projected_outline_parts(
             pose = {"x": entry.get("x"), "y": entry.get("y"), "z": entry.get("z")}
         if pose:
             part_row["observed_pose"] = deepcopy(pose)
-        if part_row.get("current_location") in (None, "") and entry.get("current_location") not in (None, ""):
+        if (
+            is_new_part
+            and part_row.get("current_location") in (None, "")
+            and entry.get("current_location") not in (None, "")
+        ):
             part_row["current_location"] = deepcopy(entry.get("current_location"))
         holder = str(entry.get("current_holder_resource_jid") or "").strip()
-        if not str(part_row.get("current_holder_resource_jid") or "").strip() and holder:
+        if (
+            is_new_part
+            and not str(part_row.get("current_holder_resource_jid") or "").strip()
+            and holder
+        ):
             part_row["current_holder_resource_jid"] = holder
 
     return [deepcopy(parts_by_name[name]) for name in order if name in parts_by_name]
@@ -1006,6 +1328,9 @@ def _slim_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
         "current_location",
         "held_part",
         "gripper_state",
+        "current_pose",
+        "current_pose_ref",
+        "workspace_bounds",
     }
     return [
         {k: v for k, v in dict(row).items() if k in _keep}
@@ -1104,6 +1429,116 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Primitive-generation prompt
+# ---------------------------------------------------------------------------
+
+
+def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
+    llm_input = dict(payload.get("llm_input") or {})
+    session_state = dict(payload.get("session_state") or {})
+    bridge_resources = dict(payload.get("bridge_resources") or {})
+    observation_store = dict(session_state.get("observation_store") or {})
+    accepted_prefix = [
+        dict(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    cursor, active_event = _active_primitive_outline_event(session_state)
+
+    projected_resources = _projected_outline_resources(
+        llm_input=llm_input,
+        session_state=session_state,
+    )
+    projected_parts = _projected_outline_parts(
+        llm_input=llm_input,
+        session_state=session_state,
+    )
+
+    active_resource_jid = str(
+        dict(active_event or {}).get("resource_jid") or ""
+    ).strip()
+    active_resource_entry = dict(bridge_resources.get(active_resource_jid) or {})
+    primitive_catalog = _slim_primitive_catalog_for_prompt(
+        [
+            dict(row)
+            for row in (active_resource_entry.get("primitive_catalog") or [])
+            if isinstance(row, dict)
+        ]
+    )
+    primitive_feedback = _primitive_rejection_feedback_summary(
+        [
+            dict(row)
+            for row in (session_state.get("primitive_rejection_feedback") or [])
+            if isinstance(row, dict)
+        ]
+    )
+    active_resources, active_parts = _active_event_start_facts_for_prompt(
+        resources=projected_resources,
+        parts=projected_parts,
+        active_event=active_event,
+    )
+
+    sections: list[str] = [
+        "Task and Role",
+        (
+            "You are the active replanner for a DES fallback recovery session.\n"
+            "Current phase: Primitive Generation.\n"
+            "Synthesize executable controller primitive steps for exactly one "
+            "accepted outline event."
+        ),
+        "",
+        "Accepted Outline Context",
+        _outline_task_sequence_summary(accepted_prefix),
+        "",
+        "Active Outline Event",
+        _compact_json(active_event or {}),
+        "",
+        "Primitive Generation Cursor",
+        _compact_json({
+            "active_index": cursor,
+            "accepted_outline_count": len(accepted_prefix),
+            "remaining_events_after_this": max(len(accepted_prefix) - cursor - 1, 0),
+        }),
+    ]
+
+    if primitive_feedback != "(none)":
+        sections.extend([
+            "",
+            "Primitive Rejection Feedback",
+            primitive_feedback,
+        ])
+
+    sections.extend([
+        "",
+        "Current Resource State",
+        _compact_json(_slim_resource_facts(active_resources)),
+        "",
+        "Current Part State",
+        _compact_json(_slim_part_facts(active_parts)),
+        "",
+        "Session Observation Store",
+        _compact_json(observation_store),
+        "",
+        "Active Resource Primitive Catalog",
+        _compact_json(primitive_catalog),
+        "",
+        "Safety Rules",
+        _compact_safety_rules(llm_input, neutralize_resource_actors=True),
+        "",
+        "Output Constraints",
+        "- Implement only the Active Outline Event.",
+        "- Use only primitives listed in Active Resource Primitive Catalog.",
+        "- primitive_steps must be ordered controller primitive calls.",
+        "- Each primitive step must include primitive and params.",
+        "- Do not invent observations, resources, parts, or grounded locations.",
+        "- Use decision primitive_event_ready when primitive_steps are ready for validation.",
+        "- Use need_primitive_revision only when prior primitive feedback cannot be addressed in the same event.",
+        "- Use need_outline_revision only when the accepted outline event is not implementable with the listed primitives.",
+    ])
+    return "\n".join(sections).strip() + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Outline prompt
 # ---------------------------------------------------------------------------
 
@@ -1112,16 +1547,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     llm_input = dict(payload.get("llm_input") or {})
     session_state = dict(payload.get("session_state") or {})
     bridge_resources = dict(payload.get("bridge_resources") or {})
-    current_recovery_blockers = [
-        deepcopy(row)
-        for row in (payload.get("current_recovery_blockers") or [])
-        if isinstance(row, dict)
-    ]
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     observation_store = dict(session_state.get("observation_store") or {})
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
     previous_lookahead = list(session_state.get("outline_lookahead") or [])
     pruned_actions = list(session_state.get("pruned_actions") or [])
+    current_recovery_blockers = [
+        deepcopy(row)
+        for row in (payload.get("current_recovery_blockers") or [])
+        if isinstance(row, dict)
+    ]
     outline_validation_findings = list(
         session_state.get("outline_validation_findings") or []
     )
@@ -1146,7 +1581,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         projected_resources=projected_resources,
         projected_parts=projected_parts,
     )
-
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
 
@@ -1158,14 +1592,14 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Each task must be one concrete physical recovery action for one resource."
         )
     elif is_candidate_mode:
+        candidate_bound = int(session_state.get("des_candidate_bound") or 3)
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Outline (Candidate Selection).\n"
-            "Propose exactly 3 distinct candidate next tasks from the SAME current state.\n"
-            "Each candidate must be a different recovery option, not a wording variant of the same action.\n"
-            "A candidate does not need to complete recovery in one step. It may be an "
-            "intermediate action that enables later recovery steps.\n"
-            "The runtime will validate all candidates and commit at most one of them."
+            "Current phase: Outline (Candidate Event Selection).\n"
+            f"Propose up to {candidate_bound} candidate recovery events from "
+            "the current world state.\n"
+            "Each candidate is one physical action for one resource.\n"
+            "The runtime supervisor will validate and commit at most one."
         )
     else:
         role_text = (
@@ -1191,13 +1625,27 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         ])
 
     if is_candidate_mode:
+        rejected_candidate_summary = _candidate_rejection_learning_summary(
+            history=candidate_rejection_history,
+            feedback_rows=candidate_rejection_feedback,
+        )
+        if rejected_candidate_summary != "(none)":
+            sections.extend([
+                "",
+                "Recent Rejected Candidate Feedback",
+                rejected_candidate_summary,
+            ])
+
+    if is_candidate_mode:
         sections.extend([
             "",
-            "Current Recovery Blockers",
+            "Current Recovery Conditions",
             _current_recovery_blockers_summary(current_recovery_blockers),
             "",
             "Resource Capabilities",
             _resource_capabilities_summary(bridge_resources),
+            # Experiment: keep raw observed poses and workspace bounds visible,
+            # but do not precompute the resource/part workspace relationship.
         ])
     elif outline_validation_findings:
         sections.extend([
@@ -1206,10 +1654,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             _outline_validation_summary(outline_validation_findings),
         ])
 
-    if history_pruned_actions != "(none)":
+    if not is_candidate_mode and history_pruned_actions != "(none)":
         sections.extend([
             "",
-            "Pruned Actions (derived from rejected history; do not re-propose these)",
+            "Rejected Events (do not re-propose)",
             history_pruned_actions,
         ])
 
@@ -1218,13 +1666,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "",
             "Rejected Outline Attempts And Validation Feedback",
             _outline_rejection_history_summary(rejection_history),
-        ])
-
-    if is_candidate_mode and candidate_rejection_feedback:
-        sections.extend([
-            "",
-            "Last Rejection Feedback",
-            _candidate_rejection_feedback_summary(candidate_rejection_feedback),
         ])
 
     sections.extend([
@@ -1238,25 +1679,36 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         _compact_recovery_objectives(llm_input, projected_parts=projected_parts),
     ])
 
+    # Safety rules stay visible as facts; assembly requirements are hidden in
+    # candidate mode to avoid nominal-resource bias.
+    sections.extend([
+        "",
+        "Safety Rules",
+        _compact_safety_rules(
+            llm_input,
+            neutralize_resource_actors=is_candidate_mode,
+        ),
+    ])
+    if not is_candidate_mode:
+        sections.extend([
+            "",
+            "Assembly Requirements",
+            _compact_assembly_requirements(llm_input),
+        ])
+
     if is_candidate_mode:
         sections.extend([
             "",
-            "Action Shape Example (shape only; use actual grounded values from this prompt)",
+            "Candidate Shape Example",
             """```json
 {
   "resource_jid": "RESOURCE_JID",
-  "action_name": "short action label you choose",
-  "description": "short grounded description",
+  "action_name": "short action label",
+  "description": "short description",
   "part_name": "PART_NAME or omit",
-  "target_ref": "GROUNDED_DESTINATION_REF or omit"
+  "target_ref": "DESTINATION_REF or omit"
 }
 ```""",
-        ])
-    else:
-        sections.extend([
-            "",
-            "Safety Rules",
-            _compact_safety_rules(llm_input),
         ])
 
     if not is_candidate_mode:
@@ -1275,19 +1727,15 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 
     constraints: list[str] = [
         "",
-        "Hard Constraints",
+        "Output Constraints",
         "- Use only the listed resources.",
-        "- Do not assume a task is restricted to its nominal resource.",
-        "- Each task must be one concrete physical recovery action for one resource.",
-        "- Do not change a part or resource location by declaration alone. "
-        "Any location change must result from a concrete physical action by the named resource.",
-        "- Do not invent observations, locations, or states not grounded in the prompt.",
+        "- Each event is one physical action for one resource.",
     ]
     if not is_candidate_mode:
         constraints.extend([
             "- expected_start_state and expected_end_state may use only: "
             "resource_state, held_part, part_state, part_location, part_holder_resource_jid.",
-            "- Use flat scalar values in state objects. Do not nest by part name or resource jid.",
+            "- Use flat scalar values in state objects.",
         ])
 
     if is_single_pass:
@@ -1296,15 +1744,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         )
     elif is_candidate_mode:
         constraints.extend([
-            "- Propose exactly 3 tasks in candidate_tasks.",
-            "- All candidate_tasks must start from the same current state shown in this prompt.",
-            "- Make the 3 candidate_tasks meaningfully different recovery options.",
-            "- Each candidate must include resource_jid, action_name, and description.",
-            "- action_name must be an open-vocabulary label for the intended physical step, not a fixed enum token.",
-            "- Include part_name when the candidate concerns a specific part.",
-            "- Include grounded target_ref when the candidate places/releases a part or moves a resource to a grounded destination.",
-            "- Provide enough grounded detail for the runtime to infer whether the candidate is a resource-only step, a part pickup, or a part placement.",
-            "- Do not include lookahead_tasks in this mode.",
+            f"- Propose 1 to {candidate_bound} events in candidate_tasks.",
+            "- Each event must include resource_jid, action_name, and description.",
         ])
     else:
         constraints.append("- Propose exactly one task in next_task.")
@@ -1327,6 +1768,8 @@ def render_multi_turn_v2_phase_prompt(prompt_input: dict[str, Any]) -> str:
         return _render_grounding_prompt(payload)
     if phase == "outline":
         return _render_outline_prompt(payload)
+    if phase == "primitive_generation":
+        return _render_primitive_generation_prompt(payload)
 
     # Other phases: placeholder until implemented
     phase_title = _PHASE_TITLES.get(phase, phase)

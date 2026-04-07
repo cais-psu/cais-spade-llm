@@ -5,13 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Case 3 Bridge Dry-Run: Hybrid (F5 Default)",
+            "name": "Case 3 Bridge Dry-Run: Multi-Turn v2 (F5 Default)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/test/test_case3_bridge_dryrun.py",
             "args": [
                 "--reasoning-mode",
-                "hybrid"
+                "multi_turn"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",

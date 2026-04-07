@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -14,8 +15,18 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_solver import (
+    compose_and_solve,
+    solver_diagnostic_summary,
+    _map_event_to_aps,
+    _delta,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
     compile_grounded_outline_task,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.hybrid_des_v1 import (
+    _extract_safety_dfas,
+    _extract_ap_descriptors,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
     _apply_outline_task_effects as _v1_apply_outline_task_effects,
@@ -26,6 +37,8 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     extract_step_output,
+    filter_synthesis_primitive_catalog,
+    validate_and_project_steps,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
@@ -38,10 +51,9 @@ _logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MAX_TURNS = 20
+_DEFAULT_MAX_TURNS = 1000  # Practical ceiling for long LLM-guided outline retries.
 _DEFAULT_MAX_OBSERVATIONS = 3
 _DEFAULT_MAX_OBSERVE_BATCH = 3
-_OUTLINE_STAGNATION_LIMIT = 3
 _V2_OUTLINE_CONTRACT = {
     "allowed_state_fields": [
         "resource_state",
@@ -70,6 +82,8 @@ _TRANSITIONS: dict[str, dict[str, str]] = {
         "need_next_task": "outline",
     },
     "primitive_generation": {
+        "primitive_event_ready": "primitive_generation",
+        "need_primitive_revision": "primitive_generation",
         "need_outline_revision": "outline",
         "draft_ready": "finalize",
     },
@@ -169,10 +183,148 @@ def build_multi_turn_session_seed(
         "pruned_actions": [],
         "outline_validation_findings": [],
         "candidate_rejection_feedback": [],
+        # Primitive-generation state
+        "primitive_generation_cursor": 0,
+        "accepted_primitive_program": [],
+        "primitive_rejection_feedback": [],
         # Symbolic state for validation
         "symbolic_resources": symbolic_resources,
         "symbolic_parts": symbolic_parts,
+        # DES plant (built incrementally as candidates are accepted)
+        "des_plant": {
+            "states": [],
+            "initial": "",
+            "marked": [],
+            "events": {},
+            "transitions": {},
+        },
+        "des_current_state": "",
+        "des_trace": [],
+        "des_safety_dfa_vector": (),
+        "des_safety_dfas": {},
+        "des_ap_descriptors": [],
+        "des_visited_states": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# DES plant helpers
+# ---------------------------------------------------------------------------
+
+
+def _symbolic_state_fingerprint(
+    symbolic_resources: dict[str, dict[str, Any]],
+    symbolic_parts: dict[str, dict[str, Any]],
+) -> str:
+    """Content-addressed hash of projected symbolic state → deterministic state name."""
+    def _canonical(d: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in sorted(d.items()) if v is not None}
+
+    payload = json.dumps(
+        {
+            "r": {k: _canonical(v) for k, v in sorted(symbolic_resources.items())},
+            "p": {k: _canonical(v) for k, v in sorted(symbolic_parts.items())},
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return "S_" + hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def _extend_plant_with_event(
+    plant: dict[str, Any],
+    event_name: str,
+    event_dict: dict[str, Any],
+    from_state: str,
+    to_state: str,
+) -> None:
+    """Append a transition to the running DES plant."""
+    states = plant["states"]
+    if from_state not in states:
+        states.append(from_state)
+    if to_state not in states:
+        states.append(to_state)
+    plant["events"][event_name] = {
+        **event_dict,
+        "from": from_state,
+        "to": to_state,
+    }
+    plant["transitions"].setdefault(from_state, []).append((event_name, to_state))
+
+
+def _init_des_state(
+    session_state: dict[str, Any],
+    planner: Any,
+    prepared_bridge_request: dict[str, Any],
+) -> None:
+    """Initialize incremental DES plant at the grounding→outline transition."""
+    initial = _symbolic_state_fingerprint(
+        session_state["symbolic_resources"],
+        session_state["symbolic_parts"],
+    )
+    plant = session_state["des_plant"]
+    plant["initial"] = initial
+    plant["states"] = [initial]
+
+    # Derive marked states from continuation conditions (goal = all parts at
+    # goal_location).  We use a single abstract marked state "S_goal" since the
+    # exact goal fingerprint is not yet known — the solver treats any plant
+    # marked state as accepting.
+    plant["marked"] = ["S_goal"]
+
+    session_state["des_current_state"] = initial
+    session_state["des_trace"] = []
+    session_state["des_visited_states"] = [initial]
+
+    # Cache safety DFAs and AP descriptors for the session lifetime.
+    session_state["des_safety_dfas"] = _extract_safety_dfas(
+        planner, prepared_bridge_request,
+    )
+    session_state["des_ap_descriptors"] = _extract_ap_descriptors(
+        planner, prepared_bridge_request,
+    )
+
+    # Initialize safety DFA state vector — all DFAs at their initial state.
+    dfas = session_state["des_safety_dfas"]
+    session_state["des_safety_dfa_vector"] = tuple(
+        str(dfa.get("initial") or "q0")
+        for dfa in dfas.values()
+    )
+
+    _logger.info(
+        "[DES] Initialized incremental plant: initial=%s, safety_dfas=%d, aps=%d",
+        initial,
+        len(dfas),
+        len(session_state["des_ap_descriptors"]),
+    )
+
+
+def _advance_des_safety_state(
+    candidate_event: dict[str, Any],
+    current_safety_q: tuple[str, ...],
+    safety_dfas: dict[str, dict[str, Any]],
+    ap_descriptors: list[dict[str, Any]],
+) -> tuple[bool, tuple[str, ...], list[str]]:
+    """Advance cached DES safety DFA state for an already-accepted event.
+
+    Validation happens before acceptance via the CCA validator; this state
+    update is turn/session bookkeeping.
+    """
+    if not safety_dfas:
+        return False, current_safety_q, []
+
+    sigma = _map_event_to_aps(candidate_event, ap_descriptors)
+    new_q_list: list[str] = []
+    violated: list[str] = []
+
+    for (rule_id, dfa), q_current in zip(safety_dfas.items(), current_safety_q):
+        q_next = _delta(dfa, q_current, sigma)
+        new_q_list.append(q_next)
+        violation_state = str(dfa.get("violation_state") or "").strip()
+        if violation_state and q_next == violation_state:
+            violated.append(rule_id)
+
+    return bool(violated), tuple(new_q_list), violated
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +1047,32 @@ def _projected_outline_validation_context(
         token = str(resource_jid or "").strip()
         if token and isinstance(row, dict):
             resources_by_jid[token] = deepcopy(row)
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    for resource_jid, raw_entry in bridge_resources.items():
+        token = str(resource_jid or "").strip()
+        if not token or not isinstance(raw_entry, dict):
+            continue
+        entry = dict(raw_entry)
+        bridge_snapshot = dict(entry.get("bridge_snapshot") or {})
+        static_capabilities = dict(entry.get("static_capabilities") or {})
+        resource_row = resources_by_jid.setdefault(token, {"resource_jid": token})
+        for key in (
+            "named_poses",
+            "available_named_poses",
+            "supported_recovery_states",
+            "available_recovery_states",
+            "reachability",
+            "reachable_locations",
+            "known_locations",
+            "staging_areas",
+            "workspace_bounds",
+        ):
+            if resource_row.get(key) not in (None, "", [], {}):
+                continue
+            if static_capabilities.get(key) not in (None, "", [], {}):
+                resource_row[key] = deepcopy(static_capabilities.get(key))
+            elif bridge_snapshot.get(key) not in (None, "", [], {}):
+                resource_row[key] = deepcopy(bridge_snapshot.get(key))
 
     parts_by_name: dict[str, dict[str, Any]] = {}
     for row in (llm_input.get("part_facts") or []):
@@ -914,16 +1092,25 @@ def _projected_outline_validation_context(
         part_name = str(entry.get("part_name") or "").strip()
         if not part_name:
             continue
+        is_new_part = part_name not in parts_by_name
         part_row = parts_by_name.setdefault(part_name, {"part_name": part_name})
         pose = dict(entry.get("pose") or {})
         if not pose and entry.get("x") is not None:
             pose = {"x": entry.get("x"), "y": entry.get("y"), "z": entry.get("z")}
         if pose:
             part_row["observed_pose"] = deepcopy(pose)
-        if part_row.get("current_location") in (None, "") and entry.get("current_location") not in (None, ""):
+        if (
+            is_new_part
+            and part_row.get("current_location") in (None, "")
+            and entry.get("current_location") not in (None, "")
+        ):
             part_row["current_location"] = deepcopy(entry.get("current_location"))
         holder = str(entry.get("current_holder_resource_jid") or "").strip()
-        if not str(part_row.get("current_holder_resource_jid") or "").strip() and holder:
+        if (
+            is_new_part
+            and not str(part_row.get("current_holder_resource_jid") or "").strip()
+            and holder
+        ):
             part_row["current_holder_resource_jid"] = holder
     return resources_by_jid, parts_by_name
 
@@ -1146,6 +1333,7 @@ def _validate_single_outline_task(
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         outline_contract=deepcopy(_V2_OUTLINE_CONTRACT),
+        location_validation_mode="strict",
     )
     finding = grounding_result.get("finding")
     if isinstance(finding, dict):
@@ -1570,14 +1758,17 @@ def _release_part_frees_resource_for_blocker(
     if str(task.get("action_type") or "").strip().lower() != "release_part":
         return False
 
+    resource_jid = str(task.get("resource_jid") or "").strip()
+
+    # Only block if THIS resource has a terminal state blocker — not if some
+    # other resource does.  Allows cross-assignment recovery.
     if any(
         _normalized_blocker_kind(blocker) == "resource_terminal_state"
+        and str(blocker.get("entity") or "").strip() == resource_jid
         for blocker in current_blockers
         if isinstance(blocker, dict)
     ):
         return False
-
-    resource_jid = str(task.get("resource_jid") or "").strip()
     released_part = str(task.get("part_name") or "").strip()
     if not resource_jid or not released_part:
         return False
@@ -1644,14 +1835,18 @@ def _acquire_part_counts_as_blocker_progress(
     if str(task.get("action_type") or "").strip().lower() != "acquire_part":
         return False
 
+    resource_jid = str(task.get("resource_jid") or "").strip()
+
+    # Only block if the resource performing this action has a terminal state
+    # blocker — not if some OTHER resource does.  This allows cross-assignment
+    # (e.g. ur5e acquiring LG when xarm6 is in failed state).
     if any(
         _normalized_blocker_kind(blocker) == "resource_terminal_state"
+        and str(blocker.get("entity") or "").strip() == resource_jid
         for blocker in current_blockers
         if isinstance(blocker, dict)
     ):
         return False
-
-    resource_jid = str(task.get("resource_jid") or "").strip()
     acquired_part = str(task.get("part_name") or "").strip()
     if not resource_jid or not acquired_part:
         return False
@@ -1679,6 +1874,123 @@ def _acquire_part_counts_as_blocker_progress(
     if str(candidate_part.get("current_holder_resource_jid") or "").strip() != resource_jid:
         return False
     return True
+
+
+def _preparatory_transit_toward_blocker(
+    *,
+    task: dict[str, Any],
+    session_state: dict[str, Any],
+    candidate_session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    current_blockers: list[dict[str, Any]],
+) -> bool:
+    """Credit preparatory moves where a resource holds a blocker part and
+    the task represents a meaningful physical transit step (e.g. moving toward
+    the goal location or to an intermediate staging position).
+
+    This prevents rejection of valid intermediate actions like "transit LG to
+    approach position" when the resource already carries the blocker part.
+    """
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    if not resource_jid or not part_name:
+        return False
+
+    # The resource must currently hold the part.
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    if str(resource_row.get("held_part") or "").strip() != part_name:
+        return False
+
+    # The held part must be relevant to a current blocker.
+    blocker_parts = _current_safety_blocker_parts(
+        current_blockers=current_blockers,
+        parts_by_name=parts_by_name,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    # Also consider parts whose goal_location is unmet as blocker-relevant.
+    for pn, pr in parts_by_name.items():
+        if not isinstance(pr, dict):
+            continue
+        goal_loc = str(pr.get("goal_location") or "").strip()
+        current_loc = str(pr.get("current_location") or "").strip()
+        if goal_loc and current_loc != goal_loc:
+            blocker_parts.add(pn)
+
+    if part_name not in blocker_parts:
+        return False
+
+    # The task must have a target_ref or change resource location — i.e. it's
+    # actually commanding a physical move, not a no-op.
+    target_ref = str(task.get("target_ref") or "").strip()
+    action_target = dict(task.get("action_target") or {})
+    target_location = str(action_target.get("target_location") or "").strip()
+    end_state = dict(task.get("expected_end_state") or {})
+    end_part_location = str(end_state.get("part_location") or "").strip()
+
+    if target_ref or target_location or end_part_location:
+        return True
+
+    # Even without explicit target, if the symbolic state changes (e.g.
+    # resource location moves) we credit it.
+    candidate_resources_by_jid, _ = _projected_outline_validation_context(
+        session_state=candidate_session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    candidate_resource = dict(candidate_resources_by_jid.get(resource_jid) or {})
+    if (
+        str(candidate_resource.get("current_location") or "").strip()
+        != str(resource_row.get("current_location") or "").strip()
+    ):
+        return True
+
+    return False
+
+
+def _compute_enabled_candidate_bound(
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> int:
+    """Estimate |Σ_c ∩ Γ(q)| — the DES enabled controllable event count.
+
+    Counts distinct (resource_jid, part_name) slots from active resources
+    and actionable parts, minus pruned action pairs.  Returns at least 1,
+    capped at 5.
+    """
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    active_resources = [
+        jid for jid, row in resources_by_jid.items()
+        if isinstance(row, dict)
+    ]
+    # Actionable parts: goal_location unmet.
+    actionable_parts = [
+        pn for pn, pr in parts_by_name.items()
+        if isinstance(pr, dict)
+        and str(pr.get("goal_location") or "").strip()
+        and str(pr.get("goal_location") or "").strip()
+        != str(pr.get("current_location") or "").strip()
+    ]
+    # Each resource can potentially act on each actionable part, plus
+    # resource-only recovery actions (at least 1 slot per resource).
+    total_slots = len(active_resources) * max(len(actionable_parts), 1)
+
+    pruned = session_state.get("pruned_actions") or []
+    pruned_pairs = {
+        (
+            str(row.get("resource_jid") or "").strip(),
+            str(row.get("part_name") or "").strip(),
+        )
+        for row in pruned
+        if isinstance(row, dict)
+    }
+    enabled = max(total_slots - len(pruned_pairs), 1)
+    return min(enabled, 5)
 
 
 def _candidate_progress_score(
@@ -1728,14 +2040,29 @@ def _candidate_progress_score(
         current_blockers=current_blockers,
     ):
         resource_freed_for_blocker = 1
+    preparatory_transit = 0
+    if (
+        resolved_blockers == 0
+        and blocker_part_acquired == 0
+        and resource_freed_for_blocker == 0
+        and _preparatory_transit_toward_blocker(
+            task=task,
+            session_state=session_state,
+            candidate_session_state=candidate_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+            current_blockers=current_blockers,
+        )
+    ):
+        preparatory_transit = 1
     remaining_blocked_issues = len(remaining_keys)
-    secondary_progress = blocker_part_acquired + resource_freed_for_blocker
+    secondary_progress = blocker_part_acquired + resource_freed_for_blocker + preparatory_transit
     return (
         resolved_blockers + secondary_progress,
         {
             "resolved_direct_blockers": resolved_blockers,
             "blocker_part_acquired": blocker_part_acquired,
             "freed_resource_for_blocker": resource_freed_for_blocker,
+            "preparatory_transit": preparatory_transit,
             "resolved_continuation_conditions": resolved_blockers,
             "remaining_continuation_conditions": remaining_blocked_issues,
             "remaining_blocked_issues": remaining_blocked_issues,
@@ -2320,10 +2647,14 @@ async def _handle_outline_incremental_candidates_validated(
     ]
     turn_entry["candidate_tasks"] = deepcopy(candidate_tasks)
 
-    if len(candidate_tasks) != 3:
-        turn_entry["error"] = "outline response must include exactly 3 candidate_tasks"
+    candidate_bound = int(session_state.get("des_candidate_bound") or 3)
+    if not (1 <= len(candidate_tasks) <= candidate_bound):
+        turn_entry["error"] = (
+            f"outline response must include 1 to {candidate_bound} candidate_tasks"
+        )
         _logger.warning(
-            "[MultiTurnV2] outline incremental_candidates_validated: expected 3 candidate_tasks, got %d",
+            "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_tasks, got %d",
+            candidate_bound,
             len(candidate_tasks),
         )
         return "need_revision", turn_entry
@@ -2393,9 +2724,31 @@ async def _handle_outline_incremental_candidates_validated(
             "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
             len(candidate_tasks),
         )
+        # Keep a stagnation counter for diagnostics, but do not terminate the
+        # LLM feedback loop here. Repeated validator feedback is part of the
+        # multi-turn recovery contract.
+        stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
+        session_state["outline_stagnation_count"] = stagnation
+        # Log rejection reasons to distinguish "validator too strict" from
+        # "LLM out of ideas" — critical for diagnosing false deadlocks in
+        # cross-assignment scenarios.
+        rejection_codes = [
+            str(f.get("constraint_code") or "unknown")
+            for row in candidate_evaluations
+            if isinstance(row, dict)
+            for f in (row.get("validation_findings") or [])
+            if isinstance(f, dict)
+        ]
+        _logger.info(
+            "[DES] Stagnation %d — rejection codes: %s",
+            stagnation, rejection_codes,
+        )
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
     turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
+
+    # Reset stagnation on successful candidate acceptance.
+    session_state["outline_stagnation_count"] = 0
 
     selected = max(
         progress_candidates,
@@ -2403,6 +2756,7 @@ async def _handle_outline_incremental_candidates_validated(
             int(dict(row.get("progress_detail") or {}).get("resolved_direct_blockers") or 0),
             int(dict(row.get("progress_detail") or {}).get("blocker_part_acquired") or 0)
             + int(dict(row.get("progress_detail") or {}).get("freed_resource_for_blocker") or 0),
+            int(dict(row.get("progress_detail") or {}).get("preparatory_transit") or 0),
             -int(dict(row.get("progress_detail") or {}).get("remaining_blocked_issues") or 0),
             -int(row.get("candidate_index") or 0),
         ),
@@ -2429,12 +2783,100 @@ async def _handle_outline_incremental_candidates_validated(
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
 
+    # Record pre-transition DES state, apply effects, record post-transition.
+    pre_state = _symbolic_state_fingerprint(
+        session_state.get("symbolic_resources") or {},
+        session_state.get("symbolic_parts") or {},
+    )
     _apply_task_effects_to_symbolic_state(selected_next_task, session_state)
+    post_state = _symbolic_state_fingerprint(
+        session_state.get("symbolic_resources") or {},
+        session_state.get("symbolic_parts") or {},
+    )
+
+    # Extend the incremental DES plant with this accepted event.
+    event_name = str(
+        selected_next_task.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
+    ).strip()
+    _extend_plant_with_event(
+        session_state.get("des_plant") or {},
+        event_name=event_name,
+        event_dict={
+            "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
+            "action_type": str(selected_next_task.get("action_type") or "").strip(),
+            "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
+            "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
+            "description": str(selected_next_task.get("description") or "").strip(),
+        },
+        from_state=pre_state,
+        to_state=post_state,
+    )
+    session_state["des_current_state"] = post_state
+    session_state.setdefault("des_trace", []).append(event_name)
+
+    # Advance safety DFA state vector for the accepted event.
+    safety_dfas = session_state.get("des_safety_dfas") or {}
+    if safety_dfas:
+        _violates, new_q, _violated_ids = _advance_des_safety_state(
+            candidate_event={
+                "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
+                "action_type": str(selected_next_task.get("action_type") or "").strip(),
+                "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
+                "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
+            },
+            current_safety_q=tuple(session_state.get("des_safety_dfa_vector") or ()),
+            safety_dfas=safety_dfas,
+            ap_descriptors=session_state.get("des_ap_descriptors") or [],
+        )
+        session_state["des_safety_dfa_vector"] = new_q
+
+    # Cycle detection: check if the post-state was already visited.
+    visited = session_state.setdefault("des_visited_states", [])
+    if post_state in visited:
+        _logger.warning("[DES] Cycle detected: state %s already visited", post_state)
+        session_state["status"] = "des_cycle_detected"
+    else:
+        visited.append(post_state)
+
+    _logger.info(
+        "[DES] Plant extended: %s -[%s]-> %s (trace len=%d)",
+        pre_state, event_name, post_state, len(session_state.get("des_trace") or []),
+    )
+
     remaining_findings, remaining_conditions = _remaining_blocked_issue_counts(
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
     )
     outline_complete = remaining_findings == 0 and remaining_conditions == 0
+
+    # DES composition gate: when outline is nominally complete, verify the
+    # full incremental plant composes safely with safety DFAs.
+    if outline_complete and (session_state.get("des_safety_dfas") or {}):
+        plant = session_state.get("des_plant") or {}
+        # Mark the final state as a goal state for the solver.
+        final_state = session_state.get("des_current_state") or ""
+        if final_state and final_state not in (plant.get("marked") or []):
+            plant.setdefault("marked", []).append(final_state)
+        solver_result = compose_and_solve(
+            plant=plant,
+            safety_dfas=session_state.get("des_safety_dfas") or {},
+            ap_descriptors=session_state.get("des_ap_descriptors") or [],
+        )
+        solver_status = str(solver_result.get("status") or "").strip()
+        if solver_status != "solved":
+            diagnostic = solver_diagnostic_summary(solver_result)
+            _logger.warning(
+                "[DES] Composition gate FAILED (%s): %s", solver_status, diagnostic,
+            )
+            session_state.setdefault("phase_feedback", []).append({
+                "phase": "outline",
+                "issue": "des_safety_composition_failed",
+                "diagnostic": diagnostic,
+            })
+            outline_complete = False
+        else:
+            _logger.info("[DES] Composition gate PASSED — outline is safety-verified.")
+
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
@@ -2486,6 +2928,144 @@ async def _handle_outline_phase(
     )
 
 
+def _active_primitive_outline_event(
+    session_state: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None, list[dict[str, Any]]]:
+    accepted_prefix = [
+        dict(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    cursor = int(session_state.get("primitive_generation_cursor") or 0)
+    if cursor < 0:
+        cursor = 0
+        session_state["primitive_generation_cursor"] = 0
+    if cursor >= len(accepted_prefix):
+        return cursor, None, accepted_prefix
+    return cursor, deepcopy(accepted_prefix[cursor]), accepted_prefix
+
+
+def _primitive_feedback_row(
+    *,
+    outline_event: dict[str, Any] | None,
+    constraint_code: str,
+    reason: str,
+) -> dict[str, Any]:
+    event = dict(outline_event or {})
+    return {
+        "outline_id": str(event.get("outline_id") or "").strip(),
+        "resource_jid": str(event.get("resource_jid") or "").strip(),
+        "part_name": str(event.get("part_name") or "").strip() or None,
+        "constraint_code": str(constraint_code or "").strip() or "primitive_validation_failed",
+        "reason": str(reason or "").strip() or "primitive validation failed",
+    }
+
+
+def _primitive_catalog_for_resource(
+    prepared_bridge_request: dict[str, Any],
+    resource_jid: str,
+) -> list[dict[str, Any]]:
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    bridge_entry = dict(bridge_resources.get(resource_jid) or {})
+    return filter_synthesis_primitive_catalog(
+        [
+            dict(row)
+            for row in (bridge_entry.get("primitive_catalog") or [])
+            if isinstance(row, dict)
+        ]
+    )
+
+
+def _primitive_start_snapshot(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    outline_event: dict[str, Any],
+) -> dict[str, Any]:
+    resource_jid = str(outline_event.get("resource_jid") or "").strip()
+    resources_by_jid, _parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    bridge_entry = dict(
+        dict(prepared_bridge_request.get("bridge_resources") or {}).get(resource_jid)
+        or {}
+    )
+    bridge_snapshot = dict(bridge_entry.get("bridge_snapshot") or {})
+    snapshot = deepcopy(dict(resources_by_jid.get(resource_jid) or {}))
+    snapshot.setdefault("resource_jid", resource_jid)
+    for key in (
+        "resource_type",
+        "current_pose",
+        "current_pose_ref",
+        "workspace_bounds",
+        "named_poses",
+        "available_named_poses",
+        "reachability",
+        "staging_areas",
+    ):
+        if snapshot.get(key) in (None, "", [], {}):
+            value = bridge_entry.get(key)
+            if value in (None, "", [], {}):
+                value = bridge_snapshot.get(key)
+            if value not in (None, "", [], {}):
+                snapshot[key] = deepcopy(value)
+
+    expected_start = dict(outline_event.get("expected_start_state") or {})
+    field_map = {
+        "resource_state": "current_state",
+        "resource_location": "current_location",
+        "held_part": "held_part",
+    }
+    for expected_key, snapshot_key in field_map.items():
+        if expected_key in expected_start:
+            snapshot[snapshot_key] = deepcopy(expected_start.get(expected_key))
+    if "held_part" in expected_start:
+        snapshot["gripper_state"] = (
+            "closed" if expected_start.get("held_part") not in (None, "") else "open"
+        )
+    return snapshot
+
+
+def _primitive_grounding_context(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    outline_event: dict[str, Any],
+) -> dict[str, Any]:
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    resource_jid = str(outline_event.get("resource_jid") or "").strip()
+    part_name = str(outline_event.get("part_name") or "").strip()
+    return {
+        "active_outline_event": deepcopy(outline_event),
+        "resource": deepcopy(resources_by_jid.get(resource_jid) or {}),
+        "part": deepcopy(parts_by_name.get(part_name) or {}) if part_name else {},
+        "resources_by_jid": deepcopy(resources_by_jid),
+        "parts_by_name": deepcopy(parts_by_name),
+        "observation_store": deepcopy(session_state.get("observation_store") or {}),
+    }
+
+
+def _primitive_projected_snapshot_matches_event(
+    projected_snapshot: dict[str, Any],
+    outline_event: dict[str, Any],
+) -> tuple[bool, str | None]:
+    expected_end = dict(outline_event.get("expected_end_state") or {})
+    if "held_part" not in expected_end:
+        return True, None
+    expected_held = expected_end.get("held_part")
+    actual_held = projected_snapshot.get("held_part")
+    if actual_held != expected_held:
+        return (
+            False,
+            f"projected held_part expected={expected_held!r} actual={actual_held!r}",
+        )
+    return True, None
+
+
 async def _handle_primitive_generation_phase(
     *,
     session_state: dict[str, Any],
@@ -2497,7 +3077,159 @@ async def _handle_primitive_generation_phase(
 
     Returns (decision, turn_entry).
     """
-    raise NotImplementedError("primitive_generation phase handler not yet implemented")
+    cursor, active_event, accepted_prefix = _active_primitive_outline_event(session_state)
+    turn_entry: dict[str, Any] = {
+        "primitive_generation_cursor": cursor,
+        "active_outline_event": deepcopy(active_event),
+    }
+    if active_event is None:
+        if accepted_prefix:
+            session_state["primitive_rejection_feedback"] = []
+            session_state["status"] = "paused_after_primitive_generation"
+            return "draft_ready", turn_entry
+        feedback = [
+            _primitive_feedback_row(
+                outline_event={},
+                constraint_code="outline_prefix_missing",
+                reason="primitive generation requires an accepted outline prefix",
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_outline_revision", turn_entry
+
+    outline_id = str(active_event.get("outline_id") or "").strip()
+    resource_jid = str(active_event.get("resource_jid") or "").strip()
+    response_decision = str(parsed_response.get("decision") or "").strip()
+    response_outline_id = str(parsed_response.get("outline_id") or "").strip()
+    response_resource_jid = str(parsed_response.get("resource_jid") or "").strip()
+    primitive_steps = [
+        dict(row)
+        for row in (parsed_response.get("primitive_steps") or [])
+        if isinstance(row, dict)
+    ]
+    turn_entry["primitive_steps"] = deepcopy(primitive_steps)
+
+    if response_decision == "need_outline_revision":
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="outline_revision_requested",
+                reason="LLM reported that the active outline event is not implementable",
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_outline_revision", turn_entry
+
+    schema_errors: list[str] = []
+    if response_outline_id != outline_id:
+        schema_errors.append(
+            f"outline_id must match active outline event {outline_id!r}"
+        )
+    if response_resource_jid != resource_jid:
+        schema_errors.append(
+            f"resource_jid must match active outline resource {resource_jid!r}"
+        )
+    if not primitive_steps:
+        schema_errors.append("primitive_steps must contain at least one primitive step")
+    if response_decision not in {"primitive_event_ready", "need_primitive_revision"}:
+        schema_errors.append(
+            "decision must be primitive_event_ready, need_primitive_revision, or need_outline_revision"
+        )
+    for index, step in enumerate(primitive_steps):
+        if "primitive" not in step or not str(step.get("primitive") or "").strip():
+            schema_errors.append(f"primitive_steps[{index}] must include primitive")
+        if "params" not in step or not isinstance(step.get("params"), dict):
+            schema_errors.append(f"primitive_steps[{index}] must include params object")
+    if schema_errors:
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="primitive_schema_violation",
+                reason="; ".join(schema_errors),
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_primitive_revision", turn_entry
+
+    primitive_catalog = _primitive_catalog_for_resource(
+        prepared_bridge_request,
+        resource_jid,
+    )
+    start_snapshot = _primitive_start_snapshot(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        outline_event=active_event,
+    )
+    turn_entry["start_snapshot"] = deepcopy(start_snapshot)
+    valid, projected_snapshot, validation_error = validate_and_project_steps(
+        primitive_steps,
+        primitive_catalog,
+        start_snapshot,
+        grounding_context=_primitive_grounding_context(
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+            outline_event=active_event,
+        ),
+    )
+    turn_entry["projected_snapshot"] = deepcopy(projected_snapshot)
+    if not valid:
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="primitive_validation_failed",
+                reason=validation_error or "primitive sequence failed validation",
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_primitive_revision", turn_entry
+
+    compatible, compatibility_error = _primitive_projected_snapshot_matches_event(
+        projected_snapshot,
+        active_event,
+    )
+    if not compatible:
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="primitive_projection_mismatch",
+                reason=compatibility_error or "primitive projection does not match outline event",
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_primitive_revision", turn_entry
+
+    accepted_program = list(session_state.get("accepted_primitive_program") or [])
+    accepted_row = {
+        "outline_id": outline_id,
+        "resource_jid": resource_jid,
+        "part_name": str(active_event.get("part_name") or "").strip() or None,
+        "action_name": str(active_event.get("action_name") or "").strip(),
+        "description": str(active_event.get("description") or "").strip(),
+        "primitive_steps": deepcopy(primitive_steps),
+        "projected_snapshot": deepcopy(projected_snapshot),
+    }
+    accepted_program.append(accepted_row)
+    session_state["accepted_primitive_program"] = deepcopy(accepted_program)
+    session_state["primitive_rejection_feedback"] = []
+    session_state["primitive_generation_cursor"] = cursor + 1
+    turn_entry["accepted_primitive_macro"] = deepcopy(accepted_row)
+
+    if cursor + 1 >= len(accepted_prefix):
+        session_state["status"] = "paused_after_primitive_generation"
+        return "draft_ready", turn_entry
+
+    session_state["status"] = "paused_after_primitive_turn"
+    return "primitive_event_ready", turn_entry
 
 
 async def _handle_finalize_phase(
@@ -2550,6 +3282,11 @@ def _build_phase_prompt(
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
         )
+        # Compute adaptive candidate bound |Σ_c ∩ Γ(q)| for this turn.
+        candidate_bound = _compute_enabled_candidate_bound(
+            session_state, prepared_bridge_request,
+        )
+        session_state["des_candidate_bound"] = candidate_bound
 
     prompt_input = build_multi_turn_v2_phase_prompt_input(
         phase=phase,
@@ -2753,6 +3490,11 @@ async def execute_multi_turn_bridge(
         next_phase = transition_multi_turn_phase(current_phase, decision)
         session_state["current_phase"] = next_phase
 
+        # 5a. Initialize DES plant at grounding→outline transition
+        if current_phase == "grounding" and next_phase == "outline":
+            if not session_state.get("des_plant", {}).get("initial"):
+                _init_des_state(session_state, planner, prepared_bridge_request)
+
         # 6. Check terminal conditions
         if current_phase == "finalize" and decision == "accepted":
             session_state["status"] = "completed"
@@ -2765,17 +3507,29 @@ async def execute_multi_turn_bridge(
             planner._set_last_bridge_debug(bridge_debug)
         _write_per_turn_artifact(prepared_bridge_request, session_state, turn_entry)
 
-        if session_state.get("status") in ("completed", "paused_after_outline_turn"):
+        if session_state.get("status") in (
+            "completed", "paused_after_outline_turn",
+            "paused_after_primitive_turn", "paused_after_primitive_generation",
+            "des_cycle_detected", "des_deadlock",
+        ):
             break
 
     # Stash session state for resume access
     prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
 
     # Turn budget exhausted
-    if session_state.get("status") not in ("completed", "paused_after_outline_turn"):
-        session_state["status"] = "turn_budget_exhausted"
+    if session_state.get("status") not in (
+        "completed",
+        "paused_after_outline_turn",
+        "paused_after_primitive_turn",
+        "paused_after_primitive_generation",
+        "des_cycle_detected",
+        "des_deadlock",
+        "error",
+    ):
+        session_state["status"] = "des_turn_limit"
         bridge_debug["multi_turn_session"] = deepcopy(session_state)
-        bridge_debug["status"] = "turn_budget_exhausted"
+        bridge_debug["status"] = "des_turn_limit"
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
         if hasattr(planner, "_set_last_bridge_debug"):

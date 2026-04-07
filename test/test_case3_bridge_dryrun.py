@@ -4,6 +4,7 @@ Run directly:
     python test/test_case3_bridge_dryrun.py
     python test/test_case3_bridge_dryrun.py --model gpt-4o
     python test/test_case3_bridge_dryrun.py --reasoning-mode hybrid
+    python test/test_case3_bridge_dryrun.py --focus primitive_generation
     python test/test_case3_bridge_dryrun.py --show-llm-input
     python test/test_case3_bridge_dryrun.py --show-prompt
 
@@ -1444,7 +1445,7 @@ def _configure_live_bridge_session(
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     normalized_mode = str(reasoning_mode or "multi_turn").strip().lower() or "multi_turn"
     bridge_session["reasoning_mode"] = normalized_mode
-    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 20)
+    bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 1000)
     bridge_session["repair_mode"] = "recover"
     bridge_session["observation_backend"] = "mock_detect_parts_harness"
     if normalized_mode == "multi_turn":
@@ -1454,6 +1455,143 @@ def _configure_live_bridge_session(
         bridge_session.pop("multi_turn_engine", None)
         bridge_session.pop("outline_mode", None)
     prepared_bridge_request["bridge_session"] = bridge_session
+
+
+def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
+    return [
+        {
+            "outline_id": "RECOVERY_SEQ1",
+            "resource_jid": "ur5e@localhost",
+            "action_name": "release MCP to prusa-mk3",
+            "description": "Move UR5e to a non-interfering position preparing for MCP delivery.",
+            "part_name": "MCP",
+            "target_ref": "prusa-mk3",
+            "action_type": "release_part",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "held_part": "MCP",
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_location": "prusa-mk3",
+                "part_holder_resource_jid": None,
+            },
+            "action_target": {"target_location": "prusa-mk3"},
+        },
+        {
+            "outline_id": "RECOVERY_SEQ2",
+            "resource_jid": "xarm6@localhost",
+            "action_name": "recover resource",
+            "description": "Attempt to restart xarm6 to transition from failed to idle state.",
+            "action_type": "recover_resource",
+            "expected_start_state": {
+                "resource_state": "failed",
+                "held_part": None,
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+            },
+        },
+        {
+            "outline_id": "RECOVERY_SEQ3",
+            "resource_jid": "ur5e@localhost",
+            "action_name": "acquire LG",
+            "description": "Position UR5e to pick up LG which is misplaced at observed_pose.",
+            "part_name": "LG",
+            "action_type": "acquire_part",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "misplaced",
+                "part_location": "observed_pose",
+                "part_holder_resource_jid": None,
+            },
+            "expected_end_state": {
+                "resource_state": "picked",
+                "held_part": "LG",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
+            },
+            "action_target": {"source_location": "observed_pose"},
+        },
+        {
+            "outline_id": "RECOVERY_SEQ4",
+            "resource_jid": "ur5e@localhost",
+            "action_name": "release LG to assembly_board-v1",
+            "description": "Position UR5e to place LG at the designated assembly board location.",
+            "part_name": "LG",
+            "target_ref": "assembly_board-v1",
+            "action_type": "release_part",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "held_part": "LG",
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost_gripper",
+                "part_holder_resource_jid": "ur5e@localhost",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_location": "assembly_board-v1",
+                "part_holder_resource_jid": None,
+            },
+            "action_target": {"target_location": "assembly_board-v1"},
+        },
+    ]
+
+
+def _seed_case3_primitive_generation_focus(session_state: dict[str, Any]) -> dict[str, Any]:
+    seeded = deepcopy(session_state)
+    seeded["current_phase"] = "primitive_generation"
+    seeded["status"] = "pending"
+    seeded["accepted_outline_prefix"] = _case3_known_accepted_outline_prefix()
+    seeded["primitive_generation_cursor"] = 0
+    seeded["accepted_primitive_program"] = []
+    seeded["primitive_rejection_feedback"] = []
+    seeded["candidate_rejection_feedback"] = []
+    seeded["outline_validation_findings"] = []
+    seeded["observation_store"] = {
+        "observed_pose_LG": {
+            "part_name": "LG",
+            "x": 0.0,
+            "y": 0.2,
+            "z": 1.035,
+            "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+        }
+    }
+    resources = seeded.setdefault("symbolic_resources", {})
+    resources.setdefault("xarm6@localhost", {"resource_jid": "xarm6@localhost"})
+    resources.setdefault("ur5e@localhost", {"resource_jid": "ur5e@localhost"})
+    resources["xarm6@localhost"].update({
+        "current_state": "failed",
+        "held_part": None,
+        "gripper_state": "open",
+    })
+    resources["ur5e@localhost"].update({
+        "current_state": "picked",
+        "current_location": "prusa-mk4-2",
+        "held_part": "MCP",
+        "gripper_state": "closed",
+    })
+    parts = seeded.setdefault("symbolic_parts", {})
+    parts.setdefault("LG", {"part_name": "LG"})
+    parts.setdefault("MCP", {"part_name": "MCP"})
+    parts["LG"].update({
+        "current_state": "misplaced",
+        "current_location": None,
+        "observed_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+        "current_holder_resource_jid": None,
+    })
+    parts["MCP"].update({
+        "current_state": "in_gripper",
+        "current_location": "ur5e@localhost_gripper",
+        "current_holder_resource_jid": "ur5e@localhost",
+    })
+    return seeded
 
 
 # ---------------------------------------------------------------------------
@@ -1588,8 +1726,14 @@ async def run_case3_bridge_dryrun(
     llm_model: str | None = None,
     reasoning_mode: str = "hybrid",
     stop_before_primitive_generation: bool = True,
+    focus: str = "full",
 ) -> dict[str, Any]:
     """Run the Case 3 dry-run scenario through the bridge once."""
+    normalized_focus = str(focus or "full").strip().lower()
+    if normalized_focus not in {"full", "primitive_generation"}:
+        raise ValueError("focus must be 'full' or 'primitive_generation'")
+    if normalized_focus == "primitive_generation":
+        stop_before_primitive_generation = False
     _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
         reasoning_mode=reasoning_mode,
@@ -1603,8 +1747,27 @@ async def run_case3_bridge_dryrun(
         bridge_debug_seed["per_turn_debug_dir"] = str(debug_dir)
         prepared_bridge_request["bridge_debug"] = bridge_debug_seed
 
-    # First run: grounding + first outline task
-    proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
+    proposal: dict[str, Any] | None = None
+    if normalized_focus == "primitive_generation":
+        if str(reasoning_mode or "").strip().lower() != "multi_turn":
+            raise ValueError("--focus primitive_generation requires --reasoning-mode multi_turn")
+        seed = deepcopy(
+            prepared_bridge_request.get("multi_turn_session_seed")
+            or multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        )
+        seed = _seed_case3_primitive_generation_focus(seed)
+        prepared_bridge_request["multi_turn_session_seed"] = deepcopy(seed)
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_multi_turn_bridge as _resume_bridge,
+        )
+        proposal = await _resume_bridge(
+            planner,
+            prepared_bridge_request,
+            session_state=seed,
+        )
+    else:
+        # First run: grounding + first outline task
+        proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
 
     if str(reasoning_mode or "multi_turn").strip().lower() == "multi_turn":
         # Resume loop: keep running while paused after outline turns
@@ -1622,7 +1785,10 @@ async def run_case3_bridge_dryrun(
         post_validation_resume_budget = 0
         for _resume_i in range(max_resume):
             ss = prepared_bridge_request.get("multi_turn_session_state") or {}
-            if ss.get("status") != "paused_after_outline_turn":
+            if ss.get("status") not in {
+                "paused_after_outline_turn",
+                "paused_after_primitive_turn",
+            }:
                 break
             if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
                 logging.getLogger("case3_bridge_dryrun").info(
@@ -1775,7 +1941,15 @@ def _assert_bridge_dryrun(
     )
     multi_turn_session = result.get("multi_turn_session") or {}
     session_status = str(multi_turn_session.get("status") or "")
-    assert session_status in ("completed", "turn_budget_exhausted", "error"), (
+    assert session_status in (
+        "completed",
+        "paused_after_primitive_turn",
+        "paused_after_primitive_generation",
+        "des_turn_limit",
+        "des_cycle_detected",
+        "des_deadlock",
+        "error",
+    ), (
         f"Unexpected multi-turn session status: {session_status!r}"
     )
     turns = result.get("turns") or []
@@ -1936,6 +2110,756 @@ def test_case3_bridge_dryrun() -> None:
     fault_event = llm_input.get("fault_event") or {}
     assert fault_event.get("blocked_at_task_id") == FAILED_TASK_ID
     assert fault_event.get("blocked_at_function") == "place_insert"
+
+
+def _seed_case3_post_mcp_release_state(session_state: dict[str, Any]) -> None:
+    session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+    session_state["symbolic_resources"]["xarm6@localhost"]["held_part"] = None
+    session_state["symbolic_resources"]["xarm6@localhost"]["gripper_state"] = "open"
+    session_state["symbolic_resources"]["ur5e@localhost"]["current_state"] = "idle"
+    session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] = None
+    session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] = "open"
+    session_state["symbolic_parts"]["LG"]["current_state"] = "misplaced"
+    session_state["symbolic_parts"]["LG"]["current_location"] = None
+    session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] = None
+    session_state["symbolic_parts"]["MCP"]["current_state"] = "misplaced"
+    session_state["symbolic_parts"]["MCP"]["current_location"] = "assembly_board-approach"
+    session_state["symbolic_parts"]["MCP"]["current_holder_resource_jid"] = None
+
+
+def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["current_phase"] = "outline"
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        session_state["des_current_state"] = "S_opaque_internal_state"
+        session_state["des_trace"] = ["RECOVERY_SEQ1", "RECOVERY_SEQ2"]
+        _seed_case3_post_mcp_release_state(session_state)
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "failed"
+        session_state["accepted_outline_prefix"] = [
+            {
+                "outline_id": "RECOVERY_SEQ1",
+                "resource_jid": "xarm6@localhost",
+                "action_name": "recover xarm6 to idle",
+                "description": "Accepted prefix should be rendered as feedback.",
+            }
+        ]
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            },
+            "observed_pose_MCP": {
+                "part_name": "MCP",
+                "x": 0.0,
+                "y": -0.08,
+                "z": 1.025,
+                "pose": {"x": 0.0, "y": -0.08, "z": 1.025},
+                "current_location": "ur5e@localhost_gripper",
+                "current_holder_resource_jid": "ur5e@localhost",
+            },
+        }
+        session_state["candidate_rejection_feedback"] = [
+            {
+                "candidate_index": 0,
+                "task": {
+                    "resource_jid": "xarm6@localhost",
+                    "action_name": "pick LG again",
+                    "description": "Rejected action label should not be rendered.",
+                    "part_name": "LG",
+                    "outline_id": "RECOVERY_SEQ3_1",
+                },
+                "validation_findings": [
+                    {
+                        "constraint_owner": "resource",
+                        "constraint_code": "workspace_unreachable",
+                        "resource_jid": "xarm6@localhost",
+                        "part_name": "LG",
+                        "reason": "outside workspace",
+                    }
+                ],
+            },
+            {
+                "candidate_index": 1,
+                "task": {
+                    "resource_jid": "ur5e@localhost",
+                    "action_name": "move MCP onward",
+                    "description": "Another rejected label should not be rendered.",
+                    "part_name": "MCP",
+                    "target_ref": "assembly_board-v1",
+                    "outline_id": "RECOVERY_SEQ3_2",
+                },
+                "validation_findings": [
+                    {
+                        "constraint_owner": "part",
+                        "constraint_code": "part_relocation_without_carrier",
+                        "resource_jid": "ur5e@localhost",
+                        "part_name": "MCP",
+                        "reason": "resource does not hold MCP",
+                    }
+                ],
+            }
+        ]
+
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
+            prepared_bridge_request,
+            session_state,
+        )
+
+        assert "current plant state" not in prompt.lower()
+        assert "S_opaque_internal_state" not in prompt
+        assert "Accepted Outline Prefix" in prompt
+        assert "recover xarm6 to idle" in prompt
+        assert "Plant Automaton Progress" not in prompt
+        assert "Accepted trace" not in prompt
+        assert "DES Supervisor Context" not in prompt
+        assert "controllable recovery events" not in prompt
+        assert "Current Recovery Conditions" in prompt
+        assert "xarm6@localhost must reach idle" in prompt
+        assert "Rejected Events (do not re-propose)" not in prompt
+        assert "Last Rejected Candidates" not in prompt
+        assert "Recent Rejected Candidate Feedback" in prompt
+        assert "Recent Rejected Candidates And Validator Feedback" not in prompt
+        assert "Assembly Requirements" not in prompt
+        assert "xarm6 Assemble LG" not in prompt
+        assert "Resource-Part Reachability Facts" not in prompt
+        assert "reachable=true" not in prompt
+        assert "reachable=false" not in prompt
+        assert "Observed Part Workspace Facts" not in prompt
+        assert '"observed_pose": {' in prompt
+        assert '"x": 0.0' in prompt
+        assert '"y": 0.2' in prompt
+        assert '"z": 1.035' in prompt
+        assert "xarm6@localhost: outside workspace (y=0.20 > y_max_m=0.10)" not in prompt
+        assert "ur5e@localhost: inside workspace" not in prompt
+        assert "Rejected Candidate Facts" not in prompt
+        assert "workspace_unreachable" in prompt
+        assert "part_relocation_without_carrier" in prompt
+        assert "Candidate Field Semantics" not in prompt
+        assert "Candidate Encoding Guide" not in prompt
+        assert "Candidate Field Notes" not in prompt
+        assert "Bridge Compiler Field Facts" not in prompt
+        assert "Robot-only events" not in prompt
+        assert "Part pickup/acquisition events" not in prompt
+        assert "Part placement/release events" not in prompt
+        assert "part_name identifies the part whose current carrier" not in prompt
+        assert "target_ref is interpreted as an intended destination reference." not in prompt
+        assert "observed_pose is sensor source context, not a destination reference." not in prompt
+        assert "part_name omitted: resource-only event" not in prompt
+        assert "observed_pose is a source fact for acquisition" not in prompt
+        assert "do not put observed_pose in target_ref" not in prompt
+        assert "release target_ref must be copied exactly" not in prompt
+        assert "LISTED_DESTINATION_REF or omit" not in prompt
+        assert "Intermediate locations are resolved at execution time" not in prompt
+        assert "reachable locations prusa-mk4-2, prusa-mk3, assembly_board-v1" in prompt
+        assert "reachable locations prusa-mk4-1, prusa-mk3, assembly_board-v1" in prompt
+        assert "Causal State Relations" not in prompt
+        assert "LG carrier=none" not in prompt
+        assert "inside_bounds" not in prompt
+        assert "outside_bounds" not in prompt
+        assert "Location Reference Facts" not in prompt
+        assert "staging anchors:" not in prompt
+        assert "workspace x[-0.70,0.70], y[-0.15,1.10], z[0.85,1.60]" in prompt
+        assert "workspace x[-0.60,0.60], y[-1.00,0.10], z[0.90,1.50]" in prompt
+        assert "current_pose(" in prompt
+        assert "pick LG again" not in prompt
+        assert "move MCP onward" not in prompt
+        assert "xarm6@localhost / LG [workspace_unreachable]: outside workspace" in prompt
+        assert "persists while observed_pose and workspace_bounds are unchanged" in prompt
+        assert (
+            "ur5e@localhost / MCP to assembly_board-v1 "
+            "[part_relocation_without_carrier]: resource does not hold MCP"
+        ) in prompt
+        assert "Rejected action label should not be rendered." not in prompt
+        assert "Another rejected label should not be rendered." not in prompt
+        assert "LG by xarm6" not in prompt
+        assert "MCP by ur5e" not in prompt
+        assert '"current_holder_resource_jid": "ur5e@localhost"' not in prompt
+        assert '"current_holder_resource_jid": null' in prompt
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_prompt_hides_derived_causal_carrier_relations() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["current_phase"] = "outline"
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+        session_state["symbolic_resources"]["xarm6@localhost"]["held_part"] = None
+        session_state["symbolic_resources"]["xarm6@localhost"]["gripper_state"] = "open"
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
+            prepared_bridge_request,
+            session_state,
+        )
+
+        assert "Causal State Relations" not in prompt
+        assert "MCP carrier=ur5e@localhost" not in prompt
+        assert "ur5e@localhost.held_part=MCP" not in prompt
+        assert '"held_part": "MCP"' in prompt
+        assert '"current_holder_resource_jid": "ur5e@localhost"' in prompt
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["current_phase"] = "outline"
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        _seed_case3_post_mcp_release_state(session_state)
+        session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] = "LG"
+        session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] = "closed"
+        session_state["symbolic_parts"]["LG"]["current_location"] = "ur5e@localhost_gripper"
+        session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] = "ur5e@localhost"
+        session_state["turns"] = [
+            {
+                "phase": "outline",
+                "turn_index": 10,
+                "candidate_evaluations": [
+                    {
+                        "candidate_index": 0,
+                        "task": {
+                            "resource_jid": "ur5e@localhost",
+                            "action_name": "old direct LG placement",
+                            "description": "Old rejection from a prior state.",
+                            "part_name": "LG",
+                            "target_ref": "assembly_board-v1",
+                        },
+                        "valid": False,
+                        "validation_findings": [
+                            {
+                                "constraint_code": "part_relocation_without_carrier",
+                                "resource_jid": "ur5e@localhost",
+                                "part_name": "LG",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "phase": "outline",
+                "turn_index": 11,
+                "selected_next_task": {
+                    "outline_id": "RECOVERY_SEQ3",
+                    "resource_jid": "ur5e@localhost",
+                    "action_name": "acquire LG",
+                    "description": "Accepted state-changing event.",
+                    "part_name": "LG",
+                },
+                "candidate_evaluations": [
+                    {
+                        "candidate_index": 1,
+                        "task": {
+                            "resource_jid": "xarm6@localhost",
+                            "action_name": "old xarm6 LG attempt",
+                            "description": "Rejected in the same accepted batch.",
+                            "part_name": "LG",
+                        },
+                        "valid": False,
+                        "validation_findings": [
+                            {
+                                "constraint_code": "workspace_unreachable",
+                                "resource_jid": "xarm6@localhost",
+                                "part_name": "LG",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
+            prepared_bridge_request,
+            session_state,
+        )
+
+        assert "Rejected Candidate Facts" not in prompt
+        assert "old direct LG placement" not in prompt
+        assert "old xarm6 LG attempt" not in prompt
+        assert "resource=ur5e@localhost; part=LG; target=assembly_board-v1; " not in prompt
+        assert "resource=xarm6@localhost; part=LG; constraint=workspace_unreachable" not in prompt
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_validator_rejects_unlisted_target_ref() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        _seed_case3_post_mcp_release_state(session_state)
+        session_state["symbolic_resources"]["ur5e@localhost"]["current_state"] = "picked"
+        session_state["symbolic_resources"]["ur5e@localhost"]["held_part"] = "LG"
+        session_state["symbolic_resources"]["ur5e@localhost"]["gripper_state"] = "closed"
+        session_state["symbolic_parts"]["LG"]["current_state"] = "in_gripper"
+        session_state["symbolic_parts"]["LG"]["current_location"] = "ur5e@localhost_gripper"
+        session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] = "ur5e@localhost"
+
+        decision, turn_entry = await (
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "Invent an unlisted target ref.",
+                    "candidate_tasks": [
+                        {
+                            "resource_jid": "ur5e@localhost",
+                            "action_name": "move LG to invented anchor",
+                            "description": "Release LG to an unlisted intermediate anchor.",
+                            "part_name": "LG",
+                            "target_ref": "prusa-mk4-2@intermediate_anchor",
+                        }
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_revision"
+        evaluation = dict((turn_entry.get("candidate_evaluations") or [])[0])
+        assert evaluation.get("valid") is False
+        finding = dict((evaluation.get("validation_findings") or [])[0])
+        assert finding.get("constraint_code") == "unknown_location_token"
+        assert "references unknown location token" in str(finding.get("reason") or "")
+        assert dict(finding.get("evidence") or {}).get("location_token") == (
+            "prusa-mk4-2@intermediate_anchor"
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_observation_store_does_not_reapply_stale_holder() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        _seed_case3_post_mcp_release_state(session_state)
+        session_state["observation_store"] = {
+            "observed_pose_MCP": {
+                "part_name": "MCP",
+                "x": 0.0,
+                "y": -0.08,
+                "z": 1.025,
+                "pose": {"x": 0.0, "y": -0.08, "z": 1.025},
+                "current_location": "ur5e@localhost_gripper",
+                "current_holder_resource_jid": "ur5e@localhost",
+            }
+        }
+
+        _resources_by_jid, parts_by_name = (
+            multi_turn_v2_mode._projected_outline_validation_context(
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+        )
+
+        assert parts_by_name["MCP"]["current_location"] == "assembly_board-approach"
+        assert parts_by_name["MCP"]["current_holder_resource_jid"] is None
+        assert parts_by_name["MCP"]["observed_pose"] == {
+            "x": 0.0,
+            "y": -0.08,
+            "z": 1.025,
+        }
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        _seed_case3_post_mcp_release_state(session_state)
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        decision, turn_entry = await (
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "Use an open vocabulary acquisition candidate.",
+                    "candidate_tasks": [
+                        {
+                            "resource_jid": "ur5e@localhost",
+                            "action_name": "recover grounded LG",
+                            "description": "Acquire LG from the observed pose.",
+                            "part_name": "LG",
+                        }
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_next_task"
+        selected = dict(turn_entry.get("selected_next_task") or {})
+        assert selected.get("resource_jid") == "ur5e@localhost"
+        assert selected.get("part_name") == "LG"
+        assert selected.get("action_type") == "acquire_part"
+        evaluation = dict((turn_entry.get("candidate_evaluations") or [])[0])
+        assert evaluation.get("valid") is True
+        assert dict(evaluation.get("progress_detail") or {}).get("blocker_part_acquired") == 1
+        assert session_state.get("candidate_rejection_feedback") == []
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        session_state["outline_stagnation_count"] = 99
+        session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
+        session_state["symbolic_resources"]["xarm6@localhost"]["held_part"] = None
+        session_state["symbolic_resources"]["xarm6@localhost"]["gripper_state"] = "open"
+        session_state["observation_store"] = {
+            "observed_pose_LG": {
+                "part_name": "LG",
+                "x": 0.0,
+                "y": 0.2,
+                "z": 1.035,
+                "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            }
+        }
+
+        decision, turn_entry = await (
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "Still trying an invalid candidate.",
+                    "candidate_tasks": [
+                        {
+                            "resource_jid": "xarm6@localhost",
+                            "action_name": "try LG again",
+                            "description": "Attempt the unreachable LG pose again.",
+                            "part_name": "LG",
+                        }
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_revision"
+        assert str(session_state.get("status") or "") == "paused_after_outline_turn"
+        assert int(session_state.get("outline_stagnation_count") or 0) == 100
+        evaluation = dict((turn_entry.get("candidate_evaluations") or [])[0])
+        finding = dict((evaluation.get("validation_findings") or [])[0])
+        assert finding.get("constraint_code") == "workspace_unreachable"
+
+    asyncio.run(_run())
+
+
+def test_v2_primitive_generation_response_schema() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
+        multi_turn_v2_phase_response_schema,
+    )
+
+    schema = multi_turn_v2_phase_response_schema("primitive_generation")
+    body = dict(schema.get("schema") or {})
+    required = set(body.get("required") or [])
+    assert {
+        "thought",
+        "decision",
+        "outline_id",
+        "resource_jid",
+        "primitive_steps",
+    } <= required
+    decision = dict(dict(body.get("properties") or {}).get("decision") or {})
+    assert set(decision.get("enum") or []) == {
+        "primitive_event_ready",
+        "need_primitive_revision",
+        "need_outline_revision",
+    }
+    primitive_steps = dict(dict(body.get("properties") or {}).get("primitive_steps") or {})
+    step_schema = dict(primitive_steps.get("items") or {})
+    assert {"primitive", "params"} <= set(step_schema.get("required") or [])
+
+
+def test_v2_primitive_generation_prompt_targets_active_outline_event() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        session_state = _seed_case3_primitive_generation_focus(seed)
+
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
+            prepared_bridge_request,
+            session_state,
+        )
+
+        assert "Current phase: Primitive Generation." in prompt
+        assert "Accepted Outline Context" in prompt
+        assert "Active Outline Event" in prompt
+        assert '"outline_id": "RECOVERY_SEQ1"' in prompt
+        assert '"resource_jid": "ur5e@localhost"' in prompt
+        assert "Primitive Generation Cursor" in prompt
+        assert '"active_index": 0' in prompt
+        assert "Active Resource Primitive Catalog" in prompt
+        assert '"name": "release_part"' in prompt
+        assert "Current Resource State" in prompt
+        assert "Current Part State" in prompt
+        assert "Session Observation Store" in prompt
+        assert "Current Recovery Conditions" not in prompt
+        assert "Candidate Shape Example" not in prompt
+        assert "Propose up to" not in prompt
+        assert "candidate recovery events" not in prompt
+        assert "release -> move + open_gripper + detach" not in prompt
+        assert "move + open_gripper + detach" not in prompt
+        assert "opens the gripper and detaches" not in prompt
+
+    asyncio.run(_run())
+
+
+def test_v2_primitive_generation_valid_event_advances_cursor() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        session_state = _seed_case3_primitive_generation_focus(seed)
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response={
+                "thought": "Release the currently held MCP using the resource primitive surface.",
+                "decision": "primitive_event_ready",
+                "outline_id": "RECOVERY_SEQ1",
+                "resource_jid": "ur5e@localhost",
+                "primitive_steps": [
+                    {
+                        "primitive": "release_part",
+                        "params": {"model_name": "MCP"},
+                    }
+                ],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "primitive_event_ready"
+        assert session_state.get("status") == "paused_after_primitive_turn"
+        assert session_state.get("primitive_generation_cursor") == 1
+        accepted = list(session_state.get("accepted_primitive_program") or [])
+        assert len(accepted) == 1
+        assert accepted[0]["outline_id"] == "RECOVERY_SEQ1"
+        assert accepted[0]["primitive_steps"] == [
+            {"primitive": "release_part", "params": {"model_name": "MCP"}}
+        ]
+        assert dict(turn_entry.get("projected_snapshot") or {}).get("held_part") is None
+        assert session_state.get("primitive_rejection_feedback") == []
+
+    asyncio.run(_run())
+
+
+def test_v2_primitive_generation_rejection_keeps_cursor_and_renders_feedback() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        session_state = _seed_case3_primitive_generation_focus(seed)
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response={
+                "thought": "Use a primitive that is not available.",
+                "decision": "primitive_event_ready",
+                "outline_id": "RECOVERY_SEQ1",
+                "resource_jid": "ur5e@localhost",
+                "primitive_steps": [
+                    {
+                        "primitive": "teleport_part",
+                        "params": {"model_name": "MCP"},
+                    }
+                ],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "need_primitive_revision"
+        assert session_state.get("status") == "paused_after_primitive_turn"
+        assert session_state.get("primitive_generation_cursor") == 0
+        feedback = list(session_state.get("primitive_rejection_feedback") or [])
+        assert feedback
+        assert feedback[0]["constraint_code"] == "primitive_validation_failed"
+        assert "unknown primitive" in feedback[0]["reason"]
+        assert turn_entry.get("primitive_rejection_feedback") == feedback
+
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
+            prepared_bridge_request,
+            session_state,
+        )
+        assert "Primitive Rejection Feedback" in prompt
+        assert "primitive_validation_failed" in prompt
+        assert "unknown primitive" in prompt
+
+    asyncio.run(_run())
+
+
+def test_v2_primitive_generation_final_event_returns_draft_ready() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        session_state = _seed_case3_primitive_generation_focus(seed)
+        session_state["primitive_generation_cursor"] = 3
+
+        decision, _turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response={
+                "thought": "Release the held LG for the final accepted outline event.",
+                "decision": "primitive_event_ready",
+                "outline_id": "RECOVERY_SEQ4",
+                "resource_jid": "ur5e@localhost",
+                "primitive_steps": [
+                    {
+                        "primitive": "release_part",
+                        "params": {"model_name": "LG"},
+                    }
+                ],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "draft_ready"
+        assert session_state.get("status") == "paused_after_primitive_generation"
+        assert session_state.get("primitive_generation_cursor") == 4
+        accepted = list(session_state.get("accepted_primitive_program") or [])
+        assert accepted[-1]["outline_id"] == "RECOVERY_SEQ4"
+
+    asyncio.run(_run())
+
+
+def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> None:
+    async def _run() -> None:
+        seed = {
+            "max_turns": 20,
+            "turn_index": 0,
+            "current_phase": "outline",
+            "status": "pending",
+            "symbolic_resources": {
+                "xarm6@localhost": {"resource_jid": "xarm6@localhost"},
+                "ur5e@localhost": {"resource_jid": "ur5e@localhost"},
+            },
+            "symbolic_parts": {
+                "LG": {"part_name": "LG"},
+                "MCP": {"part_name": "MCP"},
+            },
+        }
+        prepared_bridge_request = {
+            "bridge_session": {
+                "reasoning_mode": "multi_turn",
+                "multi_turn_engine": "v2",
+                "outline_mode": "incremental_candidates_validated",
+                "max_turns": 20,
+            },
+            "multi_turn_session_seed": deepcopy(seed),
+            "context_summary": {},
+            "llm_input": {},
+            "bridge_resources": {},
+        }
+        captured_seed: dict[str, Any] = {}
+
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(self, _prepared: dict[str, Any]) -> dict[str, Any]:
+                raise AssertionError("full dry-run path should not execute in primitive focus")
+
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": "paused_after_primitive_generation",
+                    "multi_turn_session": deepcopy(
+                        prepared_bridge_request["multi_turn_session_state"]
+                    ),
+                }
+
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
+
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model
+            assert reasoning_mode == "multi_turn"
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
+
+        async def _fake_resume_bridge(
+            planner: Any,
+            prepared_request: dict[str, Any],
+            *,
+            session_state: dict[str, Any],
+        ) -> dict[str, Any]:
+            del planner
+            captured_seed.update(deepcopy(session_state))
+            state = deepcopy(session_state)
+            state["status"] = "paused_after_primitive_generation"
+            prepared_request["multi_turn_session_state"] = deepcopy(state)
+            return {"engine": "multi_turn_v2", "focus": "primitive_generation"}
+
+        with patch.object(
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=_fake_resume_bridge,
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                reasoning_mode="multi_turn",
+                focus="primitive_generation",
+            )
+
+        assert captured_seed.get("current_phase") == "primitive_generation"
+        assert captured_seed.get("primitive_generation_cursor") == 0
+        assert len(captured_seed.get("accepted_outline_prefix") or []) == 4
+        assert (captured_seed.get("accepted_outline_prefix") or [])[0]["outline_id"] == "RECOVERY_SEQ1"
+        assert captured_seed.get("accepted_primitive_program") == []
+        assert captured_seed.get("primitive_rejection_feedback") == []
+        assert "observed_pose_LG" in dict(captured_seed.get("observation_store") or {})
+        assert result.get("proposal") == {
+            "engine": "multi_turn_v2",
+            "focus": "primitive_generation",
+        }
+
+    asyncio.run(_run())
 
 
 def test_v2_grounding_repeated_observe_request_becomes_grounded() -> None:
@@ -2438,6 +3362,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
                 llm_model="mock",
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
@@ -2510,6 +3435,7 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
         ):
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
@@ -2591,9 +3517,15 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=DEFAULT_LIVE_MODEL, help="OpenAI model name")
     parser.add_argument(
         "--reasoning-mode",
-        default="hybrid",
+        default="multi_turn",
         choices=("multi_turn", "hybrid"),
         help="Bridge reasoning mode to run in the dry-run harness",
+    )
+    parser.add_argument(
+        "--focus",
+        default="full",
+        choices=("full", "primitive_generation"),
+        help="Run the full harness or start directly from the known Case 3 primitive-generation outline",
     )
     parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifacts")
     parser.add_argument(
@@ -2614,6 +3546,7 @@ if __name__ == "__main__":
             write_debug=not args.no_debug,
             llm_model=args.model,
             reasoning_mode=args.reasoning_mode,
+            focus=args.focus,
         )
     )
 

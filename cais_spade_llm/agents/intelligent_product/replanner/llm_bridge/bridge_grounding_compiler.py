@@ -246,6 +246,32 @@ def _known_location_tokens(
         current_location = str(resource_row.get("current_location") or "").strip()
         if current_location:
             location_tokens.append(current_location)
+        for field_name in ("reachability", "reachable_locations", "known_locations"):
+            location_tokens.extend(
+                str(token).strip()
+                for token in (resource_row.get(field_name) or [])
+                if str(token).strip()
+            )
+        staging_areas = dict(resource_row.get("staging_areas") or {})
+        for name, staging_row in staging_areas.items():
+            clean_name = str(name).strip()
+            if not clean_name or not isinstance(staging_row, dict):
+                continue
+            location_tokens.extend([clean_name, f"{clean_name}@anchor"])
+            anchor_pose = dict(
+                staging_row.get("anchor_pose")
+                or staging_row.get("board_center")
+                or {}
+            )
+            coords: list[str] = []
+            for axis in ("x", "y", "z"):
+                try:
+                    coords.append(f"{axis}={float(anchor_pose.get(axis)):.2f}")
+                except (TypeError, ValueError):
+                    coords = []
+                    break
+            if coords:
+                location_tokens.append(f"{clean_name}@anchor({','.join(coords)})")
     return _dedupe_tokens(location_tokens)
 
 
@@ -1134,6 +1160,7 @@ def _binding_token_findings(
     part_row: dict[str, Any],
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
+    location_validation_mode: str = "strict",
 ) -> list[dict[str, Any]]:
     action_target = _task_action_target(task)
     start_state = dict(task.get("expected_start_state") or {})
@@ -1216,6 +1243,18 @@ def _binding_token_findings(
             part_name=part_name,
         )
     )
+
+    # In relaxed mode, collect goal/origin locations that must still be exact.
+    _critical_locations: set[str] = set()
+    if location_validation_mode == "relaxed":
+        for _pn, _pr in (parts_by_name or {}).items():
+            if not isinstance(_pr, dict):
+                continue
+            for _fl in ("goal_location", "origin_location"):
+                _loc = str(_pr.get(_fl) or "").strip()
+                if _loc:
+                    _critical_locations.add(_loc)
+
     for field_name, raw_token in location_candidates:
         token = str(raw_token or "").strip()
         if not token:
@@ -1223,6 +1262,10 @@ def _binding_token_findings(
         if part_row:
             token = _canonicalize_observed_pose_location_token(token, part_row=part_row)
         if token and token not in known_locations:
+            if location_validation_mode == "relaxed" and token not in _critical_locations:
+                # Accept as abstract location intent — deferred to primitive
+                # generation for concrete grounding.
+                continue
             return [
                 _binding_finding(
                     task=task,
@@ -1246,6 +1289,7 @@ def compile_grounded_outline_task(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     outline_contract: dict[str, Any] | None = None,
+    location_validation_mode: str = "strict",
 ) -> dict[str, Any]:
     task_id = str(task.get("outline_id") or "").strip()
     resource_jid = str(task.get("resource_jid") or "").strip()
@@ -1350,6 +1394,7 @@ def compile_grounded_outline_task(
         part_row=dict(parts_by_name.get(effective_part_name) or {}),
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
+        location_validation_mode=location_validation_mode,
     )
     if binding_token_findings:
         return {
