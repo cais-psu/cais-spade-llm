@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import re
 import time
@@ -25,6 +26,38 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
     2. requirement nodes → executable task DAG   (expand_requirements_to_tasks)
     """
 
+    _SOURCE_LOCATION_KEYS = (
+        "origin",
+        "origin_resource_location",
+        "source_location",
+        "current_location",
+        "location",
+    )
+    _DESTINATION_LOCATION_KEYS = (
+        "destination",
+        "destination_location",
+        "location_to",
+        "fixture_name",
+    )
+    _POSE_PARAM_KEYS = (
+        "pose",
+        "target_pose",
+        "observed_pose",
+        "location_pose",
+        "part_pose",
+        "placement_pose",
+    )
+    _ASSEMBLY_DESTINATION_ALIASES = frozenset(
+        {
+            "assembly station",
+            "assembly board",
+            "assembly-board",
+            "assembly_board",
+            "assembly cell",
+            "assembly table",
+        }
+    )
+
     def __init__(self, product_agent, resource_agents: Iterable[Any]):
         """Initialize planner state with agent references and empty node graphs."""
         self.product_agent = product_agent
@@ -32,8 +65,551 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self.logger = product_agent.logger
         self.nodes: List[Dict[str, Any]] = []
         self.phase_to_node: Dict[str, Dict[str, Any]] = {}
+        self.requirement_nodes: List[Dict[str, Any]] = []
+        self.requirement_lookup: Dict[str, Dict[str, Any]] = {}
         self.global_fsa: Optional[Dict[str, Any]] = None
         self.last_bridge_debug: Dict[str, Any] = {}
+        self.last_grounding_summary: Dict[str, Any] = self._empty_grounding_summary()
+
+    @staticmethod
+    def _empty_grounding_summary() -> dict[str, Any]:
+        return {
+            "corrected_task_count": 0,
+            "invalid_task_count": 0,
+            "unresolved_task_count": 0,
+            "findings": [],
+        }
+
+    def _set_requirement_state(self, nodes: list[dict[str, Any]]) -> None:
+        copied = [
+            deepcopy(node)
+            for node in nodes
+            if isinstance(node, dict) and node.get("type") == "requirement"
+        ]
+        self.requirement_nodes = copied
+        self.requirement_lookup = {
+            str(node.get("id", "")).strip(): node
+            for node in copied
+            if str(node.get("id", "")).strip()
+        }
+
+    def get_last_grounding_summary(self) -> dict[str, Any]:
+        return deepcopy(self.last_grounding_summary)
+
+    def load_requirements(self, path: Path | str) -> None:
+        p = Path(path)
+        if not p.exists():
+            self.logger.warning(f"[Planner] Requirement file missing: {p}")
+            return
+        with p.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        raw_nodes = payload.get("nodes", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_nodes, list):
+            self.logger.warning(f"[Planner] Invalid requirement payload in {p}")
+            return
+        self._set_requirement_state(raw_nodes)
+        self.last_grounding_summary = self._empty_grounding_summary()
+        self.logger.debug(
+            "[Planner] Loaded %d requirement node(s) from %s",
+            len(self.requirement_nodes),
+            p.resolve(),
+        )
+
+    @staticmethod
+    def _normalize_location_token(value: Any) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        if "@" in token:
+            token = token.split("@", 1)[0]
+        token = token.rstrip(".,:;")
+        token = re.sub(r"\s+", " ", token).strip()
+        return token.lower()
+
+    @classmethod
+    def _normalize_location_alias(cls, value: Any) -> str:
+        token = cls._normalize_location_token(value)
+        token = token.replace("_", " ").replace("-", " ")
+        token = re.sub(r"\s+", " ", token).strip()
+        return token
+
+    def _active_product_token(self) -> str:
+        for candidate in (
+            getattr(self.product_agent, "name", ""),
+            getattr(self.product_agent, "jid", ""),
+        ):
+            token = str(candidate or "").strip()
+            if not token:
+                continue
+            if "@" in token:
+                token = token.split("@", 1)[0]
+            token = token.strip()
+            if token:
+                return token
+        return ""
+
+    def _known_location_tokens(self) -> list[str]:
+        tokens: list[str] = []
+        seen: set[str] = set()
+
+        def _append(value: Any) -> None:
+            token = str(value or "").strip()
+            normalized = self._normalize_location_token(token)
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            tokens.append(token.split("@", 1)[0].strip() if "@" in token else token)
+
+        active_product = self._active_product_token()
+        if active_product:
+            _append(active_product)
+        for resource in self.resource_agents:
+            static_caps = getattr(resource, "static_capabilities", {}) or {}
+            for value in static_caps.get("reachability", []) or []:
+                _append(value)
+        return tokens
+
+    @staticmethod
+    def _first_non_empty_string(*values: Any) -> str:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            token = value.strip()
+            if token:
+                return token
+        return ""
+
+    @classmethod
+    def _first_location_value(
+        cls,
+        mapping: dict[str, Any] | None,
+        keys: tuple[str, ...],
+    ) -> Any:
+        if not isinstance(mapping, dict):
+            return None
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, str):
+                if value.strip():
+                    return value.strip()
+                continue
+            if value not in (None, "", [], {}):
+                return deepcopy(value)
+        return None
+
+    def _canonical_location_token(
+        self,
+        value: Any,
+        *,
+        known_location_tokens: list[str] | None = None,
+        active_product_token: str = "",
+    ) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        if "@" in token:
+            token = token.split("@", 1)[0]
+        token = token.rstrip(".,:;").strip()
+        normalized = self._normalize_location_token(token)
+        if not normalized:
+            return ""
+
+        known_lookup: dict[str, str] = {}
+        for candidate in known_location_tokens or []:
+            candidate_token = str(candidate or "").strip()
+            candidate_normalized = self._normalize_location_token(candidate_token)
+            if candidate_normalized and candidate_normalized not in known_lookup:
+                known_lookup[candidate_normalized] = candidate_token
+        if active_product_token:
+            active_norm = self._normalize_location_token(active_product_token)
+            if active_norm and active_norm not in known_lookup:
+                known_lookup[active_norm] = active_product_token
+
+        if normalized in known_lookup:
+            return known_lookup[normalized]
+
+        alias = self._normalize_location_alias(token)
+        if active_product_token and alias in self._ASSEMBLY_DESTINATION_ALIASES:
+            return active_product_token
+
+        return token
+
+    @staticmethod
+    def _coerce_pose_dict(value: Any) -> dict[str, float] | None:
+        if not isinstance(value, dict):
+            return None
+        if not {"x", "y", "z"} <= set(value.keys()):
+            return None
+        try:
+            pose = {
+                "x": float(value["x"]),
+                "y": float(value["y"]),
+                "z": float(value["z"]),
+            }
+        except (TypeError, ValueError):
+            return None
+        for key in ("qx", "qy", "qz", "qw"):
+            if key in value:
+                try:
+                    pose[key] = float(value[key])
+                except (TypeError, ValueError):
+                    continue
+        return pose
+
+    @classmethod
+    def _extract_coordinate_pose(cls, params: dict[str, Any] | None) -> dict[str, float] | None:
+        if not isinstance(params, dict):
+            return None
+        direct_pose = cls._coerce_pose_dict(params)
+        if direct_pose is not None:
+            return direct_pose
+        for key in cls._POSE_PARAM_KEYS:
+            pose = cls._coerce_pose_dict(params.get(key))
+            if pose is not None:
+                return pose
+        for value in params.values():
+            pose = cls._coerce_pose_dict(value)
+            if pose is not None:
+                return pose
+        return None
+
+    @staticmethod
+    def _pose_within_workspace_bounds(
+        pose: dict[str, float] | None,
+        bounds: dict[str, Any] | None,
+    ) -> bool:
+        if pose is None or not isinstance(bounds, dict):
+            return False
+        try:
+            return (
+                float(bounds["x_min_m"]) <= float(pose["x"]) <= float(bounds["x_max_m"])
+                and float(bounds["y_min_m"]) <= float(pose["y"]) <= float(bounds["y_max_m"])
+                and float(bounds["z_min_m"]) <= float(pose["z"]) <= float(bounds["z_max_m"])
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _resource_supports_function(
+        self,
+        *,
+        resource_jid: str,
+        function_name: str,
+        tools_catalog: list[dict[str, Any]],
+    ) -> bool:
+        target_resource = self._resource_short_name(resource_jid)
+        fallback_ownerless = False
+        for row in tools_catalog or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("function", "")).strip() != str(function_name or "").strip():
+                continue
+            owner = self._resource_short_name(str(row.get("function_owner_agent", "")).strip())
+            if owner and owner == target_resource:
+                return True
+            if not owner:
+                fallback_ownerless = True
+        return fallback_ownerless
+
+    def _grounding_tool_metadata(
+        self,
+        *,
+        task: dict[str, Any],
+        tools_catalog: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        tool_row = self._tool_row_for_task(
+            resource_jid=str(task.get("resource_jid", "")).strip(),
+            function_name=str(task.get("function_name", "")).strip(),
+            tools_catalog=tools_catalog,
+        )
+        task_required_context = task.get("required_context_keys")
+        required_context_keys = (
+            list(task_required_context)
+            if isinstance(task_required_context, list)
+            else list(tool_row.get("required_context_keys") or [])
+        )
+        task_context_mapping = task.get("context_mapping")
+        context_mapping = (
+            dict(task_context_mapping)
+            if isinstance(task_context_mapping, dict)
+            else dict(tool_row.get("context_mapping") or {})
+        )
+        location_param = str(context_mapping.get("location_param") or "").strip()
+        location_type = str(context_mapping.get("location_type") or "").strip()
+
+        binding = ""
+        for key in required_context_keys:
+            normalized_key = self._normalize_location_token(key)
+            if normalized_key in self._SOURCE_LOCATION_KEYS:
+                binding = "source"
+                break
+            if normalized_key in self._DESTINATION_LOCATION_KEYS:
+                binding = "destination"
+                break
+        if not binding and location_param:
+            normalized_param = self._normalize_location_token(location_param)
+            if normalized_param in self._SOURCE_LOCATION_KEYS:
+                binding = "source"
+            elif normalized_param in self._DESTINATION_LOCATION_KEYS:
+                binding = "destination"
+        if not binding and location_type == "reachable_location":
+            binding = "destination"
+
+        is_location_bound = bool(required_context_keys or location_param or location_type)
+        return {
+            "tool_row": tool_row,
+            "required_context_keys": required_context_keys,
+            "context_mapping": context_mapping,
+            "location_param": location_param,
+            "location_type": location_type,
+            "binding": binding,
+            "is_location_bound": is_location_bound,
+        }
+
+    def _allowed_resource_jids_for_task(
+        self,
+        *,
+        grounded_location: str,
+        explicit_pose: dict[str, float] | None,
+        function_name: str,
+        tools_catalog: list[dict[str, Any]],
+    ) -> list[str]:
+        allowed: list[str] = []
+        normalized_target = self._normalize_location_token(grounded_location)
+
+        if normalized_target:
+            for resource in self.resource_agents:
+                resource_jid = str(getattr(resource, "jid", "")).strip()
+                if not self._resource_supports_function(
+                    resource_jid=resource_jid,
+                    function_name=function_name,
+                    tools_catalog=tools_catalog,
+                ):
+                    continue
+                static_caps = getattr(resource, "static_capabilities", {}) or {}
+                reachability = static_caps.get("reachability", []) or []
+                if any(
+                    self._normalize_location_token(item) == normalized_target
+                    for item in reachability
+                    if isinstance(item, str)
+                ):
+                    allowed.append(resource_jid)
+            if allowed:
+                return allowed
+
+        if explicit_pose is not None:
+            for resource in self.resource_agents:
+                resource_jid = str(getattr(resource, "jid", "")).strip()
+                if not self._resource_supports_function(
+                    resource_jid=resource_jid,
+                    function_name=function_name,
+                    tools_catalog=tools_catalog,
+                ):
+                    continue
+                static_caps = getattr(resource, "static_capabilities", {}) or {}
+                bounds = static_caps.get("workspace_bounds")
+                if self._pose_within_workspace_bounds(explicit_pose, bounds):
+                    allowed.append(resource_jid)
+        return allowed
+
+    def apply_offline_requirement_grounding(self) -> dict[str, Any]:
+        tools_catalog = list(getattr(self.product_agent, "tools_catalog", []) or [])
+        known_location_tokens = self._known_location_tokens()
+        active_product_token = self._active_product_token()
+        findings: list[dict[str, Any]] = []
+        corrected_task_count = 0
+        invalid_task_count = 0
+        unresolved_task_count = 0
+        graph_changed = False
+
+        for node in self.nodes:
+            if not isinstance(node, dict) or node.get("type") != "task":
+                continue
+
+            params = node.get("params")
+            if not isinstance(params, dict):
+                params = {}
+                node["params"] = params
+
+            task_id = str(node.get("id", "")).strip()
+            requirement_id = str(node.get("requirement_id", "")).strip()
+            requirement = self.requirement_lookup.get(requirement_id) or {}
+            requirement_context = (
+                dict(requirement.get("context") or {})
+                if isinstance(requirement, dict)
+                else {}
+            )
+
+            part_name = self._first_non_empty_string(
+                params.get("part_name"),
+                requirement_context.get("part_name"),
+                requirement.get("product"),
+                node.get("part_name"),
+            )
+            source_value = self._first_location_value(
+                requirement_context,
+                self._SOURCE_LOCATION_KEYS,
+            )
+            if source_value is None:
+                source_value = self._first_location_value(params, self._SOURCE_LOCATION_KEYS)
+            destination_value = self._first_location_value(
+                requirement_context,
+                self._DESTINATION_LOCATION_KEYS,
+            )
+            if destination_value is None:
+                destination_value = self._first_location_value(params, self._DESTINATION_LOCATION_KEYS)
+
+            origin = self._canonical_location_token(
+                source_value,
+                known_location_tokens=known_location_tokens,
+                active_product_token=active_product_token,
+            ) if isinstance(source_value, str) else ""
+            destination = self._canonical_location_token(
+                destination_value,
+                known_location_tokens=known_location_tokens,
+                active_product_token=active_product_token,
+            ) if isinstance(destination_value, str) else ""
+
+            meta = self._grounding_tool_metadata(task=node, tools_catalog=tools_catalog)
+            location_param = str(meta.get("location_param") or "").strip()
+            binding = str(meta.get("binding") or "").strip()
+            explicit_pose = self._extract_coordinate_pose(params)
+
+            grounded_location = ""
+            if binding == "source":
+                grounded_location = origin
+            elif binding == "destination":
+                grounded_location = destination
+            if not grounded_location and location_param:
+                param_value = params.get(location_param)
+                if isinstance(param_value, str):
+                    grounded_location = self._canonical_location_token(
+                        param_value,
+                        known_location_tokens=known_location_tokens,
+                        active_product_token=active_product_token,
+                    )
+
+            requested_resource_jid = str(node.get("resource_jid", "")).strip()
+            resolved_resource_jid = requested_resource_jid
+            hint_resource = str(requirement_context.get("resource") or "").strip()
+            allowed_resource_jids: list[str] = []
+            status = "unchanged"
+            reasons: list[str] = []
+            task_changed = False
+
+            if location_param:
+                if grounded_location:
+                    current_param_value = params.get(location_param)
+                    current_param_text = (
+                        str(current_param_value).strip()
+                        if isinstance(current_param_value, str)
+                        else ""
+                    )
+                    if current_param_text != grounded_location:
+                        params[location_param] = grounded_location
+                        task_changed = True
+                        reasons.append(
+                            f"filled {location_param} from requirement grounding"
+                            if not current_param_text
+                            else f"normalized {location_param} to canonical location token"
+                        )
+                elif isinstance(params.get(location_param), str):
+                    canonical_param = self._canonical_location_token(
+                        params.get(location_param),
+                        known_location_tokens=known_location_tokens,
+                        active_product_token=active_product_token,
+                    )
+                    if canonical_param and canonical_param != str(params.get(location_param)).strip():
+                        params[location_param] = canonical_param
+                        grounded_location = canonical_param
+                        task_changed = True
+                        reasons.append(f"normalized {location_param} to canonical location token")
+
+            allowed_resource_jids = self._allowed_resource_jids_for_task(
+                grounded_location=grounded_location,
+                explicit_pose=explicit_pose,
+                function_name=str(node.get("function_name", "")).strip(),
+                tools_catalog=tools_catalog,
+            )
+
+            if not meta.get("is_location_bound"):
+                status = "unresolved"
+                unresolved_task_count += 1
+                reasons.append("task is not location-bound under current tool metadata")
+            elif not grounded_location and explicit_pose is None:
+                status = "unresolved"
+                unresolved_task_count += 1
+                reasons.append("could not derive a grounded symbolic location or explicit coordinates")
+            elif not allowed_resource_jids:
+                status = "invalid"
+                invalid_task_count += 1
+                if grounded_location:
+                    reasons.append("no resource reachability matches grounded location")
+                else:
+                    reasons.append("no resource workspace_bounds contains explicit coordinates")
+            elif len(allowed_resource_jids) == 1:
+                unique_resource = allowed_resource_jids[0]
+                resolved_resource_jid = unique_resource
+                if requested_resource_jid != unique_resource:
+                    node["resource_jid"] = unique_resource
+                    task_changed = True
+                    reasons.append("exclusive reachability determined a unique resource")
+                else:
+                    reasons.append("existing resource already matches exclusive reachability")
+            else:
+                if requested_resource_jid:
+                    reasons.append("multiple resources can reach the grounded location; keeping existing assignment")
+                else:
+                    status = "unresolved"
+                    unresolved_task_count += 1
+                    reasons.append("multiple resources can reach the grounded location and no existing assignment is set")
+
+            if hint_resource and resolved_resource_jid:
+                if self._resource_short_name(hint_resource) != self._resource_short_name(resolved_resource_jid):
+                    reasons.append("LLM resource hint disagrees with deterministic grounding")
+
+            if status not in {"invalid", "unresolved"}:
+                if task_changed:
+                    status = "corrected"
+                    corrected_task_count += 1
+                    graph_changed = True
+                else:
+                    status = "unchanged"
+            elif task_changed:
+                graph_changed = True
+
+            findings.append(
+                {
+                    "task_id": task_id,
+                    "requirement_id": requirement_id,
+                    "function_name": str(node.get("function_name", "")).strip(),
+                    "part_name": part_name or None,
+                    "origin": origin or None,
+                    "destination": destination or None,
+                    "requested_resource_jid": requested_resource_jid or None,
+                    "hint_resource": hint_resource or None,
+                    "resolved_resource_jid": resolved_resource_jid or None,
+                    "allowed_resource_jids": allowed_resource_jids,
+                    "status": status,
+                    "reason": "; ".join(reasons) if reasons else "",
+                }
+            )
+
+        summary = {
+            "corrected_task_count": corrected_task_count,
+            "invalid_task_count": invalid_task_count,
+            "unresolved_task_count": unresolved_task_count,
+            "findings": findings,
+        }
+        self.last_grounding_summary = summary
+        if graph_changed:
+            self.global_fsa = None
+        self.logger.info(
+            "[Planner] Offline grounding summary: corrected=%d invalid=%d unresolved=%d",
+            corrected_task_count,
+            invalid_task_count,
+            unresolved_task_count,
+        )
+        return deepcopy(summary)
 
     # ------------------------------------------------------------------ #
     # 1. NL → High-level requirements
@@ -54,6 +630,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         # Reset state
         self.nodes.clear()
         self.phase_to_node.clear()
+        self.requirement_nodes = []
+        self.requirement_lookup = {}
+        self.last_grounding_summary = self._empty_grounding_summary()
 
         try:
             structured = await self._llm_parse_requirements(
@@ -87,6 +666,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
             self.nodes.append(node)
 
+        self._set_requirement_state(self.nodes)
+
         msg = f"[Planner] Parsed {len(structured)} requirement(s) via LLM."
         self.logger.info(msg)
         return msg
@@ -105,6 +686,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         prompt = build_requirement_parse_prompt(
             requirement_text,
             tools_catalog,
+            known_location_tokens=self._known_location_tokens(),
+            active_product_token=self._active_product_token(),
             refinement_feedback=refinement_feedback,
             previous_preview_requirements=previous_preview_requirements,
         )
@@ -269,6 +852,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 nxt["predecessors"].append(prev["id"])
 
         self.nodes = new_nodes
+        self.apply_offline_requirement_grounding()
         self.logger.info(
             "[Planner] Expanded to %d LLM-generated task node(s).",
             len(self.nodes),
@@ -1161,6 +1745,12 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             safety_text=self.product_agent.safety_text,
             system_state=None,
         )
+        self._dump_offline_replan_prompt_debug(
+            prompt=prompt,
+            violations=violations,
+            resource_infos=resource_infos,
+            system_state=None,
+        )
         raw = await self.product_agent.ask_llm(prompt=prompt, with_functions=False, temperature=0.0)
         self._dump_replan_debug(source="offline", prompt=prompt, violations=violations,
                                 resource_infos=resource_infos, system_state=None, llm_response=raw)
@@ -1170,6 +1760,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 self.logger.warning("[Planner] LLM returned no modified tasks.")
                 return
             self._apply_replan_patch(modified_tasks)
+            self.apply_offline_requirement_grounding()
+            if hasattr(self.product_agent, "plan_path"):
+                self.save(self.product_agent.plan_path)
         except json.JSONDecodeError as exc:
             self.logger.error("[Planner] LLM replanning returned invalid JSON: %s", exc)
 
@@ -1898,6 +2491,70 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
     # ------------------------------------------------------------------ #
     # Debug helpers
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _project_root() -> Path:
+        """Resolve the repository root so debug files are not tied to the launch cwd."""
+        for parent in Path(__file__).resolve().parents:
+            if (parent / "pyproject.toml").exists():
+                return parent
+        return Path.cwd()
+
+    @staticmethod
+    def _markdown_text_block(text: str, language: str = "text") -> str:
+        """Use a 4-backtick fence so prompts containing ```json remain readable."""
+        return f"````{language}\n{text}\n````"
+
+    @staticmethod
+    def _json_block(obj: Any) -> str:
+        return "```json\n" + json.dumps(obj, indent=2, default=str) + "\n```"
+
+    def _dump_offline_replan_prompt_debug(
+        self,
+        *,
+        prompt: str,
+        violations: list,
+        resource_infos: list,
+        system_state: dict | None,
+    ) -> None:
+        """Write the exact offline replanning feedback prompt to repo-root debug/."""
+        try:
+            debug_dir = self._project_root() / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            now = datetime.now(timezone.utc)
+            ts = now.strftime("%Y%m%dT%H%M%S%f")
+            fname = debug_dir / f"offline_replanning_feedback_prompt_{ts}.md"
+
+            lines = [
+                "# Offline Replanning Feedback Prompt",
+                "",
+                f"- Generated: {now.isoformat()}",
+                "- Source: offline FSA/DFA validation feedback",
+                "- Purpose: reproducibility artifact showing the exact prompt and violation-trace formatting sent to the LLM.",
+                "",
+                "## Violation Trace Payload",
+                "",
+                self._json_block(violations),
+                "",
+                "## Resource Agents",
+                "",
+                self._json_block(resource_infos),
+                "",
+                "## System State",
+                "",
+                self._json_block(system_state) if system_state else "_No system state (offline replan)._",
+                "",
+                "## Rendered Prompt Sent To LLM",
+                "",
+                self._markdown_text_block(prompt),
+                "",
+            ]
+
+            fname.write_text("\n".join(lines), encoding="utf-8")
+            self.logger.info("[Planner] Offline replan prompt debug artifact written to %s", fname)
+        except Exception:
+            self.logger.exception("[Planner] Failed to write offline replan prompt debug artifact.")
+
     def _dump_replan_debug(
         self,
         *,
@@ -1917,9 +2574,6 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             suffix = "response" if llm_response is not None else "input"
             fname = debug_dir / f"replan_{source}_{ts}_{suffix}.md"
 
-            def _json_block(obj: Any) -> str:
-                return "```json\n" + json.dumps(obj, indent=2, default=str) + "\n```"
-
             lines = [
                 f"# Replan Debug — {source.upper()} | {datetime.now(timezone.utc).isoformat()}",
                 "",
@@ -1927,21 +2581,19 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 "",
                 "## Violations (what triggered the replan)",
                 "",
-                _json_block(violations),
+                self._json_block(violations),
                 "",
                 "## Resource Agents (capabilities available to LLM)",
                 "",
-                _json_block(resource_infos),
+                self._json_block(resource_infos),
                 "",
                 "## System State (runtime context: robot states, part tracker, timeline)",
                 "",
-                _json_block(system_state) if system_state else "_No system state (offline replan)._",
+                self._json_block(system_state) if system_state else "_No system state (offline replan)._",
                 "",
                 "## Prompt (full text sent to LLM)",
                 "",
-                "```",
-                prompt,
-                "```",
+                self._markdown_text_block(prompt),
                 "",
             ]
 
@@ -1949,15 +2601,13 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 lines += [
                     "## LLM Response (raw)",
                     "",
-                    "```",
-                    llm_response,
-                    "```",
+                    self._markdown_text_block(llm_response),
                     "",
                     "## LLM Response (parsed)",
                     "",
                 ]
                 try:
-                    lines.append(_json_block(json.loads(llm_response)))
+                    lines.append(self._json_block(json.loads(llm_response)))
                 except json.JSONDecodeError:
                     lines.append("_Response was not valid JSON._")
                 lines.append("")
@@ -2133,6 +2783,357 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     return cycle
         return []
 
+    @staticmethod
+    def _task_sequence_sort_key(task: dict[str, Any]) -> tuple[int, str]:
+        """Stable task ordering key used as the deterministic tie-break."""
+        seq = task.get("sequence_index", None)
+        return (10**9 if seq is None else int(seq), str(task.get("id", "")))
+
+    @classmethod
+    def _build_task_dependency_index(
+        cls,
+        tasks: list[dict[str, Any]],
+    ) -> tuple[list[str], dict[str, list[str]], dict[str, set[str]]]:
+        """
+        Build reusable task dependency indexes for a validated task DAG.
+
+        Returns:
+          - topological order of task ids
+          - direct successor map
+          - transitive predecessor map keyed by task id
+        """
+        by_id = {str(task["id"]): task for task in tasks}
+        successors: dict[str, list[str]] = {tid: [] for tid in by_id}
+        indegree: dict[str, int] = {tid: 0 for tid in by_id}
+
+        for tid, task in by_id.items():
+            for predecessor_id in task.get("predecessors", []) or []:
+                pid = str(predecessor_id or "").strip()
+                if not pid or pid not in by_id:
+                    continue
+                if tid not in successors[pid]:
+                    successors[pid].append(tid)
+                    indegree[tid] += 1
+
+        for tid in successors:
+            successors[tid].sort(key=lambda sid: cls._task_sequence_sort_key(by_id[sid]))
+
+        ready: list[tuple[tuple[int, str], str]] = [
+            (cls._task_sequence_sort_key(by_id[tid]), tid)
+            for tid, degree in indegree.items()
+            if degree == 0
+        ]
+        heapq.heapify(ready)
+
+        topo_order: list[str] = []
+        while ready:
+            _, tid = heapq.heappop(ready)
+            topo_order.append(tid)
+            for sid in successors.get(tid, []):
+                indegree[sid] -= 1
+                if indegree[sid] == 0:
+                    heapq.heappush(ready, (cls._task_sequence_sort_key(by_id[sid]), sid))
+
+        transitive_predecessors: dict[str, set[str]] = {
+            tid: set() for tid in by_id
+        }
+        for tid in topo_order:
+            for sid in successors.get(tid, []):
+                transitive_predecessors[sid].update(transitive_predecessors[tid])
+                transitive_predecessors[sid].add(tid)
+
+        return topo_order, successors, transitive_predecessors
+
+    @classmethod
+    def _stable_resource_task_order(
+        cls,
+        task_ids: list[str],
+        by_id: dict[str, dict[str, Any]],
+        transitive_predecessors: dict[str, set[str]],
+    ) -> list[str]:
+        """
+        Derive a deterministic per-resource order that honors same-resource
+        dependency paths, while preserving the legacy sequence/id order as the
+        tie-break among otherwise unrelated tasks.
+        """
+        local_ids = list(task_ids)
+        local_id_set = set(local_ids)
+        local_successors: dict[str, list[str]] = {tid: [] for tid in local_ids}
+        local_indegree: dict[str, int] = {tid: 0 for tid in local_ids}
+
+        for tid in local_ids:
+            same_resource_predecessors = sorted(
+                (
+                    pid
+                    for pid in transitive_predecessors.get(tid, set())
+                    if pid in local_id_set
+                ),
+                key=lambda pid: cls._task_sequence_sort_key(by_id[pid]),
+            )
+            for pid in same_resource_predecessors:
+                if tid not in local_successors[pid]:
+                    local_successors[pid].append(tid)
+                    local_indegree[tid] += 1
+
+        ready: list[tuple[tuple[int, str], str]] = [
+            (cls._task_sequence_sort_key(by_id[tid]), tid)
+            for tid, degree in local_indegree.items()
+            if degree == 0
+        ]
+        heapq.heapify(ready)
+
+        ordered: list[str] = []
+        while ready:
+            _, tid = heapq.heappop(ready)
+            ordered.append(tid)
+            for sid in local_successors.get(tid, []):
+                local_indegree[sid] -= 1
+                if local_indegree[sid] == 0:
+                    heapq.heappush(ready, (cls._task_sequence_sort_key(by_id[sid]), sid))
+
+        if len(ordered) != len(local_ids):
+            unresolved = sorted(
+                (tid for tid, degree in local_indegree.items() if degree > 0),
+                key=lambda tid: cls._task_sequence_sort_key(by_id[tid]),
+            )
+            raise ValueError(
+                "failed to derive deterministic same-resource task order for: "
+                + ", ".join(unresolved)
+            )
+
+        return ordered
+
+    @staticmethod
+    def _task_execution_block_key(task: dict[str, Any]) -> str:
+        requirement_id = str(task.get("requirement_id", "")).strip()
+        if requirement_id:
+            return f"requirement:{requirement_id}"
+        task_id = str(task.get("id", "")).strip()
+        return f"task:{task_id}"
+
+    @staticmethod
+    def _task_execution_block_label(task: dict[str, Any]) -> str:
+        requirement_id = str(task.get("requirement_id", "")).strip()
+        if requirement_id:
+            return requirement_id
+        task_id = str(task.get("id", "")).strip()
+        return task_id or "task"
+
+    @classmethod
+    def _stable_resource_block_order(
+        cls,
+        resource_jid: str,
+        task_ids: list[str],
+        by_id: dict[str, dict[str, Any]],
+        transitive_predecessors: dict[str, set[str]],
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """
+        Derive a deterministic per-resource order over requirement-local blocks.
+
+        Each requirement becomes a non-preemptive execution block on that
+        resource. Tasks inside a block keep their dependency-aware order, while
+        blocks are topologically sorted by same-resource cross-block
+        dependencies.
+        """
+        local_ids = list(task_ids)
+        local_id_set = set(local_ids)
+        block_to_tasks: dict[str, list[str]] = defaultdict(list)
+        block_to_label: dict[str, str] = {}
+        block_to_requirement: dict[str, str | None] = {}
+
+        for tid in local_ids:
+            task = by_id[tid]
+            block_id = cls._task_execution_block_key(task)
+            block_to_tasks[block_id].append(tid)
+            block_to_label.setdefault(block_id, cls._task_execution_block_label(task))
+            requirement_id = str(task.get("requirement_id", "")).strip()
+            block_to_requirement.setdefault(block_id, requirement_id or None)
+
+        for block_id, block_task_ids in list(block_to_tasks.items()):
+            block_to_tasks[block_id] = cls._stable_resource_task_order(
+                block_task_ids,
+                by_id,
+                transitive_predecessors,
+            )
+
+        block_ids = list(block_to_tasks.keys())
+        block_successors: dict[str, list[str]] = {block_id: [] for block_id in block_ids}
+        block_indegree: dict[str, int] = {block_id: 0 for block_id in block_ids}
+        block_edge_evidence: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+
+        def block_sort_key(block_id: str) -> tuple[tuple[int, str], str, str]:
+            first_task_key = min(
+                cls._task_sequence_sort_key(by_id[tid])
+                for tid in block_to_tasks.get(block_id, [])
+            )
+            return (first_task_key, str(block_to_label.get(block_id, "")), block_id)
+
+        for block_id, block_task_ids in block_to_tasks.items():
+            predecessor_block_id_set: set[str] = set()
+            for tid in block_task_ids:
+                for pid in transitive_predecessors.get(tid, set()):
+                    if pid not in local_id_set:
+                        continue
+                    predecessor_block_id = cls._task_execution_block_key(by_id[pid])
+                    if predecessor_block_id == block_id:
+                        continue
+                    predecessor_block_id_set.add(predecessor_block_id)
+                    block_edge_evidence[(predecessor_block_id, block_id)].append((pid, tid))
+            predecessor_block_ids = sorted(predecessor_block_id_set, key=block_sort_key)
+            for predecessor_block_id in predecessor_block_ids:
+                if block_id not in block_successors[predecessor_block_id]:
+                    block_successors[predecessor_block_id].append(block_id)
+                    block_indegree[block_id] += 1
+
+        ready: list[tuple[tuple[tuple[int, str], str, str], str]] = [
+            (block_sort_key(block_id), block_id)
+            for block_id, degree in block_indegree.items()
+            if degree == 0
+        ]
+        heapq.heapify(ready)
+
+        ordered_block_ids: list[str] = []
+        while ready:
+            _, block_id = heapq.heappop(ready)
+            ordered_block_ids.append(block_id)
+            for successor_block_id in block_successors.get(block_id, []):
+                block_indegree[successor_block_id] -= 1
+                if block_indegree[successor_block_id] == 0:
+                    heapq.heappush(
+                        ready,
+                        (block_sort_key(successor_block_id), successor_block_id),
+                    )
+
+        if len(ordered_block_ids) != len(block_ids):
+            unresolved_block_ids = sorted(
+                (block_id for block_id, degree in block_indegree.items() if degree > 0),
+                key=lambda block_id: str(block_to_label.get(block_id, block_id)),
+            )
+            unresolved = [
+                str(block_to_label.get(block_id, block_id))
+                for block_id in unresolved_block_ids
+            ]
+            unresolved_set = set(unresolved_block_ids)
+            evidence_parts: list[str] = []
+            for predecessor_block_id in unresolved_block_ids:
+                for successor_block_id in sorted(
+                    block_successors.get(predecessor_block_id, []),
+                    key=lambda block_id: str(block_to_label.get(block_id, block_id)),
+                ):
+                    if successor_block_id not in unresolved_set:
+                        continue
+                    evidence = sorted(
+                        block_edge_evidence.get((predecessor_block_id, successor_block_id), []),
+                        key=lambda item: (
+                            cls._task_sequence_sort_key(by_id[item[0]]),
+                            cls._task_sequence_sort_key(by_id[item[1]]),
+                        ),
+                    )
+                    if evidence:
+                        pid, tid = evidence[0]
+                        evidence_parts.append(
+                            f"{block_to_label.get(predecessor_block_id, predecessor_block_id)}"
+                            f" -> {block_to_label.get(successor_block_id, successor_block_id)}"
+                            f" via {pid} -> {tid}"
+                        )
+                    else:
+                        evidence_parts.append(
+                            f"{block_to_label.get(predecessor_block_id, predecessor_block_id)}"
+                            f" -> {block_to_label.get(successor_block_id, successor_block_id)}"
+                        )
+            evidence_text = (
+                "; block dependency evidence: " + "; ".join(evidence_parts)
+                if evidence_parts
+                else ""
+            )
+            raise ValueError(
+                "failed to derive deterministic same-resource requirement block order "
+                f"for {resource_jid}: " + ", ".join(unresolved) + evidence_text
+            )
+
+        ordered_task_ids: list[str] = []
+        block_records: list[dict[str, Any]] = []
+        for block_id in ordered_block_ids:
+            block_task_ids = list(block_to_tasks.get(block_id, []))
+            ordered_task_ids.extend(block_task_ids)
+            block_records.append(
+                {
+                    "block_id": block_id,
+                    "label": str(block_to_label.get(block_id, block_id)),
+                    "requirement_id": block_to_requirement.get(block_id),
+                    "task_ids": block_task_ids,
+                }
+            )
+
+        return ordered_task_ids, block_records
+
+    @classmethod
+    def _build_resource_execution_layout(
+        cls,
+        tasks: list[dict[str, Any]],
+        by_id: dict[str, dict[str, Any]],
+        transitive_predecessors: dict[str, set[str]],
+    ) -> tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]], dict[str, str]]:
+        """
+        Build the per-resource non-preemptive execution layout used by both the
+        runtime scheduler and the compiled FSA.
+        """
+        resource_task_ids: dict[str, list[str]] = defaultdict(list)
+        for task in tasks:
+            resource_jid = str(task.get("resource_jid", "")).strip()
+            if not resource_jid:
+                raise ValueError(f"Task {task.get('id')} missing resource_jid.")
+            resource_task_ids[resource_jid].append(str(task["id"]))
+
+        res_to_tasks: dict[str, list[str]] = {}
+        res_to_blocks: dict[str, list[dict[str, Any]]] = {}
+        task_to_block: dict[str, str] = {}
+
+        for resource_jid in sorted(resource_task_ids.keys()):
+            ordered_task_ids, block_records = cls._stable_resource_block_order(
+                resource_jid,
+                resource_task_ids[resource_jid],
+                by_id,
+                transitive_predecessors,
+            )
+            res_to_tasks[resource_jid] = ordered_task_ids
+            res_to_blocks[resource_jid] = block_records
+            for block in block_records:
+                block_id = str(block.get("block_id", "")).strip()
+                for task_id in block.get("task_ids", []) or []:
+                    task_to_block[str(task_id)] = block_id
+
+        return res_to_tasks, res_to_blocks, task_to_block
+
+    @staticmethod
+    def _dependency_path(
+        source_task_id: str,
+        target_task_id: str,
+        successors: dict[str, list[str]],
+    ) -> list[str]:
+        """Return one dependency path source -> ... -> target for diagnostics."""
+        source = str(source_task_id or "").strip()
+        target = str(target_task_id or "").strip()
+        if not source or not target:
+            return []
+        if source == target:
+            return [source]
+
+        frontier: deque[tuple[str, list[str]]] = deque([(source, [source])])
+        visited = {source}
+
+        while frontier:
+            current, path = frontier.popleft()
+            for sid in successors.get(current, []):
+                if sid == target:
+                    return path + [sid]
+                if sid in visited:
+                    continue
+                visited.add(sid)
+                frontier.append((sid, path + [sid]))
+
+        return []
+
     def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Return the first node with the matching id (or None)."""
         for n in self.nodes:
@@ -2142,8 +3143,25 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
         """Select the next task whose predecessors are all satisfied."""
+        tasks = [n for n in self.nodes if n.get("type") == "task"]
+        if not tasks:
+            return None
+
+        self._validate_task_graph(self.nodes)
+        by_id = {
+            str(node.get("id", "")).strip(): node
+            for node in tasks
+            if str(node.get("id", "")).strip()
+        }
+        _, _, transitive_predecessors = self._build_task_dependency_index(tasks)
+        res_to_tasks, _, _ = self._build_resource_execution_layout(
+            tasks,
+            by_id,
+            transitive_predecessors,
+        )
+
         def _pred_satisfied(status: Any) -> bool:
-            s = str(status) if status else ""
+            s = str(status or "").strip().lower()
             return s == "completed"
 
         def _pred_ready(pred_id: str) -> bool:
@@ -2152,13 +3170,43 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 return False
             return _pred_satisfied(pred.get("status"))
 
-        for node in self.nodes:
-            if node.get("type") != "task":
-                continue
-            if node.get("status") != "pending":
+        def _status_bucket(status: Any) -> str:
+            text = str(status or "").strip().lower()
+            if text == "completed":
+                return "completed"
+            if any(marker in text for marker in ("running", "dispatched", "accepted")):
+                return "active"
+            if "pending" in text:
+                return "pending"
+            if "blocked" in text:
+                return "blocked"
+            if any(marker in text for marker in ("failed", "error", "fault")):
+                return "failed"
+            return text or "pending"
+
+        for resource_jid in sorted(res_to_tasks.keys()):
+            next_task_id = None
+            for task_id in res_to_tasks.get(resource_jid, []):
+                node = by_id.get(task_id)
+                if node is None:
+                    continue
+                bucket = _status_bucket(node.get("status"))
+                if bucket == "completed":
+                    continue
+                next_task_id = task_id
+                break
+
+            if not next_task_id:
                 continue
 
-            preds = node.get("predecessors", [])
+            node = by_id.get(next_task_id)
+            if node is None:
+                continue
+
+            if _status_bucket(node.get("status")) != "pending":
+                continue
+
+            preds = list(node.get("predecessors", []) or [])
             if not preds:
                 return node
 
@@ -2186,6 +3234,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         with p.open("r", encoding="utf-8") as f:
             payload = json.load(f)
         self.nodes = payload.get("nodes", [])
+        self.last_grounding_summary = self._empty_grounding_summary()
         self.logger.debug(f"[Planner] Loaded plan from {p.resolve()}")
 
     # ------------------------------------------------------------------ #
@@ -2202,6 +3251,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self._validate_task_graph(self.nodes)
 
         by_id = {t["id"]: t for t in tasks}
+        _, task_successors, transitive_predecessors = self._build_task_dependency_index(tasks)
         tools_catalog = list(getattr(self.product_agent, "tools_catalog", []) or [])
 
         def _resource_short_name(value: str) -> str:
@@ -2244,19 +3294,14 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             return catalog_meta
 
         # ---- deterministic per-resource local order ----
-        res_to_tasks: Dict[str, List[str]] = defaultdict(list)
-        for t in tasks:
-            res = t.get("resource_jid")
-            if not res:
-                raise ValueError(f"Task {t.get('id')} missing resource_jid.")
-            res_to_tasks[res].append(t["id"])
+        res_to_tasks, res_to_blocks, _ = self._build_resource_execution_layout(
+            tasks,
+            by_id,
+            transitive_predecessors,
+        )
 
         def sort_key(tid: str):
-            si = by_id[tid].get("sequence_index", None)
-            return (10**9 if si is None else int(si), tid)
-
-        for res in res_to_tasks:
-            res_to_tasks[res].sort(key=sort_key)
+            return self._task_sequence_sort_key(by_id[tid])
 
         resources = sorted(res_to_tasks.keys())
 
@@ -2360,10 +3405,12 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         q = deque([x0])
         name_map = {x0: state_name(x0)}
         transitions = []
+        dead_end_states = []
 
         while q:
             x = q.popleft()
             sx = name_map[x]
+            transition_count = 0
 
             for res in resources:
                 k, run = _get_local(x, res)
@@ -2392,6 +3439,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                             "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
                             "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
                         })
+                        transition_count += 1
 
                 # RUNNING → done
                 else:
@@ -2416,11 +3464,85 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                         "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
                         "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
                     })
+                    transition_count += 1
+
+            if transition_count == 0 and x != x_marked:
+                dead_end_states.append(x)
 
         if x_marked not in name_map:
+            diagnostic_parts: list[str] = []
+            if dead_end_states:
+                dead_end = dead_end_states[0]
+                resource_details: list[str] = []
+                for res in resources:
+                    tid = next_local_task_if_any(dead_end, res)
+                    if tid is None:
+                        continue
+                    if is_next_task_enabled(dead_end, tid):
+                        continue
+
+                    unresolved_predecessors = [
+                        pid
+                        for pid in (by_id[tid].get("predecessors", []) or [])
+                        if pid in by_id and not is_completed(dead_end, pid)
+                    ]
+                    unresolved_bits: list[str] = []
+                    for pid in unresolved_predecessors[:2]:
+                        path = self._dependency_path(pid, tid, task_successors)
+                        if len(path) > 1:
+                            unresolved_bits.append(
+                                f"{pid} {task_sig(pid)} via {' -> '.join(path)}"
+                            )
+                        else:
+                            unresolved_bits.append(f"{pid} {task_sig(pid)}")
+
+                    later_same_resource = sorted(
+                        (
+                            pid
+                            for pid in transitive_predecessors.get(tid, set())
+                            if (
+                                by_id[pid].get("resource_jid") == res
+                                and pos[res][pid] > pos[res][tid]
+                                and not is_completed(dead_end, pid)
+                            )
+                        ),
+                        key=sort_key,
+                    )
+                    later_bits: list[str] = []
+                    for pid in later_same_resource[:2]:
+                        path = self._dependency_path(pid, tid, task_successors)
+                        if len(path) > 1:
+                            later_bits.append(
+                                f"{pid} {task_sig(pid)} via {' -> '.join(path)}"
+                            )
+                        else:
+                            later_bits.append(f"{pid} {task_sig(pid)}")
+
+                    detail = f"{res}: waiting to start {tid} {task_sig(tid)}"
+                    if unresolved_bits:
+                        detail += " until " + ", ".join(unresolved_bits)
+                        if len(unresolved_predecessors) > len(unresolved_bits):
+                            detail += f" (+{len(unresolved_predecessors) - len(unresolved_bits)} more)"
+                    if later_bits:
+                        detail += "; later same-resource prerequisites on dependency path: "
+                        detail += ", ".join(later_bits)
+                        if len(later_same_resource) > len(later_bits):
+                            detail += f" (+{len(later_same_resource) - len(later_bits)} more)"
+                    resource_details.append(detail)
+
+                if resource_details:
+                    diagnostic_parts.append(
+                        f"dead-end state {state_name(dead_end)}"
+                    )
+                    diagnostic_parts.extend(resource_details)
+
+            diagnostic_suffix = ""
+            if diagnostic_parts:
+                diagnostic_suffix = " Diagnostics: " + " | ".join(diagnostic_parts)
             raise ValueError(
                 "Global FSA has no reachable marked state. "
-                "The current task graph likely contains a cycle or an unreachable dependency."
+                "The current task graph likely contains an unreachable dependency."
+                f"{diagnostic_suffix}"
             )
 
         fsa = {
@@ -2433,6 +3555,14 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             },
             "meta": {
                 "resources": resources,
+                "resource_task_order": {
+                    res: list(res_to_tasks.get(res, []))
+                    for res in resources
+                },
+                "resource_requirement_blocks": {
+                    res: [dict(block) for block in res_to_blocks.get(res, [])]
+                    for res in resources
+                },
                 "num_reachable_states": len(visited),
                 "num_transitions": len(transitions),
                 "has_failure_states": False,

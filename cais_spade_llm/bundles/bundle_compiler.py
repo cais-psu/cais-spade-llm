@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,7 @@ from .models import (
 )
 
 log = logging.getLogger("bundles.compiler")
+DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS = 5
 
 
 class BundleCompiler:
@@ -68,6 +70,41 @@ class BundleCompiler:
             raise ValueError("invalid manifest shape")
         return str(first_key), meta
 
+    @staticmethod
+    def _resource_key_from_jid(jid: str) -> str:
+        token = str(jid or "").strip()
+        if "@" in token:
+            token = token.split("@", 1)[0]
+        return token.strip()
+
+    def _infer_selected_resource_keys(
+        self,
+        *,
+        resource_files: list[str] | None,
+        resource_jids: list[str],
+    ) -> list[str]:
+        keys: list[str] = []
+        seen: set[str] = set()
+
+        def _append(value: str) -> None:
+            key = self._resource_key_from_jid(value)
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+
+        if resource_files is not None:
+            for raw_path in resource_files:
+                path = Path(str(raw_path or "")).resolve()
+                try:
+                    name, meta = self._first_named_entry(self._load_json(path))
+                except Exception:
+                    continue
+                _append(str(meta.get("jid") or f"{name}@{meta.get('domain', 'localhost')}"))
+        if not keys:
+            for jid in resource_jids:
+                _append(jid)
+        return keys
+
     def _load_product_meta(self, product_init_file: Path) -> tuple[str, dict[str, Any]]:
         raw = self._load_json(product_init_file)
         return self._first_named_entry(raw)
@@ -80,9 +117,17 @@ class BundleCompiler:
             return name, meta
         return self._first_named_entry(raw)
 
-    def _collect_resource_refs(self, robot_env: str) -> list[Any]:
+    def _collect_resource_refs(
+        self,
+        robot_env: str,
+        resource_files: list[str] | None = None,
+    ) -> list[Any]:
         refs: list[Any] = []
-        for path in sorted(self.resource_init_dir.glob("*.json")):
+        if resource_files is None:
+            paths = sorted(self.resource_init_dir.glob("*.json"))
+        else:
+            paths = [Path(str(raw_path or "")).resolve() for raw_path in resource_files]
+        for path in paths:
             try:
                 raw = self._load_json(path)
             except Exception:
@@ -111,6 +156,40 @@ class BundleCompiler:
         if p.is_absolute():
             return p
         return self.project_root / p
+
+    def _load_known_part_tokens(self, product_meta: dict[str, Any]) -> list[str]:
+        """Return part tokens from the product geometry's gazebo.parts.model_map."""
+        geometry_ref = str(product_meta.get("product_geometry_file", "") or "").strip()
+        if not geometry_ref:
+            return []
+        try:
+            geometry_path = self._abs_path(geometry_ref)
+            if not geometry_path.exists():
+                return []
+            payload = self._load_json(geometry_path)
+        except Exception:
+            return []
+        gazebo = payload.get("gazebo", {})
+        if not isinstance(gazebo, dict):
+            return []
+        parts = gazebo.get("parts", {})
+        if not isinstance(parts, dict):
+            return []
+        model_map = parts.get("model_map", {})
+        if not isinstance(model_map, dict):
+            return []
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for name in model_map.keys():
+            token = str(name or "").strip()
+            if not token:
+                continue
+            lower = token.lower()
+            if lower in seen:
+                continue
+            seen.add(lower)
+            tokens.append(token)
+        return tokens
 
     def _load_parent_plan_context(
         self,
@@ -252,6 +331,174 @@ class BundleCompiler:
             }
         )
 
+    @staticmethod
+    def _validator_safety_rule_count(validator: Any) -> int:
+        rules = getattr(validator, "rules", [])
+        return len(rules) if isinstance(rules, list) else 0
+
+    @classmethod
+    def _safety_rule_counts(
+        cls,
+        violations: list[dict[str, Any]],
+        safety_rule_count: int,
+    ) -> tuple[int, int]:
+        violated_rule_count = len(cls._violated_rules(violations))
+        if safety_rule_count > 0:
+            violated_rule_count = min(safety_rule_count, violated_rule_count)
+            return violated_rule_count, max(0, safety_rule_count - violated_rule_count)
+        return violated_rule_count, 0
+
+    @staticmethod
+    def _task_nodes_by_id(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {
+            str(node.get("id")): node
+            for node in nodes
+            if isinstance(node, dict)
+            and node.get("type") == "task"
+            and str(node.get("id") or "").strip()
+        }
+
+    @classmethod
+    def _changed_task_ids(
+        cls,
+        before_nodes: list[dict[str, Any]],
+        after_nodes: list[dict[str, Any]],
+    ) -> list[str]:
+        before = cls._task_nodes_by_id(before_nodes)
+        after = cls._task_nodes_by_id(after_nodes)
+        changed: list[str] = []
+        for task_id in sorted(set(before) | set(after)):
+            if json.dumps(before.get(task_id), sort_keys=True, default=str) != json.dumps(
+                after.get(task_id),
+                sort_keys=True,
+                default=str,
+            ):
+                changed.append(task_id)
+        return changed
+
+    @classmethod
+    def _predecessor_map_for_tasks(
+        cls,
+        nodes: list[dict[str, Any]],
+        task_ids: list[str],
+    ) -> dict[str, list[str]]:
+        node_map = cls._task_nodes_by_id(nodes)
+        return {
+            task_id: list(node_map.get(task_id, {}).get("predecessors", []) or [])
+            for task_id in task_ids
+            if task_id in node_map
+        }
+
+    @classmethod
+    def _repair_history_validation_entry(
+        cls,
+        *,
+        ok: bool,
+        violations: list[dict[str, Any]],
+        safety_rule_count: int,
+        validation_call_index: int,
+        auto_replans_used: int,
+        stop_reason: str,
+    ) -> dict[str, Any]:
+        violated_rule_count, satisfied_rule_count = cls._safety_rule_counts(
+            violations,
+            safety_rule_count,
+        )
+        return {
+            "phase": "validation",
+            "attempt_index": int(auto_replans_used),
+            "validation_call_index": int(validation_call_index),
+            "ok": bool(ok),
+            "violated_rules": cls._violated_rules(violations),
+            "violated_rule_count": int(violated_rule_count),
+            "satisfied_rule_count": int(satisfied_rule_count),
+            "safety_rule_count": int(safety_rule_count),
+            "witness_count": len(violations),
+            "stop_reason": str(stop_reason),
+        }
+
+    @classmethod
+    def _repair_history_repair_entry(
+        cls,
+        *,
+        attempt_index: int,
+        before_hash: str,
+        after_hash: str,
+        changed_task_ids: list[str],
+        compile_ok: bool,
+        error_message: str = "",
+        retry_planned: bool = False,
+        restored_last_compileable: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "phase": "repair",
+            "attempt_index": int(attempt_index),
+            "before_hash": str(before_hash),
+            "after_hash": str(after_hash),
+            "changed_task_ids": list(changed_task_ids),
+            "compile_ok": bool(compile_ok),
+            "error_message": str(error_message or ""),
+            "retry_planned": bool(retry_planned),
+            "restored_last_compileable": bool(restored_last_compileable),
+        }
+
+    @classmethod
+    def _synthetic_repair_feedback(
+        cls,
+        *,
+        error_message: str,
+        changed_task_ids: list[str],
+        planner_nodes: list[dict[str, Any]],
+        previous_violations: list[dict[str, Any]],
+        restored_last_compileable: bool,
+    ) -> list[dict[str, Any]]:
+        prior_task_ids: list[str] = []
+        for violation in previous_violations:
+            if not isinstance(violation, dict):
+                continue
+            for key in ("witness_task_ids", "witness_trace", "conflict_task_ids"):
+                values = violation.get(key)
+                if isinstance(values, (list, tuple, set)):
+                    prior_task_ids.extend(str(value) for value in values if value)
+                elif isinstance(values, str) and values.strip():
+                    prior_task_ids.append(values.strip())
+        focus_task_ids = list(dict.fromkeys([*changed_task_ids, *prior_task_ids]))
+        relevant_tasks = [
+            deepcopy(node)
+            for node in planner_nodes
+            if isinstance(node, dict) and str(node.get("id") or "") in set(focus_task_ids)
+        ]
+        prior_rules = cls._violated_rules(previous_violations)
+        restore_text = (
+            " The planner restored the last compileable graph before asking for this repair."
+            if restored_last_compileable
+            else " The current task graph is still available for editing, but it did not compile."
+        )
+        return [
+            {
+                "violated_rule_id": "REPAIR_GRAPH_INVALID",
+                "violation_text": (
+                    "The previous LLM repair produced an invalid task graph or "
+                    f"same-resource requirement block order: {error_message}.{restore_text} "
+                    "Return a new patch that removes the cyclic/block-order dependency while "
+                    "still satisfying the original safety violation(s): "
+                    + (", ".join(prior_rules) if prior_rules else "unknown")
+                    + "."
+                ),
+                "violation_logic": "planner_compile_error",
+                "witness_trace": focus_task_ids,
+                "witness_task_ids": focus_task_ids,
+                "conflict_task_ids": focus_task_ids,
+                "relevant_tasks": relevant_tasks,
+                "relevant_pred_map": cls._predecessor_map_for_tasks(
+                    planner_nodes,
+                    focus_task_ids,
+                ),
+                "error_message": str(error_message or ""),
+                "previous_violated_rules": prior_rules,
+            }
+        ]
+
     @classmethod
     def build_validation_payload(
         cls,
@@ -260,6 +507,11 @@ class BundleCompiler:
         violations: list[dict[str, Any]],
         auto_replans_used: int,
         stop_reason: str,
+        grounding_summary: dict[str, Any] | None = None,
+        validator_stats: dict[str, Any] | None = None,
+        cumulative_validation_time_ms: float = 0.0,
+        validation_call_count: int = 0,
+        repair_history: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         violated_rules = cls._violated_rules(violations)
         return {
@@ -269,6 +521,20 @@ class BundleCompiler:
             "witness_count": len(violations),
             "auto_replans_used": int(auto_replans_used),
             "stop_reason": str(stop_reason),
+            "cumulative_validation_time_ms": float(cumulative_validation_time_ms or 0.0),
+            "validation_call_count": int(validation_call_count or 0),
+            "grounding_summary": (
+                dict(grounding_summary)
+                if isinstance(grounding_summary, dict)
+                else {
+                    "corrected_task_count": 0,
+                    "invalid_task_count": 0,
+                    "unresolved_task_count": 0,
+                    "findings": [],
+                }
+            ),
+            "validator_stats": dict(validator_stats or {}),
+            "repair_history": list(repair_history or []),
         }
 
     @classmethod
@@ -282,55 +548,237 @@ class BundleCompiler:
         seed_replan_violations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         planner = product_agent.process_planner
-        if seed_replan_violations:
-            await planner.replan_with_feedback_offline(seed_replan_violations)
-            planner.compile_global_fsa()
 
         auto_replans_used = 0
+        cumulative_validation_time_ms = 0.0
+        validation_call_count = 0
+        safety_rule_count = cls._validator_safety_rule_count(validator)
+        repair_history: list[dict[str, Any]] = []
+        last_validation_violations: list[dict[str, Any]] = []
+        pending_repair_feedback: list[dict[str, Any]] | None = (
+            list(seed_replan_violations)
+            if seed_replan_violations
+            else None
+        )
+        last_compileable_nodes = deepcopy(getattr(planner, "nodes", []) or [])
+        last_compileable_fsa = deepcopy(getattr(planner, "global_fsa", None))
+
         while True:
-            ok, violations = validator.validate_plan_fsa(
-                fsa=planner.global_fsa or {},
-                plan={"nodes": planner.nodes},
-                product_jid=product_jid,
+            grounding_summary = (
+                planner.get_last_grounding_summary()
+                if hasattr(planner, "get_last_grounding_summary")
+                else dict(getattr(planner, "last_grounding_summary", {}) or {})
             )
-            if ok:
-                stop_reason = "initial_valid" if auto_replans_used == 0 else "repaired_valid"
-                return cls.build_validation_payload(
-                    ok=True,
-                    violations=violations,
-                    auto_replans_used=auto_replans_used,
-                    stop_reason=stop_reason,
-                )
+            if pending_repair_feedback is None:
+                if int(grounding_summary.get("invalid_task_count", 0) or 0) > 0:
+                    repair_history.append(
+                        {
+                            "phase": "validation",
+                            "attempt_index": int(auto_replans_used),
+                            "validation_call_index": int(validation_call_count),
+                            "ok": False,
+                            "violated_rules": [],
+                            "violated_rule_count": 0,
+                            "satisfied_rule_count": 0,
+                            "safety_rule_count": int(safety_rule_count),
+                            "witness_count": 0,
+                            "stop_reason": "grounding_invalid",
+                        }
+                    )
+                    return cls.build_validation_payload(
+                        ok=False,
+                        violations=[],
+                        auto_replans_used=auto_replans_used,
+                        stop_reason="grounding_invalid",
+                        grounding_summary=grounding_summary,
+                        validator_stats=dict(getattr(validator, "last_run_stats", {}) or {}),
+                        cumulative_validation_time_ms=cumulative_validation_time_ms,
+                        validation_call_count=validation_call_count,
+                        repair_history=repair_history,
+                    )
 
-            if auto_replans_used >= auto_replan_max_attempts:
-                return cls.build_validation_payload(
-                    ok=False,
-                    violations=violations,
-                    auto_replans_used=auto_replans_used,
-                    stop_reason="max_attempts_reached",
+                ok, violations = validator.validate_plan_fsa(
+                    fsa=planner.global_fsa or {},
+                    plan={"nodes": planner.nodes},
+                    product_jid=product_jid,
                 )
+                latest_validator_stats = dict(getattr(validator, "last_run_stats", {}) or {})
+                cumulative_validation_time_ms += float(
+                    latest_validator_stats.get("verification_time_ms", 0.0) or 0.0
+                )
+                validation_call_count += 1
+                stop_reason = "valid" if ok else "violations_found"
+                last_validation_violations = list(violations or [])
+                repair_history.append(
+                    cls._repair_history_validation_entry(
+                        ok=ok,
+                        violations=last_validation_violations,
+                        safety_rule_count=safety_rule_count,
+                        validation_call_index=validation_call_count,
+                        auto_replans_used=auto_replans_used,
+                        stop_reason=stop_reason,
+                    )
+                )
+                if ok:
+                    final_stop_reason = "initial_valid" if auto_replans_used == 0 else "repaired_valid"
+                    repair_history[-1]["stop_reason"] = final_stop_reason
+                    return cls.build_validation_payload(
+                        ok=True,
+                        violations=violations,
+                        auto_replans_used=auto_replans_used,
+                        stop_reason=final_stop_reason,
+                        grounding_summary=grounding_summary,
+                        validator_stats=latest_validator_stats,
+                        cumulative_validation_time_ms=cumulative_validation_time_ms,
+                        validation_call_count=validation_call_count,
+                        repair_history=repair_history,
+                    )
 
-            before_hash = cls._task_nodes_hash(planner.nodes)
-            auto_replans_used += 1
-            try:
-                await planner.replan_with_feedback_offline(violations)
-                after_hash = cls._task_nodes_hash(planner.nodes)
-                if before_hash == after_hash:
+                if auto_replans_used >= auto_replan_max_attempts:
+                    repair_history[-1]["stop_reason"] = "max_attempts_reached"
                     return cls.build_validation_payload(
                         ok=False,
                         violations=violations,
                         auto_replans_used=auto_replans_used,
-                        stop_reason="repair_no_change",
+                        stop_reason="max_attempts_reached",
+                        grounding_summary=grounding_summary,
+                        validator_stats=latest_validator_stats,
+                        cumulative_validation_time_ms=cumulative_validation_time_ms,
+                        validation_call_count=validation_call_count,
+                        repair_history=repair_history,
                     )
+                repair_feedback = last_validation_violations
+            else:
+                latest_validator_stats = dict(getattr(validator, "last_run_stats", {}) or {})
+                if auto_replans_used >= auto_replan_max_attempts:
+                    return cls.build_validation_payload(
+                        ok=False,
+                        violations=last_validation_violations,
+                        auto_replans_used=auto_replans_used,
+                        stop_reason="repair_exception",
+                        grounding_summary=grounding_summary,
+                        validator_stats=latest_validator_stats,
+                        cumulative_validation_time_ms=cumulative_validation_time_ms,
+                        validation_call_count=validation_call_count,
+                        repair_history=repair_history,
+                    )
+                repair_feedback = pending_repair_feedback
+                pending_repair_feedback = None
+
+            before_hash = cls._task_nodes_hash(planner.nodes)
+            before_nodes = deepcopy(getattr(planner, "nodes", []) or [])
+            auto_replans_used += 1
+            try:
+                await planner.replan_with_feedback_offline(repair_feedback)
+                after_hash = cls._task_nodes_hash(planner.nodes)
+                changed_task_ids = cls._changed_task_ids(before_nodes, planner.nodes)
+                if before_hash == after_hash:
+                    error_message = "LLM repair did not change any task nodes."
+                    retry_planned = auto_replans_used < auto_replan_max_attempts
+                    repair_history.append(
+                        cls._repair_history_repair_entry(
+                            attempt_index=auto_replans_used,
+                            before_hash=before_hash,
+                            after_hash=after_hash,
+                            changed_task_ids=changed_task_ids,
+                            compile_ok=False,
+                            error_message=error_message,
+                            retry_planned=retry_planned,
+                            restored_last_compileable=False,
+                        )
+                    )
+                    if not retry_planned:
+                        return cls.build_validation_payload(
+                            ok=False,
+                            violations=last_validation_violations,
+                            auto_replans_used=auto_replans_used,
+                            stop_reason="repair_no_change",
+                            grounding_summary=(
+                                planner.get_last_grounding_summary()
+                                if hasattr(planner, "get_last_grounding_summary")
+                                else dict(getattr(planner, "last_grounding_summary", {}) or {})
+                            ),
+                            validator_stats=dict(getattr(validator, "last_run_stats", {}) or {}),
+                            cumulative_validation_time_ms=cumulative_validation_time_ms,
+                            validation_call_count=validation_call_count,
+                            repair_history=repair_history,
+                        )
+                    pending_repair_feedback = cls._synthetic_repair_feedback(
+                        error_message=error_message,
+                        changed_task_ids=changed_task_ids,
+                        planner_nodes=planner.nodes,
+                        previous_violations=last_validation_violations,
+                        restored_last_compileable=False,
+                    )
+                    continue
                 planner.compile_global_fsa()
-            except Exception:
-                log.exception("Offline replan attempt %d failed.", auto_replans_used)
-                return cls.build_validation_payload(
-                    ok=False,
-                    violations=violations,
-                    auto_replans_used=auto_replans_used,
-                    stop_reason="repair_exception",
+                repair_history.append(
+                    cls._repair_history_repair_entry(
+                        attempt_index=auto_replans_used,
+                        before_hash=before_hash,
+                        after_hash=after_hash,
+                        changed_task_ids=changed_task_ids,
+                        compile_ok=True,
+                        retry_planned=False,
+                    )
                 )
+                last_compileable_nodes = deepcopy(planner.nodes)
+                last_compileable_fsa = deepcopy(getattr(planner, "global_fsa", None))
+            except Exception as exc:
+                error_message = str(exc or "")
+                log.exception("Offline replan attempt %d failed.", auto_replans_used)
+                after_hash = cls._task_nodes_hash(getattr(planner, "nodes", []) or [])
+                changed_task_ids = cls._changed_task_ids(
+                    before_nodes,
+                    getattr(planner, "nodes", []) or [],
+                )
+                graph_loadable = True
+                if hasattr(planner, "_validate_task_graph"):
+                    try:
+                        planner._validate_task_graph(planner.nodes)
+                    except Exception:
+                        graph_loadable = False
+                restored_last_compileable = not graph_loadable
+                if restored_last_compileable:
+                    planner.nodes = deepcopy(last_compileable_nodes)
+                    planner.global_fsa = deepcopy(last_compileable_fsa)
+                retry_planned = auto_replans_used < auto_replan_max_attempts
+                repair_history.append(
+                    cls._repair_history_repair_entry(
+                        attempt_index=auto_replans_used,
+                        before_hash=before_hash,
+                        after_hash=after_hash,
+                        changed_task_ids=changed_task_ids,
+                        compile_ok=False,
+                        error_message=error_message,
+                        retry_planned=retry_planned,
+                        restored_last_compileable=restored_last_compileable,
+                    )
+                )
+                if not retry_planned:
+                    return cls.build_validation_payload(
+                        ok=False,
+                        violations=last_validation_violations,
+                        auto_replans_used=auto_replans_used,
+                        stop_reason="repair_exception",
+                        grounding_summary=(
+                            planner.get_last_grounding_summary()
+                            if hasattr(planner, "get_last_grounding_summary")
+                            else dict(getattr(planner, "last_grounding_summary", {}) or {})
+                        ),
+                        validator_stats=dict(getattr(validator, "last_run_stats", {}) or {}),
+                        cumulative_validation_time_ms=cumulative_validation_time_ms,
+                        validation_call_count=validation_call_count,
+                        repair_history=repair_history,
+                    )
+                pending_repair_feedback = cls._synthetic_repair_feedback(
+                    error_message=error_message,
+                    changed_task_ids=changed_task_ids,
+                    planner_nodes=planner.nodes,
+                    previous_violations=last_validation_violations,
+                    restored_last_compileable=restored_last_compileable,
+                )
+                continue
 
     async def compile_bundle(
         self,
@@ -341,7 +789,9 @@ class BundleCompiler:
         product_requirement_file: str | None = None,
         safety_requirement_file: str | None = None,
         precomputed_safety_artifacts: dict[str, Any] | None = None,
-        auto_replan_max_attempts: int = 3,
+        resource_files: list[str] | None = None,
+        selected_resource_keys: list[str] | None = None,
+        auto_replan_max_attempts: int = DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS,
         refinement_feedback: str = "",
         parent_bundle_id: str = "",
     ) -> dict[str, Any]:
@@ -412,8 +862,21 @@ class BundleCompiler:
         )
         LlmAgent.configure_shared_tools_catalogue(self.tools_path)
 
-        resources = self._collect_resource_refs(robot_env=robot_env)
+        resources = self._collect_resource_refs(
+            robot_env=robot_env,
+            resource_files=resource_files,
+        )
         resource_jids = [str(r.jid) for r in resources]
+        selected_resource_keys_for_manifest = [
+            str(key).strip()
+            for key in (selected_resource_keys or [])
+            if str(key).strip()
+        ]
+        if not selected_resource_keys_for_manifest:
+            selected_resource_keys_for_manifest = self._infer_selected_resource_keys(
+                resource_files=resource_files,
+                resource_jids=resource_jids,
+            )
 
         os.environ["ROBOT_ENV"] = str(robot_env)
         os.environ["EXECUTION_MODE"] = str(execution_mode)
@@ -459,12 +922,14 @@ class BundleCompiler:
                 cca_jid=cca_jid,
                 camera=CameraModule(backend="none"),
             )
+            known_parts = self._load_known_part_tokens(product_meta)
             cca_agent = CentralControllerAgent(
                 cca_jid,
                 cca_pw,
                 name=cca_name,
                 resource_agents=resources,
                 safety_file=str(safety_path),
+                safety_known_parts=known_parts,
             )
 
             try:
@@ -568,6 +1033,27 @@ class BundleCompiler:
                 witness_count = int(validation_payload.get("witness_count", 0))
                 auto_replans_used = int(validation_payload.get("auto_replans_used", 0))
                 stop_reason = str(validation_payload.get("stop_reason", "max_attempts_reached"))
+                cumulative_validation_time_ms = float(
+                    validation_payload.get("cumulative_validation_time_ms", 0.0) or 0.0
+                )
+                validation_call_count = int(
+                    validation_payload.get("validation_call_count", 0) or 0
+                )
+                grounding_summary = (
+                    dict(validation_payload.get("grounding_summary", {}))
+                    if isinstance(validation_payload.get("grounding_summary"), dict)
+                    else {}
+                )
+                validator_stats = (
+                    dict(validation_payload.get("validator_stats", {}))
+                    if isinstance(validation_payload.get("validator_stats"), dict)
+                    else {}
+                )
+                repair_history = (
+                    list(validation_payload.get("repair_history", []))
+                    if isinstance(validation_payload.get("repair_history"), list)
+                    else []
+                )
                 status = BUNDLE_STATUS_DRAFT if ok else BUNDLE_STATUS_INVALID
                 manifest = {
                     "bundle_id": bundle_id,
@@ -583,6 +1069,7 @@ class BundleCompiler:
                     "product_name": product_name,
                     "execution_mode": execution_mode,
                     "robot_env": robot_env,
+                    "selected_resource_keys": list(selected_resource_keys_for_manifest),
                     "llm_models": {
                         "planner_model": getattr(product_agent, "non_function_model", ""),
                         "safety_model": getattr(cca_agent, "non_function_model", ""),
@@ -611,6 +1098,11 @@ class BundleCompiler:
                         "witness_count": witness_count,
                         "auto_replans_used": auto_replans_used,
                         "stop_reason": stop_reason,
+                        "cumulative_validation_time_ms": cumulative_validation_time_ms,
+                        "validation_call_count": validation_call_count,
+                        "grounding_summary": grounding_summary,
+                        "validator_stats": validator_stats,
+                        "repair_history": repair_history,
                     },
                 }
 

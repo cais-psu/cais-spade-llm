@@ -38,6 +38,14 @@ cais_spade_llm/user_verified_safety/
 cais_spade_llm/specification/safety/intent_previews.json
 cais_spade_llm/specification/safety/intent_approvals.json
 
+# Experiment run outputs
+writing/experiments/results/*
+!writing/experiments/results/.gitkeep
+
+# Windows metadata sidecars from copied files
+*:Zone.Identifier
+*.Zone.Identifier
+
 # Debug session output
 debug/
 

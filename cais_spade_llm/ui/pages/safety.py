@@ -127,6 +127,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ui.label(
                 "Generate first, review LTLf and DFA, then verify safety."
             ).classes("text-xs text-slate-600 mb-2")
+            active_resource_context = ui.label(
+                f"Active robots for preview generation: {bridge.selected_resource_summary()}"
+            ).classes("text-xs text-slate-600 mb-2")
 
             preview_failure_card = ui.card().classes("w-full bg-red-50 border border-red-200 mb-2")
             preview_failure_card.style("display:none;")
@@ -209,6 +212,15 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 rows=[],
                 row_key="preview_id",
             ).classes("w-full")
+
+        ui.timer(
+            2.0,
+            lambda: setattr(
+                active_resource_context,
+                "text",
+                f"Active robots for preview generation: {bridge.selected_resource_summary()}",
+            ),
+        )
 
         def _intent_reason_text(reason: str) -> str:
             mapping = {
@@ -812,6 +824,12 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     refinement_feedback=feedback_text,
                     parent_preview_id=parent_preview_id,
                 )
+                active_resource_context.text = (
+                    f"Active robots for preview generation: {bridge.selected_resource_summary()}"
+                )
+                notice = bridge.consume_notice()
+                if notice:
+                    ui.notify(notice, type="info")
                 ui.notify(
                     "Safety rule preview regenerated with feedback."
                     if use_feedback
@@ -819,6 +837,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     type="positive",
                 )
             except Exception as exc:
+                notice = bridge.consume_notice()
+                if notice:
+                    ui.notify(notice, type="info")
                 ui.notify(
                     "Safety preview generation failed. Review the explanation box below.",
                     type="negative",

@@ -1,0 +1,3 @@
+[Safety Requirements]
+- SG must be place_approach first before MRP place_approach to the assembly station.
+- ur5e and xarm6 must not place_approach the assembly board area at the same time.

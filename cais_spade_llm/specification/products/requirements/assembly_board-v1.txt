@@ -1,0 +1,4 @@
+[Product Requirements]
+- assemble SG from prusa-mk4-1 to the Assembly Station.
+- assemble MRP from prusa-mk3 to the Assembly Station.
+- assemble LCP from prusa-mk4-2 to the Assembly Station.

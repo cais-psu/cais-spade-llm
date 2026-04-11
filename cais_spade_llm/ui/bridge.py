@@ -35,8 +35,10 @@ from cais_spade_llm.bundles.models import (
     sha256_file,
     sha256_text,
 )
+from cais_spade_llm.experiments import OfflineStudyRunner, latest_study_run_summary
 
 log = logging.getLogger("ui.bridge")
+_DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS = 5
 
 # Filesystem locations (mirror spade_main.py constants).
 _BASE = Path(__file__).resolve().parent.parent          # cais_spade_llm/
@@ -51,9 +53,14 @@ _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
+_XARM6_2_RESOURCE = _RESOURCE_DIR / "robot_xarm6_2.json"
+_UR5E_2_RESOURCE = _RESOURCE_DIR / "robot_ur5e_2.json"
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
+_EXPERIMENTS_DIR = _PROJECT_ROOT / "writing" / "experiments"
+_EXPERIMENT_RESOURCES_DIR = _EXPERIMENTS_DIR / "resources"
+_EXPERIMENT_RESULTS_DIR = _EXPERIMENTS_DIR / "results"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
 _SAFETY_INTENT_PREVIEWS = _USER_VERIFIED_SAFETY / "intent_previews.json"
 _SAFETY_PREVIEW_DIR = _USER_VERIFIED_SAFETY / "previews"
@@ -114,6 +121,13 @@ class SystemBridge:
         "gazebo_xarm6": "xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ur5e_rg2_moveit_gazebo.launch.py",
     }
+    _PRIMARY_RESOURCE_KEYS = ("xarm6", "ur5e")
+    _RESOURCE_LABELS = {
+        "xarm6": "xArm6",
+        "ur5e": "UR5e",
+        "xarm6-2": "xArm6-2",
+        "ur5e-2": "UR5e-2",
+    }
 
     @classmethod
     def instance(cls) -> SystemBridge:
@@ -150,6 +164,7 @@ class SystemBridge:
         # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
         # any other value -> explicit safety text file path.
         self.selected_safety_file: str = ""
+        self.selected_resource_keys: list[str] = []
         self.bundle_store = BundleStore(_USER_VERIFIED_PLAN)
         self.bundle_compiler = BundleCompiler(
             store=self.bundle_store,
@@ -184,6 +199,7 @@ class SystemBridge:
         self._startup_phase: str = "idle"
         self._startup_phase_ts: float = time.monotonic()
         self._cached_plan_safety_alerts: list[dict[str, Any]] = []
+        self._active_tools_signature: tuple[Any, ...] | None = None
         self._agent_creator_cached: Any | None = None
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
@@ -194,6 +210,9 @@ class SystemBridge:
             "yes",
             "on",
         }
+        self.selected_resource_keys = self._default_selected_resource_keys(
+            self._resource_manifest_entries()
+        )
         self._maybe_start_agent_creator_prefetch()
 
     # ------------------------------------------------------------------
@@ -463,6 +482,257 @@ class SystemBridge:
             return []
         return sorted(str(p) for p in _RESOURCE_DIR.glob("*.json"))
 
+    @classmethod
+    def _resource_sort_key(cls, key: str) -> tuple[int, str]:
+        preferred = ["xarm6", "ur5e", "xarm6-2", "ur5e-2"]
+        order = {token: idx for idx, token in enumerate(preferred)}
+        token = str(key or "").strip().lower()
+        return (order.get(token, len(order)), token)
+
+    @classmethod
+    def resource_label(cls, key: str) -> str:
+        token = str(key or "").strip().lower()
+        if token in cls._RESOURCE_LABELS:
+            return cls._RESOURCE_LABELS[token]
+        return token or "resource"
+
+    def _resource_manifest_entries(
+        self,
+        resource_files: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for raw_path in resource_files or self.list_resource_files():
+            path = Path(str(raw_path or "").strip())
+            if not path.exists():
+                continue
+            try:
+                payload = self.load_config(str(path))
+                key, meta = self._first_manifest_entry(payload)
+            except Exception:
+                continue
+            key_token = str(key or "").strip().split("@", 1)[0].lower()
+            if not key_token or not isinstance(meta, dict):
+                continue
+            entries.append(
+                {
+                    "key": key_token,
+                    "label": self.resource_label(key_token),
+                    "path": str(path.resolve()),
+                    "jid": str(meta.get("jid") or f"{key_token}@{meta.get('domain', 'localhost')}").strip(),
+                    "kind": str(meta.get("type") or "").strip().lower(),
+                    "name": str(meta.get("name") or key_token).strip() or key_token,
+                }
+            )
+        entries.sort(key=lambda item: self._resource_sort_key(str(item.get("key") or "")))
+        return entries
+
+    @classmethod
+    def _default_selected_resource_keys(
+        cls,
+        entries: list[dict[str, Any]],
+    ) -> list[str]:
+        available = [
+            str(entry.get("key") or "").strip().lower()
+            for entry in entries
+            if str(entry.get("key") or "").strip()
+        ]
+        if all(key in available for key in cls._PRIMARY_RESOURCE_KEYS):
+            return list(cls._PRIMARY_RESOURCE_KEYS)
+        return available
+
+    def _sanitize_selected_resource_keys(
+        self,
+        keys: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> list[str]:
+        requested = {
+            str(key or "").strip().lower()
+            for key in (keys or [])
+            if str(key or "").strip()
+        }
+        ordered_available = [
+            str(entry.get("key") or "").strip().lower()
+            for entry in self._resource_manifest_entries()
+            if str(entry.get("key") or "").strip()
+        ]
+        selected = [key for key in ordered_available if key in requested]
+        return selected or self._default_selected_resource_keys(self._resource_manifest_entries())
+
+    def get_selected_resource_keys(self) -> list[str]:
+        normalized = self._sanitize_selected_resource_keys(self.selected_resource_keys)
+        if normalized != list(self.selected_resource_keys):
+            self.selected_resource_keys = list(normalized)
+        return list(normalized)
+
+    def set_selected_resource_keys(self, keys: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+        normalized = self._sanitize_selected_resource_keys(keys)
+        self.selected_resource_keys = list(normalized)
+        self._active_tools_signature = None
+        return list(normalized)
+
+    def list_available_resource_entries(self) -> list[dict[str, Any]]:
+        return [dict(entry) for entry in self._resource_manifest_entries()]
+
+    def list_selected_resource_entries(self) -> list[dict[str, Any]]:
+        selected = set(self.get_selected_resource_keys())
+        return [
+            dict(entry)
+            for entry in self._resource_manifest_entries()
+            if str(entry.get("key") or "").strip().lower() in selected
+        ]
+
+    def selected_resource_summary(self) -> str:
+        labels = [str(entry.get("label") or "").strip() for entry in self.list_selected_resource_entries()]
+        return ", ".join(label for label in labels if label) or "No active robots selected"
+
+    def resource_chat_options(self, *, active_only: bool = True) -> dict[str, str]:
+        entries = self.list_selected_resource_entries() if active_only else self.list_available_resource_entries()
+        return {
+            str(entry.get("key") or ""): str(entry.get("label") or entry.get("key") or "")
+            for entry in entries
+            if str(entry.get("key") or "").strip()
+        }
+
+    def _selected_resource_files(self, resource_files: list[str] | None = None) -> list[str]:
+        selected = set(self.get_selected_resource_keys())
+        return [
+            str(entry.get("path") or "")
+            for entry in self._resource_manifest_entries(resource_files)
+            if str(entry.get("key") or "").strip().lower() in selected
+        ]
+
+    def _active_tools_signature_payload(self) -> tuple[Any, ...]:
+        selected_files = self._selected_resource_files()
+        file_state = tuple(
+            (
+                str(Path(path).resolve()),
+                Path(path).stat().st_mtime_ns,
+                Path(path).stat().st_size,
+            )
+            for path in selected_files
+            if Path(path).exists()
+        )
+        return (
+            str(self.robot_env or "gazebo").strip().lower() or "gazebo",
+            tuple(self.get_selected_resource_keys()),
+            file_state,
+        )
+
+    def _refresh_active_tools_catalogue(self, *, force: bool = False) -> Path:
+        signature = self._active_tools_signature_payload()
+        if not force and self._active_tools_signature == signature and _TOOLS_OUT.exists():
+            return _TOOLS_OUT
+
+        resource_files = self._selected_resource_files()
+        if not resource_files:
+            raise ValueError("no active resource manifests are selected")
+
+        try:
+            import agent_creator
+            from function_analyzer import FunctionAnalyzer
+        except ImportError:
+            from cais_spade_llm import agent_creator
+            from cais_spade_llm.function_analyzer import FunctionAnalyzer
+
+        agent_creator.configure_runtime(
+            robot_env=str(self.robot_env or "gazebo").strip().lower() or "gazebo",
+            execution_mode="dry_run",
+            perception_backend="none",
+        )
+        agent_creator.ALLOWED_FUNCS.clear()
+        resource_agents = agent_creator.create_resource_agents(
+            resource_files,
+            str(_CCA_INIT),
+        )
+        allowed = {
+            key: set(value)
+            for key, value in dict(agent_creator.ALLOWED_FUNCS).items()
+        }
+        FunctionAnalyzer.build_tools_catalogue(
+            agents=resource_agents,
+            allowed=allowed,
+            outfile=_TOOLS_OUT,
+        )
+        try:
+            from agents.shared_information.llm_agent import LlmAgent
+        except ImportError:
+            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+        LlmAgent.configure_shared_tools_catalogue(_TOOLS_OUT)
+        self._active_tools_signature = signature
+        return _TOOLS_OUT
+
+    def _extract_explicit_resource_mentions(self, text: str) -> list[str]:
+        normalized = str(text or "")
+        mentions: list[str] = []
+        for entry in self.list_available_resource_entries():
+            key = str(entry.get("key") or "").strip().lower()
+            if not key:
+                continue
+            pattern = rf"(?<![A-Za-z0-9_-]){re.escape(key)}(?![A-Za-z0-9_-])"
+            if re.search(pattern, normalized, flags=re.IGNORECASE):
+                mentions.append(key)
+        mentions.sort(key=self._resource_sort_key)
+        return mentions
+
+    def _ensure_selected_resources_cover_safety_text(
+        self,
+        safety_text: str,
+        *,
+        purpose: str = "safety generation",
+    ) -> list[str]:
+        mentioned = self._extract_explicit_resource_mentions(safety_text)
+        if not mentioned:
+            return self.get_selected_resource_keys()
+        active_keys = self.get_selected_resource_keys()
+        active = set(active_keys)
+        missing = [key for key in mentioned if key not in active]
+        if not missing:
+            return active_keys
+        merged_keys = [
+            str(entry.get("key") or "").strip().lower()
+            for entry in self._resource_manifest_entries()
+            if str(entry.get("key") or "").strip().lower() in (active | set(missing))
+        ]
+        normalized = self.set_selected_resource_keys(merged_keys)
+        activated_labels = ", ".join(self.resource_label(key) for key in missing)
+        self.last_notice = (
+            f"Activated robots referenced by the safety requirement for {purpose}: "
+            f"{activated_labels}. Active robots: {self.selected_resource_summary()}."
+        )
+        return normalized
+
+    def list_experiment_manifest_files(self) -> list[str]:
+        if not _EXPERIMENTS_DIR.exists():
+            return []
+        return sorted(str(p) for p in _EXPERIMENTS_DIR.glob("*.json"))
+
+    def list_experiment_resource_files(self) -> list[str]:
+        if not _EXPERIMENT_RESOURCES_DIR.exists():
+            return []
+        return sorted(str(p) for p in _EXPERIMENT_RESOURCES_DIR.glob("*.json"))
+
+    def load_experiment_study(self, manifest_file: str) -> dict[str, Any]:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            raise ValueError("study manifest is required")
+        runner = OfflineStudyRunner(
+            manifest_path,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
+        )
+        return runner.load_editor_context()
+
+    def load_experiment_editor_context(self, manifest_file: str) -> dict[str, Any]:
+        return self.load_experiment_study(manifest_file)
+
+    def save_experiment_study(self, manifest_file: str, data: dict[str, Any]) -> dict[str, Any]:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            raise ValueError("study manifest is required")
+        canonical = OfflineStudyRunner.canonicalize_manifest(dict(data or {}))
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(canonical, f, indent=2)
+        return self.load_experiment_study(manifest_path)
+
     def load_config(self, path: str) -> dict:
         with open(path) as f:
             return json.load(f)
@@ -470,6 +740,15 @@ class SystemBridge:
     def save_config(self, path: str, data: dict) -> None:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+        try:
+            saved_path = Path(path).resolve()
+        except Exception:
+            saved_path = Path(path)
+        if _RESOURCE_DIR in saved_path.parents or saved_path == _RESOURCE_DIR:
+            self._active_tools_signature = None
+            self.selected_resource_keys = self._sanitize_selected_resource_keys(
+                self.selected_resource_keys
+            )
 
     # ------------------------------------------------------------------
     # Verified bundle management
@@ -513,6 +792,7 @@ class SystemBridge:
         if not safety_text:
             raise ValueError(f"safety file empty: {safety_file}")
 
+        self._refresh_active_tools_catalogue()
         if not _TOOLS_OUT.exists():
             raise FileNotFoundError(f"tools catalogue missing: {_TOOLS_OUT}")
         prompts_path = _BASE / "prompts.py"
@@ -561,6 +841,68 @@ class SystemBridge:
         if not req_file.exists():
             raise FileNotFoundError(f"requirements file missing: {req_file}")
         return req_file.resolve(), None
+
+    def _resolve_active_product_part_tokens(self) -> list[str]:
+        """
+        Return the lowercase part-token list for the currently selected product
+        (e.g. ["sg", "mrp", "lcp"] for assembly_board-v1). Used by the safety
+        rule preview to ground part identifiers in the parser prompt.
+
+        Falls back to the only product init manifest in the system if
+        ``self.selected_product`` is unset, mirroring
+        :meth:`_resolve_product_init_for_requirement`. Returns an empty list
+        when nothing usable can be located — callers must tolerate that.
+        """
+        candidates: list[str] = []
+        selected = str(self.selected_product or "").strip()
+        if selected:
+            candidates.append(selected)
+        else:
+            init_files = self.list_product_files()
+            if len(init_files) == 1:
+                candidates.append(init_files[0])
+
+        for init_file in candidates:
+            try:
+                init_path = self._abs_project_path(init_file)
+                if not init_path.exists():
+                    continue
+                raw = self.load_config(str(init_path))
+                _, product_meta = self._first_manifest_entry(raw)
+                geometry_ref = str(
+                    product_meta.get("product_geometry_file", "") or ""
+                ).strip()
+                if not geometry_ref:
+                    continue
+                geometry_path = self._abs_project_path(geometry_ref)
+                if not geometry_path.exists():
+                    continue
+                geometry_payload = self.load_config(str(geometry_path))
+                gazebo = geometry_payload.get("gazebo", {})
+                if not isinstance(gazebo, dict):
+                    continue
+                parts = gazebo.get("parts", {})
+                if not isinstance(parts, dict):
+                    continue
+                model_map = parts.get("model_map", {})
+                if not isinstance(model_map, dict):
+                    continue
+                tokens: list[str] = []
+                seen: set[str] = set()
+                for name in model_map.keys():
+                    token = str(name or "").strip()
+                    if not token:
+                        continue
+                    lower = token.lower()
+                    if lower in seen:
+                        continue
+                    seen.add(lower)
+                    tokens.append(token)
+                if tokens:
+                    return tokens
+            except Exception:
+                continue
+        return []
 
     def _resolve_product_init_for_requirement(self, requirement_file: str) -> dict[str, Any]:
         req_norm = self._norm_path(self._abs_project_path(requirement_file))
@@ -844,6 +1186,8 @@ class SystemBridge:
                 "safety_sha256": current_hashes["safety_sha256"],
                 "tools_sha256": current_hashes["tools_sha256"],
                 "prompts_sha256": current_hashes["prompts_sha256"],
+                "selected_resource_keys": list(record.get("selected_resource_keys", []) or []),
+                "selected_resource_summary": str(record.get("selected_resource_summary", "") or "").strip(),
             },
             "approved",
         )
@@ -1672,6 +2016,8 @@ class SystemBridge:
             "safety_file": safety_key,
             "current_hash": current_hash,
             "hash_matches_current": hash_matches,
+            "current_selected_resource_keys": self.get_selected_resource_keys(),
+            "current_selected_resource_summary": self.selected_resource_summary(),
             "record": latest,
             "failure": failure,
             "refinement_feedback": str(latest.get("refinement_feedback", "")).strip(),
@@ -1708,6 +2054,11 @@ class SystemBridge:
         safety_text = safety_path.read_text(encoding="utf-8").strip()
         if not safety_text:
             raise ValueError(f"safety requirement file is empty: {safety_path}")
+        self._ensure_selected_resources_cover_safety_text(
+            safety_text,
+            purpose="safety preview generation",
+        )
+        self._refresh_active_tools_catalogue(force=True)
 
         safety_hashes = self._compute_safety_generation_hashes(safety_path)
         safety_hash = safety_hashes["safety_sha256"]
@@ -1740,14 +2091,17 @@ class SystemBridge:
 
         _, CentralControllerAgent, _, _, _ = self.bundle_compiler._import_runtime_classes()
         resources = self.bundle_compiler._collect_resource_refs(
-            robot_env=str(self.robot_env or "gazebo")
+            robot_env=str(self.robot_env or "gazebo"),
+            resource_files=self._selected_resource_files(),
         )
+        known_parts = self._resolve_active_product_part_tokens()
         cca_agent = CentralControllerAgent(
             "cca_preview@localhost",
             "none",
             name="cca_preview",
             resource_agents=resources,
             safety_file=str(safety_path),
+            safety_known_parts=known_parts,
         )
         safety_logic = getattr(cca_agent, "safety_logic", None)
         if safety_logic is None:
@@ -1787,6 +2141,8 @@ class SystemBridge:
             "safety_sha256": safety_hash,
             "tools_sha256": safety_hashes["tools_sha256"],
             "prompts_sha256": safety_hashes["prompts_sha256"],
+            "selected_resource_keys": self.get_selected_resource_keys(),
+            "selected_resource_summary": self.selected_resource_summary(),
             "refinement_feedback": str(refinement_feedback or "").strip(),
             "parent_preview_id": str(parent_record.get("preview_id", "")).strip(),
             "preview_dir": str(preview_dir.resolve()),
@@ -1967,6 +2323,8 @@ class SystemBridge:
             "safety_sha256": current_hashes["safety_sha256"],
             "tools_sha256": current_hashes["tools_sha256"],
             "prompts_sha256": current_hashes["prompts_sha256"],
+            "selected_resource_keys": self.get_selected_resource_keys(),
+            "selected_resource_summary": self.selected_resource_summary(),
             "note": str(note or "").strip(),
             "preview_id": preview_id,
             "preview_generated_at_utc": str(preview_record.get("generated_at_utc", "")).strip(),
@@ -2293,7 +2651,7 @@ class SystemBridge:
             if key == "prompts_sha256":
                 continue
             if key == "tools_sha256":
-                if tools_snapshot_ok is False:
+                if tools_snapshot_ok is False or str(got_hashes.get(key, "")) != str(expected):
                     reasons.append(key)
                 continue
             if str(got_hashes.get(key, "")) != str(expected):
@@ -2551,6 +2909,12 @@ class SystemBridge:
         selected_safety_file = str(
             safety_override or product_ctx.get("safety_file") or ""
         ).strip() or None
+        if selected_safety_file:
+            self._ensure_selected_resources_cover_safety_text(
+                self._abs_project_path(selected_safety_file).read_text(encoding="utf-8").strip(),
+                purpose="bundle generation",
+            )
+        self._refresh_active_tools_catalogue(force=True)
         precomputed_safety_artifacts: dict[str, Any] | None = None
         if selected_safety_file:
             safety_eval = self.evaluate_safety_intent_approval(selected_safety_file)
@@ -2569,7 +2933,11 @@ class SystemBridge:
                 raise ValueError(
                     self._approval_refresh_error(str(safety_eval.get("reason", "") or ""))
                 )
-        resolved_auto_replan_max_attempts = 3 if auto_replan_max_attempts is None else auto_replan_max_attempts
+        resolved_auto_replan_max_attempts = (
+            _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
+            if auto_replan_max_attempts is None
+            else auto_replan_max_attempts
+        )
 
         return asyncio.run(
             self.bundle_compiler.compile_bundle(
@@ -2579,10 +2947,82 @@ class SystemBridge:
                 product_requirement_file=req_file or None,
                 safety_requirement_file=safety_override,
                 precomputed_safety_artifacts=precomputed_safety_artifacts,
+                resource_files=self._selected_resource_files(),
+                selected_resource_keys=self.get_selected_resource_keys(),
                 auto_replan_max_attempts=resolved_auto_replan_max_attempts,
                 refinement_feedback=str(refinement_feedback or "").strip(),
                 parent_bundle_id=str(parent_bundle_id or "").strip(),
             )
+        )
+
+    def run_experiment_study(self, manifest_file: str, *, scenario_id: str = "") -> dict[str, Any]:
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("cannot run experiments while system lifecycle is active")
+
+        self._ensure_called_from_worker_thread("run_experiment_study")
+        runner = OfflineStudyRunner(
+            manifest_file,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
+        )
+        return runner.run(scenario_id=scenario_id)
+
+    def get_latest_experiment_run(self, manifest_file: str) -> dict[str, Any] | None:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            return None
+        return latest_study_run_summary(
+            manifest_path,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
+        )
+
+    def list_experiment_runs(self, manifest_file: str) -> list[dict[str, Any]]:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            return []
+        return OfflineStudyRunner.list_runs(
+            manifest_path,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
+        )
+
+    def analyze_experiment_run(
+        self,
+        manifest_file: str,
+        *,
+        run_root: str = "",
+    ) -> dict[str, Any] | None:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            return None
+        return OfflineStudyRunner.load_run_summary(
+            manifest_path,
+            run_root=run_root or None,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
+        )
+
+    def get_experiment_trial_details(
+        self,
+        manifest_file: str,
+        *,
+        run_root: str,
+        scenario_id: str,
+        method: str,
+        trial_index: int,
+    ) -> dict[str, Any]:
+        manifest_path = str(manifest_file or "").strip()
+        if not manifest_path:
+            raise ValueError("study manifest is required")
+        return OfflineStudyRunner.load_trial_details(
+            manifest_path,
+            run_root=run_root,
+            scenario_id=scenario_id,
+            method=method,
+            trial_index=trial_index,
+            project_root=_PROJECT_ROOT,
+            results_root=_EXPERIMENT_RESULTS_DIR,
         )
 
     def verify_bundle(self, bundle_id: str) -> dict[str, Any]:
@@ -2779,6 +3219,7 @@ class SystemBridge:
         artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
 
         plan_rel = str(artifacts.get("plan_json", "")).strip()
+        requirements_rel = str(artifacts.get("requirements_json", "")).strip()
         fsa_rel = str(artifacts.get("global_fsa_json", "")).strip()
         safety_logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
         validation_rel = self._plan_validation_artifact_rel(artifacts)
@@ -2786,6 +3227,7 @@ class SystemBridge:
             raise ValueError("plan set is missing required plan/safety artifacts")
 
         plan_path = (root / plan_rel).resolve()
+        requirements_path = (root / requirements_rel).resolve() if requirements_rel else None
         fsa_path = (root / fsa_rel).resolve()
         safety_logic_path = (root / safety_logic_rel).resolve()
         validation_path = (root / validation_rel).resolve()
@@ -2857,6 +3299,8 @@ class SystemBridge:
             camera=CameraModule(backend="none"),
         )
         product_agent.process_planner.load(plan_path)
+        if requirements_path is not None and requirements_path.exists():
+            product_agent.process_planner.load_requirements(requirements_path)
         product_agent.safety_text = safety_text
 
         try:
@@ -2886,9 +3330,15 @@ class SystemBridge:
             )
             replan_policy = manifest.get("replan_policy", {}) if isinstance(manifest.get("replan_policy"), dict) else {}
             try:
-                auto_replan_max_attempts = int(replan_policy.get("auto_replan_max_attempts", 3) or 0)
+                auto_replan_max_attempts = int(
+                    replan_policy.get(
+                        "auto_replan_max_attempts",
+                        _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS,
+                    )
+                    or 0
+                )
             except Exception:
-                auto_replan_max_attempts = 3
+                auto_replan_max_attempts = _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
             auto_replan_max_attempts = max(0, min(auto_replan_max_attempts, 10))
 
             validation_payload = asyncio.run(
@@ -2925,6 +3375,27 @@ class SystemBridge:
                 "witness_count": witness_count,
                 "auto_replans_used": int(validation_payload.get("auto_replans_used", 0)),
                 "stop_reason": str(validation_payload.get("stop_reason", "")),
+                "cumulative_validation_time_ms": float(
+                    validation_payload.get("cumulative_validation_time_ms", 0.0) or 0.0
+                ),
+                "validation_call_count": int(
+                    validation_payload.get("validation_call_count", 0) or 0
+                ),
+                "grounding_summary": (
+                    dict(validation_payload.get("grounding_summary", {}))
+                    if isinstance(validation_payload.get("grounding_summary"), dict)
+                    else {}
+                ),
+                "validator_stats": (
+                    dict(validation_payload.get("validator_stats", {}))
+                    if isinstance(validation_payload.get("validator_stats"), dict)
+                    else {}
+                ),
+                "repair_history": (
+                    list(validation_payload.get("repair_history", []))
+                    if isinstance(validation_payload.get("repair_history"), list)
+                    else []
+                ),
             }
             self.bundle_store.overwrite_manifest(bid, manifest)
             summary = self.bundle_store.update_bundle_summary(
@@ -3202,6 +3673,9 @@ class SystemBridge:
             prod_files, res_files = await asyncio.to_thread(self._collect_init_files)
             if not prod_files:
                 raise RuntimeError("No product initialization files found.")
+            res_files = self._selected_resource_files(res_files)
+            if not res_files:
+                raise RuntimeError("No active robot manifests are selected.")
 
             selected_requirement_file = str(self.selected_requirement_file or "").strip()
             if selected_requirement_file:

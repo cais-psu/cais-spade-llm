@@ -1,0 +1,136 @@
+{
+  "study_id": "offline_planning_experiment_pack",
+  "defaults": {
+    "execution_mode": "dry_run",
+    "robot_env": "gazebo",
+    "trials_per_method": 2,
+    "auto_replan_max_attempts": 5,
+    "methods": [
+      "llm_nl_safety"
+    ]
+  },
+  "resource_manifests": {
+    "ur5e": "cais_spade_llm/initialization/resources/robot_ur5e.json",
+    "ur5e-2": "writing/experiments/resources/robot_ur5e_2.json",
+    "xarm6": "cais_spade_llm/initialization/resources/robot_xarm6.json",
+    "xarm6-2": "writing/experiments/resources/robot_xarm6_2.json"
+  },
+  "resource_sets": {
+    "r3": [
+      "xarm6",
+      "ur5e",
+      "xarm6-2"
+    ],
+    "r4": [
+      "xarm6",
+      "ur5e",
+      "xarm6-2",
+      "ur5e-2"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "S1",
+      "resource_set": "r3",
+      "resource_keys": [
+        "xarm6",
+        "ur5e",
+        "xarm6-2"
+      ],
+      "trials": 2,
+      "product_init_file": "cais_spade_llm/initialization/products/assembly_board-v1.json",
+      "product_requirement_file": "cais_spade_llm/specification/products/requirements/s1_rpc_232.txt",
+      "safety_requirement_file": "cais_spade_llm/specification/safety/s2_rpc_343_safety.txt",
+      "enabled_safety_rule_ids": [
+        "SAFE_1",
+        "SAFE_2",
+        "SAFE_3"
+      ],
+      "parts": [
+        "SG",
+        "MRP",
+        "LCP"
+      ],
+      "part_order": [
+        "SG",
+        "MRP",
+        "LCP"
+      ],
+      "part_sources": {
+        "SG": "prusa-mk4-1",
+        "MRP": "prusa-mk3",
+        "LCP": "prusa-mk4-2"
+      },
+      "notes": "Primary dual-robot bridge scenario with approved ordering and mutex rules from Safety."
+    },
+    {
+      "id": "S2",
+      "resource_set": "r3",
+      "resource_keys": [
+        "xarm6",
+        "ur5e",
+        "xarm6-2"
+      ],
+      "trials": 2,
+      "product_init_file": "cais_spade_llm/initialization/products/assembly_board-v1.json",
+      "product_requirement_file": "cais_spade_llm/specification/products/requirements/s2_rpc_343.txt",
+      "safety_requirement_file": "cais_spade_llm/specification/safety/s2_rpc_343_safety.txt",
+      "enabled_safety_rule_ids": [
+        "SAFE_1",
+        "SAFE_2",
+        "SAFE_3"
+      ],
+      "parts": [
+        "SG",
+        "MRP",
+        "LCP",
+        "MG"
+      ],
+      "part_order": [
+        "SG",
+        "MRP",
+        "LCP",
+        "MG"
+      ],
+      "part_sources": {
+        "SG": "prusa-mk4-1",
+        "MRP": "prusa-mk3",
+        "LCP": "prusa-mk4-2",
+        "MG": "prusa-mk3-2"
+      },
+      "notes": "Three-robot offline planning stress case; swap to a newer approved Safety file here once a dedicated S2 rule pack is verified."
+    },
+    {
+      "id": "S3",
+      "resource_set": "r4",
+      "resource_keys": [
+        "xarm6",
+        "ur5e",
+        "xarm6-2",
+        "ur5e-2"
+      ],
+      "trials": 2,
+      "product_init_file": "cais_spade_llm/initialization/products/assembly_board-v1.json",
+      "product_requirement_file": "cais_spade_llm/specification/products/requirements/case2_two_arm_mutex.txt",
+      "safety_requirement_file": "cais_spade_llm/specification/safety/safety_home_mutex.txt",
+      "enabled_safety_rule_ids": [
+        "SAFE_1",
+        "SAFE_2",
+        "SAFE_3"
+      ],
+      "parts": [
+        "MCP",
+        "LRP"
+      ],
+      "part_order": [
+        "MCP",
+        "LRP"
+      ],
+      "part_sources": {
+        "MCP": "prusa-mk4-2",
+        "LRP": "prusa-mk4-1"
+      },
+      "notes": "Four-robot offline planning stress case; use this as the scenario shell after verifying a 4-resource safety file on the Safety page."
+    }
+  ]
+}

@@ -110,6 +110,10 @@ def render(bridge: SystemBridge) -> None:
                     _MODE_LABELS,
                     value="Simulation",
                 ).props("inline")
+            active_robots_label = ui.label(
+                f"Active robots for startup/planning: {bridge.selected_resource_summary()} "
+                "(change on the Resources page)."
+            ).classes("text-xs text-slate-600 mt-2")
             bridge.execution_mode = _MODE_MAP.get(mode_select.value, "simulation")
             bridge.robot_env = "gazebo" if bridge.execution_mode in ("dry_run", "simulation") else "real"
 
@@ -169,6 +173,10 @@ def render(bridge: SystemBridge) -> None:
                         )
 
                     plan_set_select.set_enabled(str(startup_source_select.value) == "Use Verified Plan Set")
+                    active_robots_label.text = (
+                        "Active robots for startup/planning: "
+                        f"{bridge.selected_resource_summary()} (change on the Resources page)."
+                    )
 
                 def _bundle_gate(*, strict: bool) -> tuple[bool, str]:
                     source = str(startup_source_select.value or "")
@@ -593,6 +601,7 @@ def render(bridge: SystemBridge) -> None:
             def _refresh_selection_and_controls() -> None:
                 _update_source_picker_visibility()
                 _refresh_plan_set_options()
+                _managed_timer(2.0, _refresh_plan_set_options)
                 _update_controls()
                 refresh_dag_now()
 
@@ -1781,8 +1790,7 @@ def render(bridge: SystemBridge) -> None:
                 "auto": "Auto-route",
                 "product": "Product Agent",
                 "cca": "Central Controller Agent",
-                "xarm6": "xArm6",
-                "ur5e": "UR5e",
+                **bridge.resource_chat_options(active_only=True),
             },
             title="System Chat",
         )

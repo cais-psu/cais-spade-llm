@@ -33,6 +33,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artif
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
+_DEFAULT_REPAIR_MAX_ATTEMPTS = 5
 _CASE3_PREPROGRAMMED_SCENARIO_ID = "case3_llm_bridge"
 _CASE3_PREPROGRAMMED_REQUIREMENT_FILES = frozenset({"case3_two_arm_llm_bridge.txt"})
 
@@ -121,7 +122,7 @@ class ProductAgent(LlmAgent):
         self._plan_result_inbox_registered = False
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
-        self._runtime_repair_max_attempts = 3
+        self._runtime_repair_max_attempts = _DEFAULT_REPAIR_MAX_ATTEMPTS
         self._bridge_generation_mode = "auto"
         self._bridge_reasoning_mode = "single_shot"
         self.runtime_repair_state = "idle"
@@ -151,10 +152,19 @@ class ProductAgent(LlmAgent):
             try:
                 self._runtime_repair_max_attempts = max(
                     0,
-                    min(int(precomputed_policy.get("auto_replan_max_attempts", 3) or 0), 10),
+                    min(
+                        int(
+                            precomputed_policy.get(
+                                "auto_replan_max_attempts",
+                                _DEFAULT_REPAIR_MAX_ATTEMPTS,
+                            )
+                            or 0
+                        ),
+                        10,
+                    ),
                 )
             except Exception:
-                self._runtime_repair_max_attempts = 3
+                self._runtime_repair_max_attempts = _DEFAULT_REPAIR_MAX_ATTEMPTS
             self._bridge_generation_mode = str(
                 precomputed_policy.get("bridge_generation_mode", "auto") or "auto"
             ).strip().lower()

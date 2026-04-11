@@ -4,7 +4,7 @@
     {
       "id": "SAFE_1-1",
       "raw_text": "each arm should move back home after placing its part is done.",
-      "constraint_type": "return_home_after_place",
+      "constraint_type": "post_place_return_home",
       "process": "assembly",
       "product": [],
       "resources": [
@@ -31,7 +31,7 @@
     {
       "id": "SAFE_1-2",
       "raw_text": "each arm should move back home after placing its part is done.",
-      "constraint_type": "return_home_after_place",
+      "constraint_type": "post_place_return_home",
       "process": "assembly",
       "product": [],
       "resources": [
@@ -54,35 +54,6 @@
         }
       ],
       "ltlf": "(G ((ap004 -> F (ap003))))"
-    },
-    {
-      "id": "SAFE_2-1",
-      "raw_text": "both arms should not be inside the assembly board station at the same time.",
-      "constraint_type": "mutual_exclusion_zone",
-      "process": "assembly",
-      "product": [],
-      "resources": [
-        "ur5e",
-        "xarm6"
-      ],
-      "resource_types": [
-        "robot"
-      ],
-      "event": null,
-      "context": {
-        "destination": "assembly_board-v1"
-      },
-      "aps": [
-        {
-          "label": "ap005",
-          "full": "ap_state/assembly/any/ur5e/at/assembly_board-v1"
-        },
-        {
-          "label": "ap006",
-          "full": "ap_state/assembly/any/xarm6/at/assembly_board-v1"
-        }
-      ],
-      "ltlf": "(G (!(ap005 & ap006)))"
     }
   ]
 }

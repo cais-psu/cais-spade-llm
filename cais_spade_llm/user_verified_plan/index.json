@@ -3,6 +3,36 @@
   "active_bundle_id": "case3_llm_bridge",
   "bundles": [
     {
+      "bundle_id": "20260408T013419Z__case2_two_arm_mutex__simulation__gazebo__5a97a08a",
+      "display_name": "assembly_board-v1 | simulation/gazebo | invalid | 20260408T013419Z",
+      "created_at_utc": "2026-04-08T01:34:41.438956+00:00",
+      "status": "invalid",
+      "verified": false,
+      "product_name": "assembly_board-v1",
+      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/case2_two_arm_mutex.txt",
+      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_mutex.txt",
+      "execution_mode": "simulation",
+      "robot_env": "gazebo",
+      "parent_bundle_id": "",
+      "refinement_feedback": "",
+      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/20260408T013419Z__case2_two_arm_mutex__simulation__gazebo__5a97a08a/bundle_manifest.json"
+    },
+    {
+      "bundle_id": "20260410T023842Z__s1_rpc_232__simulation__gazebo__b8305b9f",
+      "display_name": "assembly_board-v1 | simulation/gazebo | draft | 20260410T023842Z",
+      "created_at_utc": "2026-04-10T02:38:59.209950+00:00",
+      "status": "draft",
+      "verified": false,
+      "product_name": "assembly_board-v1",
+      "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/s1_rpc_232.txt",
+      "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/s1_rpc_232_safety.txt",
+      "execution_mode": "simulation",
+      "robot_env": "gazebo",
+      "parent_bundle_id": "",
+      "refinement_feedback": "",
+      "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/20260410T023842Z__s1_rpc_232__simulation__gazebo__b8305b9f/bundle_manifest.json"
+    },
+    {
       "bundle_id": "case1_one_arm_no_move_home",
       "manifest_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/user_verified_plan/bundles/case1_one_arm_no_move_home/bundle_manifest.json",
       "display_name": "assembly_board-v1 | simulation/gazebo | draft | 20260316T235623Z",

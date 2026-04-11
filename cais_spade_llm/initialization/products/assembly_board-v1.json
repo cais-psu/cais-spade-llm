@@ -6,7 +6,7 @@
     "domain": "localhost",
     "functions": [],
     "instructions": "This product requires to be printed and assembled as specified.",
-    "product_specification_file": "cais_spade_llm/specification/products/requirements/case2_two_arm_mutex.txt",
+    "product_specification_file": "cais_spade_llm/specification/products/requirements/s3_rpc_464.txt",
     "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
   }
 }

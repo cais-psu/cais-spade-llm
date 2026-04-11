@@ -38,6 +38,7 @@ class CentralControllerAgent(LlmAgent):
         resource_agents: Optional[Iterable[Any]] = None,
         safety_file: str | None = None,
         precomputed_bundle: Optional[dict[str, Any]] = None,
+        safety_known_parts: Optional[Iterable[str]] = None,
         **kw: Any,
     ) -> None:
         """Initialize controller state, safety logic, and monitoring scaffolding."""
@@ -47,6 +48,11 @@ class CentralControllerAgent(LlmAgent):
         self.safety_file = Path(safety_file) if safety_file else None
         self.resource_agents = list(resource_agents or [])
         self.precomputed_bundle: dict[str, Any] = dict(precomputed_bundle or {})
+        self.safety_known_parts: list[str] = [
+            str(part).strip()
+            for part in (safety_known_parts or [])
+            if str(part or "").strip()
+        ]
         
         base_safety_dir = Path("cais_spade_llm/safety")
         self.safety_logic_path = base_safety_dir / f"{name}_safety_logic.json"

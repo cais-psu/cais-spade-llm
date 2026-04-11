@@ -17,6 +17,36 @@ def render(bridge: SystemBridge) -> None:
     with ui.row().classes("w-full px-6 gap-6 items-start"):
       with ui.column().classes("flex-grow gap-6 min-w-0"):
 
+        with ui.card().classes("w-full"):
+            ui.label("Active Robots").classes("text-lg font-semibold mb-2")
+            ui.label(
+                "Choose which robots are in scope for startup, planning, and safety preview generation. "
+                "This applies on the next generation/start action."
+            ).classes("text-xs text-slate-500 mb-3")
+
+            active_options = {
+                entry["key"]: entry["label"]
+                for entry in bridge.list_available_resource_entries()
+            }
+            active_select = ui.select(
+                active_options,
+                value=bridge.get_selected_resource_keys(),
+                label="Active Robots",
+                multiple=True,
+            ).classes("w-full")
+            active_summary = ui.label(
+                f"Current selection: {bridge.selected_resource_summary()}"
+            ).classes("text-sm text-slate-700")
+
+            def _apply_active_selection() -> None:
+                selected = list(active_select.value or [])
+                normalized = bridge.set_selected_resource_keys(selected)
+                active_select.value = normalized
+                active_summary.text = f"Current selection: {bridge.selected_resource_summary()}"
+                ui.notify("Active robots updated for future preview/generation/start actions.", type="positive")
+
+            active_select.on_value_change(lambda _: _apply_active_selection())
+
         # ── Resource Configuration Files ─────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Resources").classes("text-lg font-semibold mb-2")
@@ -75,6 +105,6 @@ def render(bridge: SystemBridge) -> None:
       with ui.column().classes("w-96 shrink-0 sticky top-20 self-start"):
         render_chat(
             bridge,
-            agent_options={"xarm6": "xArm6", "ur5e": "UR5e"},
+            agent_options=bridge.resource_chat_options(active_only=False),
             title="Resource Agent Chat",
         )

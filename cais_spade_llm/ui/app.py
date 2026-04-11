@@ -23,6 +23,7 @@ _NAV_ITEMS = [
     ("Control", "/control", "gamepad"),
     ("Plans", "/plans", "schema"),
     ("Safety", "/safety", "shield"),
+    ("Experiments", "/experiments", "science"),
     ("Products", "/products", "inventory_2"),
     ("Resources", "/resources", "precision_manufacturing"),
 ]
@@ -127,7 +128,7 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products
+    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products, experiments
 
     @ui.page("/")
     def index_page():
@@ -148,6 +149,11 @@ def create_app() -> None:
     def resources_page():
         _page_wrapper(bridge)
         resources.render(bridge)
+
+    @ui.page("/experiments")
+    def experiments_page():
+        _page_wrapper(bridge)
+        experiments.render(bridge)
 
     @ui.page("/safety")
     def safety_page():
