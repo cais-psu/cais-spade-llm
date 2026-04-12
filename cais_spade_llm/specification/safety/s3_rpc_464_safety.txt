@@ -1,0 +1,5 @@
+[Safety Requirements]
+- MRP must be pick_approach first before SG pick_approach to the assembly station.
+- MG must be pick_approach first before LCP pick_approach to the assembly station.
+- xarm6 and xarm6-2 should not be pick_approach at the same time to prusa-mk4-1.
+- ur5e and ur5e-2 should not be place_approach at the same time to the assembly station.

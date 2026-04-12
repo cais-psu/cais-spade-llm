@@ -137,6 +137,13 @@ def _format_optional_count(value: Any) -> str:
         return str(value)
 
 
+def _preview_textarea_rows(text: str, *, min_rows: int = 6, max_rows: int = 28) -> int:
+    rows = 1
+    for line in str(text or "").splitlines() or [""]:
+        rows += max(1, (len(line) // 96) + 1)
+    return max(min_rows, min(max_rows, rows))
+
+
 def render(bridge: SystemBridge) -> None:
     ui.label("Experiments").classes("text-2xl font-bold px-6 pt-6")
 
@@ -1495,23 +1502,27 @@ def render(bridge: SystemBridge) -> None:
                                             ),
                                         ).props("flat color=red")
 
-                            with ui.row().classes("w-full gap-4 items-start no-wrap mt-3"):
-                                with ui.column().classes("w-1/2 gap-1"):
+                            with ui.row().classes("w-full gap-4 items-start flex-wrap mt-3"):
+                                with ui.column().classes("flex-1 min-w-[360px] gap-1"):
                                     ui.label(
                                         f"Requirement File: {_selected_file_name(scenario.get('product_requirement_file', ''))}"
                                     ).classes("text-xs text-slate-600")
                                     ui.textarea(
                                         label="Requirement File Preview",
                                         value=preview_requirements,
-                                    ).classes("w-full font-mono").props("outlined readonly autogrow")
-                                with ui.column().classes("w-1/2 gap-1"):
+                                    ).classes("w-full font-mono").props(
+                                        f"outlined readonly autogrow rows={_preview_textarea_rows(preview_requirements)}"
+                                    )
+                                with ui.column().classes("flex-1 min-w-[360px] gap-1"):
                                     ui.label(
                                         f"Verified Safety File: {_selected_file_name(scenario.get('safety_requirement_file', ''))}"
                                     ).classes("text-xs text-slate-600")
                                     ui.textarea(
                                         label="Verified Safety File Preview",
                                         value=preview_safety,
-                                    ).classes("w-full font-mono").props("outlined readonly autogrow")
+                                    ).classes("w-full font-mono").props(
+                                        f"outlined readonly autogrow rows={_preview_textarea_rows(preview_safety)}"
+                                    )
 
                 @ui.refreshable
                 def analysis_card() -> None:

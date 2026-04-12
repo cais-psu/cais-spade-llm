@@ -297,22 +297,16 @@ class BundleCompiler:
 
     @staticmethod
     def _import_runtime_classes():
-        try:
-            from agents.central_controller.central_controller_agent import CentralControllerAgent
-            from agents.central_controller.plan_safety_validator import PlanSafetyValidator
-            from agents.intelligent_product.product_agent import ProductAgent
-            from agents.shared_information.llm_agent import LlmAgent
-            from resources.sensor.camera_module import CameraModule
-        except ImportError:
-            from cais_spade_llm.agents.central_controller.central_controller_agent import (
-                CentralControllerAgent,
-            )
-            from cais_spade_llm.agents.central_controller.plan_safety_validator import (
-                PlanSafetyValidator,
-            )
-            from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
-            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-            from cais_spade_llm.resources.sensor.camera_module import CameraModule
+        from cais_spade_llm.agents.central_controller.central_controller_agent import (
+            CentralControllerAgent,
+        )
+        from cais_spade_llm.agents.central_controller.plan_safety_validator import (
+            PlanSafetyValidator,
+        )
+        from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
+        from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+        from cais_spade_llm.resources.sensor.camera_module import CameraModule
+
         return ProductAgent, CentralControllerAgent, PlanSafetyValidator, CameraModule, LlmAgent
 
     @staticmethod
@@ -732,16 +726,13 @@ class BundleCompiler:
                     before_nodes,
                     getattr(planner, "nodes", []) or [],
                 )
-                graph_loadable = True
-                if hasattr(planner, "_validate_task_graph"):
-                    try:
-                        planner._validate_task_graph(planner.nodes)
-                    except Exception:
-                        graph_loadable = False
-                restored_last_compileable = not graph_loadable
-                if restored_last_compileable:
-                    planner.nodes = deepcopy(last_compileable_nodes)
-                    planner.global_fsa = deepcopy(last_compileable_fsa)
+                # A repair can leave the DAG acyclic but still uncompilable for the
+                # resource-level FSA layout, for example by creating conflicting
+                # same-resource requirement block order. In both cases, continue
+                # from the last graph that actually compiled.
+                planner.nodes = deepcopy(last_compileable_nodes)
+                planner.global_fsa = deepcopy(last_compileable_fsa)
+                restored_last_compileable = True
                 retry_planned = auto_replans_used < auto_replan_max_attempts
                 repair_history.append(
                     cls._repair_history_repair_entry(

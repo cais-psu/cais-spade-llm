@@ -6,7 +6,7 @@
     "trials_per_method": 2,
     "auto_replan_max_attempts": 5,
     "methods": [
-      "llm_nl_safety"
+      "verified"
     ]
   },
   "resource_manifests": {
@@ -16,6 +16,10 @@
     "xarm6-2": "writing/experiments/resources/robot_xarm6_2.json"
   },
   "resource_sets": {
+    "r2": [
+      "xarm6",
+      "ur5e"
+    ],
     "r3": [
       "xarm6",
       "ur5e",
@@ -31,20 +35,18 @@
   "scenarios": [
     {
       "id": "S1",
-      "resource_set": "r3",
+      "resource_set": "r2",
       "resource_keys": [
         "xarm6",
-        "ur5e",
-        "xarm6-2"
+        "ur5e"
       ],
       "trials": 2,
       "product_init_file": "cais_spade_llm/initialization/products/assembly_board-v1.json",
       "product_requirement_file": "cais_spade_llm/specification/products/requirements/s1_rpc_232.txt",
-      "safety_requirement_file": "cais_spade_llm/specification/safety/s2_rpc_343_safety.txt",
+      "safety_requirement_file": "cais_spade_llm/specification/safety/s1_rpc_232_safety.txt",
       "enabled_safety_rule_ids": [
         "SAFE_1",
-        "SAFE_2",
-        "SAFE_3"
+        "SAFE_2"
       ],
       "parts": [
         "SG",
@@ -111,24 +113,37 @@
       ],
       "trials": 2,
       "product_init_file": "cais_spade_llm/initialization/products/assembly_board-v1.json",
-      "product_requirement_file": "cais_spade_llm/specification/products/requirements/case2_two_arm_mutex.txt",
-      "safety_requirement_file": "cais_spade_llm/specification/safety/safety_home_mutex.txt",
+      "product_requirement_file": "cais_spade_llm/specification/products/requirements/s3_rpc_464.txt",
+      "safety_requirement_file": "cais_spade_llm/specification/safety/s3_rpc_464_safety.txt",
       "enabled_safety_rule_ids": [
         "SAFE_1",
         "SAFE_2",
-        "SAFE_3"
+        "SAFE_3",
+        "SAFE_4"
       ],
       "parts": [
-        "MCP",
-        "LRP"
+        "SG",
+        "MRP",
+        "LCP",
+        "MG",
+        "LRP",
+        "SCP"
       ],
       "part_order": [
-        "MCP",
-        "LRP"
+        "SG",
+        "MRP",
+        "LCP",
+        "MG",
+        "LRP",
+        "SCP"
       ],
       "part_sources": {
-        "MCP": "prusa-mk4-2",
-        "LRP": "prusa-mk4-1"
+        "SG": "prusa-mk4-1",
+        "MRP": "prusa-mk3",
+        "LCP": "prusa-mk4-2",
+        "MG": "prusa-mk3-2",
+        "LRP": "prusa-mk4-1",
+        "SCP": "prusa-mk4-2"
       },
       "notes": "Four-robot offline planning stress case; use this as the scenario shell after verifying a 4-resource safety file on the Safety page."
     }

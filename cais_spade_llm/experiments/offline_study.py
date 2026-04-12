@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import re
 import shutil
 from collections import defaultdict
@@ -56,6 +57,34 @@ _REQUIREMENT_ASSEMBLY_LINE_RE = re.compile(
     r"(?P<part>[A-Za-z0-9_-]+)\s+from\s+(?P<source>[A-Za-z0-9_.@-]+)\s+to\b",
     flags=re.IGNORECASE,
 )
+
+
+def _make_experiment_logger() -> logging.Logger:
+    logger = logging.getLogger("agent:experiment")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    try:
+        log_dir = _BASE / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            log_dir / "experiment_actions.log",
+            mode="a",
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except Exception:
+        pass
+    logger.propagate = False
+    return logger
+
+
+log = _make_experiment_logger()
 
 
 @dataclass(frozen=True)
@@ -1710,6 +1739,63 @@ class OfflineStudyRunner:
             )
         )
 
+    def _trial_exception_record(
+        self,
+        *,
+        scenario: dict[str, Any],
+        method: str,
+        trial_index: int,
+        workspace: ScenarioWorkspace,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        safety_rule_count = int(scenario.get("safety_rule_count", 0) or 0)
+        return {
+            "scenario_id": str(scenario.get("id") or ""),
+            "method": str(method),
+            "trial_index": int(trial_index),
+            "robots": int(scenario.get("resource_count", 0) or 0),
+            "parts": int(scenario.get("part_count", 0) or 0),
+            "safety_rules": safety_rule_count,
+            "resource_names": list(scenario.get("resource_names", [])),
+            "part_ids": list(scenario.get("parts", [])),
+            "product_init_file": str(scenario.get("product_init_file", "") or ""),
+            "product_requirement_file": str(scenario.get("product_requirement_file", "") or ""),
+            "safety_requirement_file": str(scenario.get("safety_requirement_file", "") or ""),
+            "enabled_safety_rule_ids": list(scenario.get("enabled_safety_rule_ids", [])),
+            "ok": False,
+            "stop_reason": "trial_exception",
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "violated_rules": [],
+            "satisfied_rule_count": None,
+            "violated_rule_count": 0,
+            "rule_satisfaction_rate": None,
+            "rule_satisfaction_evaluated": False,
+            "witness_count": 0,
+            "auto_replans_used": 0,
+            "cumulative_validation_time_ms": 0.0,
+            "validation_call_count": 0,
+            "grounding_summary": {},
+            "repair_history": [],
+            "initial_violated_rule_count": 0,
+            "final_violated_rule_count": 0,
+            "repair_corrections_by_attempt": {},
+            "repair_correction_summary": "none",
+            "validator_stats": {},
+            "fsa_reachable_states": 0,
+            "fsa_transitions": 0,
+            "per_rule_product_states_explored": {},
+            "total_product_states_explored": 0,
+            "verification_time_ms": 0.0,
+            "product_state_limit_hit": False,
+            "first_pass_valid": False if method == "llm_nl_safety" else None,
+            "final_verified_valid": False if method == "verified" else None,
+            "requirements_file": str(workspace.requirements_file),
+            "safety_file": str(workspace.safety_file),
+            "bundle_id": "",
+            "bundle_dir": "",
+        }
+
     def _aggregate_rows(
         self,
         *,
@@ -2065,24 +2151,121 @@ class OfflineStudyRunner:
         atomic_json_write(run_root / "normalized_study.json", self._json_safe(study))
 
         trial_rows: list[dict[str, Any]] = []
+        methods = [str(method) for method in study["defaults"]["methods"]]
+        total_trials = sum(
+            int(scenario.get("trials", 0) or 0) * len(methods)
+            for scenario in study.get("scenarios", [])
+            if isinstance(scenario, dict)
+        )
+        global_trial_index = 0
+        log.info(
+            "[Experiment] Run %s started: study=%s scenarios=%d methods=%s total_trials=%d results=%s",
+            run_id,
+            study["study_id"],
+            len(study.get("scenarios", []) or []),
+            ",".join(methods),
+            total_trials,
+            run_root,
+        )
         for scenario in study.get("scenarios", []):
             workspace = self.prepare_scenario_workspace(study, scenario, run_root=run_root)
-            for method in study["defaults"]["methods"]:
-                for trial_index in range(1, int(scenario["trials"]) + 1):
-                    compile_result = self._run_trial(
-                        study=study,
-                        scenario=scenario,
-                        workspace=workspace,
-                        method=str(method),
-                        trial_index=trial_index,
-                        run_root=run_root,
+            scenario_id = str(scenario.get("id") or "")
+            scenario_trials = int(scenario["trials"])
+            log.info(
+                "[Experiment] Run %s scenario=%s prepared: scale=%d/%d/%d trials_per_method=%d resources=%s parts=%s",
+                run_id,
+                scenario_id,
+                int(scenario.get("resource_count", 0) or 0),
+                int(scenario.get("part_count", 0) or 0),
+                int(scenario.get("safety_rule_count", 0) or 0),
+                scenario_trials,
+                ",".join(str(item) for item in scenario.get("resource_names", []) or []),
+                ",".join(str(item) for item in scenario.get("parts", []) or []),
+            )
+            for method in methods:
+                for trial_index in range(1, scenario_trials + 1):
+                    global_trial_index += 1
+                    log.info(
+                        "[Experiment] Run %s scenario=%s method=%s trial=%d/%d global=%d/%d START",
+                        run_id,
+                        scenario_id,
+                        method,
+                        trial_index,
+                        scenario_trials,
+                        global_trial_index,
+                        total_trials,
                     )
-                    trial_record = self._extract_trial_record(
-                        scenario=scenario,
-                        method=str(method),
-                        trial_index=trial_index,
-                        compile_result=compile_result,
-                        workspace=workspace,
+                    try:
+                        compile_result = self._run_trial(
+                            study=study,
+                            scenario=scenario,
+                            workspace=workspace,
+                            method=method,
+                            trial_index=trial_index,
+                            run_root=run_root,
+                        )
+                    except Exception as exc:
+                        log.exception(
+                            "[Experiment] Run %s scenario=%s method=%s trial=%d/%d global=%d/%d FAILED before raw record",
+                            run_id,
+                            scenario_id,
+                            method,
+                            trial_index,
+                            scenario_trials,
+                            global_trial_index,
+                            total_trials,
+                        )
+                        trial_record = self._trial_exception_record(
+                            scenario=scenario,
+                            method=method,
+                            trial_index=trial_index,
+                            workspace=workspace,
+                            exc=exc,
+                        )
+                        compile_result = {
+                            "summary": {
+                                "status": "invalid",
+                                "verified": False,
+                                "stop_reason": "trial_exception",
+                            },
+                            "manifest": {},
+                            "validation_summary": {
+                                "ok": False,
+                                "stop_reason": "trial_exception",
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                            },
+                            "bundle_dir": "",
+                        }
+                    else:
+                        trial_record = self._extract_trial_record(
+                            scenario=scenario,
+                            method=method,
+                            trial_index=trial_index,
+                            compile_result=compile_result,
+                            workspace=workspace,
+                        )
+                    rule_sat = trial_record.get("rule_satisfaction_rate")
+                    rule_sat_text = (
+                        "N/A"
+                        if rule_sat is None
+                        else f"{float(rule_sat) * 100:.1f}%"
+                    )
+                    log.info(
+                        "[Experiment] Run %s scenario=%s method=%s trial=%d/%d global=%d/%d DONE ok=%s stop=%s rule_sat=%s violated=%s repairs=%d validation_calls=%d",
+                        run_id,
+                        scenario_id,
+                        method,
+                        trial_index,
+                        scenario_trials,
+                        global_trial_index,
+                        total_trials,
+                        bool(trial_record.get("ok", False)),
+                        str(trial_record.get("stop_reason", "") or ""),
+                        rule_sat_text,
+                        ",".join(str(item) for item in trial_record.get("violated_rules", []) or []) or "none",
+                        int(trial_record.get("auto_replans_used", 0) or 0),
+                        int(trial_record.get("validation_call_count", 0) or 0),
                     )
                     raw_payload = {
                         "study_id": study["study_id"],
@@ -2122,6 +2305,13 @@ class OfflineStudyRunner:
         )
         self._write_csv(summary_csv_path, aggregate_rows)
         markdown_path.write_text(markdown_text, encoding="utf-8")
+        log.info(
+            "[Experiment] Run %s completed: trials=%d summary=%s table=%s",
+            run_id,
+            len(trial_rows),
+            summary_json_path,
+            markdown_path,
+        )
 
         return {
             "study_id": study["study_id"],

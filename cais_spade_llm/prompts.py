@@ -882,7 +882,16 @@ GLOBAL CONSTRAINTS (MUST FOLLOW):
 - The repaired plan MUST remain a DAG (no cycles in predecessor relations).
 - NEVER add mutual/symmetric dependencies (do NOT add A as predecessor of B AND B as predecessor of A).
 - For edge repairs, ONLY edit `predecessors`. Do NOT edit `successors` (the system will rebuild successors automatically).
+- Before adding predecessor P to task T, inspect the existing DAG: if T already reaches P through task-chain dependencies, adding P to T creates a cycle and is forbidden.
 - Do not remove required work: if a task contributes to satisfying a requirement, prefer re-ordering or coordination instead of deletion.
+""")
+
+_REPLAN_MUTEX_GUIDANCE = dedent("""\
+MUTUAL-EXCLUSION REPAIR GUIDANCE:
+- For same-event resource mutexes, choose ONE consistent ordering direction for all affected task chains.
+- Do not mix directions, such as making resource A wait for resource B in one part and resource B wait for resource A in another part.
+- Prefer a simple serialization edge from the last task of the earlier chain to the conflicting event of the later chain.
+- Never make a task wait for the place_insert/pick_grasp that is already downstream of that same task; that creates cycles like T3 -> T4 -> other_T3 -> T3.
 """)
 
 _REPLAN_DATA_CONSISTENCY = dedent("""\
@@ -963,6 +972,8 @@ YOUR GOAL:
 Fix the plan structure to satisfy ALL safety rules before execution begins.
 
 {_REPLAN_SHARED_CONSTRAINTS}
+
+{_REPLAN_MUTEX_GUIDANCE}
 
 STRICT RULES FOR MODIFICATION:
 1. ANALYZE THE VIOLATION LOGIC:
