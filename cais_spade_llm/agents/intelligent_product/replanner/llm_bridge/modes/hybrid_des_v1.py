@@ -1005,6 +1005,8 @@ def _write_per_turn_artifact(
     prepared_bridge_request: dict[str, Any],
     session_state: dict[str, Any],
     turn_entry: dict[str, Any],
+    *,
+    write_session_transcript: bool = False,
 ) -> None:
     """Write debug artifacts for the current turn."""
     try:
@@ -1014,6 +1016,7 @@ def _write_per_turn_artifact(
         write_bridge_artifacts(
             payload,
             phase_label=str(session_state.get("current_phase") or "hybrid"),
+            write_session_transcript=write_session_transcript,
         )
     except Exception:
         _logger.debug("[HybridDES] Failed to write per-turn artifact.", exc_info=True)
@@ -1145,9 +1148,15 @@ async def execute_hybrid_des_bridge(
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         if hasattr(planner, "_set_last_bridge_debug"):
             planner._set_last_bridge_debug(bridge_debug)
-        _write_per_turn_artifact(prepared_bridge_request, session_state, turn_entry)
+        is_final_turn = session_state.get("status") in (
+            "completed", "paused_after_grounding",
+        )
+        _write_per_turn_artifact(
+            prepared_bridge_request, session_state, turn_entry,
+            write_session_transcript=is_final_turn,
+        )
 
-        if session_state.get("status") in ("completed", "paused_after_grounding"):
+        if is_final_turn:
             break
 
     # Stash session state
@@ -1164,6 +1173,10 @@ async def execute_hybrid_des_bridge(
             "[HybridDES] Turn budget exhausted (%d turns) in phase=%s",
             max_turns,
             str(session_state.get("current_phase") or ""),
+        )
+        _write_per_turn_artifact(
+            prepared_bridge_request, session_state, {},
+            write_session_transcript=True,
         )
         return None
 

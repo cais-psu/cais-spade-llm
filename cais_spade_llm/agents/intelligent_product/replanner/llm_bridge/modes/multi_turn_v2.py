@@ -2720,6 +2720,10 @@ async def _handle_outline_incremental_candidates_validated(
         feedback_rows = _candidate_feedback_rows(candidate_evaluations)
         session_state["candidate_rejection_feedback"] = deepcopy(feedback_rows)
         turn_entry["candidate_rejection_feedback"] = deepcopy(feedback_rows)
+        # Store the LLM's reasoning from this rejected turn for next-turn feedback.
+        session_state["rejected_turn_thought"] = str(
+            parsed_response.get("thought") or ""
+        ).strip()
         _logger.info(
             "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
             len(candidate_tasks),
@@ -2782,6 +2786,7 @@ async def _handle_outline_incremental_candidates_validated(
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
+    session_state["rejected_turn_thought"] = ""
 
     # Record pre-transition DES state, apply effects, record post-transition.
     pre_state = _symbolic_state_fingerprint(

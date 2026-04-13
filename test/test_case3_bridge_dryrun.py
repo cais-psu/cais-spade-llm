@@ -2165,6 +2165,9 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
                 "current_holder_resource_jid": "ur5e@localhost",
             },
         }
+        session_state["rejected_turn_thought"] = (
+            "xarm6 should handle LG because it is near the assembly station."
+        )
         session_state["candidate_rejection_feedback"] = [
             {
                 "candidate_index": 0,
@@ -2282,6 +2285,9 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
         assert "MCP by ur5e" not in prompt
         assert '"current_holder_resource_jid": "ur5e@localhost"' not in prompt
         assert '"current_holder_resource_jid": null' in prompt
+        assert "root cause of each rejection" in prompt
+        assert "Prior Rejected-Turn Reasoning" in prompt
+        assert "xarm6 should handle LG because it is near the assembly station." in prompt
 
     asyncio.run(_run())
 
@@ -2317,6 +2323,8 @@ def test_v2_candidate_prompt_hides_derived_causal_carrier_relations() -> None:
         assert "ur5e@localhost.held_part=MCP" not in prompt
         assert '"held_part": "MCP"' in prompt
         assert '"current_holder_resource_jid": "ur5e@localhost"' in prompt
+        assert "root cause of each rejection" not in prompt
+        assert "Prior Rejected-Turn Reasoning" not in prompt
 
     asyncio.run(_run())
 
@@ -2401,6 +2409,8 @@ def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
         assert "old xarm6 LG attempt" not in prompt
         assert "resource=ur5e@localhost; part=LG; target=assembly_board-v1; " not in prompt
         assert "resource=xarm6@localhost; part=LG; constraint=workspace_unreachable" not in prompt
+        assert "root cause of each rejection" not in prompt
+        assert "Prior Rejected-Turn Reasoning" not in prompt
 
     asyncio.run(_run())
 

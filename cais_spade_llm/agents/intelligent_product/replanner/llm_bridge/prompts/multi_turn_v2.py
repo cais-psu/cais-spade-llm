@@ -1601,6 +1601,12 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Each candidate is one physical action for one resource.\n"
             "The runtime supervisor will validate and commit at most one."
         )
+        if candidate_rejection_feedback or candidate_rejection_history:
+            role_text += (
+                "\nIf prior candidates were rejected, first reason about the "
+                "root cause of each rejection and what it rules out before "
+                "proposing new candidates."
+            )
     else:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
@@ -1635,6 +1641,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "Recent Rejected Candidate Feedback",
                 rejected_candidate_summary,
             ])
+
+    rejected_turn_thought = str(
+        session_state.get("rejected_turn_thought") or ""
+    ).strip()
+    if is_candidate_mode and rejected_turn_thought:
+        sections.extend([
+            "",
+            "Prior Rejected-Turn Reasoning (your prior reasoning, not ground truth)",
+            rejected_turn_thought,
+        ])
 
     if is_candidate_mode:
         sections.extend([
