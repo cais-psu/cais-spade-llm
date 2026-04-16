@@ -159,14 +159,52 @@ def build_multi_turn_session_seed(
         "observation_history": [],
         "accepted_outline": None,
         "accepted_outline_prefix": [],
+        "accepted_transition_prefix": [],
+        "des_event_sequence": [],
         "outline_progress_signature": None,
         "outline_stagnation_count": 0,
         "proposal_draft": None,
         "phase_feedback": [],
         "pruned_actions": [],
+        "transition_validation": {},
+        "unresolved_target_predicates": [],
         "turns": [],
         "final_proposal": None,
     }
+
+
+def _sync_des_recovery_aliases(
+    session_state: dict[str, Any],
+    *,
+    turn_entry: dict[str, Any] | None = None,
+    transition_validation: dict[str, Any] | None = None,
+    unresolved_target_predicates: list[dict[str, Any]] | None = None,
+) -> None:
+    """Maintain DES-style debug aliases without changing legacy outline fields."""
+    accepted_prefix = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    session_state["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+    session_state["des_event_sequence"] = deepcopy(accepted_prefix)
+    if transition_validation is not None:
+        session_state["transition_validation"] = deepcopy(transition_validation)
+    if unresolved_target_predicates is not None:
+        session_state["unresolved_target_predicates"] = deepcopy(
+            unresolved_target_predicates
+        )
+
+    if turn_entry is None:
+        return
+    turn_entry["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+    turn_entry["des_event_sequence"] = deepcopy(accepted_prefix)
+    if transition_validation is not None:
+        turn_entry["transition_validation"] = deepcopy(transition_validation)
+    if unresolved_target_predicates is not None:
+        turn_entry["unresolved_target_predicates"] = deepcopy(
+            unresolved_target_predicates
+        )
 
 
 def _resource_agent_map(planner: Any) -> dict[str, Any]:
@@ -6092,6 +6130,12 @@ async def execute_multi_turn_bridge(
             turn_entry["decision"] = decision
             turn_entry["outline_validation"] = deepcopy(outline_validation)
             session_state["last_outline_validation"] = deepcopy(outline_validation)
+            _sync_des_recovery_aliases(
+                session_state,
+                turn_entry=turn_entry,
+                transition_validation=outline_validation,
+                unresolved_target_predicates=remaining_unmet_conditions,
+            )
             stop_after_phase = str(session_state.get("stop_after_phase") or "").strip().lower()
             if stop_after_phase == "outline" and not outline_violations:
                 session_state["paused_before_phase_transition"] = next_phase

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from math import isfinite
 from textwrap import dedent
 from typing import Any
 
 from cais_spade_llm.resources.resource_profile import (
     ResourceProfile,
     register_resource_profile,
+    resource_event_target,
+    resource_primitive_event_target_contract,
     resource_snapshot_carried_entity,
     resource_snapshot_field_value,
 )
@@ -446,6 +449,702 @@ def _robot_event_state_validator(
         )
 
     return None
+
+
+def _robot_empty(value: Any) -> bool:
+    return value in (None, "", [], {})
+
+
+def _robot_token(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _robot_lower(value: Any) -> str:
+    return _robot_token(value).lower()
+
+
+def _robot_available_named_poses(snapshot: dict[str, Any]) -> set[str]:
+    raw = snapshot.get("named_poses") or snapshot.get("available_named_poses") or {}
+    if isinstance(raw, dict):
+        values = raw.keys()
+    else:
+        values = raw if isinstance(raw, (list, tuple, set)) else []
+    return {_robot_token(item) for item in values if _robot_token(item)}
+
+
+def _robot_sequence_finding(
+    *,
+    outline_event: dict[str, Any],
+    constraint_code: str,
+    reason: str,
+    step_result: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "task_id": _robot_token(outline_event.get("outline_id")),
+        "outline_id": _robot_token(outline_event.get("outline_id")),
+        "resource_jid": _robot_token(outline_event.get("resource_jid")),
+        "part_name": _robot_token(outline_event.get("part_name")) or None,
+        "constraint_owner": "resource",
+        "constraint_family": "primitive_sequence",
+        "constraint_code": _robot_token(constraint_code) or "primitive_sequence_invalid",
+        "reason": _robot_token(reason) or "robot primitive sequence is not valid",
+    }
+    if step_result:
+        row["step_index"] = step_result.get("step_index")
+        row["primitive"] = _robot_token(step_result.get("primitive"))
+    if evidence:
+        row["evidence"] = deepcopy(evidence)
+    return row
+
+
+def _robot_as_finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
+
+
+def _robot_motion_pose_from_params(params: dict[str, Any]) -> dict[str, float] | None:
+    pose: dict[str, float] = {}
+    for axis in ("x", "y", "z"):
+        number = _robot_as_finite_float(params.get(axis))
+        if number is None:
+            return None
+        pose[axis] = number
+    return pose
+
+
+def _robot_part_from_step(
+    step_result: dict[str, Any],
+    *,
+    fallback: str = "",
+) -> str:
+    params = dict(step_result.get("resolved_params") or step_result.get("params") or {})
+    for key in ("part_name", "model_name"):
+        token = _robot_token(params.get(key))
+        if token:
+            return token
+    return _robot_token(fallback)
+
+
+def _robot_step_output_part(
+    step_result: dict[str, Any],
+    *,
+    fallback: str = "",
+) -> str:
+    preview = dict(step_result.get("preview_output") or {})
+    token = _robot_token(preview.get("part_name"))
+    return token or _robot_part_from_step(step_result, fallback=fallback)
+
+
+def _robot_gripper_location(resource_jid: str) -> str:
+    return f"{resource_jid}_gripper" if resource_jid else "resource_gripper"
+
+
+def _robot_target_location_for_event(outline_event: dict[str, Any]) -> str:
+    expected_end = dict(outline_event.get("expected_end_state") or {})
+    action_target = dict(outline_event.get("action_target") or {})
+    return (
+        _robot_token(expected_end.get("part_location"))
+        or _robot_token(outline_event.get("target_ref"))
+        or _robot_token(action_target.get("target_location"))
+    )
+
+
+def _robot_trace_fact_key(fact: str, part_name: str = "") -> tuple[str, str]:
+    return (_robot_token(fact), _robot_token(part_name))
+
+
+def _robot_add_trace_fact(
+    facts: dict[tuple[str, str], list[dict[str, Any]]],
+    *,
+    fact: str,
+    part_name: str = "",
+    source: dict[str, Any] | None = None,
+) -> None:
+    fact_token = _robot_token(fact)
+    if not fact_token:
+        return
+    key = _robot_trace_fact_key(fact_token, part_name)
+    facts.setdefault(key, []).append(deepcopy(source or {}))
+
+
+def _robot_has_trace_fact(
+    facts: dict[tuple[str, str], list[dict[str, Any]]],
+    *,
+    fact: str,
+    part_name: str = "",
+) -> bool:
+    fact_token = _robot_token(fact)
+    part_token = _robot_token(part_name)
+    return (
+        _robot_trace_fact_key(fact_token, part_token) in facts
+        or _robot_trace_fact_key(fact_token, "") in facts
+    )
+
+
+def _robot_trace_fact_sources(
+    facts: dict[tuple[str, str], list[dict[str, Any]]],
+    *,
+    fact: str,
+    part_name: str = "",
+) -> list[dict[str, Any]]:
+    fact_token = _robot_token(fact)
+    part_token = _robot_token(part_name)
+    sources: list[dict[str, Any]] = []
+    sources.extend(facts.get(_robot_trace_fact_key(fact_token, part_token), []))
+    sources.extend(facts.get(_robot_trace_fact_key(fact_token, ""), []))
+    return deepcopy(sources)
+
+
+def _robot_part_matches(payload: dict[str, Any], part_name: str) -> bool:
+    expected = _robot_token(part_name)
+    if not expected:
+        return True
+    for key in ("part_name", "model_name"):
+        token = _robot_token(payload.get(key))
+        if token:
+            return token == expected
+    return True
+
+
+def _robot_target_payload_has_pose(payload: Any, *, target_kind: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    target_kind = _robot_lower(target_kind)
+    direct_pose_keys = ("target_pose",)
+    if target_kind == "pick":
+        nested_keys = ("pick_target",)
+        direct_pose_keys = direct_pose_keys + ("pick_target_pose",)
+    elif target_kind in {"release", "place"}:
+        nested_keys = ("place_target", "release_target")
+        direct_pose_keys = direct_pose_keys + (
+            "place_target_pose",
+            "release_target_pose",
+            "slot_pose",
+        )
+    else:
+        nested_keys = ("pick_target", "place_target", "release_target")
+        direct_pose_keys = direct_pose_keys + (
+            "pick_target_pose",
+            "place_target_pose",
+            "release_target_pose",
+            "slot_pose",
+        )
+
+    for key in direct_pose_keys:
+        if _normalized_xyz_pose(payload.get(key)) is not None:
+            return True
+    for key in nested_keys:
+        nested = payload.get(key)
+        if isinstance(nested, dict) and _robot_target_payload_has_pose(
+            nested, target_kind=target_kind,
+        ):
+            return True
+    return False
+
+
+def _robot_seed_trace_facts_from_context(
+    *,
+    facts: dict[tuple[str, str], list[dict[str, Any]]],
+    outline_event: dict[str, Any],
+    grounding_context: dict[str, Any] | None,
+) -> None:
+    event_part = _robot_token(outline_event.get("part_name"))
+    action_target = dict(outline_event.get("action_target") or {})
+    if event_part and _robot_target_payload_has_pose(action_target, target_kind="pick"):
+        _robot_add_trace_fact(
+            facts,
+            fact="pick_target_grounded",
+            part_name=event_part,
+            source={"source": "action_target"},
+        )
+    if event_part and _robot_target_payload_has_pose(action_target, target_kind="release"):
+        _robot_add_trace_fact(
+            facts,
+            fact="release_target_grounded",
+            part_name=event_part,
+            source={"source": "action_target"},
+        )
+
+    context = dict(grounding_context or {})
+    part_maps = [
+        dict(context.get("parts") or {}),
+        dict(context.get("parts_by_name") or {}),
+    ]
+    for part_map in part_maps:
+        for part_name, part_row in part_map.items():
+            if not isinstance(part_row, dict):
+                continue
+            token = _robot_token(part_row.get("part_name") or part_name)
+            if _normalized_xyz_pose(part_row.get("observed_pose")) is not None:
+                _robot_add_trace_fact(
+                    facts,
+                    fact="part_observed",
+                    part_name=token,
+                    source={"source": "grounding_context.observed_pose"},
+                )
+
+    observation_like_sources = [
+        ("observation_store", dict(context.get("observation_store") or {})),
+        ("step_outputs", dict(context.get("step_outputs") or {})),
+    ]
+    for source_name, rows in observation_like_sources:
+        for alias, payload in rows.items():
+            if not isinstance(payload, dict):
+                continue
+            payload_part = (
+                _robot_token(payload.get("part_name"))
+                or _robot_token(payload.get("model_name"))
+                or event_part
+            )
+            if event_part and not _robot_part_matches(payload, event_part):
+                continue
+            alias_token = _robot_lower(alias)
+            if _normalized_xyz_pose(payload.get("observed_pose") or payload.get("pose")) is not None:
+                _robot_add_trace_fact(
+                    facts,
+                    fact="part_observed",
+                    part_name=payload_part,
+                    source={"source": source_name, "alias": str(alias)},
+                )
+            trace_facts = payload.get("trace_facts")
+            if isinstance(trace_facts, (list, tuple)):
+                for raw_fact in trace_facts:
+                    if isinstance(raw_fact, dict):
+                        fact_name = _robot_token(raw_fact.get("fact"))
+                        fact_part = _robot_token(raw_fact.get("part_name")) or payload_part
+                    else:
+                        fact_name = _robot_token(raw_fact)
+                        fact_part = payload_part
+                    _robot_add_trace_fact(
+                        facts,
+                        fact=fact_name,
+                        part_name=fact_part,
+                        source={"source": source_name, "alias": str(alias)},
+                    )
+            if _robot_target_payload_has_pose(payload, target_kind="pick") and (
+                "pick" in alias_token
+                or any(key in payload for key in ("pick_z", "travel_z", "pick_tcp_z"))
+            ):
+                _robot_add_trace_fact(
+                    facts,
+                    fact="pick_target_grounded",
+                    part_name=payload_part,
+                    source={"source": source_name, "alias": str(alias)},
+                )
+            if _robot_target_payload_has_pose(payload, target_kind="release") and (
+                "place" in alias_token
+                or "release" in alias_token
+                or any(key in payload for key in ("place_z", "place_tcp_z", "slot_x", "slot_y"))
+            ):
+                _robot_add_trace_fact(
+                    facts,
+                    fact="release_target_grounded",
+                    part_name=payload_part,
+                    source={"source": source_name, "alias": str(alias)},
+                )
+
+
+def _robot_nested_param(params: dict[str, Any], field_path: str) -> Any:
+    current: Any = params
+    for token in str(field_path or "").split("."):
+        if not token:
+            continue
+        if not isinstance(current, dict):
+            return None
+        current = current.get(token)
+    return current
+
+
+def _robot_fact_part_from_spec(
+    spec: Any,
+    step_result: dict[str, Any],
+    *,
+    fallback: str = "",
+) -> str:
+    if not isinstance(spec, dict):
+        return _robot_part_from_step(step_result, fallback=fallback)
+    params = dict(step_result.get("resolved_params") or step_result.get("params") or {})
+    for field_name in (
+        spec.get("part_param"),
+        spec.get("model_param"),
+        "part_name",
+        "model_name",
+    ):
+        field_token = _robot_token(field_name)
+        if not field_token:
+            continue
+        token = _robot_token(_robot_nested_param(params, field_token))
+        if token:
+            return token
+    preview = dict(step_result.get("preview_output") or {})
+    token = _robot_token(preview.get("part_name") or preview.get("model_name"))
+    return token or _robot_token(fallback)
+
+
+def _robot_contract_specs(contract: dict[str, Any], key: str) -> list[Any]:
+    specs = contract.get(key)
+    if specs is None:
+        legacy_key = f"{key}_trace_facts"
+        specs = contract.get(legacy_key)
+    if isinstance(specs, (str, dict)):
+        return [specs]
+    if isinstance(specs, (list, tuple)):
+        return list(specs)
+    return []
+
+
+def _robot_primitive_contracts(
+    primitive: str,
+    *,
+    primitive_catalog_by_name: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    primitive_name = _robot_token(primitive)
+    profile_contract = dict(
+        (ROBOT_PROFILE.primitive_trace_fact_map or {}).get(primitive_name) or {}
+    )
+    catalog_entry = dict(primitive_catalog_by_name.get(primitive_name) or {})
+    entry_contract = dict(
+        catalog_entry.get("trace_fact_contract")
+        or catalog_entry.get("trace_facts")
+        or {}
+    )
+    merged: dict[str, Any] = {}
+    for key in ("establishes", "requires"):
+        merged[key] = (
+            _robot_contract_specs(profile_contract, key)
+            + _robot_contract_specs(entry_contract, key)
+            + _robot_contract_specs(catalog_entry, key)
+        )
+    return merged
+
+
+def _robot_requirement_applies(
+    requirement: Any,
+    *,
+    acquisition_required: bool,
+    release_to_target_required: bool,
+) -> bool:
+    if not isinstance(requirement, dict):
+        return True
+    when = _robot_lower(requirement.get("when"))
+    if not when:
+        return True
+    if when == "acquisition":
+        return acquisition_required
+    if when in {"release_to_target", "place_to_target"}:
+        return release_to_target_required
+    return True
+
+
+def _robot_trace_fact_name(spec: Any) -> str:
+    if isinstance(spec, dict):
+        return _robot_token(spec.get("fact"))
+    return _robot_token(spec)
+
+
+def _robot_primitive_sequence_validator(
+    *,
+    outline_event: dict[str, Any],
+    primitive_steps: list[dict[str, Any]],
+    trace_metadata: dict[str, Any],
+    start_snapshot: dict[str, Any],
+    projected_snapshot: dict[str, Any],
+    grounding_context: dict[str, Any] | None = None,
+    primitive_catalog: list[dict[str, Any]] | None = None,
+    **_: Any,
+) -> list[dict[str, Any]]:
+    """Robot-owned validation for primitive refinements of open-ended events."""
+    _ = primitive_steps, projected_snapshot
+    findings: list[dict[str, Any]] = []
+    resource_jid = _robot_token(outline_event.get("resource_jid"))
+    event_part = _robot_token(outline_event.get("part_name"))
+    expected_start = dict(outline_event.get("expected_start_state") or {})
+    expected_end = dict(outline_event.get("expected_end_state") or {})
+    start_held = (
+        expected_start.get("held_part")
+        if "held_part" in expected_start
+        else resource_snapshot_field_value(start_snapshot, "held_part")
+    )
+    end_held = expected_end.get("held_part") if "held_part" in expected_end else None
+    start_held_token = _robot_token(start_held)
+    end_held_token = _robot_token(end_held)
+    target_location = resource_event_target(ROBOT_PROFILE, outline_event)
+    event_family = _robot_event_family(outline_event)
+    gripper_location = _robot_gripper_location(resource_jid)
+
+    acquisition_required = bool(
+        event_part
+        and end_held_token == event_part
+        and start_held_token != event_part
+    )
+    release_required = bool(
+        event_part
+        and start_held_token == event_part
+        and "held_part" in expected_end
+        and _robot_empty(end_held)
+    )
+    release_to_target_required = bool(
+        release_required
+        and target_location
+        and _robot_lower(target_location) != _robot_lower(gripper_location)
+        and not _robot_lower(target_location).endswith("_gripper")
+    )
+
+    primitive_catalog_by_name = {
+        _robot_token(entry.get("name")): dict(entry)
+        for entry in (primitive_catalog or [])
+        if isinstance(entry, dict) and _robot_token(entry.get("name"))
+    }
+    named_poses = _robot_available_named_poses(start_snapshot)
+    workspace_bounds = dict(start_snapshot.get("workspace_bounds") or {})
+    trace_facts: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    _robot_seed_trace_facts_from_context(
+        facts=trace_facts,
+        outline_event=outline_event,
+        grounding_context=grounding_context,
+    )
+
+    # Track aliases emitted by target-computing primitives so we can detect
+    # motion steps whose params are actually bound to the computed target_pose
+    # (the motion-witness for downstream grasp_part / release_part).
+    target_alias_to_part: dict[str, str] = {}
+
+    for step_result in trace_metadata.get("step_results") or []:
+        if not isinstance(step_result, dict):
+            continue
+        primitive = _robot_token(step_result.get("primitive"))
+        params = dict(step_result.get("resolved_params") or {})
+        authored_params = dict(step_result.get("params") or {})
+        context_refs = [
+            str(ref or "").strip()
+            for ref in (step_result.get("context_refs") or [])
+            if str(ref or "").strip()
+        ]
+        store_as = _robot_token(step_result.get("store_as"))
+
+        if primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"} and store_as:
+            part_token = _robot_token(params.get("part_name") or authored_params.get("part_name"))
+            if part_token:
+                target_alias_to_part[store_as] = part_token
+
+        if primitive in {"move_cartesian", "move_pose"}:
+            for ref in context_refs:
+                normalized = ref.replace("/", ".").strip(".")
+                parts = [seg for seg in normalized.split(".") if seg]
+                if len(parts) < 3 or parts[0] != "step_outputs":
+                    continue
+                alias = parts[1]
+                if "target_pose" not in parts[2:]:
+                    continue
+                part_token = target_alias_to_part.get(alias)
+                if not part_token:
+                    continue
+                _robot_add_trace_fact(
+                    trace_facts,
+                    fact="motion_landed_on_target",
+                    part_name=part_token,
+                    source={
+                        "source": "motion_witness",
+                        "primitive": primitive,
+                        "step_index": step_result.get("step_index"),
+                        "alias": alias,
+                    },
+                )
+
+        if primitive == "move_to_named_pose":
+            pose_name = _robot_token(params.get("pose_name"))
+            if named_poses and pose_name and pose_name not in named_poses:
+                findings.append(
+                    _robot_sequence_finding(
+                        outline_event=outline_event,
+                        constraint_code="named_pose_unavailable",
+                        reason=f"named pose '{pose_name}' is not available for {resource_jid}",
+                        step_result=step_result,
+                        evidence={
+                            "named_pose": pose_name,
+                            "available_named_poses": sorted(named_poses),
+                        },
+                    )
+                )
+
+        event_target_contract = resource_primitive_event_target_contract(
+            ROBOT_PROFILE,
+            primitive,
+        )
+        contract_param_fields = list(event_target_contract.get("param_fields") or [])
+        contract_event_families = {
+            str(family).strip().lower()
+            for family in (event_target_contract.get("event_families") or [])
+            if str(family).strip()
+        }
+        contract_conditions = {
+            str(token).strip().lower()
+            for token in (event_target_contract.get("conditions") or [])
+            if str(token).strip()
+        }
+        target_contract_applies = bool(
+            target_location
+            and contract_param_fields
+            and (
+                (
+                    "release_to_target" in contract_conditions
+                    and release_to_target_required
+                )
+                or (
+                    contract_event_families
+                    and event_family in contract_event_families
+                )
+            )
+        )
+        if target_contract_applies:
+            authored_destination = ""
+            authored_field_name = ""
+            for field_name in contract_param_fields:
+                authored_destination = (
+                    _robot_token(params.get(field_name))
+                    or _robot_token(authored_params.get(field_name))
+                )
+                if authored_destination:
+                    authored_field_name = field_name
+                    break
+            if authored_destination and _robot_lower(authored_destination) != _robot_lower(
+                target_location,
+            ):
+                findings.append(
+                    _robot_sequence_finding(
+                        outline_event=outline_event,
+                        constraint_code=str(
+                            event_target_contract.get("constraint_code")
+                            or "primitive_event_target_mismatch"
+                        ),
+                        reason=(
+                            f"authored {primitive}.{authored_field_name}="
+                            f"{authored_destination!r} does not match active event target "
+                            f"{target_location!r}"
+                        ),
+                        step_result=step_result,
+                        evidence={
+                            "authored_target_field": authored_field_name,
+                            "authored_target_value": authored_destination,
+                            "active_event_target": target_location,
+                        },
+                    )
+                )
+
+        if primitive in {"move_cartesian", "move_pose"}:
+            pose = _robot_motion_pose_from_params(params)
+            if pose is None:
+                findings.append(
+                    _robot_sequence_finding(
+                        outline_event=outline_event,
+                        constraint_code="motion_target_invalid",
+                        reason=f"{primitive} requires finite numeric x/y/z motion targets",
+                        step_result=step_result,
+                        evidence={"params": deepcopy(params)},
+                    )
+                )
+            elif workspace_bounds:
+                reachable, violations = _robot_pose_in_workspace(pose, workspace_bounds)
+                if not reachable:
+                    findings.append(
+                        _robot_sequence_finding(
+                            outline_event=outline_event,
+                            constraint_code="workspace_unreachable",
+                            reason=f"{primitive} target is outside {resource_jid} workspace bounds",
+                            step_result=step_result,
+                            evidence={
+                                "checked_pose": deepcopy(pose),
+                                "workspace_bounds": deepcopy(workspace_bounds),
+                                "failed_axes": deepcopy(violations),
+                            },
+                        )
+                    )
+
+        fact_contract = _robot_primitive_contracts(
+            primitive,
+            primitive_catalog_by_name=primitive_catalog_by_name,
+        )
+        for requirement in _robot_contract_specs(fact_contract, "requires"):
+            if not _robot_requirement_applies(
+                requirement,
+                acquisition_required=acquisition_required,
+                release_to_target_required=release_to_target_required,
+            ):
+                continue
+            fact_name = _robot_trace_fact_name(requirement)
+            part_name = _robot_fact_part_from_spec(
+                requirement,
+                step_result,
+                fallback=event_part,
+            )
+            if fact_name and not _robot_has_trace_fact(
+                trace_facts,
+                fact=fact_name,
+                part_name=part_name,
+            ):
+                if fact_name == "pick_target_grounded":
+                    constraint_code = "pick_target_grounding_required"
+                    reason = (
+                        f"acquiring '{part_name or event_part}' requires trace fact "
+                        "pick_target_grounded before the grasp step"
+                    )
+                    evidence_key = "grounded_pick_target_sources"
+                elif fact_name == "release_target_grounded":
+                    constraint_code = "release_target_grounding_required"
+                    reason = (
+                        f"placing or staging '{part_name or event_part}' at "
+                        f"'{target_location}' requires trace fact "
+                        "release_target_grounded before the release step"
+                    )
+                    evidence_key = "grounded_release_target_sources"
+                else:
+                    constraint_code = "trace_fact_required"
+                    reason = (
+                        f"primitive '{primitive}' requires trace fact '{fact_name}' "
+                        f"for '{part_name or event_part}'"
+                    )
+                    evidence_key = "trace_fact_sources"
+                findings.append(
+                    _robot_sequence_finding(
+                        outline_event=outline_event,
+                        constraint_code=constraint_code,
+                        reason=reason,
+                        step_result=step_result,
+                        evidence={
+                            "required_trace_fact": fact_name,
+                            "part_name": part_name or event_part,
+                            evidence_key: _robot_trace_fact_sources(
+                                trace_facts,
+                                fact=fact_name,
+                                part_name=part_name,
+                            ),
+                        },
+                    )
+                )
+
+        for established in _robot_contract_specs(fact_contract, "establishes"):
+            fact_name = _robot_trace_fact_name(established)
+            part_name = _robot_fact_part_from_spec(
+                established,
+                step_result,
+                fallback=event_part,
+            )
+            _robot_add_trace_fact(
+                trace_facts,
+                fact=fact_name,
+                part_name=part_name,
+                source={
+                    "source": "primitive",
+                    "primitive": primitive,
+                    "step_index": step_result.get("step_index"),
+                },
+            )
+
+    return findings
 
 
 def _normalized_xyz_pose(value: Any) -> dict[str, float] | None:
@@ -1384,6 +2083,180 @@ def _compile_pick_place_macro(
     }
 
 
+def _step_ref(alias: str, path: str) -> dict[str, str]:
+    return {"context_ref": f"step_outputs.{alias}.{path}"}
+
+
+def _robot_capability_decompositions(
+    *,
+    function_name: str = "",
+    primitive_catalog: list[dict[str, Any]] | None = None,
+    resource_jid: str = "",
+) -> dict[str, Any]:
+    """Modeled task-function decompositions for LLM primitive authoring."""
+    _ = primitive_catalog
+    resource_token = str(resource_jid or "<RESOURCE_JID>").strip() or "<RESOURCE_JID>"
+    decompositions: dict[str, dict[str, Any]] = {
+        "pick_approach": {
+            "function_name": "pick_approach",
+            "source": "robot_agent.py",
+            "modeled_transition": "idle -> at_pick",
+            "task_preconditions": [
+                "held_part is empty",
+                "part pose is available from detect_parts, product_geometry, or served context",
+            ],
+            "bridge_visible_steps": [
+                {
+                    "primitive": "detect_parts",
+                    "params": {"part_name": "<PART>"},
+                    "store_as": "detected_part",
+                    "note": "May be skipped only when equivalent observed pose was retrieved.",
+                },
+                {
+                    "primitive": "compute_pick_targets",
+                    "params": {"part_name": "<PART>"},
+                    "store_as": "pick_targets",
+                },
+                {
+                    "primitive": "move_cartesian",
+                    "params": {
+                        "x": _step_ref("pick_targets", "approach_pose.x"),
+                        "y": _step_ref("pick_targets", "approach_pose.y"),
+                        "z": _step_ref("pick_targets", "approach_pose.z"),
+                    },
+                },
+                {
+                    "primitive": "move_cartesian",
+                    "params": {
+                        "x": _step_ref("pick_targets", "target_pose.x"),
+                        "y": _step_ref("pick_targets", "target_pose.y"),
+                        "z": _step_ref("pick_targets", "target_pose.z"),
+                    },
+                },
+            ],
+            "execution_notes": [
+                "RobotAgent.pick_approach computes pick geometry, opens the gripper, moves above the part, then descends to the pick pose.",
+                "open_gripper and direct controller pose helpers are hidden from synthesis; use compute_pick_targets plus move_cartesian approach/target poses.",
+            ],
+        },
+        "pick_grasp": {
+            "function_name": "pick_grasp",
+            "source": "robot_agent.py",
+            "modeled_transition": "at_pick -> picked",
+            "task_preconditions": [
+                "resource is already at the pick pose from pick_approach",
+                "held_part is empty",
+                "pick target was grounded for the active part",
+            ],
+            "bridge_visible_steps": [
+                {
+                    "primitive": "grasp_part",
+                    "params": {
+                        "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
+                        "part_name": "<PART>",
+                    },
+                },
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8},
+                    "note": "Positive dz lift/retreat after grasp.",
+                },
+            ],
+            "execution_notes": [
+                "RobotAgent.pick_grasp closes the gripper, attaches the part in simulation, then lifts to travel height.",
+                "close_gripper and attach_part are hidden from synthesis; use grasp_part as the visible composite.",
+            ],
+        },
+        "place_approach": {
+            "function_name": "place_approach",
+            "source": "robot_agent.py",
+            "modeled_transition": "picked -> positioned",
+            "task_preconditions": [
+                "held_part exists",
+                "destination geometry is available from destination_location, product_geometry, or served context",
+            ],
+            "bridge_visible_steps": [
+                {
+                    "primitive": "compute_place_targets",
+                    "params": {
+                        "part_name": "<PART>",
+                        "destination_location": "<DESTINATION_LOCATION>",
+                    },
+                    "store_as": "place_targets",
+                },
+                {
+                    "primitive": "move_cartesian",
+                    "params": {
+                        "x": _step_ref("place_targets", "approach_pose.x"),
+                        "y": _step_ref("place_targets", "approach_pose.y"),
+                        "z": _step_ref("place_targets", "approach_pose.z"),
+                    },
+                },
+                {
+                    "primitive": "move_cartesian",
+                    "params": {
+                        "x": _step_ref("place_targets", "target_pose.x"),
+                        "y": _step_ref("place_targets", "target_pose.y"),
+                        "z": _step_ref("place_targets", "target_pose.z"),
+                    },
+                },
+            ],
+            "execution_notes": [
+                "RobotAgent.place_approach computes destination geometry, moves above the destination, then descends to the place pose.",
+                "Direct controller pose helpers are hidden from synthesis; use compute_place_targets plus move_cartesian approach/target poses.",
+            ],
+        },
+        "place_insert": {
+            "function_name": "place_insert",
+            "source": "robot_agent.py",
+            "modeled_transition": "positioned -> placed",
+            "task_preconditions": [
+                "held_part exists",
+                "place_approach already positioned the robot at the target pose",
+            ],
+            "bridge_visible_steps": [
+                {
+                    "primitive": "release_part",
+                    "params": {
+                        "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
+                        "part_name": "<PART>",
+                    },
+                },
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0},
+                    "note": "Positive dz retreat after release.",
+                },
+            ],
+            "execution_notes": [
+                "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches in simulation, snaps/settles as needed, then lifts away.",
+                "open_gripper and detach_part are hidden from synthesis; use release_part as the visible composite.",
+            ],
+        },
+        "move_home": {
+            "function_name": "move_home",
+            "source": "robot_agent.py",
+            "modeled_transition": "any -> idle",
+            "task_preconditions": [
+                f"resource {resource_token} exposes a named pose called 'home'",
+            ],
+            "bridge_visible_steps": [
+                {
+                    "primitive": "move_to_named_pose",
+                    "params": {"pose_name": "home", "speed": 0.8},
+                },
+            ],
+            "execution_notes": [
+                "RobotAgent.move_home maps to the controller's home/named-pose motion when that named pose is available.",
+            ],
+        },
+    }
+    token = str(function_name or "").strip()
+    if token:
+        return deepcopy(decompositions.get(token) or {})
+    return deepcopy(decompositions)
+
+
 _MANIPULATOR_PROMPT_ADDENDUM = dedent(
     """\
     MANIPULATOR COMPOSITION ADDENDUM:
@@ -1449,7 +2322,49 @@ ROBOT_PROFILE = ResourceProfile(
         "attach_part": "pick",
         "detach_part": "place",
     },
+    primitive_trace_fact_map={
+        "detect_parts": {
+            "establishes": [{"fact": "part_observed", "part_param": "part_name"}],
+        },
+        "compute_pick_targets": {
+            "establishes": [{"fact": "pick_target_grounded", "part_param": "part_name"}],
+        },
+        "compute_place_targets": {
+            "establishes": [
+                {"fact": "release_target_grounded", "part_param": "part_name"},
+            ],
+        },
+        "grasp_part": {
+            "requires": [
+                {
+                    "fact": "pick_target_grounded",
+                    "part_param": "part_name",
+                    "when": "acquisition",
+                },
+                {
+                    "fact": "motion_landed_on_target",
+                    "part_param": "part_name",
+                    "when": "acquisition",
+                },
+            ],
+        },
+        "release_part": {
+            "requires": [
+                {
+                    "fact": "release_target_grounded",
+                    "part_param": "part_name",
+                    "when": "release_to_target",
+                },
+                {
+                    "fact": "motion_landed_on_target",
+                    "part_param": "part_name",
+                    "when": "release_to_target",
+                },
+            ],
+        },
+    },
     event_family_resolver=_robot_event_family,
+    event_target_resolver=_robot_target_location_for_event,
     event_contract_validator=_robot_event_contract_validator,
     compiler_map={
         "clear": _compile_clear_macro,
@@ -1461,6 +2376,8 @@ ROBOT_PROFILE = ResourceProfile(
     },
     state_projector=_robot_state_projector,
     event_state_validator=_robot_event_state_validator,
+    primitive_sequence_validator=_robot_primitive_sequence_validator,
+    capability_decomposition_provider=_robot_capability_decompositions,
     capability_flags={"supports_manipulator_pick_place": True},
     observation_families=("part_detection", "resource_pose"),
     grounding_observation_primitives=("detect_parts",),
@@ -1526,6 +2443,17 @@ ROBOT_PROFILE = ResourceProfile(
         "compute_place_targets": {
             "any_of_param_sets": [["part_name"], ["pick_ctx.part_name"]],
         },
+    },
+    primitive_event_target_contract_map={
+        "compute_place_targets": {
+            "param_fields": ["destination_location"],
+            "event_families": ["stage", "place", "assemble", "pick_place"],
+            "conditions": ["release_to_target"],
+            "constraint_code": "release_destination_mismatch",
+        },
+    },
+    expected_end_state_projection_map={
+        "held_part": "held_part",
     },
     carried_entity_field="held_part",
     carried_entity_location_builder=_robot_carried_location,

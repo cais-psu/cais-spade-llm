@@ -915,6 +915,154 @@ class Ros2PickPlaceController:
             return {"success": False, "message": f"failed to detach {model_name or 'held part'}"}
         return {"success": True, "message": f"detached {model_name or 'held part'}"}
 
+    def grasp_part(
+        self,
+        model_name: str,
+        part_name: str = "",
+        position: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Close the gripper and attach the target part as one high-level grasp primitive.
+        params:
+          model_name: {type: string, description: "Gazebo model name of the part to attach"}
+          part_name: {type: string, description: "Optional canonical part identifier for held-part tracking."}
+          position: {type: number, description: "Optional gripper closing position override."}
+        preconditions:
+          held_part:
+            equals: null
+        effects:
+          current_state:
+            set: picked
+          gripper_state:
+            set: closed
+          held_part:
+            set_from_param_any_of: ["part_name", "model_name"]
+        ---
+        """
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._unavailable_message("services not ready"),
+            }
+
+        target_model = str(model_name or "").strip()
+        target_part = str(part_name or "").strip()
+
+        if not self.close_gripper(position=position):
+            return {
+                "success": False,
+                "message": (
+                    self._last_failure_message
+                    or f"failed to close gripper to grasp {target_part or target_model or 'part'}"
+                ),
+            }
+
+        attached = self.attach_part(target_model, part_name=target_part)
+        if attached.get("success"):
+            return {
+                "success": True,
+                "message": (
+                    f"grasped {target_part or target_model or 'part'}"
+                    if (target_part or target_model)
+                    else "grasped part"
+                ),
+            }
+
+        rollback_ok = self.open_gripper()
+        rollback_message = (
+            "reopened gripper after failed attach"
+            if rollback_ok
+            else (
+                self._last_failure_message
+                or "failed to reopen gripper after failed attach"
+            )
+        )
+        return {
+            "success": False,
+            "message": (
+                f"{str(attached.get('message') or 'failed to attach part')}; "
+                f"rollback: {rollback_message}"
+            ),
+        }
+
+    def release_part(
+        self,
+        model_name: str = "",
+        part_name: str = "",
+        assume_released_if_open: bool = False,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Open the gripper and detach the currently held part as one high-level release primitive.
+        params:
+          model_name: {type: string, description: "Optional controller model name to detach."}
+          part_name: {type: string, description: "Optional canonical bridge part name for release trace validation."}
+          assume_released_if_open: {type: boolean, description: "Treat an already-open gripper as an idempotent release when true."}
+        preconditions:
+          held_part:
+            not_equals: null
+        effects:
+          current_state:
+            set: idle
+          gripper_state:
+            set: open
+          held_part:
+            set: null
+        ---
+        """
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._unavailable_message("services not ready"),
+            }
+
+        target_model = str(model_name or "").strip()
+        target_part = str(part_name or "").strip()
+
+        time.sleep(self.release_preopen_settle_sec)
+        if not self.open_gripper():
+            return {
+                "success": False,
+                "message": (
+                    self._last_failure_message
+                    or f"failed to open gripper to release {target_part or target_model or 'part'}"
+                ),
+            }
+        time.sleep(self.release_postopen_settle_sec)
+
+        detached = self.detach_part(
+            target_model,
+            assume_released_if_open=assume_released_if_open,
+        )
+        if detached.get("success"):
+            time.sleep(self.release_postdetach_settle_sec)
+            return {
+                "success": True,
+                "message": (
+                    f"released {target_part or target_model or 'part'}"
+                    if (target_part or target_model)
+                    else "released part"
+                ),
+            }
+
+        rollback_ok = self.close_gripper()
+        rollback_message = (
+            "reclosed gripper after failed detach"
+            if rollback_ok
+            else (
+                self._last_failure_message
+                or "failed to reclose gripper after failed detach"
+            )
+        )
+        return {
+            "success": False,
+            "message": (
+                f"{str(detached.get('message') or 'failed to detach part')}; "
+                f"rollback: {rollback_message}"
+            ),
+        }
+
     # ------------------------------------------------------------------ #
     # Legacy low-level API (kept for backward compat)
     # ------------------------------------------------------------------ #
@@ -2084,65 +2232,14 @@ class Ros2PickPlaceController:
                 return {"success": False, "message": "cannot read current ee pose"}
             orientation = ee.orientation
 
-        time.sleep(self.release_preopen_settle_sec)
-
-        open_ok = self._gripper_command(
-            self.gripper_open,
-            "OPEN - releasing",
-            move_time_s=self.gripper_move_time_sec,
-            wait_s=self.gripper_settle_sec,
-            require_target=True,
-            log_target_miss=False,
-        )
-        if not open_ok:
-            open_ok = self._gripper_command(
-                self.gripper_open,
-                "OPEN - releasing (retry)",
-                move_time_s=max(1.2, self.gripper_move_time_sec * 2.0),
-                wait_s=max(0.20, self.gripper_settle_sec * 1.5),
-                require_target=True,
-                log_target_miss=False,
-            )
-        if not open_ok and self.execution_mode == "physical":
+        released = self.release_part(str(model_name))
+        if not released.get("success"):
             return {
                 "success": False,
-                "message": "failed to open gripper to release part",
+                "message": str(released.get("message") or "failed to release part"),
             }
-        time.sleep(self.release_postopen_settle_sec)
 
-        detached = False
-        attempts = max(1, 1 + self.release_detach_retry_count)
-        for attempt_idx in range(attempts):
-            if attempt_idx > 0:
-                if attempt_idx == 1 and self.release_retry_lift_m > 0.0:
-                    lift_z = float(place_z) + self.release_retry_lift_m
-                    lift_ok = self._cartesian_move(
-                        self._make_pose(float(slot_x), float(slot_y), lift_z, orientation),
-                        f"Release micro-lift +{self.release_retry_lift_m * 1000.0:.1f}mm",
-                        avoid_collisions=False,
-                        min_fraction=0.70,
-                        allow_partial=True,
-                        time_scale=self.release_descend_time_scale,
-                    )
-                    if not lift_ok:
-                        self._log().warn("Release micro-lift retry move failed")
-                time.sleep(self.release_detach_retry_delay_sec)
-
-            detached = self._detach_part(
-                str(model_name),
-                timeout_sec=self.release_detach_timeout_sec,
-                attached_link_only=(attempt_idx == 0),
-            )
-            if detached:
-                break
-            self._log().warn(
-                f"Detach attempt {attempt_idx + 1}/{attempts} failed for {model_name or 'held part'}"
-            )
-        if not detached:
-            self._log().warn("Detach still failed after retries")
-        time.sleep(self.release_postdetach_settle_sec)
-
-        if detached and model_name:
+        if model_name:
             self._snap_part_to_slot(
                 str(model_name),
                 float(slot_x),
@@ -2164,15 +2261,8 @@ class Ros2PickPlaceController:
                 allow_partial=True,
             )
 
-        if not detached:
-            self._detach_part(str(model_name), timeout_sec=self.release_detach_timeout_sec)
-
-        if detached and lift_ok:
+        if lift_ok:
             return {"success": True, "message": "released part and lifted clear"}
-        if not detached and not lift_ok:
-            return {"success": False, "message": "failed to detach part and lift clear"}
-        if not detached:
-            return {"success": False, "message": "failed to detach part"}
         return {"success": False, "message": "failed to lift clear after release"}
 
     def _move_xy_direct(

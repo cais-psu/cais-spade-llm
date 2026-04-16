@@ -15,10 +15,15 @@ from uuid import uuid4
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
     build_hybrid_session_seed,
     build_multi_turn_session_seed,
+    build_procedural_session_seed,
     build_single_shot_prompt_artifacts,
     execute_hybrid_des_bridge,
     execute_multi_turn_bridge,
+    execute_procedural_des_bridge,
     execute_single_shot_bridge,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.des_recovery_common import (
+    collect_recovery_blockers,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
     bridge_resource_capabilities,
@@ -34,11 +39,61 @@ from cais_spade_llm.resources.resource_profile import (
 )
 
 
+def record_grounding_checkpoint(session_state: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot the current DES grounding state before observation pause."""
+    checkpoint = {
+        "symbolic_parts": deepcopy(session_state.get("symbolic_parts") or {}),
+        "symbolic_resources": deepcopy(session_state.get("symbolic_resources") or {}),
+        "current_phase": str(session_state.get("current_phase") or ""),
+        "turn_index": int(session_state.get("turn_index") or 0),
+    }
+    session_state["grounding_checkpoint"] = deepcopy(checkpoint)
+    return checkpoint
+
+
+def resume_from_grounding(
+    session_state: dict[str, Any],
+    observed_poses: dict[str, Any],
+    *,
+    prepared_bridge_request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resume a DES session after grounding with observed poses merged in."""
+    resumed = deepcopy(session_state or {})
+    symbolic_parts = dict(resumed.get("symbolic_parts") or {})
+    observation_count = 0
+    for part_name, raw_pose in dict(observed_poses or {}).items():
+        normalized_part = str(part_name or "").strip()
+        if not normalized_part or normalized_part not in symbolic_parts:
+            continue
+        pose = deepcopy(raw_pose) if isinstance(raw_pose, dict) else {}
+        symbolic_parts[normalized_part]["observed_pose"] = pose
+        symbolic_parts[normalized_part]["location_basis"] = "sensor_observation"
+        if not str(symbolic_parts[normalized_part].get("current_holder_resource_jid") or "").strip():
+            symbolic_parts[normalized_part]["current_location"] = None
+        symbolic_parts[normalized_part]["needs_observation"] = False
+        symbolic_parts[normalized_part]["requires_observation"] = False
+        symbolic_parts[normalized_part]["observation_required"] = False
+        symbolic_parts[normalized_part]["pose_untrusted"] = False
+        symbolic_parts[normalized_part]["location_unverified"] = False
+        observation_count += 1
+    resumed["symbolic_parts"] = symbolic_parts
+    resumed["grounding_observation_count"] = int(resumed.get("grounding_observation_count") or 0) + observation_count
+    resumed["status"] = "running"
+    resumed["current_phase"] = "domain_generation"
+    if prepared_bridge_request is not None:
+        blockers = collect_recovery_blockers(
+            session_state=resumed,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        resumed["current_recovery_blockers"] = deepcopy(blockers)
+    return resumed
+
+
 class BridgeSessionMixin:
     @staticmethod
     def _normalize_bridge_reasoning_mode(value: Any) -> str:
         mode = str(value or "single_shot").strip().lower()
-        if mode not in {"single_shot", "multi_turn", "hybrid"}:
+        if mode not in {"single_shot", "multi_turn", "hybrid", "procedural", "procedural_des_v1"}:
             return "hybrid"
         return mode
 
@@ -2981,7 +3036,7 @@ class BridgeSessionMixin:
         )
         prepared_bridge_request["llm_input"] = self._build_llm_input(
             prepared_bridge_request,
-            preload_observed_pose=reasoning_mode not in ("multi_turn", "hybrid"),
+            preload_observed_pose=reasoning_mode not in ("multi_turn", "hybrid", "procedural", "procedural_des_v1"),
         )
         if reasoning_mode == "single_shot":
             single_shot_prompt_input, single_shot_prompt_text = (
@@ -3000,6 +3055,10 @@ class BridgeSessionMixin:
         elif reasoning_mode == "hybrid":
             prepared_bridge_request["hybrid_session_seed"] = deepcopy(
                 build_hybrid_session_seed(prepared_bridge_request)
+            )
+        elif reasoning_mode in {"procedural", "procedural_des_v1"}:
+            prepared_bridge_request["procedural_session_seed"] = deepcopy(
+                build_procedural_session_seed(prepared_bridge_request)
             )
 
         bridge_debug = {
@@ -3024,8 +3083,12 @@ class BridgeSessionMixin:
                 prepared_bridge_request.get("multi_turn_session_seed") or {}
             )
         elif reasoning_mode == "hybrid":
-            bridge_debug["multi_turn_session"] = deepcopy(
+            bridge_debug["hybrid_session"] = deepcopy(
                 prepared_bridge_request.get("hybrid_session_seed") or {}
+            )
+        elif reasoning_mode in {"procedural", "procedural_des_v1"}:
+            bridge_debug["procedural_session"] = deepcopy(
+                prepared_bridge_request.get("procedural_session_seed") or {}
             )
         prepared_bridge_request["bridge_debug"] = bridge_debug
         if hasattr(self, "_set_last_bridge_debug"):
@@ -3062,6 +3125,8 @@ class BridgeSessionMixin:
             return await execute_multi_turn_bridge(self, prepared_bridge_request)
         if reasoning_mode == "hybrid":
             return await execute_hybrid_des_bridge(self, prepared_bridge_request)
+        if reasoning_mode in {"procedural", "procedural_des_v1"}:
+            return await execute_procedural_des_bridge(self, prepared_bridge_request)
 
         bridge_debug["status"] = "unsupported_reasoning_mode"
         bridge_debug["message"] = (

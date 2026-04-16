@@ -1,4 +1,4 @@
-"""Prompt builders for multi-turn v2 bridge — one-task-at-a-time outline."""
+"""Prompt builders for multi-turn v2 DES-style recovery event planning."""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ from typing import Any
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     filter_synthesis_primitive_catalog,
 )
+from cais_spade_llm.resources.resource_profile import get_resource_profile
+
+
+_DEFAULT_CANDIDATE_BOUND = 5
 
 
 # ---------------------------------------------------------------------------
@@ -17,10 +21,10 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_se
 # ---------------------------------------------------------------------------
 
 _PHASE_TITLES: dict[str, str] = {
-    "grounding": "Grounding (Observe)",
-    "outline": "Outline (One Task At A Time)",
-    "primitive_generation": "Primitive Generation",
-    "finalize": "Finalize",
+    "grounding": "Observation / State Estimation",
+    "outline": "Recovery Event Synthesis",
+    "primitive_generation": "Event-to-Primitive Grounding",
+    "finalize": "Executable Recovery Trace Finalization",
 }
 
 # ---------------------------------------------------------------------------
@@ -57,12 +61,13 @@ _OUTLINE_CANDIDATE_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "resource_jid": {"type": "string"},
+        "event_name": {"type": "string"},
         "action_name": {"type": "string"},
         "part_name": {"type": "string"},
         "target_ref": {"type": "string"},
         "description": {"type": "string"},
     },
-    "required": ["resource_jid", "action_name", "description"],
+    "required": ["resource_jid", "event_name", "description"],
 }
 
 
@@ -74,18 +79,29 @@ def _outline_incremental_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
+                "next_transition": deepcopy(_OUTLINE_TASK_SCHEMA),
+                "transition_suffix": {
+                    "type": "array",
+                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
+                },
+                # Legacy compatibility: older multi-turn artifacts used task
+                # names for these DES transition fields.
                 "next_task": deepcopy(_OUTLINE_TASK_SCHEMA),
                 "lookahead_tasks": {
                     "type": "array",
                     "items": deepcopy(_OUTLINE_TASK_SCHEMA),
                 },
             },
-            "required": ["thought", "next_task"],
+            "required": ["thought", "next_transition"],
         },
     }
 
 
-def _outline_candidates_response_schema() -> dict[str, Any]:
+def _outline_candidates_response_schema(
+    *,
+    candidate_bound: int = _DEFAULT_CANDIDATE_BOUND,
+) -> dict[str, Any]:
+    normalized_bound = max(1, int(candidate_bound or 1))
     return {
         "name": "multi_turn_v2_outline_candidates_response",
         "strict": False,
@@ -93,14 +109,27 @@ def _outline_candidates_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
+                "candidate_events": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": normalized_bound,
+                    "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
+                },
+                # Compatibility aliases accepted by the runtime parser.
+                "candidate_transitions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": normalized_bound,
+                    "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
+                },
                 "candidate_tasks": {
                     "type": "array",
-                    "minItems": 3,
-                    "maxItems": 3,
+                    "minItems": 1,
+                    "maxItems": normalized_bound,
                     "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
                 },
             },
-            "required": ["thought", "candidate_tasks"],
+            "required": ["thought", "candidate_events"],
         },
     }
 
@@ -113,12 +142,18 @@ def _outline_single_pass_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
+                "transition_trace": {
+                    "type": "array",
+                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
+                },
+                # Legacy compatibility: older single-pass outputs used
+                # outline_tasks for the same ordered transition trace.
                 "outline_tasks": {
                     "type": "array",
                     "items": deepcopy(_OUTLINE_TASK_SCHEMA),
                 },
             },
-            "required": ["thought", "outline_tasks"],
+            "required": ["thought", "transition_trace"],
         },
     }
 
@@ -174,13 +209,23 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
                 "decision": {
                     "type": "string",
                     "enum": [
-                        "primitive_event_ready",
+                        "primitive_steps_ready",
+                        "need_context",
                         "need_primitive_revision",
-                        "need_outline_revision",
+                        "primitive_blocked",
                     ],
                 },
                 "outline_id": {"type": "string"},
                 "resource_jid": {"type": "string"},
+                "context_requests": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "rationale": {"type": "string"},
+                "notes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "primitive_steps": {
                     "type": "array",
                     "items": {
@@ -188,6 +233,7 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
                         "properties": {
                             "primitive": {"type": "string"},
                             "params": {"type": "object"},
+                            "store_as": {"type": "string"},
                         },
                         "required": ["primitive", "params"],
                     },
@@ -198,7 +244,6 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
                 "decision",
                 "outline_id",
                 "resource_jid",
-                "primitive_steps",
             ],
         },
     }
@@ -223,6 +268,7 @@ def multi_turn_v2_phase_response_schema(
     phase: str,
     *,
     outline_mode: str = "incremental",
+    candidate_bound: int | None = None,
 ) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
     normalized = phase.strip().lower()
@@ -230,7 +276,9 @@ def multi_turn_v2_phase_response_schema(
         if outline_mode == "single_pass":
             return _outline_single_pass_response_schema()
         if outline_mode == "incremental_candidates_validated":
-            return _outline_candidates_response_schema()
+            return _outline_candidates_response_schema(
+                candidate_bound=max(1, int(candidate_bound or _DEFAULT_CANDIDATE_BOUND)),
+            )
         return _outline_incremental_response_schema()
     if normalized == "grounding":
         return _grounding_response_schema()
@@ -373,20 +421,386 @@ def _outline_rejection_history(session_state: dict[str, Any]) -> list[dict[str, 
         row: dict[str, Any] = {
             "turn_index": int(turn.get("turn_index") or 0),
             "decision": str(turn.get("decision") or "").strip() or None,
-            "proposed_next_task": deepcopy(dict(turn.get("next_task") or {})),
+            "proposed_next_transition": deepcopy(
+                dict(turn.get("next_transition") or turn.get("next_task") or {})
+            ),
             "validation_findings": findings,
         }
-        lookahead_tasks = [
-            deepcopy(item) for item in (turn.get("lookahead_tasks") or [])
+        transition_suffix = [
+            deepcopy(item)
+            for item in (turn.get("transition_suffix") or turn.get("lookahead_tasks") or [])
             if isinstance(item, dict)
         ]
-        if lookahead_tasks:
-            row["lookahead_tasks"] = lookahead_tasks
+        if transition_suffix:
+            row["transition_suffix"] = transition_suffix
         history.append(row)
     return history
 
 
-def _outline_validation_summary(findings: list[dict[str, Any]]) -> str:
+_PROMPT_FEEDBACK_RENDER_STYLES = {"des_event_diagnostic", "raw_code"}
+
+_PROMPT_PERSISTENT_FINDING_CODES = {
+    "workspace_unreachable",
+    "holder_conflict",
+    "required_part_not_held",
+    "part_relocation_without_carrier",
+    "source_reference_unavailable",
+}
+
+
+def _feedback_render_style_token(session_state: dict[str, Any]) -> str:
+    return "des_event_diagnostic"
+
+
+def _finding_constraint_code_token(finding: dict[str, Any]) -> str:
+    return str(finding.get("constraint_code") or "").strip().lower()
+
+
+def _task_target_ref(task: dict[str, Any], finding: dict[str, Any] | None = None) -> str:
+    direct_target = str(task.get("target_ref") or "").strip()
+    if direct_target:
+        return direct_target
+    action_target = task.get("action_target")
+    if isinstance(action_target, dict):
+        target = str(
+            action_target.get("target_ref")
+            or action_target.get("target_location")
+            or action_target.get("location")
+            or ""
+        ).strip()
+        if target:
+            return target
+    if isinstance(finding, dict):
+        evidence = dict(finding.get("evidence") or {})
+        return str(
+            evidence.get("target_ref")
+            or evidence.get("target_location")
+            or ""
+        ).strip()
+    return ""
+
+
+def _candidate_event_label(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any] | None = None,
+) -> str:
+    outline_id = str(
+        task.get("outline_id")
+        or task.get("task_id")
+        or (finding or {}).get("task_id")
+        or ""
+    ).strip()
+    resource_jid = str(
+        task.get("resource_jid")
+        or (finding or {}).get("resource_jid")
+        or ""
+    ).strip()
+    part_name = str(
+        task.get("part_name")
+        or (finding or {}).get("part_name")
+        or ""
+    ).strip()
+    label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
+    label = "/".join(label_parts) if label_parts else "anonymous_event"
+    target_ref = _task_target_ref(task, finding=finding)
+    if target_ref:
+        label += f"->{target_ref}"
+    return label
+
+
+def _finding_resources_by_jid(
+    projected_resources: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("resource_jid") or "").strip(): dict(row)
+        for row in projected_resources
+        if isinstance(row, dict) and str(row.get("resource_jid") or "").strip()
+    }
+
+
+def _finding_parts_by_name(
+    projected_parts: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("part_name") or "").strip(): dict(row)
+        for row in projected_parts
+        if isinstance(row, dict) and str(row.get("part_name") or "").strip()
+    }
+
+
+def _finding_state_evidence_text(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    evidence = dict(finding.get("evidence") or {})
+    resource_jid = str(
+        task.get("resource_jid") or finding.get("resource_jid") or ""
+    ).strip()
+    part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
+    target_ref = _task_target_ref(task, finding=finding)
+    resource_row = dict((resources_by_jid or {}).get(resource_jid) or {})
+    part_row = dict((parts_by_name or {}).get(part_name) or {})
+
+    facts: list[str] = []
+    if resource_jid:
+        facts.append(f"resource_jid={resource_jid}")
+    if part_name:
+        facts.append(f"part_name={part_name}")
+    if target_ref:
+        facts.append(f"target_ref={target_ref}")
+
+    checked_pose = dict(evidence.get("checked_pose") or finding.get("pose") or {})
+    if checked_pose:
+        facts.append(f"checked_pose=({_pose_xyz_text(checked_pose)})")
+
+    workspace_bounds = dict(
+        evidence.get("workspace_bounds") or finding.get("workspace_bounds") or {}
+    )
+    if workspace_bounds:
+        facts.append(_workspace_capability_hint(workspace_bounds))
+
+    changed_fields = [
+        str(field).strip()
+        for field in (evidence.get("changed_fields") or [])
+        if str(field).strip()
+    ]
+    if changed_fields:
+        facts.append("changed_fields=" + ",".join(changed_fields))
+
+    condition_ids = [
+        str(item).strip()
+        for item in (
+            evidence.get("condition_ids")
+            or finding.get("condition_ids")
+            or []
+        )
+        if str(item).strip()
+    ]
+    if condition_ids:
+        facts.append("condition_ids=" + ",".join(condition_ids))
+
+    rule_id = str(finding.get("rule_id") or evidence.get("rule_id") or "").strip()
+    if rule_id:
+        facts.append(f"rule_id={rule_id}")
+
+    held_part = str(resource_row.get("held_part") or "").strip()
+    if held_part:
+        facts.append(f"held_part={held_part}")
+
+    current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
+    if current_holder:
+        facts.append(f"current_holder_resource_jid={current_holder}")
+
+    current_location = str(part_row.get("current_location") or "").strip()
+    if current_location:
+        facts.append(f"current_location={current_location}")
+
+    return "; ".join(facts) if facts else "projected_state_facts=not_available"
+
+
+def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
+    constraint_code = _finding_constraint_code_token(finding)
+    constraint_family = str(finding.get("constraint_family") or "").strip().lower()
+
+    if constraint_code in {
+        "unknown_location_token",
+        "unknown_named_pose",
+        "unknown_state_token",
+        "source_reference_unavailable",
+        "part_ambiguous",
+    }:
+        return {
+            "event_status": "disabled",
+            "diagnosis": "state_estimate_not_grounded",
+            "guard_or_condition": (
+                "candidate event parameters are not grounded in the current state estimate"
+            ),
+            "re_enablement": (
+                "ground the referenced entity, pose, or location in the current state estimate"
+            ),
+        }
+
+    if constraint_code in {
+        "resource_unbound",
+        "part_unbound",
+        "part_relocation_without_carrier",
+        "required_part_not_held",
+        "holder_conflict",
+        "missing_release_destination",
+        "expected_start_state_mismatch",
+    }:
+        return {
+            "event_status": "disabled",
+            "diagnosis": "event_not_enabled",
+            "guard_or_condition": (
+                "event preconditions are not enabled in the current projected state"
+            ),
+            "re_enablement": (
+                "first satisfy the missing precondition or establish the required "
+                "carrier/control relation"
+            ),
+        }
+
+    if constraint_code == "workspace_unreachable" or constraint_family == "resource_feasibility":
+        return {
+            "event_status": "disabled",
+            "diagnosis": "feasibility_guard_disabled",
+            "guard_or_condition": (
+                "resource feasibility guard is false for the referenced source/target"
+            ),
+            "re_enablement": (
+                "choose an event whose source/target is feasible for the acting resource"
+            ),
+        }
+
+    if constraint_code in {
+        "blocker_open",
+        "dependency_unsatisfied",
+        "order_violation",
+        "invalid_dependency_reference",
+        "claimed_condition_not_currently_unmet",
+    } or constraint_family == "sequence":
+        return {
+            "event_status": "blocked_by_supervisor",
+            "diagnosis": "supervisor_ordering_block",
+            "guard_or_condition": (
+                "projected successor would advance before open continuation conditions are cleared"
+            ),
+            "re_enablement": (
+                "first execute an event that clears the open prerequisite or "
+                "continuation condition"
+            ),
+        }
+
+    if constraint_code == "safety_rule_violation" or constraint_family == "safety":
+        return {
+            "event_status": "blocked_by_supervisor",
+            "diagnosis": "supervisor_safety_block",
+            "guard_or_condition": (
+                "projected successor is outside the safety-admissible region of the "
+                "product automaton"
+            ),
+            "re_enablement": (
+                "choose an event whose projected APs remain supervisor-admissible"
+            ),
+        }
+
+    if constraint_code in {"no_state_change", "no_blocker_reduction"} or constraint_family == "candidate_selection":
+        return {
+            "event_status": "nonprogressing",
+            "diagnosis": "nonblocking_progress_failure",
+            "guard_or_condition": (
+                "candidate event does not move the recovery plant toward a marked "
+                "continuation-ready state"
+            ),
+            "re_enablement": (
+                "choose an event that changes projected state and closes an open "
+                "nonblocking condition"
+            ),
+        }
+
+    return {
+        "event_status": "disabled",
+        "diagnosis": "runtime_validation_block",
+        "guard_or_condition": (
+            "candidate event is blocked by a runtime validation constraint"
+        ),
+        "re_enablement": (
+            "revise the event to satisfy the reported validation condition"
+        ),
+    }
+
+
+def _render_des_event_diagnostic(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    diagnostic = _des_diagnostic_fields(finding)
+    line = (
+        f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
+        f" | event_status={diagnostic['event_status']}"
+        f" | diagnosis={diagnostic['diagnosis']}"
+        f" | guard_or_condition={diagnostic['guard_or_condition']}"
+        f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
+        f" | re_enablement={diagnostic['re_enablement']}"
+    )
+    if _finding_constraint_code_token(finding) in _PROMPT_PERSISTENT_FINDING_CODES:
+        line += (
+            " | persistence=diagnosis persists until the relevant projected state facts change"
+        )
+    return line
+
+
+def _candidate_diagnostic_signature(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> tuple[str, str, str, str, str, str]:
+    """Stable semantic key for feedback de-duplication.
+
+    Candidate ids are deliberately excluded so repeated RECOVERY_SEQ*_N rows
+    collapse when they describe the same event/failure under the same state.
+    """
+    diagnostic = _des_diagnostic_fields(finding)
+    resource_jid = str(
+        task.get("resource_jid")
+        or finding.get("resource_jid")
+        or ""
+    ).strip()
+    part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
+    target_ref = _task_target_ref(task, finding=finding)
+    evidence_text = _finding_state_evidence_text(
+        task=task,
+        finding=finding,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
+    return (
+        resource_jid,
+        part_name,
+        target_ref,
+        diagnostic["event_status"],
+        diagnostic["diagnosis"],
+        evidence_text,
+    )
+
+
+def _outline_validation_summary(
+    findings: list[dict[str, Any]],
+    *,
+    feedback_render_style: str = "raw_code",
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    if feedback_render_style == "des_event_diagnostic":
+        lines: list[str] = []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            task = {
+                "outline_id": str(finding.get("task_id") or "").strip(),
+                "resource_jid": str(finding.get("resource_jid") or "").strip(),
+                "part_name": str(finding.get("part_name") or "").strip(),
+            }
+            lines.append(
+                _render_des_event_diagnostic(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+            )
+        return "\n".join(lines) if lines else "(none)"
+
     lines: list[str] = []
     for finding in findings:
         if not isinstance(finding, dict):
@@ -429,7 +843,6 @@ def _effective_task_part_holder(
 
 def _structured_task_action_summary(task: dict[str, Any]) -> str:
     action_name = str(task.get("action_name") or "").strip()
-    action_type = str(task.get("action_type") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
     target_ref = str(task.get("target_ref") or "").strip()
     if action_name:
@@ -441,20 +854,6 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
         if target_ref and target_ref.lower() not in lower_summary:
             summary = f"{summary} to {target_ref}"
         return summary
-    if action_type == "recover_resource":
-        if target_ref:
-            return f"recover resource via {target_ref}"
-        return "recover resource"
-    if action_type == "acquire_part":
-        if part_name:
-            return f"acquire {part_name}"
-        return "acquire part"
-    if action_type == "release_part":
-        if part_name and target_ref:
-            return f"release {part_name} to {target_ref}"
-        if part_name:
-            return f"release {part_name}"
-        return "release part"
 
     resource_jid = str(task.get("resource_jid") or "").strip()
     start_state = dict(task.get("expected_start_state") or {})
@@ -483,7 +882,7 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
             summary_parts.append(f"acquire {part_name}")
         elif start_holder == resource_jid and end_holder != resource_jid:
             if end_part_location:
-                summary_parts.append(f"release {part_name} to {end_part_location}")
+                summary_parts.append(f"place {part_name} at {end_part_location}")
             else:
                 summary_parts.append(f"release {part_name}")
         elif start_part_location != end_part_location and end_part_location:
@@ -503,7 +902,11 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
     return str(task.get("description") or "").strip() or "state transition"
 
 
-def _outline_task_sequence_summary(tasks: list[dict[str, Any]]) -> str:
+def _outline_task_sequence_summary(
+    tasks: list[dict[str, Any]],
+    *,
+    include_descriptions: bool = True,
+) -> str:
     lines: list[str] = []
     for task in tasks:
         if not isinstance(task, dict):
@@ -512,10 +915,10 @@ def _outline_task_sequence_summary(tasks: list[dict[str, Any]]) -> str:
         resource_jid = str(task.get("resource_jid") or "").strip()
         part_name = str(task.get("part_name") or "").strip()
         label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
-        label = " / ".join(label_parts) if label_parts else "accepted task"
+        label = " / ".join(label_parts) if label_parts else "accepted event"
         lines.append(f"- {label} -> {_structured_task_action_summary(task)}")
         description = str(task.get("description") or "").strip()
-        if description:
+        if include_descriptions and description:
             lines.append(f"  ({description})")
     return "\n".join(lines) if lines else "(none)"
 
@@ -526,7 +929,7 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         if not isinstance(row, dict):
             continue
         turn_index = int(row.get("turn_index") or 0)
-        task = dict(row.get("proposed_next_task") or {})
+        task = dict(row.get("proposed_next_transition") or row.get("proposed_next_task") or {})
         outline_id = str(task.get("outline_id") or "").strip()
         resource_jid = str(task.get("resource_jid") or "").strip()
         part_name = str(task.get("part_name") or "").strip()
@@ -537,7 +940,7 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         finding_summary = finding_summary[2:] if finding_summary.startswith("- ") else finding_summary
 
         label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
-        label = " / ".join(label_parts) if label_parts else "rejected task"
+        label = " / ".join(label_parts) if label_parts else "rejected event"
         sentence = f"- Turn {turn_index}: {label}"
         action_summary = _structured_task_action_summary(task)
         if action_summary:
@@ -549,7 +952,7 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
 
 
 def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return rejected candidate batches since the last accepted outline event."""
+    """Return rejected candidate batches since the last accepted recovery event."""
     history: list[dict[str, Any]] = []
     for turn in (session_state.get("turns") or []):
         if not isinstance(turn, dict):
@@ -557,7 +960,9 @@ def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str
         if str(turn.get("phase") or "").strip().lower() != "outline":
             continue
         if (
-            isinstance(turn.get("selected_next_task"), dict)
+            isinstance(turn.get("selected_transition"), dict)
+            or isinstance(turn.get("selected_next_task"), dict)
+            or isinstance(turn.get("next_transition"), dict)
             or isinstance(turn.get("next_task"), dict)
         ):
             history = []
@@ -580,8 +985,63 @@ def _candidate_rejection_learning_summary(
     *,
     history: list[dict[str, Any]],
     feedback_rows: list[dict[str, Any]],
+    feedback_render_style: str = "raw_code",
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Summarize rejected candidate patterns without repeating action labels."""
+    if feedback_render_style == "des_event_diagnostic":
+        line_by_key: dict[tuple[str, str, str, str, str, str], str] = {}
+
+        def _add_des_rows(*, task: dict[str, Any], findings: list[dict[str, Any]]) -> None:
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                key = _candidate_diagnostic_signature(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+                if key in line_by_key:
+                    line_by_key.pop(key, None)
+                line_by_key[key] = _render_des_event_diagnostic(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            for evaluation in (row.get("candidate_evaluations") or []):
+                if not isinstance(evaluation, dict):
+                    continue
+                _add_des_rows(
+                    task=dict(evaluation.get("task") or {}),
+                    findings=[
+                        item
+                        for item in (evaluation.get("validation_findings") or [])
+                        if isinstance(item, dict)
+                    ],
+                )
+
+        for row in feedback_rows:
+            if not isinstance(row, dict):
+                continue
+            _add_des_rows(
+                task=dict(row.get("task") or {}),
+                findings=[
+                    item
+                    for item in (row.get("validation_findings") or [])
+                    if isinstance(item, dict)
+                ],
+            )
+
+        lines = list(line_by_key.values())[-8:]
+        return "\n".join(lines) if lines else "(none)"
+
     line_by_key: dict[tuple[str, str, str, str, str], str] = {}
 
     def _target_ref(task: dict[str, Any]) -> str:
@@ -664,6 +1124,58 @@ def _candidate_rejection_learning_summary(
 
     lines = list(line_by_key.values())[-8:]
     return "\n".join(lines) if lines else "(none)"
+
+
+def _candidate_rejection_diagnostic_signatures(
+    *,
+    history: list[dict[str, Any]],
+    feedback_rows: list[dict[str, Any]],
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> set[tuple[str, str, str, str, str, str]]:
+    signatures: set[tuple[str, str, str, str, str, str]] = set()
+
+    def _add_rows(*, task: dict[str, Any], findings: list[dict[str, Any]]) -> None:
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            signatures.add(
+                _candidate_diagnostic_signature(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+            )
+
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        for evaluation in (row.get("candidate_evaluations") or []):
+            if not isinstance(evaluation, dict):
+                continue
+            _add_rows(
+                task=dict(evaluation.get("task") or {}),
+                findings=[
+                    item
+                    for item in (evaluation.get("validation_findings") or [])
+                    if isinstance(item, dict)
+                ],
+            )
+
+    for row in feedback_rows:
+        if not isinstance(row, dict):
+            continue
+        _add_rows(
+            task=dict(row.get("task") or {}),
+            findings=[
+                item
+                for item in (row.get("validation_findings") or [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    return signatures
 
 
 def _current_recovery_blockers_summary(blockers: list[dict[str, Any]]) -> str:
@@ -833,6 +1345,30 @@ def _active_primitive_outline_event(
     return cursor, deepcopy(accepted_prefix[cursor])
 
 
+def _primitive_catalog_description_for_prompt(raw_entry: dict[str, Any]) -> str:
+    primitive_kind = str(raw_entry.get("primitive_kind") or "").strip()
+    preconditions = dict(raw_entry.get("preconditions") or {})
+    effects = dict(raw_entry.get("effects") or {})
+    summary_parts: list[str] = []
+    if primitive_kind:
+        summary_parts.append(f"{primitive_kind} primitive")
+    if preconditions:
+        summary_parts.append(
+            "preconditions: " + ", ".join(sorted(str(key) for key in preconditions.keys()))
+        )
+    if effects:
+        summary_parts.append(
+            "effects: " + ", ".join(sorted(str(key) for key in effects.keys()))
+        )
+    if summary_parts:
+        return "; ".join(summary_parts)
+    return str(
+        raw_entry.get("semantic_summary")
+        or raw_entry.get("description")
+        or ""
+    ).strip()
+
+
 def _slim_primitive_catalog_for_prompt(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
     slim: list[dict[str, Any]] = []
     for raw_entry in filter_synthesis_primitive_catalog(catalog or []):
@@ -841,15 +1377,7 @@ def _slim_primitive_catalog_for_prompt(catalog: list[dict[str, Any]]) -> list[di
         name = str(raw_entry.get("name") or "").strip()
         if not name:
             continue
-        description = str(
-            raw_entry.get("description")
-            or raw_entry.get("semantic_summary")
-            or ""
-        ).strip()
-        if name == "release_part":
-            description = "Release the currently held part."
-        elif name == "grasp_part":
-            description = "Secure the target part for transport."
+        description = _primitive_catalog_description_for_prompt(raw_entry)
         entry: dict[str, Any] = {
             "name": name,
             "primitive_kind": str(raw_entry.get("primitive_kind") or "").strip(),
@@ -863,8 +1391,100 @@ def _slim_primitive_catalog_for_prompt(catalog: list[dict[str, Any]]) -> list[di
             entry["preconditions"] = preconditions
         if effects:
             entry["effects"] = effects
+        resource_type = str(raw_entry.get("resource_type") or "").strip()
+        trace_fact_contract = deepcopy(
+            raw_entry.get("trace_fact_contract")
+            or raw_entry.get("trace_facts")
+            or {}
+        )
+        if not trace_fact_contract and resource_type:
+            profile = get_resource_profile(resource_type)
+            trace_fact_contract = deepcopy(
+                dict(profile.primitive_trace_fact_map or {}).get(name) or {}
+            )
+        if trace_fact_contract:
+            entry["trace_fact_contract"] = trace_fact_contract
         slim.append(entry)
     return slim
+
+
+def _primitive_signature_card(
+    primitive_catalogs_by_resource: dict[str, list[dict[str, Any]]],
+) -> str:
+    lines: list[str] = []
+    for resource_jid in sorted(primitive_catalogs_by_resource.keys()):
+        catalog = primitive_catalogs_by_resource.get(resource_jid) or []
+        signatures: list[str] = []
+        for entry in catalog:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            required = [
+                str(item).strip()
+                for item in (entry.get("required_params") or [])
+                if str(item).strip()
+            ]
+            if not required:
+                params = dict(entry.get("params") or {})
+                required = [str(key).strip() for key in params.keys() if str(key).strip()]
+            signatures.append(f"{name}({','.join(required)})")
+        if signatures:
+            lines.append(f"- {resource_jid}: " + "; ".join(signatures))
+    return "\n".join(lines).strip() or "(none)"
+
+
+def _trace_fact_spec_text(spec: Any) -> str:
+    if isinstance(spec, dict):
+        fact_name = str(spec.get("fact") or "").strip()
+        when = str(spec.get("when") or "").strip()
+    else:
+        fact_name = str(spec or "").strip()
+        when = ""
+    if not fact_name:
+        return ""
+    text = f"{fact_name}(part)"
+    if when:
+        text += f" when {when}"
+    return text
+
+
+def _primitive_trace_fact_contract_card(
+    primitive_catalogs_by_resource: dict[str, list[dict[str, Any]]],
+) -> str:
+    lines: list[str] = []
+    for resource_jid in sorted(primitive_catalogs_by_resource.keys()):
+        fragments: list[str] = []
+        for entry in primitive_catalogs_by_resource.get(resource_jid) or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            contract = dict(entry.get("trace_fact_contract") or {})
+            if not name or not contract:
+                continue
+            establishes = [
+                _trace_fact_spec_text(spec)
+                for spec in (contract.get("establishes") or [])
+            ]
+            requires = [
+                _trace_fact_spec_text(spec)
+                for spec in (contract.get("requires") or [])
+            ]
+            details: list[str] = []
+            if any(establishes):
+                details.append(
+                    "establishes " + ", ".join(item for item in establishes if item)
+                )
+            if any(requires):
+                details.append(
+                    "requires " + ", ".join(item for item in requires if item)
+                )
+            if details:
+                fragments.append(f"{name}: " + "; ".join(details))
+        if fragments:
+            lines.append(f"- {resource_jid}: " + " | ".join(fragments))
+    return "\n".join(lines).strip() or "(none)"
 
 
 def _active_event_start_facts_for_prompt(
@@ -1012,6 +1632,123 @@ def _observed_part_workspace_facts_summary(
     return "\n".join(lines) if lines else "(none)"
 
 
+def _candidate_grounding_target_refs(
+    *,
+    bridge_resources: dict[str, Any],
+    projected_parts: list[dict[str, Any]],
+) -> list[str]:
+    tokens: list[str] = []
+
+    for resource_jid in sorted(bridge_resources):
+        entry = dict(bridge_resources.get(resource_jid) or {})
+        bridge_snapshot = dict(entry.get("bridge_snapshot") or {})
+        static_capabilities = dict(entry.get("static_capabilities") or {})
+        reachable_locations = [
+            str(token).strip()
+            for token in (
+                static_capabilities.get("reachability")
+                or static_capabilities.get("reachable_locations")
+                or bridge_snapshot.get("reachability")
+                or bridge_snapshot.get("reachable_locations")
+                or []
+            )
+            if str(token).strip()
+        ]
+        for token in reachable_locations:
+            if token not in tokens:
+                tokens.append(token)
+
+    for part in projected_parts:
+        if not isinstance(part, dict):
+            continue
+        for raw_token in (
+            part.get("origin_location"),
+            part.get("goal_location"),
+            part.get("current_location"),
+        ):
+            token = str(raw_token or "").strip()
+            if not token or token.endswith("_gripper"):
+                continue
+            if token not in tokens:
+                tokens.append(token)
+
+    return tokens
+
+
+def _candidate_grounding_facts_summary(
+    *,
+    bridge_resources: dict[str, Any],
+    projected_resources: list[dict[str, Any]],
+    projected_parts: list[dict[str, Any]],
+) -> str:
+    lines: list[str] = []
+    target_refs = _candidate_grounding_target_refs(
+        bridge_resources=bridge_resources,
+        projected_parts=projected_parts,
+    )
+    if target_refs:
+        lines.append("- grounded_target_refs=" + ", ".join(target_refs))
+
+    resources_by_jid = {
+        str(row.get("resource_jid") or "").strip(): dict(row)
+        for row in projected_resources
+        if isinstance(row, dict) and str(row.get("resource_jid") or "").strip()
+    }
+
+    for resource_jid in sorted(bridge_resources):
+        entry = dict(bridge_resources.get(resource_jid) or {})
+        bridge_snapshot = dict(entry.get("bridge_snapshot") or {})
+        static_capabilities = dict(entry.get("static_capabilities") or {})
+        named_poses = _named_pose_tokens(
+            bridge_snapshot.get("named_poses")
+            or static_capabilities.get("named_poses")
+            or bridge_snapshot.get("available_named_poses")
+            or static_capabilities.get("available_named_poses")
+            or []
+        )
+        reachable_refs = [
+            str(token).strip()
+            for token in (
+                static_capabilities.get("reachability")
+                or static_capabilities.get("reachable_locations")
+                or bridge_snapshot.get("reachability")
+                or bridge_snapshot.get("reachable_locations")
+                or []
+            )
+            if str(token).strip()
+        ]
+        resource_row = dict(resources_by_jid.get(resource_jid) or {})
+        named_pose_text = ", ".join(named_poses) if named_poses else "-"
+        reachable_text = (
+            ", ".join(dict.fromkeys(reachable_refs))
+            if reachable_refs
+            else "-"
+        )
+        held_part = str(resource_row.get("held_part") or "").strip() or "-"
+        lines.append(
+            f"- resource_jid={resource_jid} | named_poses={named_pose_text} | "
+            f"grounded_target_refs={reachable_text} | held_part={held_part}"
+        )
+
+    for part in projected_parts:
+        if not isinstance(part, dict):
+            continue
+        part_name = str(part.get("part_name") or "").strip()
+        if not part_name:
+            continue
+        current_holder = str(part.get("current_holder_resource_jid") or "").strip() or "-"
+        current_location = str(part.get("current_location") or "").strip() or "-"
+        goal_location = str(part.get("goal_location") or "").strip() or "-"
+        source_ref = "observed_pose" if dict(part.get("observed_pose") or {}) else "-"
+        lines.append(
+            f"- part_name={part_name} | current_holder_resource_jid={current_holder} | "
+            f"current_location={current_location} | goal_location={goal_location} | "
+            f"source_ref={source_ref}"
+        )
+
+    return "\n".join(lines) if lines else "(none)"
+
+
 _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
     "workspace_unreachable",
     "holder_conflict",
@@ -1020,6 +1757,8 @@ _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
     "part_relocation_without_carrier",
     "safety_rule_violation",
     "blocker_open",
+    "dependency_unsatisfied",
+    "order_violation",
 }
 
 
@@ -1093,8 +1832,11 @@ def _history_derived_pruned_actions_summary(
     candidate_rejection_feedback: list[dict[str, Any]],
     projected_resources: list[dict[str, Any]],
     projected_parts: list[dict[str, Any]],
+    feedback_render_style: str = "raw_code",
+    excluded_diagnostic_signatures: set[tuple[str, str, str, str, str, str]] | None = None,
 ) -> str:
     line_by_key: dict[tuple[Any, ...], str] = {}
+    excluded_diagnostic_signatures = set(excluded_diagnostic_signatures or set())
     resources_by_jid = {
         str(row.get("resource_jid") or "").strip(): dict(row)
         for row in projected_resources
@@ -1125,6 +1867,27 @@ def _history_derived_pruned_actions_summary(
             )
         ]
         if not applicable_findings:
+            return
+
+        if feedback_render_style == "des_event_diagnostic":
+            for finding in applicable_findings:
+                signature = _candidate_diagnostic_signature(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+                if signature in excluded_diagnostic_signatures:
+                    continue
+                key = signature
+                if key in line_by_key:
+                    line_by_key.pop(key, None)
+                line_by_key[key] = _render_des_event_diagnostic(
+                    task=task,
+                    finding=finding,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
             return
 
         summary = str(explicit_summary or "").strip()
@@ -1166,7 +1929,9 @@ def _history_derived_pruned_actions_summary(
             continue
         _add_row(
             task=dict(row.get("task") or row.get("action") or {}),
-            findings=[dict(row)] if isinstance(row, dict) else [],
+            findings=[
+                dict(row.get("guard") or row)
+            ] if isinstance(row, dict) else [],
             explicit_summary=str(row.get("summary") or "").strip(),
             explicit_reason=str(row.get("reason") or "").strip(),
         )
@@ -1175,7 +1940,7 @@ def _history_derived_pruned_actions_summary(
         if not isinstance(row, dict):
             continue
         _add_row(
-            task=dict(row.get("proposed_next_task") or {}),
+            task=dict(row.get("proposed_next_transition") or row.get("proposed_next_task") or {}),
             findings=[item for item in (row.get("validation_findings") or []) if isinstance(item, dict)],
         )
 
@@ -1364,10 +2129,10 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
         "Task and Role",
         (
             "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Grounding (Observe).\n"
+            "Current phase: Observation / State Estimation.\n"
             "Assess the current world state and decide whether you have enough "
-            "grounded information to plan a recovery, or whether you need additional "
-            "observations first."
+            "grounded state predicates to synthesize a recovery event sequence, "
+            "or whether you need additional observations first."
         ),
         "",
         "Fault Event",
@@ -1434,37 +2199,77 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
 
 
 def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
-    llm_input = dict(payload.get("llm_input") or {})
     session_state = dict(payload.get("session_state") or {})
-    bridge_resources = dict(payload.get("bridge_resources") or {})
-    observation_store = dict(session_state.get("observation_store") or {})
-    accepted_prefix = [
+    active_event_token = dict(payload.get("primitive_active_outline_event_token") or {})
+    active_event_full = dict(payload.get("primitive_active_outline_event") or {})
+    if not active_event_token or not active_event_full:
+        _cursor, fallback_active_event = _active_primitive_outline_event(session_state)
+        if fallback_active_event:
+            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+                _compact_active_event_token,
+                _primitive_authoring_event_context,
+            )
+            if not active_event_token:
+                active_event_token = _compact_active_event_token(fallback_active_event)
+            if not active_event_full:
+                active_event_full = _primitive_authoring_event_context(fallback_active_event)
+    accepted_outline_prefix = [
         dict(row)
         for row in (session_state.get("accepted_outline_prefix") or [])
         if isinstance(row, dict)
     ]
-    cursor, active_event = _active_primitive_outline_event(session_state)
+    cursor_state = dict(payload.get("primitive_generation_cursor_state") or {})
+    if not cursor_state:
+        accepted_prefix_len = len(session_state.get("accepted_outline_prefix") or [])
+        cursor_idx = int(session_state.get("primitive_generation_cursor") or 0)
+        cursor_state = {
+            "active_index": cursor_idx,
+            "accepted_outline_count": accepted_prefix_len,
+            "remaining_events_count": max(accepted_prefix_len - cursor_idx, 0),
+        }
 
-    projected_resources = _projected_outline_resources(
-        llm_input=llm_input,
-        session_state=session_state,
-    )
-    projected_parts = _projected_outline_parts(
-        llm_input=llm_input,
-        session_state=session_state,
-    )
+    visible_catalog = [
+        dict(row)
+        for row in (payload.get("primitive_visible_catalog") or [])
+        if isinstance(row, dict)
+    ]
+    published_ref_schema = [
+        dict(row)
+        for row in (payload.get("primitive_published_ref_schema") or [])
+        if isinstance(row, dict)
+    ]
+    served_context = dict(payload.get("primitive_served_context") or {})
+    context_errors = [
+        dict(row)
+        for row in (payload.get("primitive_context_errors") or [])
+        if isinstance(row, dict)
+    ]
+    input_diagnostics = [
+        dict(row)
+        for row in (payload.get("primitive_input_diagnostics") or [])
+        if isinstance(row, dict)
+    ]
+    capability_names = [
+        str(name).strip()
+        for name in (payload.get("primitive_capability_decomposition_names") or [])
+        if str(name).strip()
+    ]
+    active_resource_named_poses = [
+        str(name).strip()
+        for name in (payload.get("primitive_active_resource_named_poses") or [])
+        if str(name).strip()
+    ]
+    suggested_capability_names = [
+        str(name).strip()
+        for name in (payload.get("primitive_suggested_capability_decompositions") or [])
+        if str(name).strip()
+    ]
+    memo_summary = [
+        dict(row)
+        for row in (payload.get("primitive_authoring_memo_summary") or [])
+        if isinstance(row, dict)
+    ]
 
-    active_resource_jid = str(
-        dict(active_event or {}).get("resource_jid") or ""
-    ).strip()
-    active_resource_entry = dict(bridge_resources.get(active_resource_jid) or {})
-    primitive_catalog = _slim_primitive_catalog_for_prompt(
-        [
-            dict(row)
-            for row in (active_resource_entry.get("primitive_catalog") or [])
-            if isinstance(row, dict)
-        ]
-    )
     primitive_feedback = _primitive_rejection_feedback_summary(
         [
             dict(row)
@@ -1472,68 +2277,148 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             if isinstance(row, dict)
         ]
     )
-    active_resources, active_parts = _active_event_start_facts_for_prompt(
-        resources=projected_resources,
-        parts=projected_parts,
-        active_event=active_event,
-    )
 
     sections: list[str] = [
         "Task and Role",
         (
-            "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Primitive Generation.\n"
-            "Synthesize executable controller primitive steps for exactly one "
-            "accepted outline event."
+            "You are the active replanner authoring primitive_steps for a DES "
+            "fallback recovery session.\n"
+            "Current phase: Event-to-Primitive Authoring (event-local).\n"
+            "Author primitive_steps for ONLY the active DES transition, using only "
+            "the visible primitive catalog for the active resource. There is no "
+            "mechanical composer behind you: if you emit no primitive_steps, no "
+            "trace is produced for this event.\n"
+            "The active event body and the surrounding accepted outline are "
+            "provided inline below so you can reason about intent immediately. "
+            "For peripheral facts (poses, contract cards, capability decompositions, "
+            "projected snapshots, prior decompositions), emit decision=need_context "
+            "with refs in context_requests and the bridge will resolve them in the "
+            "next turn under 'Served Context'. Do not guess values. Treat "
+            "/capability_decompositions/<function_name> as the primary modeled "
+            "source for how this resource composes valid low-level actions. When "
+            "capability decompositions are available for the active resource, "
+            "retrieve the closest applicable one before authoring primitive_steps. "
+            "Adapt the retrieved decomposition to the served context instead of "
+            "inventing a fresh sequence. The <function_name> token must be one "
+            "of the names listed under 'Available Capability Decompositions'; "
+            "primitive names such as grasp_part or release_part belong under "
+            "/primitive_contracts/<name>, not /capability_decompositions/<function_name>. "
+            "Examples of refs worth pulling: "
+            "/primitive_contracts/<name> (full contract card), "
+            "/resources/<jid>/current_pose, /parts/<name>/observed_pose, "
+            "/projected_snapshot/<jid>, /capability_decompositions/<function_name> "
+            "(primary modeled task-function decompositions for this resource), /memo/primitive_authoring "
+            "(prior accepted decompositions)."
         ),
         "",
-        "Accepted Outline Context",
-        _outline_task_sequence_summary(accepted_prefix),
+        "Active DES Transition (token)",
+        _compact_json(active_event_token),
         "",
-        "Active Outline Event",
-        _compact_json(active_event or {}),
+        "Active DES Transition (full event)",
+        _compact_json(active_event_full) if active_event_full else "(unavailable)",
         "",
-        "Primitive Generation Cursor",
-        _compact_json({
-            "active_index": cursor,
-            "accepted_outline_count": len(accepted_prefix),
-            "remaining_events_after_this": max(len(accepted_prefix) - cursor - 1, 0),
-        }),
+        "Transition Authoring Cursor",
+        _compact_json(cursor_state),
     ]
 
-    if primitive_feedback != "(none)":
+    if accepted_outline_prefix:
         sections.extend([
             "",
-            "Primitive Rejection Feedback",
-            primitive_feedback,
+            "Accepted Outline Summary (context for active event)",
+            _outline_task_sequence_summary(
+                accepted_outline_prefix,
+                include_descriptions=True,
+            ),
         ])
 
     sections.extend([
         "",
-        "Current Resource State",
-        _compact_json(_slim_resource_facts(active_resources)),
+        "Visible Primitive Catalog (names only; full contract via /primitive_contracts/<name>)",
+        _compact_json(visible_catalog),
         "",
-        "Current Part State",
-        _compact_json(_slim_part_facts(active_parts)),
+        "Published Ref Schema (for context_requests)",
+        _compact_json(published_ref_schema),
+    ])
+
+    if capability_names:
+        sections.extend([
+            "",
+            "Available Capability Decompositions (names only; retrieve the closest applicable one before authoring)",
+            _compact_json(capability_names),
+        ])
+    if suggested_capability_names:
+        sections.extend([
+            "",
+            "Suggested Capability Decompositions For This Event",
+            _compact_json(suggested_capability_names),
+        ])
+
+    if memo_summary:
+        sections.extend([
+            "",
+            "Prior Accepted Decompositions (session-scoped memo; full via /memo/primitive_authoring)",
+            _compact_json(memo_summary),
+        ])
+
+    if served_context:
+        sections.extend([
+            "",
+            "Served Context (retrieved earlier in this event)",
+            _compact_json(served_context),
+        ])
+
+    if context_errors:
+        sections.extend([
+            "",
+            "Context Request Errors (previous turn)",
+            _compact_json(context_errors),
+        ])
+
+    if input_diagnostics:
+        sections.extend([
+            "",
+            "Input Diagnostics",
+            _compact_json(input_diagnostics),
+        ])
+
+    if primitive_feedback != "(none)":
+        sections.extend([
+            "",
+            "Validator Feedback (previous turn)",
+            primitive_feedback,
+        ])
+
+    active_resource_jid = str(active_event_token.get("resource_jid") or "").strip()
+    sections.extend([
         "",
-        "Session Observation Store",
-        _compact_json(observation_store),
+        "Named Pose Rules",
+        _compact_json(active_resource_named_poses),
+        "- move_to_named_pose may only use named poses advertised for the active resource.",
+        (
+            "- Full named-pose details remain retrievable via "
+            f"/resources/{active_resource_jid}/static_capabilities."
+            if active_resource_jid
+            else "- Full named-pose details remain retrievable via /resources/<jid>/static_capabilities."
+        ),
+    ])
+
+    sections.extend([
         "",
-        "Active Resource Primitive Catalog",
-        _compact_json(primitive_catalog),
-        "",
-        "Safety Rules",
-        _compact_safety_rules(llm_input, neutralize_resource_actors=True),
-        "",
-        "Output Constraints",
-        "- Implement only the Active Outline Event.",
-        "- Use only primitives listed in Active Resource Primitive Catalog.",
-        "- primitive_steps must be ordered controller primitive calls.",
-        "- Each primitive step must include primitive and params.",
-        "- Do not invent observations, resources, parts, or grounded locations.",
-        "- Use decision primitive_event_ready when primitive_steps are ready for validation.",
-        "- Use need_primitive_revision only when prior primitive feedback cannot be addressed in the same event.",
-        "- Use need_outline_revision only when the accepted outline event is not implementable with the listed primitives.",
+        "Output Contract",
+        "- Author primitive_steps for ONLY the active DES transition shown above.",
+        "- outline_id and resource_jid MUST exactly match the active transition.",
+        "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog; hidden primitives (e.g. move_pose, get_current_pose) are rejected.",
+        "- Each step MUST include params; bind params to grounded values via {\"context_ref\": \"step_outputs.<alias>.<field>\"} referencing prior steps' store_as aliases, or via literal values derived from retrieved poses. Do NOT hardcode pose/offset numeric constants.",
+        "- If you need a grounded value (current_pose, observed_pose, contract card, projected snapshot, full event body), emit decision=need_context with refs in context_requests and leave primitive_steps empty; do not guess.",
+        "- When capability decompositions are available for the active resource, retrieve the closest applicable /capability_decompositions/<function_name> before authoring primitive_steps.",
+        "- /capability_decompositions/<function_name> accepts only names from Available Capability Decompositions. Primitive names like grasp_part and release_part must be retrieved via /primitive_contracts/<name> instead.",
+        "- Prefer adapting a retrieved capability decomposition to served context over authoring a novel low-level sequence from scratch.",
+        "- Author from scratch only when no retrieved capability decomposition fits; name that gap explicitly in rationale.",
+        "- If retrieved context or input diagnostics still contradict the active event, emit decision=primitive_blocked and explain the blocker; do not send the event back to outline from this phase.",
+        "- Use decision=primitive_steps_ready only when primitive_steps is non-empty AND every param is either a literal known-safe value, a context_ref to a prior step output, or a value derived from previously served context.",
+        "- Use decision=need_primitive_revision with a non-empty rationale when the visible catalog cannot safely satisfy the active event (name the contract gap, e.g. 'no visible primitive establishes part orientation for flipped-SG insert').",
+        "- Use decision=primitive_blocked when the active event is blocked by contradictory or insufficient primitive-side context that should pause for operator inspection.",
+        "- Do not invent observations, resources, parts, or grounded locations. Do not produce a fragile-but-valid trace.",
     ])
     return "\n".join(sections).strip() + "\n"
 
@@ -1547,6 +2432,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     llm_input = dict(payload.get("llm_input") or {})
     session_state = dict(payload.get("session_state") or {})
     bridge_resources = dict(payload.get("bridge_resources") or {})
+    feedback_render_style = _feedback_render_style_token(session_state)
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     observation_store = dict(session_state.get("observation_store") or {})
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
@@ -1567,55 +2453,82 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     projected_parts = _projected_outline_parts(
         llm_input=llm_input, session_state=session_state,
     )
+    resources_by_jid = _finding_resources_by_jid(projected_resources)
+    parts_by_name = _finding_parts_by_name(projected_parts)
     candidate_rejection_feedback = [
         deepcopy(row)
         for row in (session_state.get("candidate_rejection_feedback") or [])
         if isinstance(row, dict)
     ]
+    primitive_escalation_diagnostics = [
+        deepcopy(row)
+        for row in (session_state.get("primitive_escalation_diagnostics") or [])
+        if isinstance(row, dict)
+    ]
     candidate_rejection_history = _candidate_rejection_history(session_state)
-    history_pruned_actions = _history_derived_pruned_actions_summary(
-        pruned_actions=pruned_actions,
-        rejection_history=rejection_history,
-        candidate_rejection_history=candidate_rejection_history,
-        candidate_rejection_feedback=candidate_rejection_feedback,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-    )
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
+    recent_candidate_diagnostic_signatures = (
+        _candidate_rejection_diagnostic_signatures(
+            history=candidate_rejection_history,
+            feedback_rows=candidate_rejection_feedback,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
+        if is_candidate_mode and feedback_render_style == "des_event_diagnostic"
+        else set()
+    )
+    history_pruned_actions = _history_derived_pruned_actions_summary(
+        pruned_actions=pruned_actions,
+        rejection_history=[] if is_candidate_mode else rejection_history,
+        candidate_rejection_history=[] if is_candidate_mode else candidate_rejection_history,
+        candidate_rejection_feedback=[] if is_candidate_mode else candidate_rejection_feedback,
+        projected_resources=projected_resources,
+        projected_parts=projected_parts,
+        feedback_render_style=feedback_render_style,
+        excluded_diagnostic_signatures=recent_candidate_diagnostic_signatures,
+    )
 
     if is_single_pass:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Outline.\n"
-            "Propose ALL recovery tasks as an ordered list in outline_tasks.\n"
-            "Each task must be one concrete physical recovery action for one resource."
+            "Current phase: Recovery Event Synthesis (single pass).\n"
+            "Propose ALL recovery events as an ordered transition trace, "
+            "serialized in JSON field `transition_trace`.\n"
+            "Each row must be one DES transition: one concrete physical action "
+            "for one resource, with source-state and target-state predicates."
         )
     elif is_candidate_mode:
-        candidate_bound = int(session_state.get("des_candidate_bound") or 3)
+        candidate_bound = int(
+            session_state.get("des_candidate_bound")
+            or session_state.get("candidate_bound")
+            or _DEFAULT_CANDIDATE_BOUND
+        )
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Outline (Candidate Event Selection).\n"
-            f"Propose up to {candidate_bound} candidate recovery events from "
-            "the current world state.\n"
-            "Each candidate is one physical action for one resource.\n"
-            "The runtime supervisor will validate and commit at most one."
+            "Current phase: Recovery Event Candidate Selection.\n"
+            "Choose controllable events enabled by the current DES state.\n"
+            "Accepted events extend the recovery trace toward marked-state conditions.\n"
+            "The runtime supervisor may validate and commit at most one event."
         )
         if candidate_rejection_feedback or candidate_rejection_history:
             role_text += (
-                "\nIf prior candidates were rejected, first reason about the "
-                "root cause of each rejection and what it rules out before "
-                "proposing new candidates."
+                "\nUse listed diagnostics as projected-state evidence and avoid "
+                "repeating candidate events that remain disabled, blocked_by_supervisor, "
+                "or nonprogressing under unchanged facts."
             )
     else:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
-            "Current phase: Outline (One Task At A Time).\n"
-            "Propose exactly ONE next recovery task to append after the accepted prefix.\n"
-            "You may include optional lookahead_tasks to show your intended remaining "
-            "plan, but only next_task will be validated and accepted.\n"
-            "When next_task is your LAST recovery task, leave lookahead_tasks empty "
-            "to signal that the outline is complete."
+            "Current phase: Recovery Event Synthesis (one transition at a time).\n"
+            "Propose exactly ONE next transition to append after the accepted "
+            "transition prefix, serialized in JSON field `next_transition`.\n"
+            "You may include an optional transition suffix, serialized in JSON "
+            "field `transition_suffix`, to show your intended remaining trace; "
+            "only `next_transition` will be validated and accepted.\n"
+            "When `next_transition` is your LAST recovery event, leave "
+            "`transition_suffix` empty to signal that the recovery event sequence "
+            "is complete."
         )
 
     sections: list[str] = [
@@ -1626,72 +2539,96 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     if not is_single_pass and accepted_prefix:
         sections.extend([
             "",
-            "Accepted Outline Prefix (keep exactly, do not modify)",
-            _outline_task_sequence_summary(accepted_prefix),
+            "Accepted Transition Prefix (keep exactly, do not modify)",
+            _outline_task_sequence_summary(
+                accepted_prefix,
+                include_descriptions=not is_candidate_mode,
+            ),
         ])
 
     if is_candidate_mode:
         rejected_candidate_summary = _candidate_rejection_learning_summary(
             history=candidate_rejection_history,
             feedback_rows=candidate_rejection_feedback,
+            feedback_render_style=feedback_render_style,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
         )
         if rejected_candidate_summary != "(none)":
             sections.extend([
                 "",
-                "Recent Rejected Candidate Feedback",
+                "Disabled And Blocked Candidate Events",
                 rejected_candidate_summary,
             ])
 
-    rejected_turn_thought = str(
-        session_state.get("rejected_turn_thought") or ""
-    ).strip()
-    if is_candidate_mode and rejected_turn_thought:
+    if primitive_escalation_diagnostics:
         sections.extend([
             "",
-            "Prior Rejected-Turn Reasoning (your prior reasoning, not ground truth)",
-            rejected_turn_thought,
+            "Primitive Escalation Diagnostics",
+            _compact_json(primitive_escalation_diagnostics),
         ])
 
     if is_candidate_mode:
+        if history_pruned_actions != "(none)":
+            sections.extend([
+                "",
+                "Persistently Disabled Candidate Events",
+                history_pruned_actions,
+            ])
         sections.extend([
             "",
-            "Current Recovery Conditions",
+            f"Enabled Event Candidate Budget: {candidate_bound}",
+            "",
+            "Open Guard / Marking Conditions",
             _current_recovery_blockers_summary(current_recovery_blockers),
             "",
             "Resource Capabilities",
             _resource_capabilities_summary(bridge_resources),
+            "",
+            "Grounded Event Facts",
+            _candidate_grounding_facts_summary(
+                bridge_resources=bridge_resources,
+                projected_resources=projected_resources,
+                projected_parts=projected_parts,
+            ),
             # Experiment: keep raw observed poses and workspace bounds visible,
             # but do not precompute the resource/part workspace relationship.
         ])
     elif outline_validation_findings:
         sections.extend([
             "",
-            "Active Validation Findings (still unresolved)",
-            _outline_validation_summary(outline_validation_findings),
+            "Active Transition Diagnostics (still unresolved)",
+            _outline_validation_summary(
+                outline_validation_findings,
+                feedback_render_style=feedback_render_style,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            ),
         ])
 
     if not is_candidate_mode and history_pruned_actions != "(none)":
         sections.extend([
             "",
-            "Rejected Events (do not re-propose)",
+            "Persistently Disabled Candidate Events",
             history_pruned_actions,
         ])
 
     if rejection_history and not is_candidate_mode:
         sections.extend([
             "",
-            "Rejected Outline Attempts And Validation Feedback",
+            "Rejected Transition Attempts And Validation Feedback",
             _outline_rejection_history_summary(rejection_history),
         ])
 
     sections.extend([
         "",
-        "Current Resource State",
+        "Current DES State",
+        "Resources",
         _compact_json(_slim_resource_facts(projected_resources)),
         "",
-        "Current Part State",
+        "Parts",
         _compact_json(_slim_part_facts(projected_parts)),
-        "Recovery Objectives",
+        "Marked-State Conditions",
         _compact_recovery_objectives(llm_input, projected_parts=projected_parts),
     ])
 
@@ -1715,14 +2652,19 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     if is_candidate_mode:
         sections.extend([
             "",
-            "Candidate Shape Example",
+            "Controllable Event JSON Template",
             """```json
 {
-  "resource_jid": "RESOURCE_JID",
-  "action_name": "short action label",
-  "description": "short description",
-  "part_name": "PART_NAME or omit",
-  "target_ref": "DESTINATION_REF or omit"
+  "thought": "WHY THESE EVENTS ARE ENABLED FROM THE CURRENT STATE",
+  "candidate_events": [
+    {
+      "resource_jid": "RESOURCE_JID",
+      "event_name": "UNIQUE_DES_EVENT_LABEL",
+      "description": "STATE-BASED EVENT INTENT",
+      "part_name": "OPTIONAL_PART_NAME",
+      "target_ref": "OPTIONAL_GROUNDED_TARGET_REF"
+    }
+  ]
 }
 ```""",
         ])
@@ -1730,7 +2672,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     if not is_candidate_mode:
         sections.extend([
             "",
-            "Modeled Continuation Gap",
+            "Modeled Continuation Gap (unresolved target predicates)",
             _compact_json(_clean_continuation_gap(llm_input)),
         ])
 
@@ -1744,11 +2686,27 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     constraints: list[str] = [
         "",
         "Output Constraints",
-        "- Use only the listed resources.",
-        "- Each event is one physical action for one resource.",
     ]
+    if is_candidate_mode:
+        constraints.extend([
+            "- Return JSON with field `candidate_events`.",
+            f"- `candidate_events` contains 1 to {candidate_bound} candidate events.",
+            "- Each event is one physical action by one listed resource.",
+            "- Each event must include resource_jid, event_name, and description.",
+            "- Use part_name and target_ref only when applicable.",
+            "- Use only listed resources, parts, and grounded target refs.",
+            f"- Returning fewer than {candidate_bound} rows is valid when fewer grounded candidates are worth proposing.",
+        ])
+    else:
+        constraints.extend([
+            "- Use only the listed resources.",
+            "- Each transition is one physical action by one resource.",
+        ])
     if not is_candidate_mode:
         constraints.extend([
+            "- expected_start_state is the source-state predicate snapshot; "
+            "expected_end_state is the target-state predicate snapshot.",
+            "- The description must include guard/feasibility reasoning: why the source state enables the event and what target predicates change.",
             "- expected_start_state and expected_end_state may use only: "
             "resource_state, held_part, part_state, part_location, part_holder_resource_jid.",
             "- Use flat scalar values in state objects.",
@@ -1756,15 +2714,13 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 
     if is_single_pass:
         constraints.append(
-            "- Propose all recovery tasks in outline_tasks as an ordered sequence."
+            "- Propose all recovery events as an ordered transition trace serialized in JSON field `transition_trace`."
         )
-    elif is_candidate_mode:
+    elif not is_candidate_mode:
         constraints.extend([
-            f"- Propose 1 to {candidate_bound} events in candidate_tasks.",
-            "- Each event must include resource_jid, action_name, and description.",
+            "- Propose exactly one next transition serialized in JSON field `next_transition`.",
+            "- Optional remaining transitions are serialized in JSON field `transition_suffix`.",
         ])
-    else:
-        constraints.append("- Propose exactly one task in next_task.")
 
     sections.extend(constraints)
     return "\n".join(sections).strip() + "\n"

@@ -127,6 +127,12 @@ MOCK_SINGLE_SHOT_RESPONSE = json.dumps(
     indent=2,
 )
 
+
+def _configure_dryrun_logging() -> None:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Loader helpers
 # ---------------------------------------------------------------------------
@@ -348,6 +354,8 @@ class FakeBridgeRobot:
             "move_pose",
             "move_relative",
             "move_to_named_pose",
+            "grasp_part",
+            "release_part",
             "open_gripper",
             "close_gripper",
             "detect_parts",
@@ -376,6 +384,7 @@ class FakeBridgeRobot:
         self.jid = self.agent_name
         self.execution_mode = "dry_run"
         self.static_capabilities = deepcopy(env_block.get("static_capabilities") or {})
+        self.static_capabilities.setdefault("resource_type", "robot")
         self.named_positions = deepcopy(env_block.get("named_positions") or {})
         self._current_state = str(current_state)
         self._held_part = held_part
@@ -384,6 +393,8 @@ class FakeBridgeRobot:
         self._position = deepcopy(position)
         self._observations = deepcopy(observations or {})
         self._shared_observations: dict[str, dict[str, Any]] = {}
+        self._primitive_catalog_cache: list[dict[str, Any]] | None = None
+        self.logger = logging.getLogger(f"FakeBridgeRobot.{self.agent_name or 'robot'}")
 
     def set_shared_observations(self, observations: dict[str, dict[str, Any]] | None) -> None:
         self._shared_observations = deepcopy(observations or {})
@@ -591,6 +602,81 @@ class FakeBridgeRobot:
         self._held_part = None
         return {"success": True, "message": "fake detach_part ok"}
 
+    def grasp_part(
+        self,
+        model_name: str,
+        part_name: str = "",
+        position: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Close the gripper and attach the target part as one high-level grasp primitive.
+        params:
+          model_name: {type: string, description: "Part model name"}
+          part_name: {type: string, description: "Optional canonical part name"}
+          position: {type: number, description: "Optional gripper position override"}
+        preconditions:
+          held_part:
+            equals: null
+        effects:
+          current_state:
+            set: picked
+          gripper_state:
+            set: closed
+          held_part:
+            set_from_param_any_of: [part_name, model_name]
+        ---
+        """
+        if not self.close_gripper(position=position):
+            return {"success": False, "message": "fake close_gripper failed"}
+        attached = self.attach_part(model_name=model_name, part_name=part_name)
+        if attached.get("success"):
+            return {"success": True, "message": "fake grasp_part ok"}
+        self.open_gripper()
+        return {
+            "success": False,
+            "message": f"{str(attached.get('message') or 'fake attach failed')}; rollback: reopened gripper",
+        }
+
+    def release_part(
+        self,
+        model_name: str = "",
+        part_name: str = "",
+        assume_released_if_open: bool = False,
+    ) -> dict[str, Any]:
+        """
+        ---
+        description: Open the gripper and detach the currently held part as one high-level release primitive.
+        params:
+          model_name: {type: string, description: "Part model name"}
+          part_name: {type: string, description: "Optional canonical part name"}
+          assume_released_if_open: {type: boolean, description: "Allow open-gripper release assumption"}
+        preconditions:
+          held_part:
+            not_equals: null
+        effects:
+          current_state:
+            set: idle
+          gripper_state:
+            set: open
+          held_part:
+            set: null
+        ---
+        """
+        if not self.open_gripper():
+            return {"success": False, "message": "fake open_gripper failed"}
+        detached = self.detach_part(
+            model_name=model_name,
+            assume_released_if_open=assume_released_if_open,
+        )
+        if detached.get("success"):
+            return {"success": True, "message": f"fake release_part ok {part_name or model_name}".strip()}
+        self.close_gripper()
+        return {
+            "success": False,
+            "message": f"{str(detached.get('message') or 'fake detach failed')}; rollback: reclosed gripper",
+        }
+
     def get_current_pose(self) -> dict[str, Any]:
         """
         ---
@@ -725,6 +811,35 @@ class FakeBridgeRobot:
 
     def get_bridge_snapshot(self) -> dict[str, Any]:
         return get_resource_bridge_snapshot(self)
+
+    async def _ensure_controller_prewarmed(self) -> None:
+        return None
+
+    def _cached_primitive_catalog(self) -> list[dict[str, Any]]:
+        if self._primitive_catalog_cache is None:
+            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+                build_execution_primitive_catalog,
+            )
+
+            self._primitive_catalog_cache = build_execution_primitive_catalog(self)
+        return deepcopy(self._primitive_catalog_cache)
+
+    async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
+        method = getattr(self, primitive, None)
+        if not callable(method):
+            return {"success": False, "message": f"fake robot missing primitive '{primitive}'"}
+        result = method(**dict(params or {}))
+        if isinstance(result, bool):
+            return {"success": result, "message": f"fake {primitive} {'ok' if result else 'failed'}"}
+        if isinstance(result, list):
+            return {
+                "success": True,
+                "message": f"fake {primitive} returned {len(result)} items",
+                "data": deepcopy(result),
+            }
+        if isinstance(result, dict):
+            return deepcopy(result)
+        return {"success": False, "message": f"fake {primitive} returned unexpected type"}
 
     def _is_pose_in_workspace(self, pose: dict[str, Any]) -> tuple[bool, str]:
         bounds = self.static_capabilities.get("workspace_bounds")
@@ -1462,10 +1577,10 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         {
             "outline_id": "RECOVERY_SEQ1",
             "resource_jid": "ur5e@localhost",
-            "action_name": "release MCP to prusa-mk3",
+            "action_name": "release MCP to prusa-mk4-2",
             "description": "Move UR5e to a non-interfering position preparing for MCP delivery.",
             "part_name": "MCP",
-            "target_ref": "prusa-mk3",
+            "target_ref": "prusa-mk4-2",
             "action_type": "release_part",
             "expected_start_state": {
                 "resource_state": "picked",
@@ -1477,10 +1592,10 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
             "expected_end_state": {
                 "resource_state": "idle",
                 "held_part": None,
-                "part_location": "prusa-mk3",
+                "part_location": "prusa-mk4-2",
                 "part_holder_resource_jid": None,
             },
-            "action_target": {"target_location": "prusa-mk3"},
+            "action_target": {"target_location": "prusa-mk4-2"},
         },
         {
             "outline_id": "RECOVERY_SEQ2",
@@ -1548,6 +1663,7 @@ def _seed_case3_primitive_generation_focus(session_state: dict[str, Any]) -> dic
     seeded = deepcopy(session_state)
     seeded["current_phase"] = "primitive_generation"
     seeded["status"] = "pending"
+    seeded["turn_index"] = 7
     seeded["accepted_outline_prefix"] = _case3_known_accepted_outline_prefix()
     seeded["primitive_generation_cursor"] = 0
     seeded["accepted_primitive_program"] = []
@@ -1729,6 +1845,7 @@ async def run_case3_bridge_dryrun(
     focus: str = "full",
 ) -> dict[str, Any]:
     """Run the Case 3 dry-run scenario through the bridge once."""
+    _configure_dryrun_logging()
     normalized_focus = str(focus or "full").strip().lower()
     if normalized_focus not in {"full", "primitive_generation"}:
         raise ValueError("focus must be 'full' or 'primitive_generation'")
@@ -1785,7 +1902,39 @@ async def run_case3_bridge_dryrun(
         post_validation_resume_budget = 0
         for _resume_i in range(max_resume):
             ss = prepared_bridge_request.get("multi_turn_session_state") or {}
-            if ss.get("status") not in {
+            current_status = str(ss.get("status") or "")
+            if current_status in {
+                "paused_after_primitive_stuck",
+                "paused_after_primitive_blocked",
+            }:
+                diagnostics = [
+                    deepcopy(row)
+                    for row in (ss.get("primitive_escalation_diagnostics") or [])
+                    if isinstance(row, dict)
+                ]
+                feedback = [
+                    deepcopy(row)
+                    for row in (ss.get("primitive_rejection_feedback") or [])
+                    if isinstance(row, dict)
+                ]
+                summary = str((diagnostics[0] or {}).get("reason") or "").strip() if diagnostics else ""
+                if not summary and feedback:
+                    summary = str((feedback[0] or {}).get("reason") or "").strip()
+                logging.getLogger("case3_bridge_dryrun").warning(
+                    "[DryRun] Primitive generation paused%s%s%s",
+                    (
+                        " on blocked event"
+                        if current_status == "paused_after_primitive_blocked"
+                        else " on stuck event"
+                    ),
+                    (
+                        f" {str((diagnostics[0] or {}).get('outline_id') or '').strip()}"
+                        if diagnostics else ""
+                    ),
+                    (f": {summary}" if summary else ""),
+                )
+                break
+            if current_status not in {
                 "paused_after_outline_turn",
                 "paused_after_primitive_turn",
             }:
@@ -1796,9 +1945,6 @@ async def run_case3_bridge_dryrun(
                 )
                 break
             if stop_before_primitive_generation:
-                logging.getLogger("case3_bridge_dryrun").info(
-                    "[DryRun] Resuming outline loop until primitive_generation (round %d)", _resume_i + 1,
-                )
                 proposal = await _resume_bridge(
                     planner, prepared_bridge_request, session_state=ss,
                 )
@@ -1817,15 +1963,6 @@ async def run_case3_bridge_dryrun(
                     _POST_VALIDATION_INSPECTION_TURNS,
                 )
                 post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
-            elif post_validation_resume_budget > 0:
-                logging.getLogger("case3_bridge_dryrun").info(
-                    "[DryRun] Resuming post-validation inspection turn (%d remaining after this resume)",
-                    post_validation_resume_budget - 1,
-                )
-            else:
-                logging.getLogger("case3_bridge_dryrun").info(
-                    "[DryRun] Resuming outline loop (round %d)", _resume_i + 1,
-                )
             proposal = await _resume_bridge(
                 planner, prepared_bridge_request, session_state=ss,
             )
@@ -1945,6 +2082,8 @@ def _assert_bridge_dryrun(
         "completed",
         "paused_after_primitive_turn",
         "paused_after_primitive_generation",
+        "paused_after_primitive_blocked",
+        "paused_after_primitive_stuck",
         "des_turn_limit",
         "des_cycle_detected",
         "des_deadlock",
@@ -2600,179 +2739,335 @@ def test_v2_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
     asyncio.run(_run())
 
 
-def test_v2_primitive_generation_response_schema() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        multi_turn_v2_phase_response_schema,
+
+def test_v2_split_modules_are_wired_into_phase_handlers() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+        multi_turn_outline_generation as outline_mode,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+        multi_turn_primitive_generation as primitive_mode,
     )
 
-    schema = multi_turn_v2_phase_response_schema("primitive_generation")
-    body = dict(schema.get("schema") or {})
-    required = set(body.get("required") or [])
-    assert {
-        "thought",
-        "decision",
-        "outline_id",
-        "resource_jid",
-        "primitive_steps",
-    } <= required
-    decision = dict(dict(body.get("properties") or {}).get("decision") or {})
-    assert set(decision.get("enum") or []) == {
-        "primitive_event_ready",
-        "need_primitive_revision",
-        "need_outline_revision",
-    }
-    primitive_steps = dict(dict(body.get("properties") or {}).get("primitive_steps") or {})
-    step_schema = dict(primitive_steps.get("items") or {})
-    assert {"primitive", "params"} <= set(step_schema.get("required") or [])
+    assert multi_turn_v2_mode._PHASE_HANDLERS["outline"] is outline_mode._handle_outline_phase
+    assert (
+        multi_turn_v2_mode._PHASE_HANDLERS["primitive_generation"]
+        is primitive_mode._handle_primitive_generation_phase
+    )
 
 
-def test_v2_primitive_generation_prompt_targets_active_outline_event() -> None:
+
+
+def test_controller_grasp_part_uses_close_then_attach_with_rollback() -> None:
+    from cais_spade_llm.resources.robot.ros2_pick_place_controller import Ros2PickPlaceController
+
+    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller._last_failure_message = ""
+    controller.release_preopen_settle_sec = 0.0
+    controller.release_postopen_settle_sec = 0.0
+    controller.release_postdetach_settle_sec = 0.0
+    controller.wait_for_services = lambda: True
+
+    success_calls: list[tuple[Any, ...]] = []
+    controller.close_gripper = lambda position=None: success_calls.append(("close", position)) or True
+    controller.attach_part = (
+        lambda model_name, link=None, part_name="": success_calls.append(
+            ("attach", model_name, part_name)
+        ) or {"success": True, "message": "attach ok"}
+    )
+    controller.open_gripper = lambda: success_calls.append(("open",)) or True
+
+    result = Ros2PickPlaceController.grasp_part(
+        controller,
+        "lg_model",
+        part_name="LG",
+        position=0.42,
+    )
+    assert result["success"] is True
+    assert success_calls == [("close", 0.42), ("attach", "lg_model", "LG")]
+
+    rollback_calls: list[tuple[Any, ...]] = []
+    controller.close_gripper = lambda position=None: rollback_calls.append(("close", position)) or True
+    controller.attach_part = (
+        lambda model_name, link=None, part_name="": rollback_calls.append(
+            ("attach", model_name, part_name)
+        ) or {"success": False, "message": "attach boom"}
+    )
+    controller.open_gripper = lambda: rollback_calls.append(("open",)) or True
+
+    failed = Ros2PickPlaceController.grasp_part(
+        controller,
+        "lg_model",
+        part_name="LG",
+    )
+    assert failed["success"] is False
+    assert "rollback: reopened gripper" in str(failed.get("message") or "")
+    assert rollback_calls == [("close", None), ("attach", "lg_model", "LG"), ("open",)]
+
+
+def test_controller_release_part_uses_open_then_detach_with_rollback() -> None:
+    from cais_spade_llm.resources.robot.ros2_pick_place_controller import Ros2PickPlaceController
+
+    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller._last_failure_message = ""
+    controller.release_preopen_settle_sec = 0.0
+    controller.release_postopen_settle_sec = 0.0
+    controller.release_postdetach_settle_sec = 0.0
+    controller.wait_for_services = lambda: True
+
+    success_calls: list[tuple[Any, ...]] = []
+    controller.open_gripper = lambda: success_calls.append(("open",)) or True
+    controller.detach_part = (
+        lambda model_name="", link=None, assume_released_if_open=False: success_calls.append(
+            ("detach", model_name, assume_released_if_open)
+        ) or {"success": True, "message": "detach ok"}
+    )
+    controller.close_gripper = lambda position=None: success_calls.append(("close", position)) or True
+
+    result = Ros2PickPlaceController.release_part(
+        controller,
+        model_name="lg_model",
+        part_name="LG",
+    )
+    assert result["success"] is True
+    assert success_calls == [("open",), ("detach", "lg_model", False)]
+
+    rollback_calls: list[tuple[Any, ...]] = []
+    controller.open_gripper = lambda: rollback_calls.append(("open",)) or True
+    controller.detach_part = (
+        lambda model_name="", link=None, assume_released_if_open=False: rollback_calls.append(
+            ("detach", model_name, assume_released_if_open)
+        ) or {"success": False, "message": "detach boom"}
+    )
+    controller.close_gripper = lambda position=None: rollback_calls.append(("close", position)) or True
+
+    failed = Ros2PickPlaceController.release_part(
+        controller,
+        model_name="lg_model",
+        part_name="LG",
+    )
+    assert failed["success"] is False
+    assert "rollback: reclosed gripper" in str(failed.get("message") or "")
+    assert rollback_calls == [("open",), ("detach", "lg_model", False), ("close", None)]
+
+
+def test_pick_grasp_routes_through_grasp_part() -> None:
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+
+    class _TaskRobot:
+        def __init__(self) -> None:
+            self.execution_mode = "simulation"
+            self._held_part = None
+            self._current_state = "at_pick"
+            self._gripper_state = "open"
+            self._task_ctx = {
+                "model_name": "lg_model",
+                "travel_z": 1.2,
+                "tx": 0.1,
+                "ty": 0.2,
+                "tz": 0.3,
+            }
+            self.primitive_calls: list[tuple[str, dict[str, Any]]] = []
+            self.helper_calls: list[tuple[str, dict[str, Any]]] = []
+            self.logger = logging.getLogger("test.pick_grasp")
+
+        async def _maybe_inject_failure(self, **kwargs: Any) -> None:
+            del kwargs
+            return None
+
+        def _log_step(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def _task_failure(
+            self,
+            detail: str,
+            *,
+            step: str,
+            observations: dict[str, Any] | None = None,
+            failure_context: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del failure_context
+            return {
+                "status": "failed",
+                "content": detail,
+                "step": step,
+                "observations": deepcopy(observations or {}),
+            }
+
+        async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.primitive_calls.append((primitive, deepcopy(params)))
+            return {"success": True, "message": f"{primitive} ok"}
+
+        async def _execute_controller_helper(self, helper_name: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.helper_calls.append((helper_name, deepcopy(params)))
+            return {"success": True, "message": f"{helper_name} ok"}
+
     async def _run() -> None:
-        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
-        session_state = _seed_case3_primitive_generation_focus(seed)
-
-        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
-            prepared_bridge_request,
-            session_state,
+        robot = _TaskRobot()
+        result = await RobotAgent.pick_grasp(
+            robot,
+            part_name="LG",
+            origin_resource_location="observed_pose",
         )
 
-        assert "Current phase: Primitive Generation." in prompt
-        assert "Accepted Outline Context" in prompt
-        assert "Active Outline Event" in prompt
-        assert '"outline_id": "RECOVERY_SEQ1"' in prompt
-        assert '"resource_jid": "ur5e@localhost"' in prompt
-        assert "Primitive Generation Cursor" in prompt
-        assert '"active_index": 0' in prompt
-        assert "Active Resource Primitive Catalog" in prompt
-        assert '"name": "release_part"' in prompt
-        assert "Current Resource State" in prompt
-        assert "Current Part State" in prompt
-        assert "Session Observation Store" in prompt
-        assert "Current Recovery Conditions" not in prompt
-        assert "Candidate Shape Example" not in prompt
-        assert "Propose up to" not in prompt
-        assert "candidate recovery events" not in prompt
-        assert "release -> move + open_gripper + detach" not in prompt
-        assert "move + open_gripper + detach" not in prompt
-        assert "opens the gripper and detaches" not in prompt
+        primitive_names = [name for name, _params in robot.primitive_calls]
+        assert result["status"] == "completed"
+        assert primitive_names == ["grasp_part"]
+        assert "close_gripper" not in primitive_names
+        assert "attach_part" not in primitive_names
+        assert robot.helper_calls and robot.helper_calls[0][0] == "_move_pose_direct"
+        assert robot._held_part == "LG"
+        assert robot._current_state == "picked"
+        assert robot._gripper_state == "closed"
 
     asyncio.run(_run())
 
 
-def test_v2_primitive_generation_valid_event_advances_cursor() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
-        session_state = _seed_case3_primitive_generation_focus(seed)
+def test_place_insert_routes_through_release_part_and_separate_cleanup() -> None:
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
 
-        decision, turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
-            session_state=session_state,
-            parsed_response={
-                "thought": "Release the currently held MCP using the resource primitive surface.",
-                "decision": "primitive_event_ready",
-                "outline_id": "RECOVERY_SEQ1",
-                "resource_jid": "ur5e@localhost",
-                "primitive_steps": [
-                    {
-                        "primitive": "release_part",
-                        "params": {"model_name": "MCP"},
-                    }
-                ],
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
+    class _TaskRobot:
+        def __init__(self) -> None:
+            self.execution_mode = "simulation"
+            self._held_part = "LG"
+            self._current_state = "positioned"
+            self._gripper_state = "closed"
+            self._task_ctx = {
+                "model_name": "lg_model",
+                "slot_x": 0.25,
+                "slot_y": -0.10,
+                "board_top_z": 1.02,
+                "part_height": 0.08,
+                "place_z": 1.10,
+                "travel_z": 1.20,
+            }
+            self.primitive_calls: list[tuple[str, dict[str, Any]]] = []
+            self.helper_calls: list[tuple[str, dict[str, Any]]] = []
+            self.logger = logging.getLogger("test.place_insert")
+
+        async def _maybe_inject_failure(self, **kwargs: Any) -> None:
+            del kwargs
+            return None
+
+        def _log_step(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def _task_failure(
+            self,
+            detail: str,
+            *,
+            step: str,
+            observations: dict[str, Any] | None = None,
+            failure_context: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del failure_context
+            return {
+                "status": "failed",
+                "content": detail,
+                "step": step,
+                "observations": deepcopy(observations or {}),
+            }
+
+        async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.primitive_calls.append((primitive, deepcopy(params)))
+            return {"success": True, "message": f"{primitive} ok"}
+
+        async def _execute_controller_helper(self, helper_name: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.helper_calls.append((helper_name, deepcopy(params)))
+            return {"success": True, "message": f"{helper_name} ok"}
+
+    async def _run() -> None:
+        robot = _TaskRobot()
+        result = await RobotAgent.place_insert(
+            robot,
+            destination_location="assembly_board-v1",
+            part_name="LG",
         )
 
-        assert decision == "primitive_event_ready"
-        assert session_state.get("status") == "paused_after_primitive_turn"
-        assert session_state.get("primitive_generation_cursor") == 1
-        accepted = list(session_state.get("accepted_primitive_program") or [])
-        assert len(accepted) == 1
-        assert accepted[0]["outline_id"] == "RECOVERY_SEQ1"
-        assert accepted[0]["primitive_steps"] == [
-            {"primitive": "release_part", "params": {"model_name": "MCP"}}
-        ]
-        assert dict(turn_entry.get("projected_snapshot") or {}).get("held_part") is None
-        assert session_state.get("primitive_rejection_feedback") == []
+        primitive_names = [name for name, _params in robot.primitive_calls]
+        helper_names = [name for name, _params in robot.helper_calls]
+        assert result["status"] == "completed"
+        assert primitive_names == ["release_part"]
+        assert "open_gripper" not in primitive_names
+        assert "detach_part" not in primitive_names
+        assert "_release_part_sequence" not in helper_names
+        assert helper_names == ["snap_part_to_slot", "_move_pose_direct"]
+        assert robot._held_part is None
+        assert robot._current_state == "placed"
+        assert robot._gripper_state == "open"
 
     asyncio.run(_run())
 
 
-def test_v2_primitive_generation_rejection_keeps_cursor_and_renders_feedback() -> None:
+def test_bridge_catalog_and_macro_execution_use_real_grasp_release_primitives() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        build_execution_primitive_catalog,
+        build_synthesis_primitive_catalog,
+    )
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+
     async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
-        session_state = _seed_case3_primitive_generation_focus(seed)
-
-        decision, turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
-            session_state=session_state,
-            parsed_response={
-                "thought": "Use a primitive that is not available.",
-                "decision": "primitive_event_ready",
-                "outline_id": "RECOVERY_SEQ1",
-                "resource_jid": "ur5e@localhost",
-                "primitive_steps": [
-                    {
-                        "primitive": "teleport_part",
-                        "params": {"model_name": "MCP"},
-                    }
-                ],
+        robot = FakeBridgeRobot(
+            config={
+                "jid": "ur5e@localhost",
+                "gazebo": {
+                    "static_capabilities": {
+                        "resource_type": "robot",
+                        "workspace_bounds": {
+                            "x_min_m": -1.0,
+                            "x_max_m": 1.0,
+                            "y_min_m": -1.0,
+                            "y_max_m": 1.0,
+                            "z_min_m": 0.0,
+                            "z_max_m": 2.0,
+                        },
+                    },
+                    "named_positions": {"home": [0.0]},
+                },
             },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
+            execution_env="gazebo",
+            current_state="idle",
+            held_part=None,
+            gripper_state="open",
+            pose_ref="home",
+            position={"x": 0.0, "y": 0.0, "z": 1.0},
         )
 
-        assert decision == "need_primitive_revision"
-        assert session_state.get("status") == "paused_after_primitive_turn"
-        assert session_state.get("primitive_generation_cursor") == 0
-        feedback = list(session_state.get("primitive_rejection_feedback") or [])
-        assert feedback
-        assert feedback[0]["constraint_code"] == "primitive_validation_failed"
-        assert "unknown primitive" in feedback[0]["reason"]
-        assert turn_entry.get("primitive_rejection_feedback") == feedback
+        execution_names = {
+            str(entry.get("name") or "").strip()
+            for entry in build_execution_primitive_catalog(robot)
+        }
+        synthesis_names = {
+            str(entry.get("name") or "").strip()
+            for entry in build_synthesis_primitive_catalog(robot)
+        }
+        assert {"grasp_part", "release_part"} <= execution_names
+        assert {"grasp_part", "release_part"} <= synthesis_names
+        assert not ({"open_gripper", "close_gripper", "attach_part", "detach_part"} & synthesis_names)
 
-        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
-            prepared_bridge_request,
-            session_state,
-        )
-        assert "Primitive Rejection Feedback" in prompt
-        assert "primitive_validation_failed" in prompt
-        assert "unknown primitive" in prompt
-
-    asyncio.run(_run())
-
-
-def test_v2_primitive_generation_final_event_returns_draft_ready() -> None:
-    async def _run() -> None:
-        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        seed = multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
-        session_state = _seed_case3_primitive_generation_focus(seed)
-        session_state["primitive_generation_cursor"] = 3
-
-        decision, _turn_entry = await multi_turn_v2_mode._handle_primitive_generation_phase(
-            session_state=session_state,
-            parsed_response={
-                "thought": "Release the held LG for the final accepted outline event.",
-                "decision": "primitive_event_ready",
-                "outline_id": "RECOVERY_SEQ4",
-                "resource_jid": "ur5e@localhost",
-                "primitive_steps": [
-                    {
-                        "primitive": "release_part",
-                        "params": {"model_name": "LG"},
-                    }
-                ],
-            },
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
+        result = await RobotAgent.execute_recovery_macro(
+            robot,
+            macro_name="grasp_release_roundtrip",
+            primitive_steps=[
+                {
+                    "primitive": "grasp_part",
+                    "params": {"model_name": "lg_model", "part_name": "LG"},
+                },
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05},
+                },
+                {
+                    "primitive": "release_part",
+                    "params": {"model_name": "lg_model", "part_name": "LG"},
+                },
+            ],
+            expected_start_state="idle",
+            out_state="idle",
         )
 
-        assert decision == "draft_ready"
-        assert session_state.get("status") == "paused_after_primitive_generation"
-        assert session_state.get("primitive_generation_cursor") == 4
-        accepted = list(session_state.get("accepted_primitive_program") or [])
-        assert accepted[-1]["outline_id"] == "RECOVERY_SEQ4"
+        assert result["status"] == "completed"
+        assert robot._held_part is None
+        assert robot._gripper_state == "open"
 
     asyncio.run(_run())
 
@@ -3456,6 +3751,166 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
     asyncio.run(_run())
 
 
+def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
+    async def _run() -> None:
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 20},
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
+                "status": "paused_after_primitive_turn",
+                "current_phase": "primitive_generation",
+                "turn_index": 8,
+                "max_turns": 20,
+                "primitive_escalation_diagnostics": [],
+            },
+            "context_summary": {},
+            "llm_input": {},
+        }
+        resume_calls = 0
+
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(self, _prepared: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
+                }
+
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
+
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model, reasoning_mode
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
+
+        async def _fake_resume_bridge(
+            planner: Any,
+            prepared_request: dict[str, Any],
+            *,
+            session_state: dict[str, Any],
+        ) -> dict[str, Any]:
+            nonlocal resume_calls
+            del planner, session_state
+            resume_calls += 1
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
+            state["status"] = "paused_after_primitive_stuck"
+            state["primitive_escalation_diagnostics"] = [
+                {
+                    "outline_id": "RECOVERY_SEQ1",
+                    "reason": "primitive authoring stalled on the active event",
+                }
+            ]
+            prepared_request["multi_turn_session_state"] = state
+            return {"turn_index": state.get("turn_index")}
+
+        with patch.object(
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=_fake_resume_bridge,
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                reasoning_mode="multi_turn",
+                stop_before_primitive_generation=False,
+            )
+
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
+        assert resume_calls == 1
+        assert str(session_state.get("status") or "") == "paused_after_primitive_stuck"
+
+    asyncio.run(_run())
+
+
+def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
+    async def _run() -> None:
+        import sys
+        from unittest.mock import patch
+
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 20},
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
+                "status": "paused_after_primitive_turn",
+                "current_phase": "primitive_generation",
+                "turn_index": 8,
+                "max_turns": 20,
+                "primitive_escalation_diagnostics": [],
+            },
+            "context_summary": {},
+            "llm_input": {},
+        }
+        resume_calls = 0
+
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(self, _prepared: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
+                }
+
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
+
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model, reasoning_mode
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
+
+        async def _fake_resume_bridge(
+            planner: Any,
+            prepared_request: dict[str, Any],
+            *,
+            session_state: dict[str, Any],
+        ) -> dict[str, Any]:
+            nonlocal resume_calls
+            del planner, session_state
+            resume_calls += 1
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
+            state["status"] = "paused_after_primitive_blocked"
+            state["primitive_rejection_feedback"] = [
+                {
+                    "outline_id": "RECOVERY_SEQ1",
+                    "constraint_code": "primitive_blocked",
+                    "reason": "active event remains contradictory after capability retrieval",
+                }
+            ]
+            prepared_request["multi_turn_session_state"] = state
+            return {"turn_index": state.get("turn_index")}
+
+        with patch.object(
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=_fake_resume_bridge,
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                reasoning_mode="multi_turn",
+                stop_before_primitive_generation=False,
+            )
+
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
+        assert resume_calls == 1
+        assert str(session_state.get("status") or "") == "paused_after_primitive_blocked"
+
+    asyncio.run(_run())
+
+
 def test_case3_dryrun_hybrid_mode_skips_multi_turn_resume_loop() -> None:
     async def _run() -> None:
         prepared_bridge_request = {
@@ -3551,6 +4006,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    _configure_dryrun_logging()
     result = asyncio.run(
         run_case3_bridge_dryrun(
             write_debug=not args.no_debug,

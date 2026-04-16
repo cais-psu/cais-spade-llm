@@ -19,13 +19,16 @@ from collections import deque
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_contract_semantics import (
+    apply_event_contract_effects,
+    event_location_ref,
+    infer_event_semantics,
+    normalize_event_contract,
+    normalize_state_metadata_entry,
+    snapshot_signature,
+)
+
 _logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# (action_type is now free-form — no hardcoded whitelist)
 
 # ---------------------------------------------------------------------------
 # Validation finding helper
@@ -38,6 +41,7 @@ def _plant_finding(
     reason: str,
     evidence: dict[str, Any] | None = None,
     event_name: str | None = None,
+    severity: str = "error",
 ) -> dict[str, Any]:
     """Build a structured validation finding for plant compilation."""
     finding: dict[str, Any] = {
@@ -45,6 +49,7 @@ def _plant_finding(
         "constraint_family": "plant_validation",
         "constraint_code": constraint_code,
         "reason": reason,
+        "severity": str(severity or "error"),
     }
     if evidence:
         finding["evidence"] = deepcopy(evidence)
@@ -161,22 +166,82 @@ def _is_pose_in_workspace(
 
 def _parse_plant_events(
     raw_events: list[dict[str, Any]] | dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Normalize events from LLM response into {event_name: event_dict}."""
     events: dict[str, dict[str, Any]] = {}
+    warnings: list[dict[str, Any]] = []
     if isinstance(raw_events, dict):
         for name, edict in raw_events.items():
-            edict = dict(edict or {})
-            edict["name"] = str(name).strip()
-            events[edict["name"]] = edict
+            normalized, legacy_fields = normalize_event_contract(
+                {**dict(edict or {}), "name": str(name).strip()},
+            )
+            event_name = str(normalized.get("name") or "").strip()
+            if not event_name:
+                continue
+            events[event_name] = normalized
+            if legacy_fields:
+                warnings.append(_plant_finding(
+                    constraint_code="deprecated_event_fields",
+                    reason=(
+                        f"Event '{event_name}' used deprecated field(s): "
+                        f"{', '.join(legacy_fields)}. They were accepted for compatibility "
+                        "but ignored semantically."
+                    ),
+                    event_name=event_name,
+                    evidence={"deprecated_fields": legacy_fields},
+                    severity="warning",
+                ))
     elif isinstance(raw_events, list):
         for edict in raw_events:
-            edict = dict(edict or {})
-            name = str(edict.get("name") or "").strip()
-            if not name:
+            normalized, legacy_fields = normalize_event_contract(dict(edict or {}))
+            event_name = str(normalized.get("name") or "").strip()
+            if not event_name:
                 continue
-            events[name] = edict
-    return events
+            events[event_name] = normalized
+            if legacy_fields:
+                warnings.append(_plant_finding(
+                    constraint_code="deprecated_event_fields",
+                    reason=(
+                        f"Event '{event_name}' used deprecated field(s): "
+                        f"{', '.join(legacy_fields)}. They were accepted for compatibility "
+                        "but ignored semantically."
+                    ),
+                    event_name=event_name,
+                    evidence={"deprecated_fields": legacy_fields},
+                    severity="warning",
+                ))
+    return events, warnings
+
+
+def _normalize_state_metadata(
+    raw_metadata: Any,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Normalize audit-only metadata maps keyed by plant state name."""
+    metadata: dict[str, dict[str, Any]] = {}
+    warnings: list[dict[str, Any]] = []
+    if not isinstance(raw_metadata, dict):
+        return metadata, warnings
+    for raw_state_name, raw_entry in raw_metadata.items():
+        state_name = str(raw_state_name or "").strip()
+        if not state_name:
+            continue
+        entry, legacy_fields = normalize_state_metadata_entry(raw_entry)
+        metadata[state_name] = entry
+        if legacy_fields:
+            warnings.append(_plant_finding(
+                constraint_code="deprecated_state_metadata_fields",
+                reason=(
+                    f"State metadata for '{state_name}' used deprecated field(s): "
+                    f"{', '.join(legacy_fields)}. They were accepted for compatibility "
+                    "but ignored semantically."
+                ),
+                evidence={
+                    "state_name": state_name,
+                    "deprecated_fields": legacy_fields,
+                },
+                severity="warning",
+            ))
+    return metadata, warnings
 
 
 def _build_transition_table(
@@ -208,6 +273,8 @@ def _validate_plant_structure(
     initial = str(plant.get("initial") or "").strip()
     marked = set(plant.get("marked") or set())
     transitions = dict(plant.get("transitions") or {})
+    state_metadata = dict(plant.get("state_metadata") or {})
+    marked_state_metadata = dict(plant.get("marked_state_metadata") or {})
 
     if not initial:
         findings.append(_plant_finding(
@@ -230,6 +297,20 @@ def _validate_plant_structure(
             findings.append(_plant_finding(
                 constraint_code="marked_state_not_in_states",
                 reason=f"Marked state '{m}' is not in the state set.",
+            ))
+
+    for state_name in state_metadata:
+        if state_name not in states:
+            findings.append(_plant_finding(
+                constraint_code="state_metadata_unbound",
+                reason=f"State metadata references unknown state '{state_name}'.",
+            ))
+
+    for state_name in marked_state_metadata:
+        if state_name not in states:
+            findings.append(_plant_finding(
+                constraint_code="marked_state_metadata_unbound",
+                reason=f"Marked-state metadata references unknown state '{state_name}'.",
             ))
 
     for ename, edict in events.items():
@@ -320,8 +401,7 @@ def _validate_plant_vocabulary(
     for ename, edict in events.items():
         resource_jid = str(edict.get("resource_jid") or "").strip()
         part_name = str(edict.get("part_name") or "").strip()
-        action_type = str(edict.get("action_type") or "").strip()
-        target_ref = str(edict.get("target_ref") or "").strip()
+        location_ref = event_location_ref(edict)
         pose = edict.get("pose")
 
         if resource_jid and resource_jid not in known_resources:
@@ -340,16 +420,13 @@ def _validate_plant_vocabulary(
                 evidence={"part_name": part_name, "known": sorted(known_parts)},
             ))
 
-        # action_type is free-form — no whitelist validation
-
-        if target_ref and target_ref not in known_locations:
-            # Allow target_ref that matches "observed_pose" variants
-            if not (target_ref.endswith("_observed_pose") or target_ref == "observed_pose"):
+        if location_ref and location_ref not in known_locations:
+            if not (location_ref.endswith("_observed_pose") or location_ref == "observed_pose"):
                 findings.append(_plant_finding(
                     constraint_code="unknown_location_token",
-                    reason=f"Event '{ename}' target_ref '{target_ref}' is not a known location.",
+                    reason=f"Event '{ename}' location_ref '{location_ref}' is not a known location.",
                     event_name=ename,
-                    evidence={"target_ref": target_ref},
+                    evidence={"location_ref": location_ref},
                 ))
 
         # Workspace check if pose provided
@@ -368,57 +445,115 @@ def _validate_plant_vocabulary(
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Semantic annotation
-# ---------------------------------------------------------------------------
-
-
-def _infer_action_type(edict: dict[str, Any]) -> str:
-    """Infer action_type from event fields if not explicitly provided."""
-    explicit = str(edict.get("action_type") or "").strip()
-    if explicit:
-        return explicit  # accept any LLM-provided label
-    part_name = str(edict.get("part_name") or "").strip()
-    description = str(edict.get("description") or edict.get("name") or "").strip().lower()
-    if not part_name:
-        return "move_resource"
-    if any(kw in description for kw in ("pickup", "pick", "acquire", "grasp", "grab")):
-        return "pick_part"
-    if any(kw in description for kw in ("place", "release", "put", "return", "park", "drop")):
-        return "place_part"
-    return "manipulate_part"
-
-
 def _annotate_events_with_semantics(
     plant: dict[str, Any],
     bridge_resources: dict[str, Any],
     symbolic_parts: dict[str, Any],
-) -> dict[str, Any]:
-    """Enrich plant events with inferred semantics.
-
-    Fills in action_type, resolves observed_pose references, etc.
-    Returns the plant with annotated events (mutated in place).
-    """
+) -> list[dict[str, Any]]:
+    """Resolve event grounding and infer rolling symbolic semantics."""
     events = dict(plant.get("events") or {})
-    for ename, edict in events.items():
-        if not str(edict.get("action_type") or "").strip():
-            edict["action_type"] = _infer_action_type(edict)
+    transitions = dict(plant.get("transitions") or {})
+    initial = str(plant.get("initial") or "").strip()
+    findings: list[dict[str, Any]] = []
+    if not initial:
+        plant["events"] = events
+        return findings
 
-        # Resolve observed_pose if target_ref is "observed_pose" and part has one
-        part_name = str(edict.get("part_name") or "").strip()
-        target_ref = str(edict.get("target_ref") or "").strip()
-        if (
-            part_name
-            and target_ref in ("observed_pose", f"{part_name}_observed_pose")
-            and not edict.get("pose")
-        ):
-            prow = dict((symbolic_parts or {}).get(part_name) or {})
-            observed = prow.get("observed_pose")
-            if isinstance(observed, dict) and "x" in observed:
-                edict["pose"] = deepcopy(observed)
+    state_snapshots: dict[str, dict[str, Any]] = {
+        initial: snapshot_signature(
+            resources=deepcopy(bridge_resources or {}),
+            parts=deepcopy(symbolic_parts or {}),
+        )
+    }
+    queue: deque[str] = deque([initial])
+    processed_edges: set[tuple[str, str]] = set()
+
+    while queue:
+        state_name = queue.popleft()
+        snapshot = dict(state_snapshots.get(state_name) or {})
+        if not snapshot:
+            continue
+        pre_resources = deepcopy(dict(snapshot.get("resources") or {}))
+        pre_parts = deepcopy(dict(snapshot.get("parts") or {}))
+        for ename, dst in transitions.get(state_name, []):
+            edge_key = (state_name, ename)
+            if edge_key in processed_edges:
+                continue
+            processed_edges.add(edge_key)
+            edict = dict(events.get(ename) or {})
+            if not edict:
+                continue
+
+            part_name = str(edict.get("part_name") or "").strip()
+            location_ref = event_location_ref(edict)
+            if (
+                part_name
+                and location_ref in ("observed_pose", f"{part_name}_observed_pose")
+                and not edict.get("pose")
+            ):
+                observed = dict((symbolic_parts or {}).get(part_name) or {}).get("observed_pose")
+                if isinstance(observed, dict) and observed:
+                    edict["pose"] = deepcopy(observed)
+
+            next_resources = deepcopy(pre_resources)
+            next_parts = deepcopy(pre_parts)
+            apply_event_contract_effects(
+                edict,
+                resources=next_resources,
+                parts=next_parts,
+            )
+            semantics = infer_event_semantics(
+                edict,
+                pre_resources=pre_resources,
+                pre_parts=pre_parts,
+                post_resources=next_resources,
+                post_parts=next_parts,
+            )
+            resource_jid = str(edict.get("resource_jid") or "").strip()
+            edict["semantic_witness"] = semantics
+            edict["pre_state"] = {
+                "resource": deepcopy(dict(pre_resources.get(resource_jid) or {})),
+                "part": deepcopy(dict(pre_parts.get(part_name) or {})) if part_name else {},
+            }
+            edict["post_state"] = {
+                "resource": deepcopy(dict(next_resources.get(resource_jid) or {})),
+                "part": deepcopy(dict(next_parts.get(part_name) or {})) if part_name else {},
+            }
+            events[ename] = edict
+
+            candidate_snapshot = snapshot_signature(
+                resources=next_resources,
+                parts=next_parts,
+            )
+            if dst not in state_snapshots:
+                state_snapshots[dst] = candidate_snapshot
+                queue.append(dst)
+                continue
+
+            current_snapshot = state_snapshots[dst]
+            if json.dumps(current_snapshot, sort_keys=True, default=str) != json.dumps(
+                candidate_snapshot,
+                sort_keys=True,
+                default=str,
+            ):
+                findings.append(_plant_finding(
+                    constraint_code="inconsistent_state_merge",
+                    reason=(
+                        f"Plant state '{dst}' is reached with inconsistent symbolic snapshots. "
+                        "All incoming paths to a merged state must agree."
+                    ),
+                    event_name=ename,
+                    evidence={
+                        "state_name": dst,
+                        "incoming_event": ename,
+                        "existing_snapshot": deepcopy(current_snapshot),
+                        "candidate_snapshot": deepcopy(candidate_snapshot),
+                    },
+                ))
 
     plant["events"] = events
-    return plant
+    plant["state_snapshots"] = state_snapshots
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +613,7 @@ def compile_plant_from_llm_response(
 
     # Parse events
     raw_events = plant_raw.get("events") or []
-    events = _parse_plant_events(raw_events)
+    events, event_warnings = _parse_plant_events(raw_events)
 
     # Infer states from events if states list is empty
     if not states and events:
@@ -500,6 +635,10 @@ def compile_plant_from_llm_response(
         marked = set()
 
     transitions = _build_transition_table(events)
+    state_metadata, state_metadata_warnings = _normalize_state_metadata(plant_raw.get("state_metadata"))
+    marked_state_metadata, marked_state_metadata_warnings = _normalize_state_metadata(
+        plant_raw.get("marked_state_metadata"),
+    )
 
     plant: dict[str, Any] = {
         "states": states,
@@ -507,13 +646,15 @@ def compile_plant_from_llm_response(
         "initial": initial,
         "marked": marked,
         "transitions": transitions,
+        "state_metadata": state_metadata,
+        "marked_state_metadata": marked_state_metadata,
     }
-
-    # Annotate semantics
-    _annotate_events_with_semantics(plant, bridge_resources, symbolic_parts)
 
     # Validate structure
     all_findings: list[dict[str, Any]] = []
+    all_findings.extend(event_warnings)
+    all_findings.extend(state_metadata_warnings)
+    all_findings.extend(marked_state_metadata_warnings)
     all_findings.extend(_validate_plant_structure(plant))
 
     # Validate vocabulary
@@ -531,8 +672,12 @@ def compile_plant_from_llm_response(
         known_locations=known_locations,
         workspace_bounds_by_resource=workspace_bounds,
     ))
+    all_findings.extend(
+        _annotate_events_with_semantics(plant, bridge_resources, symbolic_parts)
+    )
 
-    status = "valid" if not all_findings else "invalid"
+    has_errors = any(str(f.get("severity") or "error").strip().lower() != "warning" for f in all_findings)
+    status = "invalid" if has_errors else "valid"
     return {
         "status": status,
         "plant": plant,
@@ -549,7 +694,8 @@ def plant_findings_summary(findings: list[dict[str, Any]]) -> str:
         code = str(f.get("constraint_code") or "").strip()
         reason = str(f.get("reason") or "").strip()
         ename = str(f.get("event_name") or "").strip()
-        prefix = f"[{code}]" if code else ""
+        severity = str(f.get("severity") or "error").strip().lower()
+        prefix = f"[{severity}:{code}]" if code else f"[{severity}]"
         event_tag = f" (event: {ename})" if ename else ""
         lines.append(f"- {prefix} {reason}{event_tag}")
     return "\n".join(lines)

@@ -1,17 +1,20 @@
-"""Hybrid DES bridge execution engine — LLM as domain author + DFA solver.
+"""Hybrid DES bridge execution engine: LLM domain author + deterministic DES solver.
 
 The LLM generates a recovery plant automaton (state-transition model for
 actions that don't exist in any pre-modeled domain).  The DES solver
 composes that plant with safety DFA specifications and finds the optimal
-recovery trace via BFS on the product automaton.
+recovery trace via BFS on the product automaton.  When primitive catalogs
+are available, a cursor-based primitive grounding phase turns each
+validated DES event into executable controller primitive steps.
 
 Phases
 ------
-domain_generation (LLM) → compose_and_solve (DFA) → validate_plan → finalize
-        ↑                                                   |
-        └─── feedback (if plant invalid or no solution) ────┘
+evaluate_grounding → domain_generation (LLM) → compose_and_solve (DFA)
+        → validate_plan → primitive_generation (LLM, optional) → finalize
+        ↑                                       |
+        └── feedback if plant/solver/validation/primitive grounding fails
 
-Self-contained — no imports from multi_turn or multi_turn_v2.
+Self-contained: no imports from multi_turn or multi_turn_v2.
 """
 
 from __future__ import annotations
@@ -19,22 +22,35 @@ from __future__ import annotations
 import json
 import logging
 from copy import deepcopy
-from datetime import datetime, timezone
 from typing import Any
 
-from cais_spade_llm.agents.central_controller.outline_macro_safety import (
-    validate_outline_macro_cca_constraints,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
-    write_bridge_artifacts,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_solver import (
-    compose_and_solve,
     solver_diagnostic_summary,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_plant_compiler import (
     compile_plant_from_llm_response,
     plant_findings_summary,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+    filter_synthesis_primitive_catalog,
+    validate_and_project_steps,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.des_recovery_common import (
+    append_revision_entry,
+    apply_des_action_effects as _shared_apply_des_action_effects,
+    build_des_session_seed,
+    build_recovery_gap_state as _shared_build_recovery_gap_state,
+    collect_recovery_blockers as _shared_collect_recovery_blockers,
+    extract_ap_descriptors as _shared_extract_ap_descriptors,
+    extract_safety_dfas as _shared_extract_safety_dfas,
+    feasibility_findings_summary as _shared_feasibility_findings_summary,
+    handle_compose_and_solve as _shared_handle_compose_and_solve,
+    handle_evaluate_grounding as _shared_handle_evaluate_grounding,
+    handle_finalize as _shared_handle_finalize,
+    handle_validate_plan as _shared_handle_validate_plan,
+    revision_history_summary_text,
+    validate_action_feasibility as _shared_validate_action_feasibility,
+    write_des_per_turn_artifact,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.hybrid_des_v1 import (
     build_hybrid_des_prompt_input,
@@ -67,8 +83,15 @@ _TRANSITIONS: dict[str, dict[str, str]] = {
         "safety_blocked": "domain_generation",
     },
     "validate_plan": {
-        "all_feasible": "finalize",
+        "all_feasible": "primitive_generation",
+        "all_feasible_no_primitives": "finalize",
         "infeasible": "domain_generation",
+    },
+    "primitive_generation": {
+        "primitive_event_ready": "primitive_generation",
+        "need_primitive_revision": "primitive_generation",
+        "need_domain_revision": "domain_generation",
+        "draft_ready": "finalize",
     },
     "finalize": {
         "accepted": "finalize",
@@ -97,49 +120,15 @@ def build_hybrid_session_seed(
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the initial session state for a hybrid DES bridge run."""
-    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    max_turns = int(bridge_session.get("max_turns") or _DEFAULT_MAX_TURNS)
-
-    # Build symbolic resource/part state
-    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-    observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
-    symbolic_resources: dict[str, dict[str, Any]] = {}
-    for row in observed_runtime_state.get("resources") or []:
-        if not isinstance(row, dict):
-            continue
-        jid = str(row.get("resource_jid") or "").strip()
-        if jid:
-            symbolic_resources[jid] = deepcopy(row)
-    symbolic_parts: dict[str, dict[str, Any]] = {}
-    for row in llm_input.get("part_facts") or []:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("part_name") or "").strip()
-        if name:
-            symbolic_parts[name] = deepcopy(row)
-
-    return {
-        "hybrid_engine": "des_v1",
-        "current_phase": "evaluate_grounding",
-        "turn_index": 0,
-        "max_turns": max_turns,
-        "status": "pending",
-        "turns": [],
-        "domain_revision_count": 0,
-        # Plant state
-        "current_plant": None,
-        "plant_findings": [],
-        # Solver state
-        "solver_result": None,
-        # Validation state
-        "feasibility_findings": [],
-        # Final output
-        "action_sequence": [],
-        "proposal": None,
-        # Symbolic state
-        "symbolic_resources": symbolic_resources,
-        "symbolic_parts": symbolic_parts,
-    }
+    seed = build_des_session_seed(
+        prepared_bridge_request,
+        engine_name="hybrid_des_v1",
+    )
+    seed["hybrid_engine"] = "des_v1"
+    seed["primitive_generation_cursor"] = 0
+    seed["accepted_primitive_program"] = []
+    seed["primitive_rejection_feedback"] = []
+    return seed
 
 
 # ---------------------------------------------------------------------------
@@ -152,45 +141,44 @@ def _compute_observation_blockers(
 ) -> list[dict[str, Any]]:
     """Identify parts that need observation before they can be manipulated.
 
-    Parts with ``current_state == 'misplaced'`` (or similar fault states) and
-    ``observed_pose is None`` or ``current_location is None`` require a
-    ``detect_parts`` observation before any pick/place action can be grounded.
+    Detection is purely structural — it does not rely on any hardcoded
+    vocabulary of failure-state names. A part is observation-blocked iff
+    the system needs to act on it (its current location diverges from its
+    goal, or its current location is unknown) AND no usable observed pose
+    is available; or the part's ``location_basis`` explicitly requires
+    sensor confirmation that has not yet been recorded.
     """
     blockers: list[dict[str, Any]] = []
-    _NEEDS_OBSERVATION_STATES = {"misplaced", "dropped", "lost", "unknown", "fault"}
     for part_name, row in (symbolic_parts or {}).items():
         if not isinstance(row, dict):
             continue
-        current_state = str(row.get("current_state") or "").strip().lower()
         observed_pose = row.get("observed_pose")
-        current_location = row.get("current_location")
+        has_pose = isinstance(observed_pose, dict) and bool(observed_pose)
+        current_location = str(row.get("current_location") or "").strip()
+        goal_location = str(row.get("goal_location") or "").strip()
         location_basis = str(row.get("location_basis") or "").strip().lower()
 
         needs_observation = False
         reason_parts: list[str] = []
 
-        # Case 1: part in fault state with no observation data
-        if current_state in _NEEDS_OBSERVATION_STATES:
-            # If we already have a valid observed pose, we don't need to observe it again
-            # even if current_location is unknown
-            has_pose = isinstance(observed_pose, dict) and bool(observed_pose)
-            
-            if not has_pose:
-                needs_observation = True
+        location_unknown = current_location == ""
+        diverges_from_goal = (
+            current_location != "" and goal_location != ""
+            and current_location != goal_location
+        )
+        needs_action = location_unknown or diverges_from_goal
+
+        if needs_action and not has_pose:
+            needs_observation = True
+            if location_unknown:
+                reason_parts.append(f"part '{part_name}' has no current_location")
+            else:
                 reason_parts.append(
-                    f"part '{part_name}' is in state '{current_state}' "
-                    "but has no observed_pose"
-                )
-            if (current_location is None or str(current_location).strip() == "") and not has_pose:
-                needs_observation = True
-                reason_parts.append(
-                    f"part '{part_name}' has no current_location"
+                    f"part '{part_name}' current_location='{current_location}' "
+                    f"differs from goal_location='{goal_location}' but has no observed_pose"
                 )
 
-        # Case 2: location_basis requires sensor confirmation
-        if location_basis == "sensor_observation" and (
-            observed_pose is None or not isinstance(observed_pose, dict)
-        ):
+        if location_basis == "sensor_observation" and not has_pose:
             needs_observation = True
             reason_parts.append(
                 f"part '{part_name}' location_basis is 'sensor_observation' "
@@ -214,6 +202,263 @@ def _compute_observation_blockers(
 
 
 # ---------------------------------------------------------------------------
+# Additional runtime blockers (terminal / order / workspace / reachability)
+# ---------------------------------------------------------------------------
+
+
+def _compute_terminal_state_blockers(
+    symbolic_resources: dict[str, dict[str, Any]],
+    *,
+    extra_terminal_state_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Resources blocked from executing recovery actions.
+
+    Detection is structural — no hardcoded failure-state vocabulary. A
+    resource is terminal-blocked if any of these structural fields say so:
+    - ``available`` is explicitly False
+    - ``is_blocked`` / ``is_faulted`` / ``is_error`` / ``is_terminal`` is truthy
+    - ``fault`` / ``error`` / ``error_code`` is a non-empty value
+    - ``current_state`` matches a name supplied via ``extra_terminal_state_names``
+      (deployment-level configuration; default empty so no vocabulary is baked in).
+    """
+    extras = {str(s).strip().lower() for s in (extra_terminal_state_names or set())}
+    blockers: list[dict[str, Any]] = []
+    for jid, row in (symbolic_resources or {}).items():
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("current_state") or "").strip().lower()
+        reasons: list[str] = []
+        if row.get("available") is False:
+            reasons.append("available=False")
+        for flag in ("is_blocked", "is_faulted", "is_error", "is_terminal"):
+            if bool(row.get(flag)):
+                reasons.append(f"{flag}=True")
+        for fault_field in ("fault", "error", "error_code"):
+            value = row.get(fault_field)
+            if value not in (None, "", 0, False, [], {}):
+                reasons.append(f"{fault_field}={value!r}")
+        if state and state in extras:
+            reasons.append(f"current_state='{state}' matches configured terminal-state vocabulary")
+
+        if reasons:
+            blockers.append({
+                "kind": "resource_terminal_state",
+                "resource_jid": jid,
+                "current_state": state,
+                "description": (
+                    f"RESOURCE BLOCKED: '{jid}' shows terminal-state evidence "
+                    f"({'; '.join(reasons)}). Recovery plant must include a "
+                    f"reset/recover transition for this resource before assigning "
+                    f"further actions to it, or route the work to a different resource."
+                ),
+                "reason": "; ".join(reasons),
+            })
+    return blockers
+
+
+def _compute_assembly_order_blockers(
+    llm_input: dict[str, Any],
+    symbolic_parts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Parts whose goal references a predecessor that is not yet at its goal.
+
+    Detection is purely structural. A part is "at its goal" iff its
+    ``current_location`` equals its ``goal_location`` (both non-empty).
+    A part with a ``goal_location`` string that references another part's
+    name as a substring (e.g., 'on top of part_X', 'into part_X.cavity')
+    declares an order dependency on that predecessor; the blocker fires
+    when the predecessor is not yet at its goal. No state-name vocabulary
+    is consulted.
+    """
+    def _at_goal(row: dict[str, Any]) -> bool:
+        cur = str(row.get("current_location") or "").strip()
+        goal = str(row.get("goal_location") or "").strip()
+        return bool(cur) and bool(goal) and cur == goal
+
+    blockers: list[dict[str, Any]] = []
+    part_names = [str(p).strip() for p in (symbolic_parts or {}).keys() if p]
+    for part_name, row in (symbolic_parts or {}).items():
+        if not isinstance(row, dict):
+            continue
+        if _at_goal(row):
+            continue
+        goal_location = str(row.get("goal_location") or "").strip()
+        if not goal_location:
+            continue
+        for predecessor in part_names:
+            if predecessor == part_name:
+                continue
+            if predecessor and predecessor in goal_location:
+                pred_row = dict(symbolic_parts.get(predecessor) or {})
+                if not _at_goal(pred_row):
+                    pred_cur = str(pred_row.get("current_location") or "").strip() or "unknown"
+                    pred_goal = str(pred_row.get("goal_location") or "").strip() or "unknown"
+                    blockers.append({
+                        "kind": "assembly_order",
+                        "part_name": part_name,
+                        "predecessor": predecessor,
+                        "predecessor_current_location": pred_cur,
+                        "predecessor_goal_location": pred_goal,
+                        "description": (
+                            f"ORDER BLOCKED: '{part_name}' goal_location references "
+                            f"predecessor '{predecessor}' which is not yet at its goal "
+                            f"(current='{pred_cur}', goal='{pred_goal}'). Recovery "
+                            f"plant must place '{predecessor}' at its goal before "
+                            f"placing '{part_name}', or sequence them in a single "
+                            f"accepting trace."
+                        ),
+                        "reason": (
+                            f"part '{part_name}' depends on '{predecessor}' "
+                            f"(current='{pred_cur}', goal='{pred_goal}')"
+                        ),
+                    })
+                break
+    return blockers
+
+
+def _compute_shared_workspace_blockers(
+    bridge_resources: dict[str, dict[str, Any]],
+    symbolic_parts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cross-region deadlock: a part is in resource B's workspace but assigned to A.
+
+    A part with an ``observed_pose`` (or ``current_location``) inside
+    resource B's workspace bounds, when its ``assigned_resource_jid`` is
+    resource A, indicates a handoff is required and the two-robot
+    workspaces are sharing state in a way that can deadlock.
+    """
+    blockers: list[dict[str, Any]] = []
+
+    def _bounds_of(jid: str) -> dict[str, Any] | None:
+        res = dict((bridge_resources or {}).get(jid) or {})
+        caps = dict(res.get("static_capabilities") or res.get("capabilities") or {})
+        bounds = caps.get("workspace_bounds") or res.get("workspace_bounds")
+        return dict(bounds) if isinstance(bounds, dict) else None
+
+    def _pose_in_bounds(pose: dict[str, Any], bounds: dict[str, Any]) -> bool:
+        try:
+            x, y, z = float(pose["x"]), float(pose["y"]), float(pose["z"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        for axis, val in (("x", x), ("y", y), ("z", z)):
+            lo = bounds.get(f"{axis}_min_m")
+            hi = bounds.get(f"{axis}_max_m")
+            if lo is not None and val < float(lo):
+                return False
+            if hi is not None and val > float(hi):
+                return False
+        return True
+
+    for part_name, row in (symbolic_parts or {}).items():
+        if not isinstance(row, dict):
+            continue
+        assigned = str(row.get("assigned_resource_jid") or "").strip()
+        if not assigned:
+            continue
+        pose = row.get("observed_pose")
+        if not isinstance(pose, dict):
+            continue
+        for jid in bridge_resources or {}:
+            if jid == assigned:
+                continue
+            other_bounds = _bounds_of(jid)
+            if not other_bounds:
+                continue
+            if _pose_in_bounds(pose, other_bounds):
+                blockers.append({
+                    "kind": "shared_workspace",
+                    "part_name": part_name,
+                    "assigned_resource_jid": assigned,
+                    "host_resource_jid": jid,
+                    "description": (
+                        f"DEADLOCK CANDIDATE: '{part_name}' is assigned to "
+                        f"'{assigned}' but its observed pose lies inside the "
+                        f"workspace of '{jid}'. Recovery plant must include "
+                        f"a handoff (pick by '{jid}', transfer, place by "
+                        f"'{assigned}') or reassignment to clear the deadlock."
+                    ),
+                    "reason": (
+                        f"part '{part_name}' assigned='{assigned}' but "
+                        f"in '{jid}' workspace"
+                    ),
+                })
+                break
+    return blockers
+
+
+def _compute_reachability_blockers(
+    planner: Any,
+    symbolic_parts: dict[str, dict[str, Any]],
+    bridge_resources: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Parts whose current pose lies outside every known resource workspace.
+
+    Without a candidate resource able to reach the pose, no plant can
+    succeed without prior relocation/observation.
+    """
+    blockers: list[dict[str, Any]] = []
+
+    def _bounds(jid: str) -> dict[str, Any] | None:
+        res = dict((bridge_resources or {}).get(jid) or {})
+        caps = dict(res.get("static_capabilities") or res.get("capabilities") or {})
+        bounds = caps.get("workspace_bounds") or res.get("workspace_bounds")
+        return dict(bounds) if isinstance(bounds, dict) else None
+
+    def _in(pose: dict[str, Any], bounds: dict[str, Any]) -> bool:
+        try:
+            x, y, z = float(pose["x"]), float(pose["y"]), float(pose["z"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        for axis, val in (("x", x), ("y", y), ("z", z)):
+            lo = bounds.get(f"{axis}_min_m")
+            hi = bounds.get(f"{axis}_max_m")
+            if lo is not None and val < float(lo):
+                return False
+            if hi is not None and val > float(hi):
+                return False
+        return True
+
+    for part_name, row in (symbolic_parts or {}).items():
+        if not isinstance(row, dict):
+            continue
+        pose = row.get("observed_pose")
+        if not isinstance(pose, dict):
+            continue
+        reachable_jids: list[str] = []
+        for jid in bridge_resources or {}:
+            b = _bounds(jid)
+            if b and _in(pose, b):
+                reachable_jids.append(jid)
+        if not reachable_jids:
+            blockers.append({
+                "kind": "reachability",
+                "part_name": part_name,
+                "observed_pose": deepcopy(pose),
+                "description": (
+                    f"UNREACHABLE: '{part_name}' observed pose is outside every "
+                    f"known resource workspace. Recovery plant cannot reach this "
+                    f"pose directly; an external relocation or pose correction "
+                    f"event must precede any pick involving '{part_name}'."
+                ),
+                "reason": f"part '{part_name}' pose outside all workspaces",
+            })
+    return blockers
+
+
+def _collect_recovery_blockers(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    planner: Any,
+) -> list[dict[str, Any]]:
+    del planner
+    return _shared_collect_recovery_blockers(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Recovery gap state (resource + part state for prompt)
 # ---------------------------------------------------------------------------
 
@@ -222,16 +467,533 @@ def _build_recovery_gap_state(
     session_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the resource/part state for the prompt from session symbolic state."""
-    resource_state = list(
-        deepcopy(row) for row in (session_state.get("symbolic_resources") or {}).values()
-    )
-    part_state = list(
-        deepcopy(row) for row in (session_state.get("symbolic_parts") or {}).values()
-    )
+    return _shared_build_recovery_gap_state(session_state)
+
+
+def _plant_summary(plant: dict[str, Any] | None) -> dict[str, Any]:
+    plant = dict(plant or {})
+    events = plant.get("events") or []
     return {
-        "resource_state": resource_state,
-        "part_state": part_state,
+        "state_count": len(plant.get("states") or []),
+        "event_count": len(events) if isinstance(events, list) else len(dict(events)),
+        "initial": plant.get("initial"),
+        "marked": list(plant.get("marked") or []),
     }
+
+
+def _has_primitive_catalogs(prepared_bridge_request: dict[str, Any]) -> bool:
+    bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+    if bridge_session.get("enable_primitive_generation") is False:
+        return False
+    for entry in dict(prepared_bridge_request.get("bridge_resources") or {}).values():
+        if isinstance(entry, dict) and entry.get("primitive_catalog"):
+            return True
+    return bool(bridge_session.get("enable_primitive_generation"))
+
+
+def _report_json(value: Any) -> str:
+    return json.dumps(value, indent=2, default=str, ensure_ascii=True)
+
+
+def _render_compose_report(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    planner: Any,
+    decision: str,
+    next_phase: str,
+) -> tuple[str, dict[str, Any]]:
+    solver_result = dict(session_state.get("solver_result") or {})
+    action_sequence = list(session_state.get("action_sequence") or [])
+    safety_dfas = _extract_safety_dfas(planner, prepared_bridge_request)
+    result = {
+        "phase": "compose_and_solve",
+        "llm_call": False,
+        "decision": decision,
+        "next_phase": next_phase,
+        "input_plant_summary": _plant_summary(session_state.get("current_plant")),
+        "safety_dfa_count": len(safety_dfas),
+        "solver_status": solver_result.get("status"),
+        "product_states_explored": solver_result.get("product_states_explored", 0),
+        "trace": deepcopy(solver_result.get("trace") or []),
+        "action_sequence": deepcopy(action_sequence),
+    }
+    report = "\n".join([
+        "Hybrid DES Compose And Solve Report",
+        "No LLM call was made in this phase.",
+        f"Decision: {decision}",
+        f"Next phase: {next_phase}",
+        "",
+        "Input Plant Summary",
+        _report_json(result["input_plant_summary"]),
+        "",
+        f"Safety DFA Count: {result['safety_dfa_count']}",
+        f"Solver Status: {result['solver_status']}",
+        f"Product States Explored: {result['product_states_explored']}",
+        "",
+        "Selected Trace",
+        _report_json(result["trace"]),
+        "",
+        "Selected Action Sequence",
+        _report_json(result["action_sequence"]),
+    ])
+    return report + "\n", result
+
+
+def _findings_for_task(
+    findings: list[dict[str, Any]],
+    task_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        deepcopy(row)
+        for row in findings
+        if isinstance(row, dict) and str(row.get("task_id") or "").strip() == task_id
+    ]
+
+
+def _validate_plan_steps_report(
+    *,
+    action_sequence: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    initial_resources: dict[str, dict[str, Any]],
+    initial_parts: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    projected_resources = deepcopy(initial_resources)
+    projected_parts = deepcopy(initial_parts)
+    step_rows: list[dict[str, Any]] = []
+    for index, action in enumerate(action_sequence):
+        task_id = f"RECOVERY_SEQ{index + 1}"
+        resource_jid = str(action.get("resource_jid") or "").strip()
+        part_name = str(action.get("part_name") or "").strip()
+        resource_before = deepcopy(dict(projected_resources.get(resource_jid) or {}))
+        part_before = deepcopy(dict(projected_parts.get(part_name) or {})) if part_name else {}
+        step_findings = _findings_for_task(findings, task_id)
+        row = {
+            "task_id": task_id,
+            "action": deepcopy(action),
+            "pre_state": {
+                "resource": {
+                    "resource_jid": resource_jid,
+                    "current_state": resource_before.get("current_state"),
+                    "current_location": resource_before.get("current_location"),
+                    "held_part": resource_before.get("held_part"),
+                    "gripper_state": resource_before.get("gripper_state"),
+                },
+                "part": {
+                    "part_name": part_name or None,
+                    "current_location": part_before.get("current_location"),
+                    "current_holder_resource_jid": part_before.get("current_holder_resource_jid"),
+                    "observed_pose": part_before.get("observed_pose"),
+                } if part_name else {},
+            },
+            "findings": step_findings,
+        }
+        if not step_findings:
+            _apply_hybrid_action_effects(
+                action,
+                resources=projected_resources,
+                parts=projected_parts,
+            )
+            resource_after = deepcopy(dict(projected_resources.get(resource_jid) or {}))
+            part_after = deepcopy(dict(projected_parts.get(part_name) or {})) if part_name else {}
+            row["projected_effect"] = {
+                "resource": {
+                    "current_state": resource_after.get("current_state"),
+                    "current_location": resource_after.get("current_location"),
+                    "held_part": resource_after.get("held_part"),
+                    "gripper_state": resource_after.get("gripper_state"),
+                },
+                "part": {
+                    "current_location": part_after.get("current_location"),
+                    "current_holder_resource_jid": part_after.get("current_holder_resource_jid"),
+                    "part_state": part_after.get("part_state"),
+                } if part_name else {},
+            }
+        step_rows.append(row)
+    return step_rows, projected_resources, projected_parts
+
+
+def _render_validate_report(
+    *,
+    session_state: dict[str, Any],
+    decision: str,
+    next_phase: str,
+    initial_resources: dict[str, dict[str, Any]],
+    initial_parts: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    action_sequence = list(session_state.get("action_sequence") or [])
+    findings = [
+        deepcopy(row)
+        for row in (session_state.get("feasibility_findings") or [])
+        if isinstance(row, dict)
+    ]
+    step_rows, projected_resources, projected_parts = _validate_plan_steps_report(
+        action_sequence=action_sequence,
+        findings=findings,
+        initial_resources=initial_resources,
+        initial_parts=initial_parts,
+    )
+    unassigned_findings = [
+        deepcopy(row)
+        for row in findings
+        if isinstance(row, dict) and not str(row.get("task_id") or "").strip()
+    ]
+    result = {
+        "phase": "validate_plan",
+        "llm_call": False,
+        "decision": decision,
+        "next_phase": next_phase,
+        "feasibility_finding_count": len(findings),
+        "steps": step_rows,
+        "unassigned_findings": unassigned_findings,
+        "final_projected_resources": deepcopy(projected_resources),
+        "final_projected_parts": deepcopy(projected_parts),
+    }
+    report = "\n".join([
+        "Hybrid DES Validate Plan Report",
+        "No LLM call was made in this phase.",
+        f"Decision: {decision}",
+        f"Next phase: {next_phase}",
+        f"Feasibility Findings: {len(findings)}",
+        "",
+        "Step Checks",
+        _report_json(step_rows),
+        "",
+        "Unassigned Findings",
+        _report_json(unassigned_findings),
+        "",
+        "Final Projected Resource State",
+        _report_json(projected_resources),
+        "",
+        "Final Projected Part State",
+        _report_json(projected_parts),
+    ])
+    return report + "\n", result
+
+
+def _primitive_catalog_for_resource(
+    prepared_bridge_request: dict[str, Any],
+    resource_jid: str,
+) -> list[dict[str, Any]]:
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    entry = dict(bridge_resources.get(resource_jid) or {})
+    return filter_synthesis_primitive_catalog(
+        [
+            dict(row)
+            for row in (entry.get("primitive_catalog") or [])
+            if isinstance(row, dict)
+        ]
+    )
+
+
+def _primitive_projected_context(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    cursor: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    resources = deepcopy(
+        dict(
+            session_state.get("primitive_generation_initial_resources")
+            or session_state.get("symbolic_resources")
+            or {}
+        )
+    )
+    parts = deepcopy(
+        dict(
+            session_state.get("primitive_generation_initial_parts")
+            or session_state.get("symbolic_parts")
+            or {}
+        )
+    )
+    for action in list(session_state.get("action_sequence") or [])[:max(cursor, 0)]:
+        _apply_hybrid_action_effects(action, resources=resources, parts=parts)
+    for resource_jid, entry in dict(prepared_bridge_request.get("bridge_resources") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        row = resources.setdefault(str(resource_jid), {"resource_jid": str(resource_jid)})
+        for field in (
+            "resource_type",
+            "current_pose",
+            "current_pose_ref",
+            "workspace_bounds",
+            "named_poses",
+            "available_named_poses",
+            "reachability",
+            "staging_areas",
+        ):
+            if row.get(field) in (None, "", [], {}) and entry.get(field) not in (None, "", [], {}):
+                row[field] = deepcopy(entry.get(field))
+    return resources, parts
+
+
+def _active_primitive_event(
+    session_state: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None, list[dict[str, Any]]]:
+    action_sequence = [
+        dict(row)
+        for row in (session_state.get("action_sequence") or [])
+        if isinstance(row, dict)
+    ]
+    cursor = int(session_state.get("primitive_generation_cursor") or 0)
+    if cursor < 0:
+        cursor = 0
+        session_state["primitive_generation_cursor"] = 0
+    if cursor >= len(action_sequence):
+        return cursor, None, action_sequence
+    active_event = deepcopy(action_sequence[cursor])
+    active_event.setdefault("event_index", cursor)
+    active_event.setdefault("outline_id", f"RECOVERY_SEQ{cursor + 1}")
+    return cursor, active_event, action_sequence
+
+
+def _render_primitive_generation_prompt(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> str:
+    cursor, active_event, action_sequence = _active_primitive_event(session_state)
+    resource_jid = str(dict(active_event or {}).get("resource_jid") or "").strip()
+    resources, parts = _primitive_projected_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        cursor=cursor,
+    )
+    primitive_catalog = _primitive_catalog_for_resource(prepared_bridge_request, resource_jid)
+    sections = [
+        "Task and Role",
+        (
+            "You are grounding one validated DES recovery event into executable "
+            "controller primitive steps.\n"
+            "Current phase: Event-to-Primitive Grounding.\n"
+            "Implement only the active recovery event; do not re-plan the event sequence."
+        ),
+        "",
+        "Accepted Recovery Event Sequence",
+        _report_json(action_sequence),
+        "",
+        "Active Recovery Event",
+        _report_json(active_event or {}),
+        "",
+        "Event Grounding Cursor",
+        _report_json({
+            "active_index": cursor,
+            "accepted_event_count": len(action_sequence),
+            "remaining_events_after_this": max(len(action_sequence) - cursor - 1, 0),
+        }),
+    ]
+    feedback = [
+        deepcopy(row)
+        for row in (session_state.get("primitive_rejection_feedback") or [])
+        if isinstance(row, dict)
+    ]
+    if feedback:
+        sections.extend(["", "Primitive Rejection Feedback", _report_json(feedback)])
+    part_name = str(dict(active_event or {}).get("part_name") or "").strip()
+    sections.extend([
+        "",
+        "Current Resource State",
+        _report_json(dict(resources.get(resource_jid) or {})),
+        "",
+        "Current Part State",
+        _report_json(dict(parts.get(part_name) or {}) if part_name else {}),
+        "",
+        "Session Observation Store",
+        _report_json(dict(session_state.get("observation_store") or {})),
+        "",
+        "Active Resource Primitive Catalog",
+        _report_json(primitive_catalog),
+        "",
+        "Output Constraints",
+        "- Use only primitives listed in Active Resource Primitive Catalog.",
+        "- primitive_steps must be ordered controller primitive calls.",
+        "- Each primitive step must include primitive and params.",
+        "- Do not invent observations, resources, parts, or grounded locations.",
+        "- Use primitive_event_ready when primitive_steps are ready for validation.",
+        "- Use need_primitive_revision when prior primitive feedback needs another attempt.",
+        "- Use need_domain_revision only when the active recovery event is not implementable with the listed primitives.",
+    ])
+    return "\n".join(sections).strip() + "\n"
+
+
+def _primitive_expected_held_part(action: dict[str, Any]) -> Any:
+    expected_effect = action.get("expected_effect")
+    if isinstance(expected_effect, dict):
+        resource_effect = expected_effect.get("resource")
+        if isinstance(resource_effect, dict) and "held_part" in resource_effect:
+            return resource_effect.get("held_part")
+    return "__skip__"
+
+
+def _record_primitive_domain_revision(
+    session_state: dict[str, Any],
+    feedback: list[dict[str, Any]],
+) -> None:
+    """Carry primitive-level impossibility back into domain-generation feedback."""
+    session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+    session_state["feasibility_findings"] = deepcopy(feedback)
+    session_state["domain_revision_count"] = int(
+        session_state.get("domain_revision_count") or 0
+    ) + 1
+    append_revision_entry(
+        session_state,
+        plant=session_state.get("current_plant"),
+        solver_result=session_state.get("solver_result"),
+        feasibility_findings=feedback,
+    )
+
+
+async def _handle_primitive_generation(
+    *,
+    session_state: dict[str, Any],
+    parsed_response: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    planner: Any,
+) -> tuple[str, dict[str, Any]]:
+    del planner
+    cursor, active_event, action_sequence = _active_primitive_event(session_state)
+    turn_entry: dict[str, Any] = {
+        "primitive_generation_cursor": cursor,
+        "active_recovery_event": deepcopy(active_event),
+        "accepted_action_sequence": deepcopy(action_sequence),
+    }
+    if active_event is None:
+        session_state["status"] = "running"
+        return "draft_ready", turn_entry
+
+    resource_jid = str(active_event.get("resource_jid") or "").strip()
+    primitive_catalog = _primitive_catalog_for_resource(prepared_bridge_request, resource_jid)
+    if not primitive_catalog:
+        feedback = [{
+            "event_index": cursor,
+            "event_name": active_event.get("name"),
+            "resource_jid": resource_jid,
+            "constraint_code": "primitive_catalog_missing",
+            "reason": f"no primitive catalog is available for {resource_jid}",
+        }]
+        _record_primitive_domain_revision(session_state, feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "need_domain_revision", turn_entry
+
+    response_decision = str(parsed_response.get("decision") or "").strip()
+    primitive_steps = [
+        dict(row)
+        for row in (parsed_response.get("primitive_steps") or [])
+        if isinstance(row, dict)
+    ]
+    turn_entry["primitive_steps"] = deepcopy(primitive_steps)
+    if response_decision == "need_domain_revision":
+        feedback = [{
+            "event_index": cursor,
+            "event_name": active_event.get("name"),
+            "resource_jid": resource_jid,
+            "constraint_code": "domain_revision_requested",
+            "reason": "LLM reported the active recovery event is not implementable",
+        }]
+        _record_primitive_domain_revision(session_state, feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "need_domain_revision", turn_entry
+
+    schema_errors: list[str] = []
+    if response_decision not in {"primitive_event_ready", "need_primitive_revision"}:
+        schema_errors.append("decision must be primitive_event_ready, need_primitive_revision, or need_domain_revision")
+    raw_event_index = parsed_response.get("event_index")
+    try:
+        event_index = int(raw_event_index) if raw_event_index is not None else -1
+    except (TypeError, ValueError):
+        event_index = -1
+    if event_index != cursor:
+        schema_errors.append(f"event_index must match active event index {cursor}")
+    if str(parsed_response.get("resource_jid") or "").strip() != resource_jid:
+        schema_errors.append(f"resource_jid must match active resource {resource_jid!r}")
+    if not primitive_steps:
+        schema_errors.append("primitive_steps must contain at least one primitive step")
+    for index, step in enumerate(primitive_steps):
+        if not str(step.get("primitive") or "").strip():
+            schema_errors.append(f"primitive_steps[{index}] must include primitive")
+        if not isinstance(step.get("params"), dict):
+            schema_errors.append(f"primitive_steps[{index}] must include params object")
+    if schema_errors:
+        feedback = [{
+            "event_index": cursor,
+            "event_name": active_event.get("name"),
+            "resource_jid": resource_jid,
+            "constraint_code": "primitive_schema_violation",
+            "reason": "; ".join(schema_errors),
+        }]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "need_primitive_revision", turn_entry
+
+    resources, parts = _primitive_projected_context(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        cursor=cursor,
+    )
+    start_snapshot = deepcopy(dict(resources.get(resource_jid) or {}))
+    part_name = str(active_event.get("part_name") or "").strip()
+    grounding_context = {
+        "active_recovery_event": deepcopy(active_event),
+        "resource": deepcopy(start_snapshot),
+        "part": deepcopy(dict(parts.get(part_name) or {})) if part_name else {},
+        "resources_by_jid": deepcopy(resources),
+        "parts_by_name": deepcopy(parts),
+        "observation_store": deepcopy(session_state.get("observation_store") or {}),
+    }
+    valid, projected_snapshot, validation_error = validate_and_project_steps(
+        primitive_steps,
+        primitive_catalog,
+        start_snapshot,
+        grounding_context=grounding_context,
+    )
+    turn_entry["start_snapshot"] = deepcopy(start_snapshot)
+    turn_entry["projected_snapshot"] = deepcopy(projected_snapshot)
+    if not valid:
+        feedback = [{
+            "event_index": cursor,
+            "event_name": active_event.get("name"),
+            "resource_jid": resource_jid,
+            "constraint_code": "primitive_validation_failed",
+            "reason": validation_error or "primitive validation failed",
+        }]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "need_primitive_revision", turn_entry
+
+    expected_held = _primitive_expected_held_part(active_event)
+    if expected_held != "__skip__" and projected_snapshot.get("held_part") != expected_held:
+        feedback = [{
+            "event_index": cursor,
+            "event_name": active_event.get("name"),
+            "resource_jid": resource_jid,
+            "constraint_code": "primitive_projection_mismatch",
+            "reason": (
+                f"projected held_part expected={expected_held!r} "
+                f"actual={projected_snapshot.get('held_part')!r}"
+            ),
+        }]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "need_primitive_revision", turn_entry
+
+    accepted_program = list(session_state.get("accepted_primitive_program") or [])
+    accepted_row = {
+        "event_index": cursor,
+        "event_name": active_event.get("name"),
+        "resource_jid": resource_jid,
+        "part_name": part_name or None,
+        "description": str(active_event.get("description") or "").strip(),
+        "primitive_steps": deepcopy(primitive_steps),
+        "projected_snapshot": deepcopy(projected_snapshot),
+    }
+    accepted_program.append(accepted_row)
+    session_state["accepted_primitive_program"] = deepcopy(accepted_program)
+    session_state["primitive_rejection_feedback"] = []
+    session_state["primitive_generation_cursor"] = cursor + 1
+    turn_entry["accepted_primitive_macro"] = deepcopy(accepted_row)
+    if cursor + 1 >= len(action_sequence):
+        return "draft_ready", turn_entry
+    return "primitive_event_ready", turn_entry
 
 
 # ---------------------------------------------------------------------------
@@ -247,42 +1009,18 @@ async def _handle_evaluate_grounding(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Handle evaluate_grounding phase — check if missing poses require camera execution."""
-    symbolic_parts = dict(session_state.get("symbolic_parts") or {})
-    observation_blockers = _compute_observation_blockers(symbolic_parts)
-    
-    if not observation_blockers:
-        _logger.info("[HybridDES] All parts currently grounded. Proceeding to domain generation.")
-        return "grounding_satisfied", {}
-
-    # Need observation — dispatch detect_parts to execution engine
-    part_names = []
-    for blocker in observation_blockers:
-        p_name = str(blocker.get("part_name") or "").strip()
-        if p_name and p_name not in part_names:
-            part_names.append(p_name)
-            
-    # We build an observation task for the Resource Agent to run
-    # (Similar to what the observation_policy generates in multi_turn)
-    observation_tasks = []
-    for part_name in part_names:
-        observation_tasks.append({
-            "id": f"OBS_" + part_name,
-            "resource_jid": str(prepared_bridge_request.get("ra_jid") or ""),
-            "function_name": "detect_parts",
-            "params": {"part_name": part_name},
-            "store_as": f"detected_{part_name.lower()}",
-            "background": False
-        })
-        
-    session_state["status"] = "paused_after_grounding"
-    _logger.info("[HybridDES] Dispatching %d actual observation tasks to Bridge Engine.", len(observation_tasks))
-    
-    # Store the tasks in multi_turn_session_result so that the Engine's `_execute_multi_turn_session` 
-    # (or equivalent bridge return handler) runs them
-    prepared_bridge_request["multi_turn_session_result"] = deepcopy(session_state)
-    prepared_bridge_request.setdefault("bridge_debug", {})["status"] = "paused_after_grounding"
-    
-    return "grounding_required", {"dispatch_observation_tasks": observation_tasks}
+    session_state["grounding_checkpoint"] = {
+        "symbolic_parts": deepcopy(session_state.get("symbolic_parts") or {}),
+        "symbolic_resources": deepcopy(session_state.get("symbolic_resources") or {}),
+        "current_phase": str(session_state.get("current_phase") or ""),
+        "turn_index": int(session_state.get("turn_index") or 0),
+    }
+    return await _shared_handle_evaluate_grounding(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        engine_name="hybrid",
+        session_state_key="hybrid_session_state",
+    )
 
 
 async def _handle_domain_generation(
@@ -299,7 +1037,9 @@ async def _handle_domain_generation(
     # Extract plant from LLM response
     plant_response = parsed_response.get("plant") or parsed_response
     compile_result = compile_plant_from_llm_response(
-        plant_response, bridge_resources, symbolic_parts,
+        plant_response,
+        bridge_resources,
+        symbolic_parts,
     )
 
     turn_entry: dict[str, Any] = {
@@ -310,13 +1050,20 @@ async def _handle_domain_generation(
     if compile_result["status"] == "valid":
         session_state["current_plant"] = deepcopy(compile_result["plant"])
         session_state["plant_findings"] = []
+        session_state["last_rejected_plant"] = None
         _logger.info("[HybridDES] Plant compiled successfully.")
         return "plant_valid", turn_entry
 
+    session_state["last_rejected_plant"] = deepcopy(compile_result.get("plant") or plant_response)
     session_state["plant_findings"] = deepcopy(compile_result.get("findings") or [])
     session_state["domain_revision_count"] = int(
         session_state.get("domain_revision_count") or 0
     ) + 1
+    append_revision_entry(
+        session_state,
+        plant=compile_result.get("plant") or plant_response,
+        plant_findings=compile_result.get("findings") or [],
+    )
     _logger.warning(
         "[HybridDES] Plant invalid (%d findings). Revision %d.",
         len(compile_result.get("findings") or []),
@@ -333,41 +1080,28 @@ async def _handle_compose_and_solve(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Handle compose_and_solve phase — run DES solver (no LLM call)."""
-    plant = dict(session_state.get("current_plant") or {})
-
-    # Get safety DFAs from the planner/CCA
-    safety_dfas = _extract_safety_dfas(planner, prepared_bridge_request)
-    ap_descriptors = _extract_ap_descriptors(planner, prepared_bridge_request)
-
-    solver_result = compose_and_solve(
-        plant=plant,
-        safety_dfas=safety_dfas,
-        ap_descriptors=ap_descriptors,
+    decision, turn_entry = await _shared_handle_compose_and_solve(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        planner=planner,
     )
-
-    session_state["solver_result"] = deepcopy(solver_result)
-    turn_entry: dict[str, Any] = {
-        "solver_status": solver_result["status"],
-        "product_states_explored": solver_result.get("product_states_explored", 0),
-        "trace_length": len(solver_result.get("trace") or []),
-    }
-
-    status = solver_result["status"]
-    if status == "solved":
-        session_state["action_sequence"] = deepcopy(
-            solver_result.get("action_sequence") or []
+    next_phase = _transition_phase("compose_and_solve", decision)
+    report_text, phase_result = _render_compose_report(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        planner=planner,
+        decision=decision,
+        next_phase=next_phase,
+    )
+    turn_entry["report_text"] = report_text
+    turn_entry["phase_result"] = deepcopy(phase_result)
+    if decision in {"unsolvable", "safety_blocked"}:
+        append_revision_entry(
+            session_state,
+            plant=session_state.get("current_plant"),
+            solver_result=session_state.get("solver_result"),
         )
-        _logger.info(
-            "[HybridDES] Solver found plan with %d steps.",
-            len(solver_result.get("action_sequence") or []),
-        )
-        return "solved", turn_entry
-
-    _logger.warning("[HybridDES] Solver returned: %s", status)
-    session_state["domain_revision_count"] = int(
-        session_state.get("domain_revision_count") or 0
-    ) + 1
-    return status, turn_entry
+    return decision, turn_entry
 
 
 async def _handle_validate_plan(
@@ -382,53 +1116,36 @@ async def _handle_validate_plan(
     Uses rolling symbolic state projection so that each step is validated
     against the projected state *after* all preceding steps have been applied.
     """
-    action_sequence = list(session_state.get("action_sequence") or [])
-    all_findings: list[dict[str, Any]] = []
-
-    # Component 4: rolling symbolic state projection
-    projected_resources = deepcopy(dict(session_state.get("symbolic_resources") or {}))
-    projected_parts = deepcopy(dict(session_state.get("symbolic_parts") or {}))
-
-    for i, action in enumerate(action_sequence):
-        # Validate step against current projected state
-        step_findings = await _validate_action_feasibility(
-            action=action,
-            step_index=i,
-            planner=planner,
-            prepared_bridge_request=prepared_bridge_request,
-            session_state=session_state,
-            pre_resources=projected_resources,
-            pre_parts=projected_parts,
-            action_sequence=action_sequence,
-        )
-        all_findings.extend(step_findings)
-
-        # If step is valid, project its effects onto symbolic state
-        if not step_findings:
-            _apply_hybrid_action_effects(
-                action,
-                resources=projected_resources,
-                parts=projected_parts,
-            )
-
-    session_state["feasibility_findings"] = deepcopy(all_findings)
-    turn_entry: dict[str, Any] = {
-        "feasibility_finding_count": len(all_findings),
-        "feasibility_findings": deepcopy(all_findings),
-    }
-
-    if not all_findings:
-        _logger.info("[HybridDES] All plan steps pass feasibility.")
-        return "all_feasible", turn_entry
-
-    _logger.warning(
-        "[HybridDES] %d feasibility finding(s); revising domain.",
-        len(all_findings),
+    initial_resources = deepcopy(dict(session_state.get("symbolic_resources") or {}))
+    initial_parts = deepcopy(dict(session_state.get("symbolic_parts") or {}))
+    decision, turn_entry = await _shared_handle_validate_plan(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        planner=planner,
     )
-    session_state["domain_revision_count"] = int(
-        session_state.get("domain_revision_count") or 0
-    ) + 1
-    return "infeasible", turn_entry
+    if decision == "all_feasible":
+        session_state["primitive_generation_initial_resources"] = deepcopy(initial_resources)
+        session_state["primitive_generation_initial_parts"] = deepcopy(initial_parts)
+        if not _has_primitive_catalogs(prepared_bridge_request):
+            decision = "all_feasible_no_primitives"
+    next_phase = _transition_phase("validate_plan", decision)
+    report_text, phase_result = _render_validate_report(
+        session_state=session_state,
+        decision=decision,
+        next_phase=next_phase,
+        initial_resources=initial_resources,
+        initial_parts=initial_parts,
+    )
+    turn_entry["report_text"] = report_text
+    turn_entry["phase_result"] = deepcopy(phase_result)
+    if decision == "infeasible":
+        append_revision_entry(
+            session_state,
+            plant=session_state.get("current_plant"),
+            solver_result=session_state.get("solver_result"),
+            feasibility_findings=session_state.get("feasibility_findings"),
+        )
+    return decision, turn_entry
 
 
 async def _handle_finalize(
@@ -439,44 +1156,11 @@ async def _handle_finalize(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Handle finalize phase — build the bridge proposal from validated trace."""
-    action_sequence = list(session_state.get("action_sequence") or [])
-
-    # Convert action_sequence to bridge proposal format
-    outline_tasks: list[dict[str, Any]] = []
-    for i, action in enumerate(action_sequence):
-        task: dict[str, Any] = {
-            "outline_id": f"RECOVERY_SEQ{i + 1}",
-            "resource_jid": str(action.get("resource_jid") or "").strip(),
-            "action_type": str(action.get("action_type") or "").strip(),
-            "description": str(action.get("description") or "").strip(),
-        }
-        part_name = str(action.get("part_name") or "").strip()
-        if part_name:
-            task["part_name"] = part_name
-        target_ref = str(action.get("target_ref") or "").strip()
-        if target_ref:
-            task["target_ref"] = target_ref
-        pose = action.get("pose")
-        if isinstance(pose, dict):
-            task["pose"] = deepcopy(pose)
-        outline_tasks.append(task)
-
-    proposal: dict[str, Any] = {
-        "outline_tasks": outline_tasks,
-        "solver_status": "solved",
-        "engine": "hybrid_des_v1",
-        "domain_revisions": int(session_state.get("domain_revision_count") or 0),
-    }
-    session_state["proposal"] = deepcopy(proposal)
-
-    turn_entry: dict[str, Any] = {
-        "proposal_task_count": len(outline_tasks),
-    }
-    _logger.info(
-        "[HybridDES] Finalized proposal with %d tasks.",
-        len(outline_tasks),
+    return await _shared_handle_finalize(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        engine_name="hybrid_des_v1",
     )
-    return "accepted", turn_entry
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +1172,7 @@ _PHASE_HANDLERS: dict[str, Any] = {
     "domain_generation": _handle_domain_generation,
     "compose_and_solve": _handle_compose_and_solve,
     "validate_plan": _handle_validate_plan,
+    "primitive_generation": _handle_primitive_generation,
     "finalize": _handle_finalize,
 }
 
@@ -501,59 +1186,14 @@ def _extract_safety_dfas(
     planner: Any,
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Extract loaded safety DFA rules from the CCA/planner context."""
-    # Try direct access via product_agent → cca_agent → safety checker
-    product_agent = getattr(planner, "product_agent", None)
-    if product_agent is not None:
-        cca = getattr(product_agent, "cca_agent", None) or getattr(product_agent, "_cca", None)
-        if cca is not None:
-            safety_checker = (
-                getattr(cca, "plan_safety_validator", None)
-                or getattr(cca, "safety_checker", None)
-                or getattr(cca, "online_safety_monitor", None)
-            )
-            if safety_checker is not None:
-                dfas = getattr(safety_checker, "dfas", None)
-                if isinstance(dfas, dict) and dfas:
-                    return deepcopy(dfas)
-
-    # Fallback: extract from llm_input safety rules (build minimal DFAs)
-    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-    rules = llm_input.get("loaded_safety_rules") or []
-    dfas: dict[str, dict[str, Any]] = {}
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
-        dfa_data = rule.get("dfa")
-        if rule_id and isinstance(dfa_data, dict):
-            dfas[rule_id] = deepcopy(dfa_data)
-    return dfas
+    return _shared_extract_safety_dfas(planner, prepared_bridge_request)
 
 
 def _extract_ap_descriptors(
     planner: Any,
     prepared_bridge_request: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Extract AP descriptor list from safety rules."""
-    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-    rules = llm_input.get("loaded_safety_rules") or []
-    descriptors: list[dict[str, Any]] = []
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        ap_defs = rule.get("ap_definitions") or rule.get("aps") or []
-        if isinstance(ap_defs, list):
-            descriptors.extend(
-                deepcopy(d) for d in ap_defs if isinstance(d, dict)
-            )
-        elif isinstance(ap_defs, dict):
-            for label, desc in ap_defs.items():
-                if isinstance(desc, dict):
-                    entry = deepcopy(desc)
-                    entry["label"] = label
-                    descriptors.append(entry)
-    return descriptors
+    return _shared_extract_ap_descriptors(planner, prepared_bridge_request)
 
 
 # ---------------------------------------------------------------------------
@@ -572,263 +1212,16 @@ async def _validate_action_feasibility(
     pre_parts: dict[str, dict[str, Any]] | None = None,
     action_sequence: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Check physical feasibility of a single action via CCA and RA oracle."""
-    findings: list[dict[str, Any]] = []
-    resource_jid = str(action.get("resource_jid") or "").strip()
-    if not resource_jid:
-        findings.append({
-            "constraint_owner": "hybrid_validator",
-            "constraint_code": "missing_resource",
-            "reason": f"Step {step_index + 1} has no resource_jid.",
-        })
-        return findings
-
-    # Resolve the resource agent (needed for both CCA and RA validation)
-    resolver = getattr(planner, "_resource_by_jid", None)
-    resource_agent = resolver(resource_jid) if callable(resolver) else None
-
-    # Build a grounded-action-like dict for validators
-    task_id = f"RECOVERY_SEQ{step_index + 1}"
-    part_name = str(action.get("part_name") or "").strip()
-    action_type = str(action.get("action_type") or "").strip()
-    target_ref = str(action.get("target_ref") or "").strip()
-    pose = action.get("pose")
-
-    # Build task dict (matches outline task format)
-    task: dict[str, Any] = {
-        "outline_id": task_id,
-        "resource_jid": resource_jid,
-        "action_type": action_type,
-        "description": str(action.get("description") or "").strip(),
-    }
-    if part_name:
-        task["part_name"] = part_name
-    if target_ref:
-        task["action_target"] = {"target_location": target_ref}
-    if isinstance(pose, dict):
-        task["pose"] = deepcopy(pose)
-
-    # Build grounded_action dict for CCA
-    grounded_action: dict[str, Any] = deepcopy(task)
-
-    # Use provided symbolic state or fall back to session state
-    sym_resources = pre_resources or dict(session_state.get("symbolic_resources") or {})
-    sym_parts = pre_parts or dict(session_state.get("symbolic_parts") or {})
-
-    # --- Component 2: CCA constraint validation (corrected signature) ---
-    try:
-        llm_input = dict(prepared_bridge_request.get("llm_input") or {})
-        full_action_sequence = action_sequence or list(
-            session_state.get("action_sequence") or []
-        )
-
-        # Build outline_tasks list from the full action sequence
-        outline_tasks: list[dict[str, Any]] = []
-        task_types_by_id: dict[str, str] = {}
-        task_index_by_id: dict[str, int] = {}
-        dependency_map: dict[str, list[str]] = {}
-        for idx, act in enumerate(full_action_sequence):
-            act_id = f"RECOVERY_SEQ{idx + 1}"
-            act_task: dict[str, Any] = {
-                "outline_id": act_id,
-                "resource_jid": str(act.get("resource_jid") or "").strip(),
-                "action_type": str(act.get("action_type") or "").strip(),
-                "description": str(act.get("description") or "").strip(),
-            }
-            act_part = str(act.get("part_name") or "").strip()
-            if act_part:
-                act_task["part_name"] = act_part
-            act_target = str(act.get("target_ref") or "").strip()
-            if act_target:
-                act_task["action_target"] = {"target_location": act_target}
-            outline_tasks.append(act_task)
-            task_types_by_id[act_id] = str(act.get("action_type") or "part_handling").strip()
-            task_index_by_id[act_id] = idx
-            # Sequential dependency: each step depends on the previous
-            if idx > 0:
-                dependency_map[act_id] = [f"RECOVERY_SEQ{idx}"]
-            else:
-                dependency_map[act_id] = []
-
-        # Build projected state for this step
-        projected_resources = deepcopy(sym_resources)
-        projected_parts = deepcopy(sym_parts)
-        _apply_hybrid_action_effects(
-            action,
-            resources=projected_resources,
-            parts=projected_parts,
-        )
-
-        # Manually build signature and grounded_action state since hybrid
-        # tasks don't have the explicit states needed to run the normal grounding compiler
-        act_lower = action_type.lower()
-        signature: dict[str, Any] = {
-            "task_kind": "part_handling",
-            "changes_part_world": bool(part_name),
-            "inferable_primary_part": part_name if part_name else None,
-        }
-        preconditions: dict[str, Any] = {}
-        expected_effect: dict[str, Any] = {}
-
-        if act_lower in {"pick_part", "pick", "grasp", "acquire"}:
-            signature["task_kind"] = "part_acquire"
-            expected_effect["resource"] = {"held_part": part_name, "current_state": "picked"}
-            expected_effect["part"] = {"holder": resource_jid}
-            preconditions["part"] = {"requires_acquisition": True, "holder": None}
-            if target_ref:
-                preconditions["source_ref"] = {"location": target_ref}
-            elif sym_parts.get(part_name, {}).get("observed_pose"):
-                preconditions["source_ref"] = {"location": "observed_pose", "pose": sym_parts[part_name]["observed_pose"]}
-            else:
-                preconditions["source_ref"] = {"location": sym_parts.get(part_name, {}).get("current_location")}
-        elif act_lower in {"place_part", "place", "insert", "release_part", "release"}:
-            signature["task_kind"] = "part_release"
-            expected_effect["resource"] = {"held_part": None, "current_state": "idle"}
-            expected_effect["part"] = {"holder": None, "location": target_ref}
-            preconditions["part"] = {"holder": resource_jid}
-        elif act_lower in {"place_prepare", "place_approach"}:
-            signature["task_kind"] = "part_interaction"
-            expected_effect["resource"] = {"held_part": part_name, "current_state": "place_prepare"}
-        elif act_lower in {"move_resource", "move", "go_to", "navigate"}:
-            signature["task_kind"] = "resource_transition"
-            signature["changes_part_world"] = False
-            expected_effect["resource"] = {"location": target_ref}
-        elif act_lower in {"reset_state", "reset", "home"}:
-            signature["task_kind"] = "resource_transition"
-            signature["changes_part_world"] = False
-            expected_effect["resource"] = {"current_state": "idle"}
-        elif act_lower in {"observe", "detect_parts", "detect", "observe_part"}:
-            signature["task_kind"] = "observation"
-            signature["changes_part_world"] = False
-
-        grounded_action["preconditions"] = preconditions
-        grounded_action["expected_effect"] = expected_effect
-        grounded_action["task_kind"] = signature["task_kind"]
-        if signature.get("effect_scope"):
-            grounded_action["effect_scope"] = signature["effect_scope"]
-
-        cca_result = validate_outline_macro_cca_constraints(
-            task=task,
-            grounded_action=grounded_action,
-            signature=signature,
-            pre_resources=sym_resources,
-            pre_parts=sym_parts,
-            projected_resources=projected_resources,
-            projected_parts=projected_parts,
-            llm_input=llm_input,
-            outline_tasks=outline_tasks,
-            task_types_by_id=task_types_by_id,
-            task_index_by_id=task_index_by_id,
-            dependency_map=dependency_map,
-        )
-        cca_findings = list(cca_result.get("findings") or [])
-        if cca_findings:
-            findings.extend(cca_findings)
-            _logger.info(
-                "[HybridDES] CCA validation step %d: %d finding(s).",
-                step_index, len(cca_findings),
-            )
-    except Exception as exc:
-        _logger.warning(
-            "[HybridDES] CCA validation failed for step %d: %s",
-            step_index, exc,
-        )
-
-    # --- Component 3: Resource Agent feasibility oracle ---
-    if resource_agent is not None:
-        oracle = getattr(resource_agent, "bridge_feasibility_oracle", None)
-        if callable(oracle):
-            try:
-                # Build bridge snapshot from resource agent or symbolic state
-                resource_snapshot = deepcopy(
-                    dict(sym_resources.get(resource_jid) or {})
-                )
-                get_bridge_snapshot = getattr(
-                    resource_agent, "get_bridge_snapshot", None
-                )
-                if callable(get_bridge_snapshot):
-                    try:
-                        live_snapshot = get_bridge_snapshot()
-                    except Exception:
-                        live_snapshot = {}
-                    if isinstance(live_snapshot, dict):
-                        for field_name in (
-                            "workspace_bounds",
-                            "available_named_poses",
-                            "bridge_adapter",
-                            "resource_type",
-                            "role",
-                        ):
-                            if (
-                                field_name not in resource_snapshot
-                                and field_name in live_snapshot
-                            ):
-                                resource_snapshot[field_name] = deepcopy(
-                                    live_snapshot.get(field_name)
-                                )
-
-                # Build part context from symbolic parts
-                part_row = deepcopy(dict(sym_parts.get(part_name) or {}))
-                part_context: dict[str, Any] = {
-                    **part_row,
-                    "target": {
-                        "target_location": target_ref,
-                    },
-                }
-                if isinstance(pose, dict):
-                    part_context["observed_pose"] = deepcopy(pose)
-
-                oracle_result = oracle(
-                    operation_kind=action_type,
-                    part_name=part_name or None,
-                    part_context=part_context,
-                    bridge_snapshot=resource_snapshot,
-                    grounded_action=deepcopy(grounded_action),
-                )
-
-                result = dict(oracle_result or {})
-                if not bool(result.get("allowed", True)):
-                    constraint_code = (
-                        str(result.get("constraint_code") or "").strip()
-                        or "resource_unavailable"
-                    )
-                    reason = (
-                        str(result.get("reason") or "").strip()
-                        or "resource feasibility oracle rejected the action"
-                    )
-                    findings.append({
-                        "task_id": task_id,
-                        "resource_jid": resource_jid,
-                        "part_name": part_name or None,
-                        "pose_source": "resource_feasibility",
-                        "pose": deepcopy(
-                            dict(result.get("evidence") or {}).get(
-                                "checked_pose"
-                            )
-                        ),
-                        "workspace_bounds": deepcopy(
-                            dict(result.get("evidence") or {}).get(
-                                "workspace_bounds"
-                            )
-                        ),
-                        "failed_axes": [constraint_code],
-                        "constraint_owner": "resource",
-                        "constraint_family": "resource_feasibility",
-                        "constraint_code": constraint_code,
-                        "reason": reason,
-                        "evidence": deepcopy(result.get("evidence") or {}),
-                    })
-                    _logger.info(
-                        "[HybridDES] RA oracle step %d rejected: %s",
-                        step_index, reason,
-                    )
-            except Exception as exc:
-                _logger.warning(
-                    "[HybridDES] RA oracle failed for step %d: %s",
-                    step_index, exc,
-                )
-
-    return findings
+    return await _shared_validate_action_feasibility(
+        action=action,
+        step_index=step_index,
+        planner=planner,
+        prepared_bridge_request=prepared_bridge_request,
+        session_state=session_state,
+        pre_resources=pre_resources,
+        pre_parts=pre_parts,
+        action_sequence=action_sequence,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -842,92 +1235,16 @@ def _apply_hybrid_action_effects(
     resources: dict[str, dict[str, Any]],
     parts: dict[str, dict[str, Any]],
 ) -> None:
-    """Apply the symbolic effects of a hybrid DES action to projected state.
-
-    This mirrors what multi_turn does with ``_apply_outline_task_effects`` but
-    uses the simpler action_type-based contract from the hybrid plant events.
-    """
-    resource_jid = str(action.get("resource_jid") or "").strip()
-    part_name = str(action.get("part_name") or "").strip()
-    action_type = str(action.get("action_type") or "").strip().lower()
-    target_ref = str(action.get("target_ref") or "").strip()
-
-    resource_row = resources.get(resource_jid)
-    if resource_row is None and resource_jid:
-        resource_row = {"resource_jid": resource_jid}
-        resources[resource_jid] = resource_row
-
-    part_row = parts.get(part_name) if part_name else None
-
-    if action_type in {"pick_part", "pick", "grasp", "acquire"}:
-        # Resource now holds the part
-        if resource_row is not None:
-            resource_row["held_part"] = part_name
-            resource_row["gripper_state"] = "closed"
-        if part_row is not None:
-            part_row["current_holder_resource_jid"] = resource_jid
-
-    elif action_type in {"place_part", "place", "insert", "release_part", "release"}:
-        # Resource releases the part to target
-        if resource_row is not None:
-            resource_row["held_part"] = None
-            resource_row["gripper_state"] = "open"
-        if part_row is not None:
-            part_row["current_holder_resource_jid"] = None
-            if target_ref:
-                part_row["current_location"] = target_ref
-
-    elif action_type in {"place_prepare", "place_approach"}:
-        # Resource approaches target while held
-        if resource_row is not None:
-            resource_row["current_state"] = "place_prepare"
-            # It should ALREADY be holding the part, so we assert it
-            if resource_row.get("held_part") != part_name:
-                pass # The Feasibility oracle will catch this violation natively
-        
-    elif action_type in {"move_resource", "move", "go_to", "navigate"}:
-        # Resource moves to target location
-        if resource_row is not None and target_ref:
-            resource_row["current_location"] = target_ref
-
-    elif action_type in {"reset_state", "reset", "home"}:
-        # Resource returns to idle
-        if resource_row is not None:
-            resource_row["current_state"] = "idle"
-            if target_ref:
-                resource_row["current_location"] = target_ref
-
-    elif action_type in {"observe", "detect_parts", "detect", "observe_part"}:
-        # Observation updates part pose (in real execution)
-        # For projection, mark that observation was performed and inject a dummy pose
-        # in the resource's workspace to satisfy downstream oracle reachability checks
-        if part_row is not None:
-            part_row["observation_performed"] = True
-            
-            # Create a broadly valid dummy pose. The exact bounds check varies, 
-            # so we place it roughly in a generic work area unless we have resource bounds.
-            # Using typical generic positive values since z is usually > 0
-            dummy_pose = {"x": 0.0, "y": 0.0, "z": 1.0}
-            
-            bounds = (resources.get(resource_jid) or {}).get("workspace_bounds")
-            if isinstance(bounds, dict):
-                dummy_pose["x"] = (bounds.get("x_min_m", -0.5) + bounds.get("x_max_m", 0.5)) / 2
-                dummy_pose["y"] = (bounds.get("y_min_m", -0.5) + bounds.get("y_max_m", 0.5)) / 2
-                dummy_pose["z"] = (bounds.get("z_min_m", 0.5) + bounds.get("z_max_m", 1.5)) / 2
-                
-            part_row["observed_pose"] = dummy_pose
+    _shared_apply_des_action_effects(
+        action,
+        resources=resources,
+        parts=parts,
+    )
 
 
 def _feasibility_findings_summary(findings: list[dict[str, Any]]) -> str:
     """Render feasibility findings as text for LLM feedback."""
-    if not findings:
-        return "(none)"
-    lines: list[str] = []
-    for f in findings:
-        code = str(f.get("constraint_code") or "").strip()
-        reason = str(f.get("reason") or "").strip()
-        lines.append(f"- [{code}] {reason}")
-    return "\n".join(lines)
+    return _shared_feasibility_findings_summary(findings)
 
 
 # ---------------------------------------------------------------------------
@@ -938,17 +1255,20 @@ def _feasibility_findings_summary(findings: list[dict[str, Any]]) -> str:
 def _build_phase_prompt(
     prepared_bridge_request: dict[str, Any],
     session_state: dict[str, Any],
+    *,
+    planner: Any = None,
 ) -> tuple[dict[str, Any], str]:
     """Build the prompt for the current phase."""
     current_phase = str(session_state.get("current_phase") or "").strip()
     llm_input = dict(prepared_bridge_request.get("llm_input") or {})
     bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
     recovery_gap_state = _build_recovery_gap_state(session_state)
-    current_recovery_blockers = list(
-        dict(prepared_bridge_request.get("llm_input") or {}).get(
-            "current_recovery_blockers"
-        ) or []
+    current_recovery_blockers = _collect_recovery_blockers(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        planner=planner,
     )
+    ap_descriptors = _extract_ap_descriptors(planner, prepared_bridge_request)
     prompt_input = build_hybrid_des_prompt_input(
         phase=current_phase,
         llm_input=llm_input,
@@ -956,6 +1276,11 @@ def _build_phase_prompt(
         bridge_resources=bridge_resources,
         recovery_gap_state=recovery_gap_state,
         current_recovery_blockers=current_recovery_blockers,
+        ap_descriptors=ap_descriptors,
+        persistent_constraint_summary=list(
+            session_state.get("persistent_constraint_summary") or []
+        ),
+        revision_history_summary_text=revision_history_summary_text(session_state),
     )
 
     # Check if this is a revision (feedback prompt) or initial generation
@@ -963,7 +1288,10 @@ def _build_phase_prompt(
 
     if current_phase == "domain_generation" and domain_revision_count > 0:
         # Build feedback prompt with diagnostics
-        previous_plant = session_state.get("current_plant")
+        previous_plant = (
+            session_state.get("last_rejected_plant")
+            or session_state.get("current_plant")
+        )
         previous_plant_json = ""
         if previous_plant:
             # Serialize plant for display, converting sets to lists
@@ -977,7 +1305,12 @@ def _build_phase_prompt(
             )
 
         solver_result = session_state.get("solver_result") or {}
-        solver_diag = solver_diagnostic_summary(solver_result) if solver_result else ""
+        feasibility_findings = session_state.get("feasibility_findings") or []
+        solver_diag = ""
+        if solver_result and not (
+            solver_result.get("status") == "solved" and feasibility_findings
+        ):
+            solver_diag = solver_diagnostic_summary(solver_result)
 
         prompt_text = build_hybrid_feedback_prompt(
             prompt_input,
@@ -986,12 +1319,21 @@ def _build_phase_prompt(
             ),
             solver_diagnostic_text=solver_diag,
             feasibility_findings_text=_feasibility_findings_summary(
-                session_state.get("feasibility_findings") or [],
+                feasibility_findings,
             ),
             previous_plant_json=previous_plant_json,
+            persistent_constraint_summary=list(
+                session_state.get("persistent_constraint_summary") or []
+            ),
+            revision_history_summary_text=revision_history_summary_text(session_state),
         )
     else:
         prompt_text = build_hybrid_domain_generation_prompt(prompt_input)
+    if current_phase == "primitive_generation":
+        prompt_text = _render_primitive_generation_prompt(
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
 
     return prompt_input, prompt_text
 
@@ -1009,17 +1351,14 @@ def _write_per_turn_artifact(
     write_session_transcript: bool = False,
 ) -> None:
     """Write debug artifacts for the current turn."""
-    try:
-        payload = deepcopy(prepared_bridge_request)
-        payload["bridge_debug"] = payload.get("bridge_debug") or {}
-        payload["bridge_debug"]["multi_turn_session"] = deepcopy(session_state)
-        write_bridge_artifacts(
-            payload,
-            phase_label=str(session_state.get("current_phase") or "hybrid"),
-            write_session_transcript=write_session_transcript,
-        )
-    except Exception:
-        _logger.debug("[HybridDES] Failed to write per-turn artifact.", exc_info=True)
+    del turn_entry
+    write_des_per_turn_artifact(
+        prepared_bridge_request,
+        session_state,
+        phase_label=str(session_state.get("current_phase") or "hybrid"),
+        debug_session_key="hybrid_session",
+        write_session_transcript=write_session_transcript,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1068,7 +1407,7 @@ async def execute_hybrid_des_bridge(
     session_state["status"] = "running"
 
     bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-    bridge_debug["multi_turn_session"] = deepcopy(session_state)
+    bridge_debug["hybrid_session"] = deepcopy(session_state)
     prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
     if hasattr(planner, "_set_last_bridge_debug"):
         planner._set_last_bridge_debug(bridge_debug)
@@ -1089,11 +1428,18 @@ async def execute_hybrid_des_bridge(
         )
 
         # Phases that require an LLM call
-        if current_phase == "domain_generation":
+        if current_phase in {"domain_generation", "primitive_generation"}:
             prompt_input, prompt_text = _build_phase_prompt(
-                prepared_bridge_request, session_state,
+                prepared_bridge_request, session_state, planner=planner,
             )
-            response_schema = hybrid_des_phase_response_schema("domain_generation")
+            response_schema = hybrid_des_phase_response_schema(
+                current_phase,
+                vocab=(
+                    dict(prompt_input.get("domain_vocabulary") or {})
+                    if current_phase == "domain_generation"
+                    else None
+                ),
+            )
             raw_response = await ask_llm_structured(
                 prompt=prompt_text,
                 response_format=response_schema,
@@ -1143,7 +1489,7 @@ async def execute_hybrid_des_bridge(
             pass
 
         # Update debug
-        bridge_debug["multi_turn_session"] = deepcopy(session_state)
+        bridge_debug["hybrid_session"] = deepcopy(session_state)
         bridge_debug["status"] = str(session_state.get("status") or "running")
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         if hasattr(planner, "_set_last_bridge_debug"):
@@ -1164,7 +1510,8 @@ async def execute_hybrid_des_bridge(
 
     if session_state.get("status") not in ("completed", "paused_after_grounding"):
         session_state["status"] = "turn_budget_exhausted"
-        bridge_debug["multi_turn_session"] = deepcopy(session_state)
+        prepared_bridge_request["hybrid_session_state"] = deepcopy(session_state)
+        bridge_debug["hybrid_session"] = deepcopy(session_state)
         bridge_debug["status"] = "turn_budget_exhausted"
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         if hasattr(planner, "_set_last_bridge_debug"):

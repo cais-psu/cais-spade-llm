@@ -773,7 +773,9 @@ async def llm_explore_states_and_events(
     macros that execute through execute_recovery_macro.  Otherwise, falls back
     to the legacy catalog-function-based macro shape.
     """
-    from cais_spade_llm.prompts import build_state_exploration_prompt
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.bridge_react import (
+        build_state_exploration_prompt,
+    )
 
     primitive_mode = bool(primitive_catalog or bridge_resources)
     debug_payload = debug_trace if isinstance(debug_trace, dict) else None

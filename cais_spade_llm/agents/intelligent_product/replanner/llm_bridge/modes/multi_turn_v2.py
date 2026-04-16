@@ -38,7 +38,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     extract_step_output,
     filter_synthesis_primitive_catalog,
-    validate_and_project_steps,
+    validate_and_project_steps_with_trace,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
@@ -54,6 +54,9 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TURNS = 1000  # Practical ceiling for long LLM-guided outline retries.
 _DEFAULT_MAX_OBSERVATIONS = 3
 _DEFAULT_MAX_OBSERVE_BATCH = 3
+_DEFAULT_CANDIDATE_BOUND = 5
+_DEFAULT_CANDIDATE_BOUND_CAP = 8
+_CANDIDATE_PRUNE_REPEAT_THRESHOLD = 2
 _V2_OUTLINE_CONTRACT = {
     "allowed_state_fields": [
         "resource_state",
@@ -71,6 +74,18 @@ _V2_OUTLINE_CONTRACT = {
 
 _PHASE_SEQUENCE = ("grounding", "outline", "primitive_generation", "finalize")
 
+_V2_DURABLE_PRUNED_CONSTRAINT_CODES = {
+    "workspace_unreachable",
+    "holder_conflict",
+    "required_part_not_held",
+    "source_reference_unavailable",
+    "part_relocation_without_carrier",
+    "safety_rule_violation",
+    "blocker_open",
+    "dependency_unsatisfied",
+    "order_violation",
+}
+
 _TRANSITIONS: dict[str, dict[str, str]] = {
     "grounding": {
         "observe": "grounding",
@@ -82,9 +97,11 @@ _TRANSITIONS: dict[str, dict[str, str]] = {
         "need_next_task": "outline",
     },
     "primitive_generation": {
-        "primitive_event_ready": "primitive_generation",
+        "need_context": "primitive_generation",
+        "primitive_steps_ready": "primitive_generation",
         "need_primitive_revision": "primitive_generation",
-        "need_outline_revision": "outline",
+        "primitive_event_stuck": "primitive_generation",
+        "primitive_blocked": "primitive_generation",
         "draft_ready": "finalize",
     },
     "finalize": {
@@ -141,6 +158,26 @@ def build_multi_turn_session_seed(
         "incremental_candidates_validated",
     ):
         outline_mode = "incremental"
+    feedback_render_style = str(
+        bridge_session.get("feedback_render_style") or "des_event_diagnostic"
+    ).strip().lower()
+    if feedback_render_style not in {"des_event_diagnostic", "raw_code"}:
+        feedback_render_style = "des_event_diagnostic"
+    candidate_bound_cap = max(
+        1,
+        int(
+            bridge_session.get("candidate_bound_cap")
+            or _DEFAULT_CANDIDATE_BOUND_CAP
+        ),
+    )
+    candidate_bound = max(
+        1,
+        int(
+            bridge_session.get("candidate_bound")
+            or bridge_session.get("des_candidate_bound")
+            or _DEFAULT_CANDIDATE_BOUND
+        ),
+    )
     # Build symbolic resource/part state for validation tracking
     llm_input = dict(prepared_bridge_request.get("llm_input") or {})
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
@@ -167,6 +204,9 @@ def build_multi_turn_session_seed(
         "max_observations": max_observations,
         "max_observe_batch": max_observe_batch,
         "outline_mode": outline_mode,
+        "feedback_render_style": feedback_render_style,
+        "candidate_bound": candidate_bound,
+        "candidate_bound_cap": candidate_bound_cap,
         "status": "pending",
         "turns": [],
         # Grounding state
@@ -177,16 +217,27 @@ def build_multi_turn_session_seed(
         "phase_feedback": [],
         # Outline state
         "accepted_outline_prefix": [],
+        "accepted_transition_prefix": [],
+        "des_event_sequence": [],
+        "transition_trace": [],
         "outline_lookahead": [],
         "outline_stagnation_count": 0,
         "outline_progress_signature": "",
         "pruned_actions": [],
         "outline_validation_findings": [],
+        "transition_validation": {},
+        "unresolved_target_predicates": [],
         "candidate_rejection_feedback": [],
+        "candidate_prune_history": {},
         # Primitive-generation state
         "primitive_generation_cursor": 0,
         "accepted_primitive_program": [],
         "primitive_rejection_feedback": [],
+        "primitive_served_context": {},
+        "primitive_context_errors": [],
+        "primitive_input_diagnostics": [],
+        "primitive_event_guard": {},
+        "primitive_escalation_diagnostics": [],
         # Symbolic state for validation
         "symbolic_resources": symbolic_resources,
         "symbolic_parts": symbolic_parts,
@@ -210,6 +261,43 @@ def build_multi_turn_session_seed(
 # ---------------------------------------------------------------------------
 # DES plant helpers
 # ---------------------------------------------------------------------------
+
+
+def _sync_des_recovery_aliases(
+    session_state: dict[str, Any],
+    *,
+    turn_entry: dict[str, Any] | None = None,
+    transition_validation: dict[str, Any] | None = None,
+    unresolved_target_predicates: list[dict[str, Any]] | None = None,
+) -> None:
+    """Maintain DES-style debug aliases without changing parser-facing fields."""
+    accepted_prefix = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    session_state["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+    session_state["des_event_sequence"] = deepcopy(accepted_prefix)
+    session_state["transition_trace"] = deepcopy(accepted_prefix)
+
+    if transition_validation is not None:
+        session_state["transition_validation"] = deepcopy(transition_validation)
+    if unresolved_target_predicates is not None:
+        session_state["unresolved_target_predicates"] = deepcopy(
+            unresolved_target_predicates
+        )
+
+    if turn_entry is None:
+        return
+    turn_entry["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+    turn_entry["des_event_sequence"] = deepcopy(accepted_prefix)
+    turn_entry["transition_trace"] = deepcopy(accepted_prefix)
+    if transition_validation is not None:
+        turn_entry["transition_validation"] = deepcopy(transition_validation)
+    if unresolved_target_predicates is not None:
+        turn_entry["unresolved_target_predicates"] = deepcopy(
+            unresolved_target_predicates
+        )
 
 
 def _symbolic_state_fingerprint(
@@ -1747,7 +1835,7 @@ def _candidate_session_after_task(
     return candidate_session_state
 
 
-def _release_part_frees_resource_for_blocker(
+def _part_release_frees_resource_for_blocker(
     *,
     task: dict[str, Any],
     session_state: dict[str, Any],
@@ -1755,7 +1843,7 @@ def _release_part_frees_resource_for_blocker(
     prepared_bridge_request: dict[str, Any],
     current_blockers: list[dict[str, Any]],
 ) -> bool:
-    if str(task.get("action_type") or "").strip().lower() != "release_part":
+    if not _task_ends_with_part_clear_of_resource(task):
         return False
 
     resource_jid = str(task.get("resource_jid") or "").strip()
@@ -1824,7 +1912,7 @@ def _current_safety_blocker_parts(
     return blocker_parts
 
 
-def _acquire_part_counts_as_blocker_progress(
+def _part_acquisition_counts_as_blocker_progress(
     *,
     task: dict[str, Any],
     session_state: dict[str, Any],
@@ -1832,7 +1920,7 @@ def _acquire_part_counts_as_blocker_progress(
     prepared_bridge_request: dict[str, Any],
     current_blockers: list[dict[str, Any]],
 ) -> bool:
-    if str(task.get("action_type") or "").strip().lower() != "acquire_part":
+    if not _task_ends_with_part_held_by_resource(task):
         return False
 
     resource_jid = str(task.get("resource_jid") or "").strip()
@@ -1911,15 +1999,6 @@ def _preparatory_transit_toward_blocker(
         parts_by_name=parts_by_name,
         prepared_bridge_request=prepared_bridge_request,
     )
-    # Also consider parts whose goal_location is unmet as blocker-relevant.
-    for pn, pr in parts_by_name.items():
-        if not isinstance(pr, dict):
-            continue
-        goal_loc = str(pr.get("goal_location") or "").strip()
-        current_loc = str(pr.get("current_location") or "").strip()
-        if goal_loc and current_loc != goal_loc:
-            blocker_parts.add(pn)
-
     if part_name not in blocker_parts:
         return False
 
@@ -1950,47 +2029,304 @@ def _preparatory_transit_toward_blocker(
     return False
 
 
-def _compute_enabled_candidate_bound(
+def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "resource_jid": str(task.get("resource_jid") or "").strip(),
+            "part_name": str(task.get("part_name") or "").strip(),
+            "target_ref": str(task.get("target_ref") or "").strip(),
+            "effect": _candidate_effect_match_key(task),
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+
+
+def _is_durable_candidate_finding(finding: dict[str, Any]) -> bool:
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
+    return constraint_code in _V2_DURABLE_PRUNED_CONSTRAINT_CODES
+
+
+def _current_candidate_state_signature(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any],
     session_state: dict[str, Any],
     prepared_bridge_request: dict[str, Any],
-) -> int:
-    """Estimate |Σ_c ∩ Γ(q)| — the DES enabled controllable event count.
-
-    Counts distinct (resource_jid, part_name) slots from active resources
-    and actionable parts, minus pruned action pairs.  Returns at least 1,
-    capped at 5.
-    """
+) -> str:
     resources_by_jid, parts_by_name = _projected_outline_validation_context(
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
     )
-    active_resources = [
-        jid for jid, row in resources_by_jid.items()
-        if isinstance(row, dict)
-    ]
-    # Actionable parts: goal_location unmet.
-    actionable_parts = [
-        pn for pn, pr in parts_by_name.items()
-        if isinstance(pr, dict)
-        and str(pr.get("goal_location") or "").strip()
-        and str(pr.get("goal_location") or "").strip()
-        != str(pr.get("current_location") or "").strip()
-    ]
-    # Each resource can potentially act on each actionable part, plus
-    # resource-only recovery actions (at least 1 slot per resource).
-    total_slots = len(active_resources) * max(len(actionable_parts), 1)
+    resource_jid = str(
+        task.get("resource_jid")
+        or finding.get("resource_jid")
+        or ""
+    ).strip()
+    part_name = str(
+        task.get("part_name")
+        or finding.get("part_name")
+        or ""
+    ).strip()
+    target_ref = str(task.get("target_ref") or "").strip()
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
+    resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    part_row = dict(parts_by_name.get(part_name) or {})
+    active_blockers = _active_candidate_recovery_blockers(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    payload: dict[str, Any] = {
+        "constraint_code": constraint_code,
+        "resource_jid": resource_jid,
+        "part_name": part_name,
+        "target_ref": target_ref,
+    }
+    if constraint_code == "workspace_unreachable":
+        payload.update({
+            "part_current_location": str(part_row.get("current_location") or "").strip(),
+            "part_current_holder_resource_jid": str(
+                part_row.get("current_holder_resource_jid") or ""
+            ).strip(),
+            "has_observed_pose": bool(dict(part_row.get("observed_pose") or {})),
+            "checked_pose": deepcopy(
+                finding.get("checked_pose")
+                or finding.get("pose")
+                or part_row.get("observed_pose")
+                or {}
+            ),
+            "workspace_bounds": deepcopy(
+                finding.get("workspace_bounds")
+                or resource_row.get("workspace_bounds")
+                or {}
+            ),
+        })
+    elif constraint_code in {
+        "holder_conflict",
+        "required_part_not_held",
+        "part_relocation_without_carrier",
+    }:
+        payload.update({
+            "resource_held_part": str(resource_row.get("held_part") or "").strip(),
+            "part_current_holder_resource_jid": str(
+                part_row.get("current_holder_resource_jid") or ""
+            ).strip(),
+            "part_current_location": str(part_row.get("current_location") or "").strip(),
+            "part_current_state": str(part_row.get("current_state") or "").strip(),
+        })
+    elif constraint_code == "source_reference_unavailable":
+        payload.update({
+            "part_current_holder_resource_jid": str(
+                part_row.get("current_holder_resource_jid") or ""
+            ).strip(),
+            "part_current_location": str(part_row.get("current_location") or "").strip(),
+            "has_observed_pose": bool(dict(part_row.get("observed_pose") or {})),
+        })
+    elif constraint_code in {
+        "blocker_open",
+        "dependency_unsatisfied",
+        "order_violation",
+        "safety_rule_violation",
+    }:
+        payload.update({
+            "condition_ids": list(finding.get("condition_ids") or []),
+            "rule_id": str(finding.get("rule_id") or "").strip(),
+            "active_blockers": [
+                str(row.get("summary") or "").strip()
+                for row in active_blockers
+                if isinstance(row, dict) and str(row.get("summary") or "").strip()
+            ],
+            "des_safety_dfa_vector": list(session_state.get("des_safety_dfa_vector") or ()),
+        })
+    else:
+        payload.update({
+            "resource_held_part": str(resource_row.get("held_part") or "").strip(),
+            "part_current_holder_resource_jid": str(
+                part_row.get("current_holder_resource_jid") or ""
+            ).strip(),
+            "part_current_location": str(part_row.get("current_location") or "").strip(),
+        })
+    return json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
 
-    pruned = session_state.get("pruned_actions") or []
-    pruned_pairs = {
-        (
-            str(row.get("resource_jid") or "").strip(),
-            str(row.get("part_name") or "").strip(),
+
+def _build_durable_pruned_action_row(
+    *,
+    task: dict[str, Any],
+    finding: dict[str, Any],
+    activation_signature: str,
+    repeat_count: int,
+) -> dict[str, Any]:
+    return {
+        "resource_jid": str(task.get("resource_jid") or "").strip(),
+        "part_name": str(task.get("part_name") or "").strip(),
+        "target_ref": str(task.get("target_ref") or "").strip(),
+        "task": deepcopy(task),
+        "action": deepcopy(task),
+        "guard": deepcopy(finding),
+        "reason": str(finding.get("reason") or "").strip(),
+        "activation_signature": activation_signature,
+        "repeat_count": max(1, int(repeat_count or 1)),
+    }
+
+
+def _active_v2_pruned_actions(
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    active_rows: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for raw_row in (session_state.get("pruned_actions") or []):
+        if not isinstance(raw_row, dict):
+            continue
+        task = dict(raw_row.get("task") or raw_row.get("action") or {})
+        guard = dict(raw_row.get("guard") or {})
+        activation_signature = str(raw_row.get("activation_signature") or "").strip()
+        if not task or not guard or not activation_signature:
+            continue
+        if not _is_durable_candidate_finding(guard):
+            continue
+        current_signature = _current_candidate_state_signature(
+            task=task,
+            finding=guard,
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
         )
-        for row in pruned
+        if current_signature != activation_signature:
+            continue
+        dedupe_key = (
+            _candidate_pruned_task_match_key(task),
+            str(guard.get("constraint_code") or "").strip().lower(),
+            activation_signature,
+        )
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        active_rows.append(deepcopy(raw_row))
+    return active_rows
+
+
+def _matching_active_v2_pruned_action(
+    *,
+    task: dict[str, Any],
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> dict[str, Any] | None:
+    task_key = _candidate_pruned_task_match_key(task)
+    for row in _active_v2_pruned_actions(session_state, prepared_bridge_request):
+        row_task = dict(row.get("task") or row.get("action") or {})
+        if _candidate_pruned_task_match_key(row_task) != task_key:
+            continue
+        return deepcopy(row)
+    return None
+
+
+def _retarget_candidate_finding_to_task(
+    finding: dict[str, Any],
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    retargeted = deepcopy(finding or {})
+    outline_id = str(task.get("outline_id") or "").strip()
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    if outline_id:
+        retargeted["task_id"] = outline_id
+    if resource_jid:
+        retargeted["resource_jid"] = resource_jid
+    if part_name:
+        retargeted["part_name"] = part_name
+    return retargeted
+
+
+def _promote_durable_candidate_rejections(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    candidate_evaluations: list[dict[str, Any]],
+) -> None:
+    prune_history = dict(session_state.get("candidate_prune_history") or {})
+    active_rows = _active_v2_pruned_actions(session_state, prepared_bridge_request)
+    seen_active = {
+        (
+            _candidate_pruned_task_match_key(dict(row.get("task") or row.get("action") or {})),
+            str(dict(row.get("guard") or {}).get("constraint_code") or "").strip().lower(),
+            str(row.get("activation_signature") or "").strip(),
+        )
+        for row in active_rows
         if isinstance(row, dict)
     }
-    enabled = max(total_slots - len(pruned_pairs), 1)
-    return min(enabled, 5)
+
+    for evaluation in candidate_evaluations:
+        if not isinstance(evaluation, dict) or bool(evaluation.get("valid")):
+            continue
+        task = dict(evaluation.get("task") or {})
+        findings = [
+            dict(item)
+            for item in (evaluation.get("validation_findings") or [])
+            if isinstance(item, dict)
+        ]
+        durable_finding = next(
+            (item for item in findings if _is_durable_candidate_finding(item)),
+            None,
+        )
+        if durable_finding is None:
+            continue
+        activation_signature = _current_candidate_state_signature(
+            task=task,
+            finding=durable_finding,
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        history_key = json.dumps(
+            {
+                "task": _candidate_pruned_task_match_key(task),
+                "constraint_code": str(
+                    durable_finding.get("constraint_code") or ""
+                ).strip().lower(),
+                "activation_signature": activation_signature,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+        repeat_count = int(prune_history.get(history_key) or 0) + 1
+        prune_history[history_key] = repeat_count
+        if repeat_count < _CANDIDATE_PRUNE_REPEAT_THRESHOLD:
+            continue
+        dedupe_key = (
+            _candidate_pruned_task_match_key(task),
+            str(durable_finding.get("constraint_code") or "").strip().lower(),
+            activation_signature,
+        )
+        if dedupe_key in seen_active:
+            continue
+        seen_active.add(dedupe_key)
+        active_rows.append(
+            _build_durable_pruned_action_row(
+                task=task,
+                finding=durable_finding,
+                activation_signature=activation_signature,
+                repeat_count=repeat_count,
+            )
+        )
+
+    session_state["candidate_prune_history"] = prune_history
+    session_state["pruned_actions"] = active_rows
+
+
+def _compute_enabled_candidate_bound(
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> int:
+    """Return the configured candidate budget for candidate selection."""
+    del prepared_bridge_request
+    candidate_bound = max(
+        1,
+        int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
+    )
+    candidate_bound_cap = max(
+        1,
+        int(session_state.get("candidate_bound_cap") or _DEFAULT_CANDIDATE_BOUND_CAP),
+    )
+    return min(candidate_bound, candidate_bound_cap)
 
 
 def _candidate_progress_score(
@@ -2023,7 +2359,7 @@ def _candidate_progress_score(
     }
     resolved_blockers = len(current_keys - remaining_keys)
     blocker_part_acquired = 0
-    if resolved_blockers == 0 and _acquire_part_counts_as_blocker_progress(
+    if resolved_blockers == 0 and _part_acquisition_counts_as_blocker_progress(
         task=task,
         session_state=session_state,
         candidate_session_state=candidate_session_state,
@@ -2032,7 +2368,7 @@ def _candidate_progress_score(
     ):
         blocker_part_acquired = 1
     resource_freed_for_blocker = 0
-    if resolved_blockers == 0 and blocker_part_acquired == 0 and _release_part_frees_resource_for_blocker(
+    if resolved_blockers == 0 and blocker_part_acquired == 0 and _part_release_frees_resource_for_blocker(
         task=task,
         session_state=session_state,
         candidate_session_state=candidate_session_state,
@@ -2084,12 +2420,36 @@ def _candidate_feedback_rows(
         ]
         if not findings:
             continue
-        rows.append({
+        feedback_row = {
             "candidate_index": int(row.get("candidate_index") or 0),
             "task": deepcopy(dict(row.get("task") or {})),
             "validation_findings": findings,
-        })
+        }
+        if isinstance(row.get("surface_task"), dict):
+            feedback_row["surface_task"] = deepcopy(dict(row.get("surface_task") or {}))
+        if isinstance(row.get("repaired_task"), dict):
+            feedback_row["repaired_task"] = deepcopy(dict(row.get("repaired_task") or {}))
+        if str(row.get("repair_applied") or "").strip():
+            feedback_row["repair_applied"] = str(row.get("repair_applied") or "").strip()
+        rows.append(feedback_row)
     return rows
+
+
+def _finding_event_status_for_logging(finding: dict[str, Any]) -> str:
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
+    constraint_family = str(finding.get("constraint_family") or "").strip().lower()
+    if constraint_code in {
+        "blocker_open",
+        "dependency_unsatisfied",
+        "order_violation",
+        "invalid_dependency_reference",
+        "claimed_condition_not_currently_unmet",
+        "safety_rule_violation",
+    } or constraint_family in {"safety", "continuation"}:
+        return "blocked_by_supervisor"
+    if constraint_code in {"no_state_change", "no_blocker_reduction"} or constraint_family == "candidate_selection":
+        return "nonprogressing"
+    return "disabled"
 
 
 def _remaining_blocked_issue_counts(
@@ -2180,12 +2540,12 @@ def _resource_current_state_token(resource_row: dict[str, Any]) -> str:
 
 
 def _candidate_action_name_from_task(task: dict[str, Any]) -> str:
-    action_name = str(task.get("action_name") or "").strip()
-    if action_name:
-        return action_name
-    legacy_action_type = str(task.get("action_type") or "").strip().lower()
-    if legacy_action_type:
-        return legacy_action_type.replace("_", " ")
+    event_name = str(task.get("event_name") or "").strip()
+    if event_name:
+        return event_name
+    legacy_action_name = str(task.get("action_name") or "").strip()
+    if legacy_action_name:
+        return legacy_action_name
     return ""
 
 
@@ -2200,14 +2560,55 @@ def _candidate_target_ref_from_surface_task(task: dict[str, Any]) -> str:
     ).strip()
 
 
-def _surface_candidate_hidden_action_type(
-    *,
-    part_name: str,
-    target_ref: str,
-) -> str:
-    if part_name:
-        return "release_part" if target_ref else "acquire_part"
-    return "recover_resource"
+def _task_ends_with_part_held_by_resource(task: dict[str, Any]) -> bool:
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    end_state = dict(task.get("expected_end_state") or {})
+    held_part = str(end_state.get("held_part") or "").strip()
+    part_holder = str(end_state.get("part_holder_resource_jid") or "").strip()
+    return bool(
+        part_name
+        and resource_jid
+        and (held_part == part_name or part_holder == resource_jid)
+    )
+
+
+def _task_ends_with_part_clear_of_resource(task: dict[str, Any]) -> bool:
+    part_name = str(task.get("part_name") or "").strip()
+    if not part_name:
+        return False
+    end_state = dict(task.get("expected_end_state") or {})
+    held_part = end_state.get("held_part")
+    part_holder = end_state.get("part_holder_resource_jid")
+    return bool(
+        ("part_location" in end_state or str(task.get("target_ref") or "").strip())
+        and (held_part in (None, ""))
+        and (part_holder in (None, ""))
+    )
+
+
+def _normalize_place_verb_in_action_name(task: dict[str, Any]) -> None:
+    """Rewrite 'release X to Y' -> 'place X at Y' when the event drops a held part at a target.
+
+    Leaves event_name untouched so DES-level identity tokens remain stable.
+    """
+    if not _task_ends_with_part_clear_of_resource(task):
+        return
+    action_name = str(task.get("action_name") or "").strip()
+    if not action_name:
+        return
+    first, _, rest = action_name.partition(" ")
+    if first.lower() != "release":
+        return
+    rewritten = f"place {rest}".replace(" to ", " at ", 1) if rest else "place"
+    task["action_name"] = rewritten
+
+
+def _candidate_effect_match_key(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "expected_end_state": deepcopy(task.get("expected_end_state") or {}),
+        "action_target": deepcopy(task.get("action_target") or {}),
+    }
 
 
 def _normalize_candidate_task(
@@ -2226,6 +2627,7 @@ def _normalize_candidate_task(
     part_name = str(raw_task.get("part_name") or "").strip()
     target_ref = _candidate_target_ref_from_surface_task(raw_task)
     if action_name:
+        normalized["event_name"] = action_name
         normalized["action_name"] = action_name
     if description:
         normalized["description"] = description
@@ -2253,7 +2655,11 @@ def _derive_candidate_outline_task(
         prepared_bridge_request=prepared_bridge_request,
     )
     resource_jid = str(candidate_task.get("resource_jid") or "").strip()
-    action_name = str(candidate_task.get("action_name") or "").strip()
+    action_name = str(
+        candidate_task.get("event_name")
+        or candidate_task.get("action_name")
+        or ""
+    ).strip()
     part_name = str(candidate_task.get("part_name") or "").strip()
     target_ref = str(candidate_task.get("target_ref") or "").strip()
     description = str(candidate_task.get("description") or "").strip()
@@ -2273,8 +2679,11 @@ def _derive_candidate_outline_task(
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason="candidate must include action_name naming the physical intent",
-                evidence={"field": "action_name"},
+                reason=(
+                    "candidate must include event_name naming the DES event "
+                    "(legacy action_name accepted)"
+                ),
+                evidence={"field": "event_name"},
             )
         ]
 
@@ -2287,36 +2696,13 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    action_type = _surface_candidate_hidden_action_type(
-        part_name=part_name,
-        target_ref=target_ref,
-    )
-
-    if action_type == "acquire_part":
+    if part_name:
         if part_name not in parts_by_name:
             return None, [
                 _candidate_schema_finding(
                     task=candidate_task,
                     reason=f"candidate references unknown part '{part_name}'",
                     evidence={"field": "part_name", "token": part_name},
-                )
-            ]
-
-    if action_type == "release_part":
-        if part_name not in parts_by_name:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason=f"candidate references unknown part '{part_name}'",
-                    evidence={"field": "part_name", "token": part_name},
-                )
-            ]
-        if not target_ref:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason="release_part requires target_ref",
-                    evidence={"field": "target_ref"},
                 )
             ]
 
@@ -2345,14 +2731,7 @@ def _derive_candidate_outline_task(
     action_target: dict[str, Any] = {}
     end_state: dict[str, Any] = {}
 
-    if action_type == "recover_resource":
-        end_state["resource_state"] = "idle"
-        if target_ref:
-            if target_ref in _candidate_named_pose_tokens(resource_row):
-                action_target["named_pose"] = target_ref
-            else:
-                action_target["target_location"] = target_ref
-    elif action_type == "acquire_part":
+    if part_name and not target_ref:
         current_part_location = _part_current_location_token(part_row)
         if current_part_location:
             action_target["source_location"] = current_part_location
@@ -2364,7 +2743,7 @@ def _derive_candidate_outline_task(
             "part_location": f"{resource_jid}_gripper",
             "part_holder_resource_jid": resource_jid,
         })
-    elif action_type == "release_part":
+    elif part_name and target_ref:
         action_target["target_location"] = target_ref
         end_state.update({
             "resource_state": "idle",
@@ -2372,12 +2751,19 @@ def _derive_candidate_outline_task(
             "part_location": target_ref,
             "part_holder_resource_jid": None,
         })
+    else:
+        end_state["resource_state"] = "idle"
+        if target_ref:
+            if target_ref in _candidate_named_pose_tokens(resource_row):
+                action_target["named_pose"] = target_ref
+            else:
+                action_target["target_location"] = target_ref
 
     normalized_task: dict[str, Any] = {
         "outline_id": str(candidate_task.get("outline_id") or "").strip(),
         "resource_jid": resource_jid,
+        "event_name": action_name,
         "action_name": action_name,
-        "action_type": action_type,
         "description": description,
         "expected_start_state": start_state,
         "expected_end_state": end_state,
@@ -2401,6 +2787,7 @@ def _commit_selected_candidate_task(
     committed = deepcopy(task or {})
     committed["candidate_outline_id"] = str(committed.get("outline_id") or "").strip()
     committed["outline_id"] = _committed_outline_id(sequence_index=sequence_index)
+    _normalize_place_verb_in_action_name(committed)
     return committed
 
 
@@ -2411,9 +2798,10 @@ def _apply_task_effects_to_symbolic_state(
     """Update symbolic resource/part state based on accepted task's expected_end_state."""
     resource_jid = str(task.get("resource_jid") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
-    action_type = str(task.get("action_type") or "").strip().lower()
     target_ref = str(task.get("target_ref") or "").strip()
     end_state = dict(task.get("expected_end_state") or {})
+    ends_with_part_held = _task_ends_with_part_held_by_resource(task)
+    ends_with_part_clear = _task_ends_with_part_clear_of_resource(task)
 
     symbolic_resources = dict(session_state.get("symbolic_resources") or {})
     symbolic_parts = dict(session_state.get("symbolic_parts") or {})
@@ -2432,25 +2820,25 @@ def _apply_task_effects_to_symbolic_state(
         part = symbolic_parts.setdefault(part_name, {"part_name": part_name})
         if "part_state" in end_state:
             part["current_state"] = end_state["part_state"]
-        elif action_type == "acquire_part":
+        elif ends_with_part_held:
             part["current_state"] = "in_gripper"
-        elif action_type == "release_part":
+        elif ends_with_part_clear:
             goal_location = str(part.get("goal_location") or "").strip()
             resolved_target = str(end_state.get("part_location") or target_ref or "").strip()
             part["current_state"] = "placed" if goal_location and resolved_target == goal_location else "misplaced"
         if "part_location" in end_state:
             part["current_location"] = end_state["part_location"] or None
-        elif action_type == "acquire_part" and resource_jid:
+        elif ends_with_part_held and resource_jid:
             part["current_location"] = f"{resource_jid}_gripper"
-        elif action_type == "release_part":
+        elif ends_with_part_clear:
             part["current_location"] = target_ref or None
         if "part_holder_resource_jid" in end_state:
             part["current_holder_resource_jid"] = (
                 end_state["part_holder_resource_jid"] or None
             )
-        elif action_type == "acquire_part":
+        elif ends_with_part_held:
             part["current_holder_resource_jid"] = resource_jid or None
-        elif action_type == "release_part":
+        elif ends_with_part_clear:
             part["current_holder_resource_jid"] = None
         elif "held_part" in end_state:
             part["current_holder_resource_jid"] = resource_jid if end_state["held_part"] == part_name else None
@@ -2467,6 +2855,45 @@ def _apply_task_effects_to_symbolic_state(
     session_state["symbolic_parts"] = symbolic_parts
 
 
+def _parsed_response_object(
+    parsed_response: dict[str, Any],
+    *,
+    primary_key: str,
+    legacy_key: str,
+) -> dict[str, Any]:
+    """Read one DES transition object, accepting the legacy task field."""
+    raw = parsed_response.get(primary_key)
+    if not isinstance(raw, dict):
+        raw = parsed_response.get(legacy_key)
+    return dict(raw or {}) if isinstance(raw, dict) else {}
+
+
+def _parsed_response_rows(
+    parsed_response: dict[str, Any],
+    *,
+    primary_key: str,
+    legacy_key: str,
+) -> list[dict[str, Any]]:
+    """Read DES transition rows, accepting the legacy task array field."""
+    raw = parsed_response.get(primary_key)
+    if not isinstance(raw, list):
+        raw = parsed_response.get(legacy_key)
+    return [dict(row) for row in (raw or []) if isinstance(row, dict)]
+
+
+def _parsed_response_rows_any(
+    parsed_response: dict[str, Any],
+    *,
+    keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Read DES event/transition rows from the first populated response key."""
+    for key in keys:
+        raw = parsed_response.get(key)
+        if isinstance(raw, list):
+            return [dict(row) for row in raw if isinstance(row, dict)]
+    return []
+
+
 async def _handle_outline_single_pass(
     *,
     session_state: dict[str, Any],
@@ -2475,21 +2902,26 @@ async def _handle_outline_single_pass(
     """Single-pass: LLM proposes all tasks at once, accept without validation."""
     turn_entry: dict[str, Any] = {}
 
-    outline_tasks = [
-        dict(row) for row in (parsed_response.get("outline_tasks") or [])
-        if isinstance(row, dict)
-    ]
+    outline_tasks = _parsed_response_rows(
+        parsed_response,
+        primary_key="transition_trace",
+        legacy_key="outline_tasks",
+    )
+    turn_entry["transition_trace"] = deepcopy(outline_tasks)
     turn_entry["outline_tasks"] = deepcopy(outline_tasks)
 
     if not outline_tasks:
-        turn_entry["error"] = "outline response missing outline_tasks"
-        _logger.warning("[MultiTurnV2] outline single_pass: no outline_tasks")
+        turn_entry["error"] = (
+            "outline response missing transition_trace (legacy outline_tasks)"
+        )
+        _logger.warning("[MultiTurnV2] outline single_pass: no transition_trace")
         return "need_revision", turn_entry
 
     session_state["accepted_outline_prefix"] = deepcopy(outline_tasks)
+    _sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     _logger.info(
-        "[MultiTurnV2] outline single_pass: accepted %d tasks",
+        "[MultiTurnV2] outline single_pass: accepted %d recovery events",
         len(outline_tasks),
     )
 
@@ -2505,25 +2937,36 @@ async def _handle_outline_incremental(
     """Incremental: one task at a time, no validation."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = dict(parsed_response.get("next_task") or {})
-    lookahead_tasks = [
-        dict(row) for row in (parsed_response.get("lookahead_tasks") or [])
-        if isinstance(row, dict)
-    ]
+    next_task = _parsed_response_object(
+        parsed_response,
+        primary_key="next_transition",
+        legacy_key="next_task",
+    )
+    lookahead_tasks = _parsed_response_rows(
+        parsed_response,
+        primary_key="transition_suffix",
+        legacy_key="lookahead_tasks",
+    )
 
+    turn_entry["next_transition"] = deepcopy(next_task)
     turn_entry["next_task"] = deepcopy(next_task)
+    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
     if lookahead_tasks:
         turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
 
     if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = "outline response missing next_task with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental: no next_task")
+        turn_entry["error"] = (
+            "outline response missing next_transition with outline_id "
+            "(legacy next_task)"
+        )
+        _logger.warning("[MultiTurnV2] outline incremental: no next_transition")
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
     accepted_prefix.append(deepcopy(next_task))
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = deepcopy(lookahead_tasks)
+    _sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     # Track symbolic state even in non-validated mode
     _apply_task_effects_to_symbolic_state(next_task, session_state)
@@ -2534,7 +2977,7 @@ async def _handle_outline_incremental(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental: accepted task %s (prefix now %d tasks, complete=%s)",
+        "[MultiTurnV2] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
         str(next_task.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
@@ -2554,19 +2997,29 @@ async def _handle_outline_incremental_validated(
     """Incremental with validation: one task at a time, validate before accepting."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = dict(parsed_response.get("next_task") or {})
-    lookahead_tasks = [
-        dict(row) for row in (parsed_response.get("lookahead_tasks") or [])
-        if isinstance(row, dict)
-    ]
+    next_task = _parsed_response_object(
+        parsed_response,
+        primary_key="next_transition",
+        legacy_key="next_task",
+    )
+    lookahead_tasks = _parsed_response_rows(
+        parsed_response,
+        primary_key="transition_suffix",
+        legacy_key="lookahead_tasks",
+    )
 
+    turn_entry["next_transition"] = deepcopy(next_task)
     turn_entry["next_task"] = deepcopy(next_task)
+    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
     if lookahead_tasks:
         turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
 
     if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = "outline response missing next_task with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental_validated: no next_task")
+        turn_entry["error"] = (
+            "outline response missing next_transition with outline_id "
+            "(legacy next_task)"
+        )
+        _logger.warning("[MultiTurnV2] outline incremental_validated: no next_transition")
         return "need_revision", turn_entry
 
     # Validate before accepting
@@ -2585,8 +3038,15 @@ async def _handle_outline_incremental_validated(
             list(session_state.get("outline_validation_findings") or []),
             findings,
         )
+        turn_entry["transition_validation"] = {
+            "status": "rejected",
+            "findings": deepcopy(findings),
+        }
+        session_state["transition_validation"] = deepcopy(
+            turn_entry["transition_validation"]
+        )
         _logger.info(
-            "[MultiTurnV2] outline incremental_validated: rejected task %s (%d findings)",
+            "[MultiTurnV2] outline incremental_validated: rejected event %s (%d findings)",
             str(next_task.get("outline_id") or "").strip(),
             len(findings),
         )
@@ -2608,13 +3068,18 @@ async def _handle_outline_incremental_validated(
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
     )
+    _sync_des_recovery_aliases(
+        session_state,
+        turn_entry=turn_entry,
+        transition_validation={"status": "passed", "findings": []},
+    )
 
     outline_complete = not lookahead_tasks
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental_validated: accepted task %s "
-        "(prefix now %d tasks, complete=%s)",
+        "[MultiTurnV2] outline incremental_validated: accepted event %s "
+        "(prefix now %d events, complete=%s)",
         str(next_task.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
@@ -2635,25 +3100,40 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry: dict[str, Any] = {}
     sequence_index = _next_recovery_sequence_index(session_state)
     session_state["outline_validation_findings"] = []
+    session_state["pruned_actions"] = _active_v2_pruned_actions(
+        session_state,
+        prepared_bridge_request,
+    )
 
+    candidate_response_rows = _parsed_response_rows_any(
+        parsed_response,
+        keys=("candidate_events", "candidate_transitions", "candidate_tasks"),
+    )
     candidate_tasks = [
         _normalize_candidate_task(
             task=dict(row),
             sequence_index=sequence_index,
             candidate_index=candidate_index,
         )
-        for candidate_index, row in enumerate(parsed_response.get("candidate_tasks") or [])
-        if isinstance(row, dict)
+        for candidate_index, row in enumerate(candidate_response_rows)
     ]
+    turn_entry["candidate_events"] = deepcopy(candidate_tasks)
+    turn_entry["candidate_transitions"] = deepcopy(candidate_tasks)
     turn_entry["candidate_tasks"] = deepcopy(candidate_tasks)
 
-    candidate_bound = int(session_state.get("des_candidate_bound") or 3)
+    candidate_bound = int(
+        session_state.get("des_candidate_bound")
+        or session_state.get("candidate_bound")
+        or _DEFAULT_CANDIDATE_BOUND
+    )
     if not (1 <= len(candidate_tasks) <= candidate_bound):
         turn_entry["error"] = (
-            f"outline response must include 1 to {candidate_bound} candidate_tasks"
+            "outline response must include 1 to "
+            f"{candidate_bound} candidate_events "
+            "(compatibility candidate_transitions/candidate_tasks)"
         )
         _logger.warning(
-            "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_tasks, got %d",
+            "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
             candidate_bound,
             len(candidate_tasks),
         )
@@ -2662,13 +3142,33 @@ async def _handle_outline_incremental_candidates_validated(
     candidate_evaluations: list[dict[str, Any]] = []
     valid_candidates: list[dict[str, Any]] = []
     for candidate_index, task in enumerate(candidate_tasks):
+        surface_task = deepcopy(task)
+        working_task = deepcopy(task)
         evaluation: dict[str, Any] = {
             "candidate_index": candidate_index,
-            "task": deepcopy(task),
+            "surface_task": deepcopy(surface_task),
+            "task": deepcopy(working_task),
         }
 
+        pruned_row = _matching_active_v2_pruned_action(
+            task=working_task,
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        if pruned_row is not None:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = [
+                _retarget_candidate_finding_to_task(
+                    dict(pruned_row.get("guard") or {}),
+                    working_task,
+                )
+            ]
+            evaluation["pruned_match"] = True
+            candidate_evaluations.append(evaluation)
+            continue
+
         normalized_task, schema_findings = _derive_candidate_outline_task(
-            candidate_task=task,
+            candidate_task=working_task,
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
         )
@@ -2716,10 +3216,22 @@ async def _handle_outline_incremental_candidates_validated(
             row["validation_findings"] = [
                 _no_blocker_reduction_finding(task=dict(row.get("task") or {}))
             ]
+        _promote_durable_candidate_rejections(
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+            candidate_evaluations=candidate_evaluations,
+        )
         turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
         feedback_rows = _candidate_feedback_rows(candidate_evaluations)
         session_state["candidate_rejection_feedback"] = deepcopy(feedback_rows)
         turn_entry["candidate_rejection_feedback"] = deepcopy(feedback_rows)
+        turn_entry["transition_validation"] = {
+            "status": "rejected",
+            "findings": deepcopy(feedback_rows),
+        }
+        session_state["transition_validation"] = deepcopy(
+            turn_entry["transition_validation"]
+        )
         # Store the LLM's reasoning from this rejected turn for next-turn feedback.
         session_state["rejected_turn_thought"] = str(
             parsed_response.get("thought") or ""
@@ -2733,9 +3245,23 @@ async def _handle_outline_incremental_candidates_validated(
         # multi-turn recovery contract.
         stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
         session_state["outline_stagnation_count"] = stagnation
-        # Log rejection reasons to distinguish "validator too strict" from
-        # "LLM out of ideas" — critical for diagnosing false deadlocks in
-        # cross-assignment scenarios.
+        status_counts: dict[str, int] = {}
+        for row in candidate_evaluations:
+            if not isinstance(row, dict):
+                continue
+            findings = [
+                dict(f)
+                for f in (row.get("validation_findings") or [])
+                if isinstance(f, dict)
+            ]
+            if not findings:
+                continue
+            status = _finding_event_status_for_logging(findings[0])
+            status_counts[status] = int(status_counts.get(status) or 0) + 1
+        status_summary = ", ".join(
+            f"{status}={count}"
+            for status, count in sorted(status_counts.items())
+        ) or "none"
         rejection_codes = [
             str(f.get("constraint_code") or "unknown")
             for row in candidate_evaluations
@@ -2744,6 +3270,10 @@ async def _handle_outline_incremental_candidates_validated(
             if isinstance(f, dict)
         ]
         _logger.info(
+            "[DES] Stagnation %d — status_counts: %s",
+            stagnation, status_summary,
+        )
+        _logger.debug(
             "[DES] Stagnation %d — rejection codes: %s",
             stagnation, rejection_codes,
         )
@@ -2775,8 +3305,10 @@ async def _handle_outline_incremental_candidates_validated(
     selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
 
     turn_entry["selected_candidate_index"] = selected_candidate_index
+    turn_entry["selected_transition"] = deepcopy(selected_next_task)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
     turn_entry["selected_next_task"] = deepcopy(selected_next_task)
+    turn_entry["next_transition"] = deepcopy(selected_next_task)
     turn_entry["next_task"] = deepcopy(selected_next_task)
     if selected_grounded_action:
         turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
@@ -2787,6 +3319,14 @@ async def _handle_outline_incremental_candidates_validated(
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
     session_state["rejected_turn_thought"] = ""
+    _sync_des_recovery_aliases(
+        session_state,
+        turn_entry=turn_entry,
+        transition_validation={
+            "status": "passed",
+            "selected_candidate_index": selected_candidate_index,
+        },
+    )
 
     # Record pre-transition DES state, apply effects, record post-transition.
     pre_state = _symbolic_state_fingerprint(
@@ -2794,6 +3334,10 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("symbolic_parts") or {},
     )
     _apply_task_effects_to_symbolic_state(selected_next_task, session_state)
+    session_state["pruned_actions"] = _active_v2_pruned_actions(
+        session_state,
+        prepared_bridge_request,
+    )
     post_state = _symbolic_state_fingerprint(
         session_state.get("symbolic_resources") or {},
         session_state.get("symbolic_parts") or {},
@@ -2807,8 +3351,12 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("des_plant") or {},
         event_name=event_name,
         event_dict={
+            "name": str(
+                selected_next_task.get("event_name")
+                or selected_next_task.get("action_name")
+                or ""
+            ).strip(),
             "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-            "action_type": str(selected_next_task.get("action_type") or "").strip(),
             "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
             "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
             "description": str(selected_next_task.get("description") or "").strip(),
@@ -2824,8 +3372,12 @@ async def _handle_outline_incremental_candidates_validated(
     if safety_dfas:
         _violates, new_q, _violated_ids = _advance_des_safety_state(
             candidate_event={
+                "name": str(
+                    selected_next_task.get("event_name")
+                    or selected_next_task.get("action_name")
+                    or ""
+                ).strip(),
                 "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-                "action_type": str(selected_next_task.get("action_type") or "").strip(),
                 "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
                 "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
             },
@@ -2886,7 +3438,7 @@ async def _handle_outline_incremental_candidates_validated(
 
     _logger.info(
         "[MultiTurnV2] outline incremental_candidates_validated: selected candidate %d (%s) "
-        "(progress=%d, prefix now %d tasks, complete=%s)",
+        "(progress=%d, prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
         str(selected_next_task.get("outline_id") or "").strip(),
         int(selected.get("progress_score") or 0),
@@ -2955,15 +3507,34 @@ def _primitive_feedback_row(
     outline_event: dict[str, Any] | None,
     constraint_code: str,
     reason: str,
+    finding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event = dict(outline_event or {})
-    return {
+    row: dict[str, Any] = {
         "outline_id": str(event.get("outline_id") or "").strip(),
         "resource_jid": str(event.get("resource_jid") or "").strip(),
         "part_name": str(event.get("part_name") or "").strip() or None,
         "constraint_code": str(constraint_code or "").strip() or "primitive_validation_failed",
         "reason": str(reason or "").strip() or "primitive validation failed",
     }
+    if isinstance(finding, dict):
+        if str(finding.get("constraint_code") or "").strip():
+            row["constraint_code"] = str(finding.get("constraint_code") or "").strip()
+        if str(finding.get("reason") or "").strip():
+            row["reason"] = str(finding.get("reason") or "").strip()
+        for key in (
+            "constraint_owner",
+            "constraint_family",
+            "evidence",
+            "guard",
+            "failed_axes",
+            "step_index",
+            "primitive",
+            "task_id",
+        ):
+            if key in finding and finding.get(key) not in (None, "", [], {}):
+                row[key] = deepcopy(finding.get(key))
+    return row
 
 
 def _primitive_catalog_for_resource(
@@ -2979,6 +3550,52 @@ def _primitive_catalog_for_resource(
             if isinstance(row, dict)
         ]
     )
+
+
+def _primitive_resource_sequence_findings(
+    *,
+    outline_event: dict[str, Any],
+    primitive_steps: list[dict[str, Any]],
+    trace_metadata: dict[str, Any],
+    start_snapshot: dict[str, Any],
+    projected_snapshot: dict[str, Any],
+    grounding_context: dict[str, Any],
+    primitive_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    resource_type = str(
+        dict(start_snapshot.get("resource_core") or {}).get("resource_type")
+        or start_snapshot.get("resource_type")
+        or ""
+    ).strip()
+    profile = get_resource_profile(resource_type or "resource")
+    validator = getattr(profile, "primitive_sequence_validator", None)
+    if not callable(validator):
+        return []
+    try:
+        raw_findings = validator(
+            outline_event=deepcopy(outline_event),
+            primitive_steps=deepcopy(primitive_steps),
+            trace_metadata=deepcopy(trace_metadata),
+            start_snapshot=deepcopy(start_snapshot),
+            projected_snapshot=deepcopy(projected_snapshot),
+            grounding_context=deepcopy(grounding_context),
+            primitive_catalog=deepcopy(primitive_catalog),
+        )
+    except Exception as exc:
+        return [{
+            "outline_id": str(outline_event.get("outline_id") or "").strip(),
+            "resource_jid": str(outline_event.get("resource_jid") or "").strip(),
+            "part_name": str(outline_event.get("part_name") or "").strip() or None,
+            "constraint_owner": "resource",
+            "constraint_family": "primitive_sequence",
+            "constraint_code": "primitive_sequence_validator_error",
+            "reason": f"resource primitive sequence validator failed: {exc}",
+        }]
+    return [
+        dict(row)
+        for row in (raw_findings or [])
+        if isinstance(row, dict)
+    ]
 
 
 def _primitive_start_snapshot(
@@ -3054,23 +3671,6 @@ def _primitive_grounding_context(
     }
 
 
-def _primitive_projected_snapshot_matches_event(
-    projected_snapshot: dict[str, Any],
-    outline_event: dict[str, Any],
-) -> tuple[bool, str | None]:
-    expected_end = dict(outline_event.get("expected_end_state") or {})
-    if "held_part" not in expected_end:
-        return True, None
-    expected_held = expected_end.get("held_part")
-    actual_held = projected_snapshot.get("held_part")
-    if actual_held != expected_held:
-        return (
-            False,
-            f"projected held_part expected={expected_held!r} actual={actual_held!r}",
-        )
-    return True, None
-
-
 async def _handle_primitive_generation_phase(
     *,
     session_state: dict[str, Any],
@@ -3078,14 +3678,23 @@ async def _handle_primitive_generation_phase(
     prepared_bridge_request: dict[str, Any],
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
-    """Handle one turn of the primitive generation phase.
+    """Handle one batched turn of the primitive generation phase.
+
+    Expects ``parsed_response.primitive_events`` to cover every remaining
+    accepted outline event in order. Validates each event sequentially with
+    chained projected snapshots.
 
     Returns (decision, turn_entry).
     """
     cursor, active_event, accepted_prefix = _active_primitive_outline_event(session_state)
+    remaining_events = accepted_prefix[cursor:] if cursor < len(accepted_prefix) else []
     turn_entry: dict[str, Any] = {
         "primitive_generation_cursor": cursor,
         "active_outline_event": deepcopy(active_event),
+        "active_recovery_event": deepcopy(active_event),
+        "accepted_transition_prefix": deepcopy(accepted_prefix),
+        "des_event_sequence": deepcopy(accepted_prefix),
+        "remaining_outline_events": deepcopy(remaining_events),
     }
     if active_event is None:
         if accepted_prefix:
@@ -3102,59 +3711,35 @@ async def _handle_primitive_generation_phase(
         session_state["primitive_rejection_feedback"] = deepcopy(feedback)
         turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
         session_state["status"] = "paused_after_primitive_turn"
-        return "need_outline_revision", turn_entry
+        return "primitive_blocked", turn_entry
 
-    outline_id = str(active_event.get("outline_id") or "").strip()
-    resource_jid = str(active_event.get("resource_jid") or "").strip()
     response_decision = str(parsed_response.get("decision") or "").strip()
-    response_outline_id = str(parsed_response.get("outline_id") or "").strip()
-    response_resource_jid = str(parsed_response.get("resource_jid") or "").strip()
-    primitive_steps = [
+    response_events = [
         dict(row)
-        for row in (parsed_response.get("primitive_steps") or [])
+        for row in (parsed_response.get("primitive_events") or [])
         if isinstance(row, dict)
     ]
-    turn_entry["primitive_steps"] = deepcopy(primitive_steps)
+    turn_entry["primitive_events"] = deepcopy(response_events)
 
-    if response_decision == "need_outline_revision":
+    if response_decision in {"primitive_blocked", "need_outline_revision"}:
         feedback = [
             _primitive_feedback_row(
                 outline_event=active_event,
-                constraint_code="outline_revision_requested",
-                reason="LLM reported that the active outline event is not implementable",
+                constraint_code="primitive_blocked",
+                reason="LLM reported that one or more outline events remain blocked for primitive authoring",
             )
         ]
         session_state["primitive_rejection_feedback"] = deepcopy(feedback)
         turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
-        session_state["status"] = "paused_after_primitive_turn"
-        return "need_outline_revision", turn_entry
+        session_state["status"] = "paused_after_primitive_blocked"
+        return "primitive_blocked", turn_entry
 
-    schema_errors: list[str] = []
-    if response_outline_id != outline_id:
-        schema_errors.append(
-            f"outline_id must match active outline event {outline_id!r}"
-        )
-    if response_resource_jid != resource_jid:
-        schema_errors.append(
-            f"resource_jid must match active outline resource {resource_jid!r}"
-        )
-    if not primitive_steps:
-        schema_errors.append("primitive_steps must contain at least one primitive step")
-    if response_decision not in {"primitive_event_ready", "need_primitive_revision"}:
-        schema_errors.append(
-            "decision must be primitive_event_ready, need_primitive_revision, or need_outline_revision"
-        )
-    for index, step in enumerate(primitive_steps):
-        if "primitive" not in step or not str(step.get("primitive") or "").strip():
-            schema_errors.append(f"primitive_steps[{index}] must include primitive")
-        if "params" not in step or not isinstance(step.get("params"), dict):
-            schema_errors.append(f"primitive_steps[{index}] must include params object")
-    if schema_errors:
+    if response_decision not in {"primitive_steps_ready", "need_primitive_revision"}:
         feedback = [
             _primitive_feedback_row(
                 outline_event=active_event,
                 constraint_code="primitive_schema_violation",
-                reason="; ".join(schema_errors),
+                reason="decision must be primitive_steps_ready, need_primitive_revision, or primitive_blocked",
             )
         ]
         session_state["primitive_rejection_feedback"] = deepcopy(feedback)
@@ -3162,79 +3747,230 @@ async def _handle_primitive_generation_phase(
         session_state["status"] = "paused_after_primitive_turn"
         return "need_primitive_revision", turn_entry
 
-    primitive_catalog = _primitive_catalog_for_resource(
-        prepared_bridge_request,
-        resource_jid,
-    )
-    start_snapshot = _primitive_start_snapshot(
-        session_state=session_state,
-        prepared_bridge_request=prepared_bridge_request,
-        outline_event=active_event,
-    )
-    turn_entry["start_snapshot"] = deepcopy(start_snapshot)
-    valid, projected_snapshot, validation_error = validate_and_project_steps(
-        primitive_steps,
-        primitive_catalog,
-        start_snapshot,
-        grounding_context=_primitive_grounding_context(
+    if response_decision == "need_primitive_revision":
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="primitive_revision_requested",
+                reason=(
+                    "LLM marked the primitive batch as needing revision; return "
+                    "decision primitive_steps_ready only when the batch is ready "
+                    "for validation"
+                ),
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_primitive_revision", turn_entry
+
+    if len(response_events) != len(remaining_events):
+        feedback = [
+            _primitive_feedback_row(
+                outline_event=active_event,
+                constraint_code="primitive_schema_violation",
+                reason=(
+                    f"primitive_events must contain exactly {len(remaining_events)} entries "
+                    f"(one per remaining outline event); got {len(response_events)}"
+                ),
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_turn"
+        return "need_primitive_revision", turn_entry
+
+    per_event_results: list[dict[str, Any]] = []
+    accepted_rows_to_append: list[dict[str, Any]] = []
+    prev_projected_snapshot: dict[str, Any] | None = None
+    prev_resource_jid: str | None = None
+
+    for idx, (expected_event, response_event) in enumerate(
+        zip(remaining_events, response_events)
+    ):
+        outline_id = str(expected_event.get("outline_id") or "").strip()
+        resource_jid = str(expected_event.get("resource_jid") or "").strip()
+        response_outline_id = str(response_event.get("outline_id") or "").strip()
+        response_resource_jid = str(response_event.get("resource_jid") or "").strip()
+        primitive_steps = [
+            dict(row)
+            for row in (response_event.get("primitive_steps") or [])
+            if isinstance(row, dict)
+        ]
+
+        schema_errors: list[str] = []
+        if response_outline_id != outline_id:
+            schema_errors.append(
+                f"primitive_events[{idx}].outline_id must match {outline_id!r}"
+            )
+        if response_resource_jid != resource_jid:
+            schema_errors.append(
+                f"primitive_events[{idx}].resource_jid must match {resource_jid!r}"
+            )
+        if not primitive_steps:
+            schema_errors.append(
+                f"primitive_events[{idx}].primitive_steps must contain at least one primitive step"
+            )
+        for step_index, step in enumerate(primitive_steps):
+            if "primitive" not in step or not str(step.get("primitive") or "").strip():
+                schema_errors.append(
+                    f"primitive_events[{idx}].primitive_steps[{step_index}] must include primitive"
+                )
+            if "params" not in step or not isinstance(step.get("params"), dict):
+                schema_errors.append(
+                    f"primitive_events[{idx}].primitive_steps[{step_index}] must include params object"
+                )
+        if schema_errors:
+            feedback = [
+                _primitive_feedback_row(
+                    outline_event=expected_event,
+                    constraint_code="primitive_schema_violation",
+                    reason="; ".join(schema_errors),
+                )
+            ]
+            session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["per_event_results"] = per_event_results
+            session_state["status"] = "paused_after_primitive_turn"
+            return "need_primitive_revision", turn_entry
+
+        if prev_projected_snapshot is not None and prev_resource_jid == resource_jid:
+            start_snapshot = deepcopy(prev_projected_snapshot)
+            expected_start = dict(expected_event.get("expected_start_state") or {})
+            field_map = {
+                "resource_state": "current_state",
+                "resource_location": "current_location",
+                "held_part": "held_part",
+            }
+            for expected_key, snapshot_key in field_map.items():
+                if expected_key in expected_start:
+                    start_snapshot[snapshot_key] = deepcopy(expected_start.get(expected_key))
+            if "held_part" in expected_start:
+                start_snapshot["gripper_state"] = (
+                    "closed"
+                    if expected_start.get("held_part") not in (None, "")
+                    else "open"
+                )
+        else:
+            start_snapshot = _primitive_start_snapshot(
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+                outline_event=expected_event,
+            )
+
+        primitive_catalog = _primitive_catalog_for_resource(
+            prepared_bridge_request,
+            resource_jid,
+        )
+        grounding_context = _primitive_grounding_context(
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
-            outline_event=active_event,
-        ),
-    )
-    turn_entry["projected_snapshot"] = deepcopy(projected_snapshot)
-    if not valid:
-        feedback = [
-            _primitive_feedback_row(
-                outline_event=active_event,
-                constraint_code="primitive_validation_failed",
-                reason=validation_error or "primitive sequence failed validation",
-            )
-        ]
-        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
-        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
-        session_state["status"] = "paused_after_primitive_turn"
-        return "need_primitive_revision", turn_entry
+            outline_event=expected_event,
+        )
+        trace_result = validate_and_project_steps_with_trace(
+            primitive_steps,
+            primitive_catalog,
+            start_snapshot,
+            grounding_context=grounding_context,
+        )
+        valid = bool(trace_result.get("valid"))
+        projected_snapshot = dict(trace_result.get("projected_snapshot") or {})
+        validation_error = trace_result.get("validation_error")
+        per_event_results.append({
+            "outline_id": outline_id,
+            "resource_jid": resource_jid,
+            "start_snapshot": deepcopy(start_snapshot),
+            "projected_snapshot": deepcopy(projected_snapshot),
+            "valid": bool(valid),
+            "validation_error": validation_error,
+            "trace_step_count": len(trace_result.get("step_results") or []),
+        })
+        if not valid:
+            feedback = [
+                _primitive_feedback_row(
+                    outline_event=expected_event,
+                    constraint_code="primitive_validation_failed",
+                    reason=validation_error or "primitive sequence failed validation",
+                )
+            ]
+            session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["per_event_results"] = per_event_results
+            session_state["status"] = "paused_after_primitive_turn"
+            return "need_primitive_revision", turn_entry
 
-    compatible, compatibility_error = _primitive_projected_snapshot_matches_event(
-        projected_snapshot,
-        active_event,
-    )
-    if not compatible:
-        feedback = [
-            _primitive_feedback_row(
-                outline_event=active_event,
-                constraint_code="primitive_projection_mismatch",
-                reason=compatibility_error or "primitive projection does not match outline event",
-            )
-        ]
-        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
-        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
-        session_state["status"] = "paused_after_primitive_turn"
-        return "need_primitive_revision", turn_entry
+        resource_findings = _primitive_resource_sequence_findings(
+            outline_event=expected_event,
+            primitive_steps=primitive_steps,
+            trace_metadata=trace_result,
+            start_snapshot=start_snapshot,
+            projected_snapshot=projected_snapshot,
+            grounding_context=grounding_context,
+            primitive_catalog=primitive_catalog,
+        )
+        if resource_findings:
+            feedback = [
+                _primitive_feedback_row(
+                    outline_event=expected_event,
+                    constraint_code=str(row.get("constraint_code") or "primitive_sequence_invalid"),
+                    reason=str(row.get("reason") or "resource primitive sequence validation failed"),
+                    finding=row,
+                )
+                for row in resource_findings
+            ]
+            session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["per_event_results"] = per_event_results
+            per_event_results[-1]["resource_validation_findings"] = deepcopy(resource_findings)
+            session_state["status"] = "paused_after_primitive_turn"
+            return "need_primitive_revision", turn_entry
+
+        compatible, compatibility_error = _primitive_projected_snapshot_matches_event(
+            projected_snapshot,
+            expected_event,
+        )
+        if not compatible:
+            feedback = [
+                _primitive_feedback_row(
+                    outline_event=expected_event,
+                    constraint_code="primitive_projection_mismatch",
+                    reason=compatibility_error
+                    or "primitive projection does not match outline event",
+                )
+            ]
+            session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+            turn_entry["per_event_results"] = per_event_results
+            session_state["status"] = "paused_after_primitive_turn"
+            return "need_primitive_revision", turn_entry
+
+        accepted_rows_to_append.append({
+            "outline_id": outline_id,
+            "des_event_id": outline_id,
+            "resource_jid": resource_jid,
+            "part_name": str(expected_event.get("part_name") or "").strip() or None,
+            "event_name": str(
+                expected_event.get("event_name")
+                or expected_event.get("action_name")
+                or ""
+            ).strip(),
+            "action_name": str(expected_event.get("action_name") or "").strip(),
+            "description": str(expected_event.get("description") or "").strip(),
+            "primitive_steps": deepcopy(primitive_steps),
+            "projected_snapshot": deepcopy(projected_snapshot),
+        })
+        prev_projected_snapshot = projected_snapshot
+        prev_resource_jid = resource_jid
 
     accepted_program = list(session_state.get("accepted_primitive_program") or [])
-    accepted_row = {
-        "outline_id": outline_id,
-        "resource_jid": resource_jid,
-        "part_name": str(active_event.get("part_name") or "").strip() or None,
-        "action_name": str(active_event.get("action_name") or "").strip(),
-        "description": str(active_event.get("description") or "").strip(),
-        "primitive_steps": deepcopy(primitive_steps),
-        "projected_snapshot": deepcopy(projected_snapshot),
-    }
-    accepted_program.append(accepted_row)
+    accepted_program.extend(deepcopy(accepted_rows_to_append))
     session_state["accepted_primitive_program"] = deepcopy(accepted_program)
     session_state["primitive_rejection_feedback"] = []
-    session_state["primitive_generation_cursor"] = cursor + 1
-    turn_entry["accepted_primitive_macro"] = deepcopy(accepted_row)
-
-    if cursor + 1 >= len(accepted_prefix):
-        session_state["status"] = "paused_after_primitive_generation"
-        return "draft_ready", turn_entry
-
-    session_state["status"] = "paused_after_primitive_turn"
-    return "primitive_event_ready", turn_entry
+    session_state["primitive_generation_cursor"] = cursor + len(remaining_events)
+    turn_entry["per_event_results"] = per_event_results
+    turn_entry["accepted_primitive_macros"] = deepcopy(accepted_rows_to_append)
+    session_state["status"] = "paused_after_primitive_generation"
+    return "draft_ready", turn_entry
 
 
 async def _handle_finalize_phase(
@@ -3249,6 +3985,27 @@ async def _handle_finalize_phase(
     Returns (decision, turn_entry).
     """
     raise NotImplementedError("finalize phase handler not yet implemented")
+
+
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_generation import (
+    _projected_outline_validation_context,
+    _handle_outline_single_pass,
+    _handle_outline_incremental,
+    _handle_outline_incremental_validated,
+    _handle_outline_incremental_candidates_validated,
+    _handle_outline_phase,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+    _active_primitive_outline_event,
+    _primitive_feedback_row,
+    _primitive_catalog_for_resource,
+    _primitive_resource_sequence_findings,
+    _primitive_start_snapshot,
+    _primitive_grounding_context,
+    _primitive_projected_snapshot_matches_event,
+    build_primitive_generation_prompt_context,
+    _handle_primitive_generation_phase,
+)
 
 
 _PHASE_HANDLERS = {
@@ -3283,11 +4040,15 @@ def _build_phase_prompt(
 
     current_recovery_blockers: list[dict[str, Any]] | None = None
     if phase == "outline" and outline_mode == "incremental_candidates_validated":
+        session_state["pruned_actions"] = _active_v2_pruned_actions(
+            session_state,
+            prepared_bridge_request,
+        )
         current_recovery_blockers = _active_candidate_recovery_blockers(
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
         )
-        # Compute adaptive candidate bound |Σ_c ∩ Γ(q)| for this turn.
+        # Compute the configured candidate budget for this turn.
         candidate_bound = _compute_enabled_candidate_bound(
             session_state, prepared_bridge_request,
         )
@@ -3301,6 +4062,13 @@ def _build_phase_prompt(
         world_observation_surface=world_observation_surface,
         current_recovery_blockers=current_recovery_blockers,
     )
+    if phase == "primitive_generation":
+        prompt_input.update(
+            build_primitive_generation_prompt_context(
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+        )
     prompt_text = render_multi_turn_v2_phase_prompt(prompt_input)
     return prompt_input, prompt_text
 
@@ -3311,12 +4079,200 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         multi_turn_v2_phase_response_schema,
     )
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
-    return multi_turn_v2_phase_response_schema(phase, outline_mode=outline_mode)
+    candidate_bound = None
+    if phase.strip().lower() == "outline" and outline_mode == "incremental_candidates_validated":
+        candidate_bound = max(
+            1,
+            int(
+                session_state.get("des_candidate_bound")
+                or session_state.get("candidate_bound")
+                or _DEFAULT_CANDIDATE_BOUND
+            ),
+        )
+    return multi_turn_v2_phase_response_schema(
+        phase,
+        outline_mode=outline_mode,
+        candidate_bound=candidate_bound,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Response artifact shaping
 # ---------------------------------------------------------------------------
+
+_ARTIFACT_TASK_KEYS = (
+    "outline_id",
+    "candidate_outline_id",
+    "llm_outline_id",
+    "resource_jid",
+    "event_name",
+    "action_name",
+    "description",
+    "part_name",
+    "target_ref",
+    "action_target",
+    "expected_start_state",
+    "expected_end_state",
+)
+
+
+def _compact_artifact_task(task: Any) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in _ARTIFACT_TASK_KEYS:
+        value = task.get(key)
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = deepcopy(value)
+    return compact
+
+
+def _compact_artifact_finding(finding: Any) -> dict[str, Any]:
+    if not isinstance(finding, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in (
+        "constraint_code",
+        "constraint_family",
+        "constraint_owner",
+        "resource_jid",
+        "part_name",
+        "task_id",
+        "reason",
+    ):
+        value = finding.get(key)
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = deepcopy(value)
+    return compact
+
+
+def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
+    compact_rows: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if "constraint_code" in row and not (
+            row.get("validation_findings") or row.get("findings")
+        ):
+            compact_finding = _compact_artifact_finding(row)
+            if compact_finding:
+                compact_rows.append(compact_finding)
+            continue
+        compact_row: dict[str, Any] = {
+            "candidate_index": int(row.get("candidate_index") or 0),
+        }
+        task = row.get("task")
+        if not isinstance(task, dict):
+            task = row.get("surface_task")
+        compact_task = _compact_artifact_task(task)
+        if compact_task:
+            compact_row["task"] = compact_task
+        findings = [
+            compact_finding
+            for compact_finding in (
+                _compact_artifact_finding(item)
+                for item in (row.get("validation_findings") or [])
+            )
+            if compact_finding
+        ]
+        if findings:
+            compact_row["findings"] = findings
+            compact_row["constraint_codes"] = sorted({
+                str(item.get("constraint_code") or "")
+                for item in findings
+                if str(item.get("constraint_code") or "").strip()
+            })
+        compact_rows.append(compact_row)
+    return compact_rows
+
+
+def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        task = row.get("normalized_task")
+        if not isinstance(task, dict):
+            task = row.get("task")
+        if not isinstance(task, dict):
+            task = row.get("surface_task")
+        summary: dict[str, Any] = {
+            "candidate_index": int(row.get("candidate_index") or 0),
+            "valid": bool(row.get("valid")),
+        }
+        if row.get("pruned_match") is not None:
+            summary["pruned_match"] = bool(row.get("pruned_match"))
+        compact_task = _compact_artifact_task(task)
+        if compact_task:
+            summary["task"] = compact_task
+        findings = [
+            compact_finding
+            for compact_finding in (
+                _compact_artifact_finding(item)
+                for item in (row.get("validation_findings") or [])
+            )
+            if compact_finding
+        ]
+        if findings:
+            summary["findings"] = findings
+            summary["constraint_codes"] = sorted({
+                str(item.get("constraint_code") or "")
+                for item in findings
+                if str(item.get("constraint_code") or "").strip()
+            })
+        progress_detail = row.get("progress_detail")
+        if isinstance(progress_detail, dict) and progress_detail:
+            summary["progress_detail"] = deepcopy(progress_detail)
+        summaries.append(summary)
+    return summaries
+
+
+def _compact_artifact_transition_validation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in ("status", "selected_candidate_index"):
+        if value.get(key) not in (None, "", [], {}):
+            compact[key] = deepcopy(value.get(key))
+    findings = value.get("findings")
+    if isinstance(findings, list) and findings:
+        compact_findings = _compact_artifact_feedback_rows(findings)
+        if compact_findings:
+            compact["findings"] = compact_findings
+    return compact
+
+
+def _compact_final_output_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "engine",
+        "decision",
+        "final_output_stage",
+        "status",
+        "current_phase",
+        "accepted_trace_length",
+        "primitive_program_complete",
+    ):
+        if payload.get(key) not in (None, "", [], {}):
+            compact[key] = deepcopy(payload.get(key))
+    outline_tasks = payload.get("outline_tasks")
+    if not isinstance(outline_tasks, list) or not outline_tasks:
+        outline_tasks = payload.get("accepted_transition_prefix")
+    if isinstance(outline_tasks, list) and outline_tasks:
+        compact["outline_tasks"] = [
+            _compact_artifact_task(row)
+            for row in outline_tasks
+            if isinstance(row, dict)
+        ]
+    accepted_program = payload.get("accepted_primitive_program")
+    if isinstance(accepted_program, list) and accepted_program:
+        compact["accepted_primitive_program"] = deepcopy(accepted_program)
+    executable_trace = payload.get("executable_recovery_trace")
+    if isinstance(executable_trace, list) and executable_trace:
+        compact["executable_recovery_trace"] = deepcopy(executable_trace)
+    return compact
 
 
 def _normalized_response_artifact_payload(
@@ -3327,14 +4283,37 @@ def _normalized_response_artifact_payload(
     turn_entry: dict[str, Any],
 ) -> dict[str, Any]:
     """Return the response payload to persist in per-turn artifacts."""
-    def _sanitize_surface_task(task: Any) -> dict[str, Any]:
-        sanitized = deepcopy(dict(task or {}))
-        sanitized.pop("action_type", None)
-        return sanitized
-
     normalized = deepcopy(parsed_response if isinstance(parsed_response, dict) else {})
+    if str(turn_entry.get("decision") or "").strip():
+        normalized.setdefault("decision", str(turn_entry.get("decision") or "").strip())
     if str(phase or "").strip().lower() != "outline":
         return normalized
+
+    accepted_prefix = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    if accepted_prefix:
+        normalized.setdefault("accepted_transition_prefix", deepcopy(accepted_prefix))
+        normalized.setdefault("des_event_sequence", deepcopy(accepted_prefix))
+        normalized.setdefault("transition_trace", deepcopy(accepted_prefix))
+    next_transition = turn_entry.get("next_transition")
+    if not isinstance(next_transition, dict):
+        next_transition = turn_entry.get("next_task")
+    if isinstance(next_transition, dict):
+        normalized.setdefault("next_transition", deepcopy(next_transition))
+        normalized.setdefault("next_recovery_event", deepcopy(next_transition))
+    if isinstance(turn_entry.get("transition_suffix"), list):
+        normalized.setdefault(
+            "transition_suffix",
+            deepcopy(turn_entry.get("transition_suffix") or []),
+        )
+    if isinstance(turn_entry.get("transition_validation"), dict):
+        normalized.setdefault(
+            "transition_validation",
+            deepcopy(turn_entry.get("transition_validation") or {}),
+        )
 
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     if outline_mode != "incremental_candidates_validated":
@@ -3344,22 +4323,151 @@ def _normalized_response_artifact_payload(
     thought = str(parsed_response.get("thought") or "").strip()
     if thought:
         payload["thought"] = thought
-    payload["candidate_tasks"] = [
-        _sanitize_surface_task(row)
-        for row in (turn_entry.get("candidate_tasks") or [])
+    if str(turn_entry.get("decision") or "").strip():
+        payload["decision"] = str(turn_entry.get("decision") or "").strip()
+    payload["candidate_events"] = [
+        _compact_artifact_task(row)
+        for row in (
+            turn_entry.get("candidate_events")
+            or turn_entry.get("candidate_transitions")
+            or turn_entry.get("candidate_tasks")
+            or []
+        )
         if isinstance(row, dict)
     ]
+    if isinstance(turn_entry.get("candidate_evaluations"), list):
+        payload["candidate_evaluation_summary"] = (
+            _compact_artifact_candidate_evaluations(
+                turn_entry.get("candidate_evaluations") or []
+            )
+        )
     if "selected_candidate_index" in turn_entry:
-        payload["selected_candidate_index"] = int(turn_entry.get("selected_candidate_index") or 0)
+        payload["selected_candidate_index"] = int(
+            turn_entry.get("selected_candidate_index") or 0
+        )
     if isinstance(turn_entry.get("selected_next_task"), dict):
-        payload["selected_next_task"] = _sanitize_surface_task(
-            turn_entry.get("selected_next_task")
+        payload["selected_transition"] = _compact_artifact_task(
+            turn_entry.get("selected_transition") or turn_entry.get("selected_next_task")
+        )
+    if isinstance(turn_entry.get("selected_candidate_task"), dict):
+        payload["selected_candidate_task"] = _compact_artifact_task(
+            turn_entry.get("selected_candidate_task")
         )
     if isinstance(turn_entry.get("candidate_rejection_feedback"), list):
-        payload["candidate_rejection_feedback"] = deepcopy(
+        payload["candidate_rejection_feedback"] = _compact_artifact_feedback_rows(
             turn_entry.get("candidate_rejection_feedback") or []
         )
+    if accepted_prefix:
+        payload["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+    if isinstance(turn_entry.get("transition_validation"), dict):
+        payload["transition_validation"] = _compact_artifact_transition_validation(
+            turn_entry.get("transition_validation") or {}
+        )
     return payload
+
+
+def _build_final_output_payload(
+    session_state: dict[str, Any],
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    """Build the standalone final-output response shown in debug artifacts."""
+    accepted_prefix = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    accepted_program = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_primitive_program") or [])
+        if isinstance(row, dict)
+    ]
+    executable_trace: list[dict[str, Any]] = []
+    primitives_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): deepcopy(row)
+        for row in accepted_program
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    for event in accepted_prefix:
+        outline_id = str(event.get("outline_id") or "").strip()
+        primitive_row = dict(primitives_by_outline_id.get(outline_id) or {})
+        executable_trace.append({
+            "outline_id": outline_id,
+            "des_event_id": outline_id,
+            "event_name": str(
+                event.get("event_name")
+                or event.get("action_name")
+                or primitive_row.get("event_name")
+                or primitive_row.get("action_name")
+                or ""
+            ).strip(),
+            "resource_jid": str(event.get("resource_jid") or "").strip(),
+            "part_name": str(event.get("part_name") or "").strip() or None,
+            "target_ref": str(event.get("target_ref") or "").strip() or None,
+            "description": str(event.get("description") or "").strip(),
+            "expected_start_state": deepcopy(event.get("expected_start_state") or {}),
+            "expected_end_state": deepcopy(event.get("expected_end_state") or {}),
+            "primitive_steps": deepcopy(primitive_row.get("primitive_steps") or []),
+        })
+
+    return {
+        "engine": "multi_turn_v2",
+        "decision": "final_output_ready",
+        "final_output_stage": str(stage or "").strip() or "unknown",
+        "status": str(session_state.get("status") or "").strip(),
+        "current_phase": str(session_state.get("current_phase") or "").strip(),
+        "accepted_trace_length": len(accepted_prefix),
+        "accepted_transition_prefix": deepcopy(accepted_prefix),
+        "des_event_sequence": deepcopy(accepted_prefix),
+        "outline_tasks": deepcopy(accepted_prefix),
+        "accepted_primitive_program": deepcopy(accepted_program),
+        "executable_recovery_trace": executable_trace,
+        "primitive_program_complete": bool(accepted_prefix)
+        and len(accepted_program) >= len(accepted_prefix),
+    }
+
+
+def _append_final_output_turn(
+    *,
+    planner: Any,
+    prepared_bridge_request: dict[str, Any],
+    session_state: dict[str, Any],
+    stage: str,
+) -> dict[str, Any] | None:
+    """Append and persist a synthetic final-output turn without another LLM call."""
+    if any(
+        str(turn.get("phase") or "").strip().lower() == "final_output"
+        and str(turn.get("final_output_stage") or "").strip() == stage
+        for turn in (session_state.get("turns") or [])
+        if isinstance(turn, dict)
+    ):
+        return None
+
+    final_output = _build_final_output_payload(session_state, stage=stage)
+    final_turn_index = int(session_state.get("turn_index") or 0) + 1
+    turn_entry: dict[str, Any] = {
+        "turn_index": final_turn_index,
+        "phase": "final_output",
+        "decision": "final_output_ready",
+        "final_output_stage": stage,
+        "prompt_text": "",
+        "llm_raw_response": {},
+        "raw_response": _compact_final_output_artifact_payload(final_output),
+        "phase_result": deepcopy(final_output),
+    }
+    session_state["turn_index"] = final_turn_index
+    session_state["proposal"] = deepcopy(final_output)
+    session_state["final_output"] = deepcopy(final_output)
+    session_state.setdefault("turns", []).append(deepcopy(turn_entry))
+
+    bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+    bridge_debug["multi_turn_session"] = deepcopy(session_state)
+    bridge_debug["status"] = str(session_state.get("status") or "")
+    prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+    if hasattr(planner, "_set_last_bridge_debug"):
+        planner._set_last_bridge_debug(bridge_debug)
+    _write_per_turn_artifact(prepared_bridge_request, session_state, turn_entry)
+    return final_output
 
 
 # ---------------------------------------------------------------------------
@@ -3482,13 +4590,13 @@ async def execute_multi_turn_bridge(
         turn_entry["phase"] = current_phase
         turn_entry["prompt_text"] = prompt_text
         turn_entry["llm_raw_response"] = deepcopy(parsed_response)
+        turn_entry["decision"] = decision
         turn_entry["raw_response"] = _normalized_response_artifact_payload(
             phase=current_phase,
             session_state=session_state,
             parsed_response=parsed_response,
             turn_entry=turn_entry,
         )
-        turn_entry["decision"] = decision
         session_state.setdefault("turns", []).append(deepcopy(turn_entry))
 
         # 5. Transition
@@ -3512,9 +4620,26 @@ async def execute_multi_turn_bridge(
             planner._set_last_bridge_debug(bridge_debug)
         _write_per_turn_artifact(prepared_bridge_request, session_state, turn_entry)
 
+        if current_phase == "outline" and decision == "outline_ready":
+            _append_final_output_turn(
+                planner=planner,
+                prepared_bridge_request=prepared_bridge_request,
+                session_state=session_state,
+                stage="outline_ready",
+            )
+        elif current_phase == "primitive_generation" and decision == "draft_ready":
+            _append_final_output_turn(
+                planner=planner,
+                prepared_bridge_request=prepared_bridge_request,
+                session_state=session_state,
+                stage="primitive_program_ready",
+            )
+
         if session_state.get("status") in (
             "completed", "paused_after_outline_turn",
             "paused_after_primitive_turn", "paused_after_primitive_generation",
+            "paused_after_primitive_blocked",
+            "paused_after_primitive_stuck",
             "des_cycle_detected", "des_deadlock",
         ):
             break
@@ -3528,6 +4653,8 @@ async def execute_multi_turn_bridge(
         "paused_after_outline_turn",
         "paused_after_primitive_turn",
         "paused_after_primitive_generation",
+        "paused_after_primitive_blocked",
+        "paused_after_primitive_stuck",
         "des_cycle_detected",
         "des_deadlock",
         "error",

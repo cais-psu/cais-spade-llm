@@ -34,7 +34,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.v3.observati
     primitive_supports_part_grounding,
     semantic_observation_candidates_from_grounding_candidates,
 )
-from cais_spade_llm.prompts import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.bridge_react import (
     _bridge_generalize_location_summary,
 )
 from cais_spade_llm.resources.robot.place_geometry_resolution import (

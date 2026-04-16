@@ -12,6 +12,11 @@ import re
 from collections import deque
 from copy import deepcopy
 from typing import Any
+from urllib.parse import parse_qsl
+
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_contract_semantics import (
+    event_location_ref,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -92,6 +97,187 @@ def _delta(
 # ---------------------------------------------------------------------------
 
 
+def _norm_token(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _resource_short_name(resource_jid: Any) -> str:
+    token = _norm_token(resource_jid)
+    if "@" in token:
+        token = token.split("@", 1)[0]
+    return token
+
+
+def _parse_ap_full(full: Any) -> dict[str, str]:
+    """Parse AP strings like ap_event/assembly/mcp/ur5e/place_approach/destination=x."""
+    token = str(full or "").strip()
+    segments = [segment.strip() for segment in token.split("/") if segment.strip()]
+    if len(segments) < 5:
+        return {}
+    parsed = {
+        "prefix": segments[0],
+        "process": segments[1] if len(segments) > 1 else "",
+        "product": segments[2] if len(segments) > 2 else "",
+        "resource": segments[3] if len(segments) > 3 else "",
+        "function_name": segments[4] if len(segments) > 4 else "",
+        "context": segments[5] if len(segments) > 5 else "",
+    }
+    if parsed["prefix"] not in {"ap", "ap_event"}:
+        return {}
+    return parsed
+
+
+def _descriptor_value(desc: dict[str, Any], *names: str) -> str:
+    for name in names:
+        value = str(desc.get(name) or "").strip()
+        if value:
+            return value
+    selector = dict(desc.get("selector") or {})
+    for name in names:
+        value = str(selector.get(name) or "").strip()
+        if value:
+            return value
+    parsed = _parse_ap_full(desc.get("full"))
+    for name in names:
+        value = str(parsed.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _event_context_values(event: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in (
+        "location_ref",
+        "target_ref",
+        "target_location",
+        "destination_location",
+        "destination",
+        "location",
+        "context",
+    ):
+        value = event.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list, tuple, set)):
+            values.add(str(value).strip())
+    action_target = event.get("action_target")
+    if isinstance(action_target, dict):
+        for key in ("target_location", "destination_location", "destination", "location"):
+            value = action_target.get(key)
+            if value not in (None, ""):
+                values.add(str(value).strip())
+    params = event.get("params")
+    if isinstance(params, dict):
+        for key in ("target_location", "destination_location", "destination", "location"):
+            value = params.get(key)
+            if value not in (None, ""):
+                values.add(str(value).strip())
+    return {value for value in values if value}
+
+
+def _context_matches(desc_context: str, event: dict[str, Any]) -> bool:
+    token = str(desc_context or "").strip()
+    if not token or _norm_token(token) == "any":
+        return True
+
+    event_values = _event_context_values(event)
+    normalized_values = {_norm_token(value) for value in event_values}
+    try:
+        pairs = parse_qsl(token, keep_blank_values=True, strict_parsing=False)
+    except Exception:
+        pairs = []
+    if not pairs and "=" in token:
+        key, value = token.split("=", 1)
+        pairs = [(key, value)]
+    if not pairs:
+        return _norm_token(token) in normalized_values
+
+    for key, value in pairs:
+        normalized_value = _norm_token(value)
+        if not normalized_value or normalized_value == "any":
+            continue
+        direct_value = event.get(str(key).strip())
+        if direct_value not in (None, "") and _norm_token(direct_value) == normalized_value:
+            continue
+        if normalized_value in normalized_values:
+            continue
+        return False
+    return True
+
+
+def _descriptor_selector(desc: dict[str, Any]) -> dict[str, Any]:
+    selector = dict(desc.get("selector") or {})
+    if selector:
+        return selector
+
+    parsed = _parse_ap_full(desc.get("full"))
+    if not parsed or parsed.get("prefix") != "ap_event":
+        return {}
+
+    context = str(parsed.get("context") or "").strip()
+    destination = ""
+    if context:
+        try:
+            destination = dict(parse_qsl(context, keep_blank_values=True)).get("destination", "")
+        except Exception:
+            destination = ""
+        if not destination and "=" in context:
+            key, value = context.split("=", 1)
+            if key.strip() == "destination":
+                destination = value.strip()
+    part_name = str(parsed.get("product") or "").strip()
+    return {
+        "mode": "move_part_to_destination" if part_name and part_name.lower() != "any" else "resource_move_to_destination",
+        "part": part_name or "any",
+        "resource": str(parsed.get("resource") or "any").strip() or "any",
+        "destination": destination,
+    }
+
+
+def _semantic_selector_matches(selector: dict[str, Any], event: dict[str, Any]) -> bool:
+    if not selector:
+        return False
+
+    witness = dict(event.get("semantic_witness") or {})
+    mode = _norm_token(selector.get("mode"))
+    resource_selector = _norm_token(selector.get("resource") or "any")
+    part_selector = _norm_token(selector.get("part") or "any")
+    destination = str(selector.get("destination") or "").strip()
+
+    resource_jid = str(event.get("resource_jid") or "").strip()
+    resource_short = _resource_short_name(resource_jid)
+    if (
+        resource_selector not in {"", "any", "robot"}
+        and resource_selector not in {_norm_token(resource_jid), resource_short}
+    ):
+        return False
+
+    part_name = str(event.get("part_name") or "").strip()
+    if part_selector not in {"", "any"} and part_selector != _norm_token(part_name):
+        return False
+
+    after_resource = dict(witness.get("resource_after") or {})
+    after_part = dict(witness.get("part_after") or {})
+    destination_tokens = {
+        token
+        for token in (
+            event_location_ref(event),
+            str(witness.get("location_ref") or "").strip(),
+            str(after_resource.get("current_location") or after_resource.get("location") or "").strip(),
+            str(after_part.get("current_location") or after_part.get("location") or "").strip(),
+        )
+        if token
+    }
+    if destination and destination not in destination_tokens:
+        return False
+
+    category = _norm_token(witness.get("category"))
+    if mode == "move_part_to_destination":
+        return bool(part_name and category in {"acquisition", "release", "transfer", "carry"})
+    if mode == "resource_move_to_destination":
+        return bool(destination_tokens and category in {"resource_only_transition", "carry", "release", "transfer", "acquisition"})
+    return False
+
+
 def _map_event_to_aps(
     event: dict[str, Any],
     ap_descriptors: list[dict[str, Any]],
@@ -116,9 +302,14 @@ def _map_event_to_aps(
     """
     matched: set[str] = set()
     resource_jid = str(event.get("resource_jid") or "").strip()
-    action_type = str(event.get("action_type") or "").strip()
+    resource_short = _resource_short_name(resource_jid)
     part_name = str(event.get("part_name") or "").strip()
     action_name = str(event.get("name") or "").strip()
+    function_candidates = {
+        _norm_token(event.get("function_name")),
+        _norm_token(action_name),
+    }
+    function_candidates.discard("")
 
     for desc in ap_descriptors:
         desc = dict(desc or {})
@@ -126,28 +317,39 @@ def _map_event_to_aps(
         if not ap_label:
             continue
 
+        selector = _descriptor_selector(desc)
+        if _semantic_selector_matches(selector, event):
+            matched.add(ap_label)
+            continue
+
         # Resource match
-        desc_resource = str(desc.get("resource") or "any").strip()
-        if desc_resource != "any" and desc_resource != resource_jid:
+        desc_resource = _descriptor_value(desc, "resource") or "any"
+        desc_resource_norm = _norm_token(desc_resource)
+        if (
+            desc_resource_norm not in {"any", "robot"}
+            and desc_resource_norm != _norm_token(resource_jid)
+            and desc_resource_norm != resource_short
+        ):
             continue
 
         # Function/action match
-        desc_function = str(desc.get("function_name") or desc.get("function") or "any").strip()
-        if desc_function != "any":
-            if desc_function != action_type and desc_function != action_name:
-                continue
+        desc_function = (
+            _descriptor_value(desc, "function_name", "function", "event", "symbol")
+            or "any"
+        )
+        desc_function_norm = _norm_token(desc_function)
+        if desc_function_norm != "any" and desc_function_norm not in function_candidates:
+            continue
 
         # Product/part match
-        desc_product = str(desc.get("product") or desc.get("part") or "any").strip()
-        if desc_product != "any" and desc_product != part_name:
+        desc_product = _descriptor_value(desc, "product", "part") or "any"
+        if _norm_token(desc_product) != "any" and _norm_token(desc_product) != _norm_token(part_name):
             continue
 
         # Context match (e.g., target_ref must match)
-        desc_context = str(desc.get("context") or "any").strip()
-        if desc_context != "any":
-            target_ref = str(event.get("target_ref") or "").strip()
-            if desc_context != target_ref:
-                continue
+        desc_context = _descriptor_value(desc, "context", "destination") or "any"
+        if not _context_matches(desc_context, event):
+            continue
 
         matched.add(ap_label)
 
@@ -171,6 +373,7 @@ def compose_and_solve(
     plant: dict[str, Any],
     safety_dfas: dict[str, dict[str, Any]],
     ap_descriptors: list[dict[str, Any]] | None = None,
+    max_states: int | None = None,
 ) -> dict[str, Any]:
     """Compose plant with safety DFAs and find shortest recovery trace.
 
@@ -217,7 +420,9 @@ def compose_and_solve(
     blocked_transitions: list[dict[str, Any]] = []
     found_goal: ProductState | None = None
 
-    while queue and len(visited) < _MAX_PRODUCT_STATES:
+    state_cap = int(max_states or _MAX_PRODUCT_STATES)
+
+    while queue and len(visited) < state_cap:
         ps = queue.popleft()
         if ps in visited:
             continue
@@ -290,6 +495,22 @@ def compose_and_solve(
         }
 
     # Diagnose failure
+    if len(visited) >= state_cap and found_goal is None:
+        diagnostic = (
+            f"Reached the explored-state cap ({state_cap}) before finding any accepting "
+            "product state. The recovery search budget may be too small for this plant."
+        )
+        return {
+            "status": "unsolvable",
+            "trace": [],
+            "action_sequence": [],
+            "blocked_transitions": blocked_transitions,
+            "product_states_explored": len(visited),
+            "reachable_plant_states": sorted({ps[0] for ps in visited}),
+            "unreachable_marked": sorted(plant_marked - {ps[0] for ps in visited}),
+            "diagnostic": diagnostic,
+        }
+
     if blocked_transitions:
         diagnostic = (
             f"Safety rules blocked {len(blocked_transitions)} transition(s). "
@@ -364,7 +585,6 @@ def _trace_to_action_sequence(
         action: dict[str, Any] = {
             "event_name": event_name,
             "resource_jid": str(edict.get("resource_jid") or "").strip(),
-            "action_type": str(edict.get("action_type") or "").strip(),
             "description": str(
                 edict.get("description") or edict.get("name") or ""
             ).strip(),
@@ -372,12 +592,18 @@ def _trace_to_action_sequence(
         part_name = str(edict.get("part_name") or "").strip()
         if part_name:
             action["part_name"] = part_name
-        target_ref = str(edict.get("target_ref") or "").strip()
-        if target_ref:
-            action["target_ref"] = target_ref
+        location_ref = event_location_ref(edict)
+        if location_ref:
+            action["location_ref"] = location_ref
         pose = edict.get("pose")
         if isinstance(pose, dict):
             action["pose"] = deepcopy(pose)
+        projected_effect = edict.get("projected_effect")
+        if isinstance(projected_effect, dict):
+            action["projected_effect"] = deepcopy(projected_effect)
+        semantic_witness = edict.get("semantic_witness")
+        if isinstance(semantic_witness, dict):
+            action["semantic_witness"] = deepcopy(semantic_witness)
         actions.append(action)
     return actions
 

@@ -279,6 +279,26 @@ def resolve_param_refs(
     return deepcopy(value)
 
 
+def _collect_context_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        if set(value.keys()) == {"context_ref"}:
+            ref = str(value.get("context_ref") or "").strip()
+            return [ref] if ref else []
+        for item in value.values():
+            refs.extend(_collect_context_refs(item))
+        return refs
+    if isinstance(value, list):
+        for item in value:
+            refs.extend(_collect_context_refs(item))
+        return refs
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("/") or text.startswith("step_outputs."):
+            return [text]
+    return refs
+
+
 def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
     """Build the execution primitive catalog from the live bridge surface."""
     if resource_agent is None:
@@ -380,6 +400,7 @@ def _robot_prompt_composites(
         "required_params": grasp_required,
         "preconditions": {"held_part": {"equals": None}},
         "effects": {
+            "current_state": {"set": "picked"},
             "gripper_state": {"set": "closed"},
             "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
         },
@@ -399,6 +420,10 @@ def _robot_prompt_composites(
 
     release_params, release_required = _composite_parameter_schema(
         properties={
+            "part_name": {
+                "type": "string",
+                "description": "Canonical bridge part name for release trace validation.",
+            },
             "model_name": {
                 "type": "string",
                 "description": "Optional controller model name to detach.",
@@ -423,6 +448,7 @@ def _robot_prompt_composites(
         "required_params": release_required,
         "preconditions": {"held_part": {"exists": True}},
         "effects": {
+            "current_state": {"set": "idle"},
             "gripper_state": {"set": "open"},
             "held_part": {"set": None},
         },
@@ -448,7 +474,14 @@ def _robot_prompt_composites(
 
 def _prompt_hidden_primitive_names(resource_type: str) -> set[str]:
     if resource_type == "robot":
-        return {"open_gripper", "close_gripper", "attach_part", "detach_part"}
+        return {
+            "open_gripper",
+            "close_gripper",
+            "attach_part",
+            "detach_part",
+            "move_pose",
+            "get_current_pose",
+        }
     return set()
 
 
@@ -776,18 +809,25 @@ def _precondition_failed_message(field: str, condition: dict[str, Any], actual: 
     return None
 
 
-def validate_and_project_steps(
+def validate_and_project_steps_with_trace(
     steps: list[dict[str, Any]] | None,
     primitive_catalog: list[dict[str, Any]] | None,
     snapshot: dict[str, Any],
     *,
     grounding_context: dict[str, Any] | None = None,
-) -> tuple[bool, dict[str, Any], str | None]:
-    """Validate a primitive sequence and project its semantic effects forward."""
+) -> dict[str, Any]:
+    """Validate a primitive sequence and return projection trace metadata."""
     try:
         normalized_steps = expand_composite_steps(steps or [], primitive_catalog or [])
     except Exception as exc:
-        return False, deepcopy(snapshot or {}), str(exc)
+        return {
+            "valid": False,
+            "projected_snapshot": deepcopy(snapshot or {}),
+            "validation_error": str(exc),
+            "normalized_steps": [],
+            "step_results": [],
+            "step_outputs": {},
+        }
 
     catalog_by_name = {
         str(entry.get("name") or "").strip(): entry
@@ -801,12 +841,30 @@ def validate_and_project_steps(
         or "resource"
     ).strip() or "resource"
     step_outputs: dict[str, Any] = {}
+    step_results: list[dict[str, Any]] = []
 
     for step_index, step in enumerate(normalized_steps):
         primitive = str(step.get("primitive") or "").strip()
         primitive_meta = dict(catalog_by_name.get(primitive) or {})
+        step_result: dict[str, Any] = {
+            "step_index": step_index,
+            "primitive": primitive,
+            "params": deepcopy(step.get("params") or {}),
+            "context_refs": _collect_context_refs(step.get("params") or {}),
+            "start_snapshot": deepcopy(projected),
+        }
         if not primitive_meta:
-            return False, projected, f"unknown primitive '{primitive}' at step {step_index}"
+            validation_error = f"unknown primitive '{primitive}' at step {step_index}"
+            step_result["validation_error"] = validation_error
+            step_results.append(step_result)
+            return {
+                "valid": False,
+                "projected_snapshot": projected,
+                "validation_error": validation_error,
+                "normalized_steps": deepcopy(normalized_steps),
+                "step_results": step_results,
+                "step_outputs": deepcopy(step_outputs),
+            }
 
         try:
             resolved_params = resolve_param_refs(
@@ -815,31 +873,62 @@ def validate_and_project_steps(
                 step_outputs=step_outputs,
             )
         except Exception as exc:
-            return False, projected, f"param resolution failed at step {step_index} ({primitive}): {exc}"
+            validation_error = f"param resolution failed at step {step_index} ({primitive}): {exc}"
+            step_result["validation_error"] = validation_error
+            step_results.append(step_result)
+            return {
+                "valid": False,
+                "projected_snapshot": projected,
+                "validation_error": validation_error,
+                "normalized_steps": deepcopy(normalized_steps),
+                "step_results": step_results,
+                "step_outputs": deepcopy(step_outputs),
+            }
+        step_result["resolved_params"] = deepcopy(resolved_params)
 
         for required_param in primitive_meta.get("required_params") or []:
             param_name = str(required_param or "").strip()
             if not param_name:
                 continue
             if param_name not in resolved_params or resolved_params.get(param_name) is None:
-                return (
-                    False,
-                    projected,
-                    f"missing required param '{param_name}' at step {step_index} ({primitive})",
+                validation_error = (
+                    f"missing required param '{param_name}' at step {step_index} ({primitive})"
                 )
+                step_result["validation_error"] = validation_error
+                step_results.append(step_result)
+                return {
+                    "valid": False,
+                    "projected_snapshot": projected,
+                    "validation_error": validation_error,
+                    "normalized_steps": deepcopy(normalized_steps),
+                    "step_results": step_results,
+                    "step_outputs": deepcopy(step_outputs),
+                }
 
         preconditions = dict(primitive_meta.get("preconditions") or {})
         for field, condition in preconditions.items():
             actual = resource_snapshot_field_value(projected, str(field))
             failed = _precondition_failed_message(str(field), dict(condition or {}), actual)
             if failed:
-                return False, projected, f"{failed} at step {step_index} ({primitive})"
+                validation_error = f"{failed} at step {step_index} ({primitive})"
+                step_result["validation_error"] = validation_error
+                step_results.append(step_result)
+                return {
+                    "valid": False,
+                    "projected_snapshot": projected,
+                    "validation_error": validation_error,
+                    "normalized_steps": deepcopy(normalized_steps),
+                    "step_results": step_results,
+                    "step_outputs": deepcopy(step_outputs),
+                }
 
         preview_input = {**step, "params": deepcopy(resolved_params)}
         projected = apply_effects_to_snapshot(preview_input, primitive_meta, projected)
+        step_result["projected_snapshot"] = deepcopy(projected)
 
         store_as = str(step.get("store_as") or "").strip()
         if store_as:
+            step_result["store_as"] = store_as
             preview, preview_error = preview_step_output(
                 primitive=primitive,
                 params=resolved_params,
@@ -850,10 +939,54 @@ def validate_and_project_steps(
                 },
                 resource_type=runtime_resource_type,
             )
-            if preview_error is None:
-                step_outputs[store_as] = preview
+            step_result["preview_error"] = preview_error
+            if preview_error is not None:
+                validation_error = (
+                    f"{preview_error} at step {step_index} ({primitive})"
+                )
+                step_result["validation_error"] = validation_error
+                step_results.append(step_result)
+                return {
+                    "valid": False,
+                    "projected_snapshot": projected,
+                    "validation_error": validation_error,
+                    "normalized_steps": deepcopy(normalized_steps),
+                    "step_results": step_results,
+                    "step_outputs": deepcopy(step_outputs),
+                }
+            step_outputs[store_as] = preview
+            step_result["preview_output"] = deepcopy(preview)
+        step_results.append(step_result)
 
-    return True, projected, None
+    return {
+        "valid": True,
+        "projected_snapshot": projected,
+        "validation_error": None,
+        "normalized_steps": deepcopy(normalized_steps),
+        "step_results": step_results,
+        "step_outputs": deepcopy(step_outputs),
+    }
+
+
+def validate_and_project_steps(
+    steps: list[dict[str, Any]] | None,
+    primitive_catalog: list[dict[str, Any]] | None,
+    snapshot: dict[str, Any],
+    *,
+    grounding_context: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any], str | None]:
+    """Validate a primitive sequence and project its semantic effects forward."""
+    result = validate_and_project_steps_with_trace(
+        steps,
+        primitive_catalog,
+        snapshot,
+        grounding_context=grounding_context,
+    )
+    return (
+        bool(result.get("valid")),
+        deepcopy(dict(result.get("projected_snapshot") or {})),
+        result.get("validation_error"),
+    )
 
 
 def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, str | None]:
@@ -928,4 +1061,5 @@ __all__ = [
     "snapshot_matches_expected",
     "sync_agent_from_bridge_snapshot",
     "validate_and_project_steps",
+    "validate_and_project_steps_with_trace",
 ]

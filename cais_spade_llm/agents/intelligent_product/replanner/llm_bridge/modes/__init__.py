@@ -22,6 +22,10 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.hybrid
     build_hybrid_session_seed as _build_hybrid_session_seed,
     execute_hybrid_des_bridge as _execute_hybrid_des_bridge,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.procedural_des_v1 import (
+    build_procedural_session_seed as _build_procedural_session_seed,
+    execute_procedural_des_bridge as _execute_procedural_des_bridge,
+)
 
 
 def _resolve_multi_turn_engine(
@@ -72,6 +76,12 @@ def build_hybrid_session_seed(
     return _build_hybrid_session_seed(deepcopy(prepared_bridge_request or {}))
 
 
+def build_procedural_session_seed(
+    prepared_bridge_request: dict[str, Any],
+) -> dict[str, Any]:
+    return _build_procedural_session_seed(deepcopy(prepared_bridge_request or {}))
+
+
 async def execute_hybrid_des_bridge(
     planner: Any,
     prepared_bridge_request: dict[str, Any],
@@ -84,12 +94,27 @@ async def execute_hybrid_des_bridge(
     )
 
 
+async def execute_procedural_des_bridge(
+    planner: Any,
+    prepared_bridge_request: dict[str, Any],
+    *,
+    session_state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    return await _execute_procedural_des_bridge(
+        planner,
+        prepared_bridge_request or {},
+        session_state=session_state,
+    )
+
+
 __all__ = [
     "build_hybrid_session_seed",
     "build_multi_turn_session_seed",
+    "build_procedural_session_seed",
     "build_single_shot_prompt_artifacts",
     "execute_hybrid_des_bridge",
     "execute_multi_turn_bridge",
+    "execute_procedural_des_bridge",
     "execute_single_shot_bridge",
     "transition_multi_turn_phase",
 ]

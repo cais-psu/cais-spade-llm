@@ -1082,27 +1082,23 @@ class RobotAgent(ResourceAgent):
                 duration=5.0,
             )
         else:
-            # Close gripper to grasp.
-            self._log_step("pick_grasp", "closing gripper", part=part_name)
-            r = await self._execute_primitive("close_gripper", {})
+            model_name = str(self._task_ctx.get("model_name") or "").strip()
+            self._log_step(
+                "pick_grasp",
+                "grasping part",
+                part=part_name,
+                model=model_name or "(none)",
+            )
+            r = await self._execute_primitive(
+                "grasp_part",
+                {"model_name": model_name, "part_name": part_name},
+            )
             if not r.get("success"):
                 return self._task_failure(
-                    str(r.get("message") or f"failed to close gripper to grasp {part_name}"),
-                    step="pick_grasp.close_gripper",
-                    observations={"part_name": part_name},
+                    str(r.get("message") or f"failed to grasp {part_name}"),
+                    step="pick_grasp.grasp_part",
+                    observations={"part_name": part_name, "model_name": model_name},
                 )
-
-            # Attach part in simulation (Gazebo link attacher).
-            model_name = self._task_ctx.get("model_name", "")
-            if model_name:
-                self._log_step("pick_grasp", "attaching part", model=model_name)
-                r = await self._execute_primitive("attach_part", {"model_name": model_name})
-                if not r.get("success"):
-                    return self._task_failure(
-                        str(r.get("message") or f"failed to attach {model_name}"),
-                        step="pick_grasp.attach_part",
-                        observations={"part_name": part_name, "model_name": model_name},
-                    )
 
             # Lift part to travel height after grasping.
             travel_z = self._task_ctx.get("travel_z", 1.2)
@@ -1453,7 +1449,7 @@ class RobotAgent(ResourceAgent):
                 "placed_location": destination_location,
             }
 
-        # Simulation / physical: open gripper + detach + snap + lift.
+        # Simulation / physical: release pair, then post-release cleanup.
         model_name = self._task_ctx.get("model_name", "")
         slot_x = self._task_ctx.get("slot_x", 0.0)
         slot_y = self._task_ctx.get("slot_y", 0.0)
@@ -1469,16 +1465,11 @@ class RobotAgent(ResourceAgent):
             slot_x=f"{slot_x:.3f}",
             slot_y=f"{slot_y:.3f}",
         )
-        release = await self._execute_controller_helper(
-            "_release_part_sequence",
+        release = await self._execute_primitive(
+            "release_part",
             {
                 "model_name": model_name,
-                "slot_x": slot_x,
-                "slot_y": slot_y,
-                "part_height": part_height,
-                "board_top_z": board_top_z,
-                "place_z": place_z,
-                "travel_z": travel_z,
+                "part_name": str(self._held_part or ""),
             },
         )
         released_ok = bool(release.get("success"))
@@ -1486,7 +1477,55 @@ class RobotAgent(ResourceAgent):
         if not released_ok:
             return self._task_failure(
                 str(release.get("message") or f"failed to assemble {self._held_part} at {destination_location}"),
-                step="place_insert.release",
+                step="place_insert.release_part",
+                observations={"part_name": self._held_part, "destination_location": destination_location},
+            )
+
+        if model_name:
+            snap = await self._execute_controller_helper(
+                "snap_part_to_slot",
+                {
+                    "model_name": model_name,
+                    "slot_x": slot_x,
+                    "slot_y": slot_y,
+                    "part_height": part_height,
+                    "board_top_z": board_top_z,
+                },
+            )
+            if not snap.get("success"):
+                self.logger.warning(
+                    "[Robot] post-release snap_part_to_slot failed for %s: %s",
+                    model_name,
+                    snap.get("message"),
+                )
+
+        self._log_step("place_insert", "lifting clear after release", z=f"{travel_z:.3f}")
+        lift = await self._execute_controller_helper(
+            "_move_pose_direct",
+            {
+                "x": slot_x,
+                "y": slot_y,
+                "z": travel_z,
+                "label": "Lift after place",
+            },
+        )
+        if not lift.get("success"):
+            lift = await self._execute_controller_helper(
+                "_move_pose_direct",
+                {
+                    "x": slot_x,
+                    "y": slot_y,
+                    "z": travel_z,
+                    "label": "Lift after place (no-collision)",
+                    "avoid_collisions": False,
+                    "min_fraction": 0.70,
+                    "allow_partial": True,
+                },
+            )
+        if not lift.get("success"):
+            return self._task_failure(
+                str(lift.get("message") or "failed to lift clear after release"),
+                step="place_insert.lift",
                 observations={"part_name": self._held_part, "destination_location": destination_location},
             )
 
@@ -1625,6 +1664,8 @@ class RobotAgent(ResourceAgent):
         "move_pose",
         "move_relative",
         "move_to_named_pose",
+        "grasp_part",
+        "release_part",
         "open_gripper",
         "close_gripper",
         "detect_parts",
@@ -1908,7 +1949,8 @@ class RobotAgent(ResourceAgent):
                 # Inject real-time spatial context into the error so the LLM understands WHY it failed.
                 if primitive in (
                     "move_cartesian", "move_pose", "move_relative", 
-                    "move_to_named_pose", "attach_part", "close_gripper"
+                    "move_to_named_pose", "attach_part", "close_gripper",
+                    "grasp_part", "release_part",
                 ):
                     try:
                         pose_res = await self._execute_primitive("get_current_pose", {})
@@ -2341,7 +2383,13 @@ class RobotAgent(ResourceAgent):
                 }
 
         target_pose: Dict[str, Any] | None = None
-        if requires_part_acquisition or str(target_info.get("source_location") or "").strip() == "observed_pose":
+        source_location = str(
+            source_ref.get("location") or target_info.get("source_location") or ""
+        ).strip()
+        source_location_is_pose_only = (
+            source_location == "observed_pose" or source_location.endswith("_observed_pose")
+        )
+        if requires_part_acquisition or source_location_is_pose_only:
             source_pose = dict(source_ref.get("pose") or {})
             target_pose = (
                 source_pose
@@ -2349,7 +2397,7 @@ class RobotAgent(ResourceAgent):
                 or target_info.get("source_pose")
                 or part_context.get("pose")
             )
-            if requires_part_acquisition and target_pose is None:
+            if requires_part_acquisition and target_pose is None and source_location_is_pose_only:
                 return {
                     "allowed": False,
                     "constraint_code": "source_reference_unavailable",

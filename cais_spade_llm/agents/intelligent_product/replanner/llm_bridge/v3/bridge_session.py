@@ -19,7 +19,9 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
 )
-from cais_spade_llm.prompts import build_bridge_turn_prompt
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.bridge_react import (
+    build_bridge_turn_prompt,
+)
 
 
 

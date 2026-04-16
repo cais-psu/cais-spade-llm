@@ -2184,8 +2184,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 )
             if bridge_status == "paused_after_grounding":
                 message = (
-                    "DES found no modeled continuation. Multi-turn grounding completed and "
-                    "paused before outline generation for review."
+                    "DES found no modeled continuation. Bridge grounding completed and "
+                    "paused before recovery synthesis for review."
                 )
                 self.logger.info("[Planner] %s", message)
                 return self._build_des_replan_result(

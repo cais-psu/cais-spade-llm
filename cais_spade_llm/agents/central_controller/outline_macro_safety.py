@@ -377,7 +377,7 @@ def _parse_bridge_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
             params[key] = value
     destination = str(params.get("destination") or "").strip()
     if ap_kind == "ap_event":
-        if verb == "place_approach":
+        if destination:
             return {
                 "mode": (
                     "move_part_to_destination"

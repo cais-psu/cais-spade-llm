@@ -14,10 +14,13 @@ AvailabilityResolver = Callable[[dict[str, Any], str], str]
 PrimitiveOwnerResolver = Callable[[Any], Any | None]
 SyncTarget = str | Callable[[Any, Any], None]
 EventFamilyResolver = Callable[[dict[str, Any]], str]
+EventTargetResolver = Callable[[dict[str, Any]], str]
 EventContractValidator = Callable[..., str | None]
 CompilerHook = Callable[..., dict[str, Any]]
 StateProjector = Callable[..., None]
 EventStateValidator = Callable[..., str | None]
+PrimitiveSequenceValidator = Callable[..., list[dict[str, Any]]]
+CapabilityDecompositionProvider = Callable[..., Any]
 PreviewOutputResolver = Callable[
     [dict[str, Any], dict[str, Any], dict[str, Any]],
     tuple[dict[str, Any] | None, str | None],
@@ -46,12 +49,16 @@ class ResourceProfile:
     primitive_owner_resolver: PrimitiveOwnerResolver | None = None
     sync_map: Mapping[str, SyncTarget] = field(default_factory=dict)
     primitive_kind_map: Mapping[str, str] = field(default_factory=dict)
+    primitive_trace_fact_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     event_family_resolver: EventFamilyResolver | None = None
+    event_target_resolver: EventTargetResolver | None = None
     event_contract_validator: EventContractValidator | None = None
     family_to_primitive: Mapping[str, str] = field(default_factory=dict)
     compiler_map: Mapping[str, str | CompilerHook] = field(default_factory=dict)
     state_projector: StateProjector | None = None
     event_state_validator: EventStateValidator | None = None
+    primitive_sequence_validator: PrimitiveSequenceValidator | None = None
+    capability_decomposition_provider: CapabilityDecompositionProvider | None = None
     capability_flags: Mapping[str, bool] = field(default_factory=dict)
     observation_families: tuple[str, ...] = ()
     grounding_observation_primitives: tuple[str, ...] = ()
@@ -61,6 +68,10 @@ class ResourceProfile:
     preview_output_map: Mapping[str, PreviewOutputResolver] = field(default_factory=dict)
     extract_output_map: Mapping[str, ExtractOutputResolver] = field(default_factory=dict)
     store_as_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
+    primitive_event_target_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
+    expected_end_state_projection_map: Mapping[str, dict[str, Any] | str] = field(
+        default_factory=dict
+    )
     carried_entity_field: str = ""
     carried_entity_location_builder: CarriedEntityLocationBuilder | None = None
     prompt_addendum: str = ""
@@ -95,6 +106,117 @@ def resource_store_as_contract(
     if any_of_param_sets:
         normalized["any_of_param_sets"] = any_of_param_sets
     return normalized
+
+
+def resource_capability_decompositions(
+    profile: ResourceProfile | None,
+    *,
+    function_name: str = "",
+    primitive_catalog: list[dict[str, Any]] | None = None,
+    resource_jid: str = "",
+) -> Any:
+    """Return code-provided decomposition examples for modeled capabilities."""
+    if profile is None or profile.capability_decomposition_provider is None:
+        return {}
+    payload = profile.capability_decomposition_provider(
+        function_name=str(function_name or "").strip(),
+        primitive_catalog=deepcopy(primitive_catalog or []),
+        resource_jid=str(resource_jid or "").strip(),
+    )
+    return deepcopy(payload)
+
+
+def resource_event_target(
+    profile: ResourceProfile | None,
+    outline_event: dict[str, Any] | None,
+) -> str:
+    if profile is None or profile.event_target_resolver is None:
+        return ""
+    return str(profile.event_target_resolver(dict(outline_event or {})) or "").strip()
+
+
+def resource_primitive_event_target_contract(
+    profile: ResourceProfile | None,
+    primitive_name: str,
+) -> dict[str, Any]:
+    primitive_token = str(primitive_name or "").strip()
+    if profile is None or not primitive_token:
+        return {}
+    raw_contract = dict(
+        (profile.primitive_event_target_contract_map or {}).get(primitive_token) or {}
+    )
+    raw_param_fields = raw_contract.get("param_fields")
+    if isinstance(raw_param_fields, str):
+        raw_param_fields = [raw_param_fields]
+    param_fields = [
+        str(field).strip()
+        for field in (raw_param_fields or [])
+        if str(field).strip()
+    ]
+    raw_event_families = raw_contract.get("event_families")
+    if isinstance(raw_event_families, str):
+        raw_event_families = [raw_event_families]
+    event_families = [
+        str(family).strip().lower()
+        for family in (raw_event_families or [])
+        if str(family).strip()
+    ]
+    raw_conditions = raw_contract.get("conditions") or raw_contract.get("when")
+    if isinstance(raw_conditions, str):
+        raw_conditions = [raw_conditions]
+    conditions = [
+        str(token).strip().lower()
+        for token in (raw_conditions or [])
+        if str(token).strip()
+    ]
+    normalized: dict[str, Any] = {}
+    if param_fields:
+        normalized["param_fields"] = param_fields
+    if event_families:
+        normalized["event_families"] = event_families
+    if conditions:
+        normalized["conditions"] = conditions
+    constraint_code = str(raw_contract.get("constraint_code") or "").strip()
+    if constraint_code:
+        normalized["constraint_code"] = constraint_code
+    return normalized
+
+
+def resource_expected_end_state_projection_map(
+    profile: ResourceProfile | None,
+) -> dict[str, dict[str, Any]]:
+    def _normalize(
+        mapping: Mapping[str, dict[str, Any] | str] | None,
+    ) -> dict[str, dict[str, Any]]:
+        normalized: dict[str, dict[str, Any]] = {}
+        for expected_field, raw_spec in dict(mapping or {}).items():
+            expected_token = str(expected_field or "").strip()
+            if not expected_token:
+                continue
+            if isinstance(raw_spec, str):
+                snapshot_field = str(raw_spec).strip()
+                compare_when_present = False
+            elif isinstance(raw_spec, dict):
+                snapshot_field = str(
+                    raw_spec.get("snapshot_field")
+                    or raw_spec.get("field")
+                    or ""
+                ).strip()
+                compare_when_present = bool(raw_spec.get("compare_when_present"))
+            else:
+                continue
+            if not snapshot_field:
+                continue
+            normalized[expected_token] = {
+                "snapshot_field": snapshot_field,
+                "compare_when_present": compare_when_present,
+            }
+        return normalized
+
+    merged = _normalize(_DEFAULT_PROFILE.expected_end_state_projection_map)
+    if profile is not None and profile is not _DEFAULT_PROFILE:
+        merged.update(_normalize(profile.expected_end_state_projection_map))
+    return merged
 
 
 def resource_snapshot_field_value(
@@ -357,6 +479,13 @@ _BUILTINS_REGISTERED = False
 _DEFAULT_PROFILE = ResourceProfile(
     resource_type="resource",
     snapshot_fields=("current_state",),
+    expected_end_state_projection_map={
+        "resource_state": "current_state",
+        "resource_location": {
+            "snapshot_field": "current_location",
+            "compare_when_present": True,
+        },
+    },
     example_families=("generic_bridge",),
 )
 

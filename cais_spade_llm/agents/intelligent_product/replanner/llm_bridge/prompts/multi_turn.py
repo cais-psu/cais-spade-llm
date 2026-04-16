@@ -15,10 +15,10 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.shar
 
 
 _PHASE_TITLES = {
-    "grounding": "Grounding Assessment",
-    "outline": "Recovery Outline",
-    "primitive_generation": "Primitive Generation",
-    "finalize": "Finalize Proposal",
+    "grounding": "Observation / State Estimation",
+    "outline": "Recovery Event Synthesis",
+    "primitive_generation": "Event-to-Primitive Grounding",
+    "finalize": "Executable Recovery Trace Finalization",
 }
 
 
@@ -1328,9 +1328,11 @@ def _outline_contract() -> dict[str, Any]:
             ],
         },
         "outline_tasks_usage": (
-            "If Repair Contract.accepted_prefix is present, return only the replacement suffix "
-            "that follows that accepted prefix. Returning the full outline is still allowed "
-            "only when it begins with the same accepted prefix."
+            "Treat outline_tasks as the legacy field name for a DES-style recovery "
+            "event sequence. If Repair Contract.accepted_prefix is present, return "
+            "only the replacement transition suffix that follows that accepted "
+            "prefix. Returning the full event sequence is still allowed only when "
+            "it begins with the same accepted prefix."
         ),
     }
 
@@ -1352,6 +1354,10 @@ def _primitive_generation_contract() -> dict[str, Any]:
             ],
             "optional_fields": ["part_name"],
         },
+        "usage": (
+            "Ground the accepted DES-style recovery event sequence into executable "
+            "primitive_steps; do not re-plan the event sequence here."
+        ),
     }
 
 
@@ -1455,11 +1461,11 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
             )
         )
     elif phase == "primitive_generation":
-        extra_sections.append(("Accepted Outline", accepted_outline))
+        extra_sections.append(("Accepted Transition Prefix", accepted_outline))
     elif phase == "finalize":
         extra_sections.extend(
             [
-                ("Accepted Outline", accepted_outline),
+                ("Accepted Transition Prefix", accepted_outline),
                 ("Proposal Draft", proposal_draft),
             ]
         )
@@ -1517,14 +1523,15 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
         sections.extend(
             [
                 "- addressed_validation_findings must exactly match Repair Contract.required_addressed_validation_findings when that field is present; otherwise use [].",
-                "- Each outline row must be one concrete physical recovery task for one listed resource.",
-                "- Each outline task must use grounded start and end states consistent with the prompt and predecessor-projected state.",
+                "- Treat each outline_tasks row as one DES-style recovery event: one concrete physical action for one listed resource.",
+                "- Each recovery event must use grounded start and end states consistent with the prompt and predecessor-projected state.",
+                "- expected_start_state is the source-state predicate snapshot; expected_end_state is the target-state predicate snapshot.",
                 "- expected_start_state and expected_end_state may use only: resource_state, resource_location, held_part, part_state, part_location, part_holder_resource_jid.",
                 "- Resource-only recovery rows may end in grounded terminal state 'idle' without naming the concrete home primitive; primitive generation will choose the concrete controller action.",
-                "- rationale must be one short factual cause-to-effect explanation tied to the row's grounded state change, claimed closes_condition_ids, or claimed enables_task_ids.",
+                "- rationale must be one short guard/feasibility and cause-to-effect explanation tied to the row's grounded state change, claimed closes_condition_ids, or claimed enables_task_ids.",
                 "- closes_condition_ids may list only currently unmet continuation condition ids that the projected row actually clears.",
                 "- enables_task_ids may list only blocked nominal task ids that become unblocked after the projected row.",
-                "- depends_on may reference only outline_id values from outline rows in this same response; never use nominal task ids, condition ids, or free-form markers.",
+                "- depends_on may reference only outline_id values from recovery events in this same response; never use nominal task ids, condition ids, or free-form markers.",
                 "- If a task stops holding a part, make the part's resulting holder, location, or pose explicit in grounded state.",
                 "- Do not use robot-specific state fields such as gripper_state, current_pose, position, pose, current_location, or current_holder_resource_jid inside outline state objects.",
                 "- Do not use abstract blocker states such as blocked/unblocked/safe/unsafe or invented lifecycle tokens such as placed_approached.",

@@ -2568,3 +2568,90 @@ def latest_study_run_summary(
         project_root=project_root,
         results_root=results_root,
     )
+
+
+def run_hybrid_vs_procedural_comparison(
+    scenarios: list[dict[str, Any]],
+    *,
+    results_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Write a lightweight hybrid-vs-procedural comparison CSV.
+
+    Each scenario entry should already include the paired outcome fields for the
+    two DES modes, for example::
+
+        {
+            "scenario_id": "case3",
+            "disruption_class": "cross_robot_handoff",
+            "baseline_found": False,
+            "hybrid_found": True,
+            "baseline_trace_length": None,
+            "hybrid_trace_length": 4,
+            "baseline_solver_states_explored": 12,
+            "hybrid_solver_states_explored": 21,
+            "baseline_safety_violations": 1,
+            "hybrid_safety_violations": 0,
+            "derived_labels_used": 4,
+            "revisions_used": 1,
+        }
+    """
+    target_root = Path(results_root).resolve() if results_root else _DEFAULT_RESULTS_ROOT
+    target_root.mkdir(parents=True, exist_ok=True)
+    csv_path = target_root / "hybrid_vs_procedural_comparison.csv"
+
+    rows: list[dict[str, Any]] = []
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        row = {
+            "scenario_id": str(scenario.get("scenario_id") or scenario.get("id") or "").strip(),
+            "disruption_class": str(scenario.get("disruption_class") or "").strip(),
+            "baseline_found": bool(scenario.get("baseline_found", False)),
+            "hybrid_found": bool(scenario.get("hybrid_found", False)),
+            "trace_length_delta": (
+                (int(scenario.get("hybrid_trace_length") or 0) - int(scenario.get("baseline_trace_length") or 0))
+                if scenario.get("hybrid_trace_length") not in (None, "")
+                and scenario.get("baseline_trace_length") not in (None, "")
+                else None
+            ),
+            "solver_states_explored": int(scenario.get("hybrid_solver_states_explored") or 0),
+            "safety_violations": int(scenario.get("hybrid_safety_violations") or 0),
+            "derived_labels_used": int(scenario.get("derived_labels_used") or 0),
+            "revisions_used": int(scenario.get("revisions_used") or 0),
+        }
+        rows.append(row)
+        grouped[row["disruption_class"]].append(row)
+
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "scenario_id",
+                "disruption_class",
+                "baseline_found",
+                "hybrid_found",
+                "trace_length_delta",
+                "solver_states_explored",
+                "safety_violations",
+                "derived_labels_used",
+                "revisions_used",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    by_disruption_class: list[dict[str, Any]] = []
+    for disruption_class, disruption_rows in sorted(grouped.items()):
+        by_disruption_class.append({
+            "disruption_class": disruption_class,
+            "scenario_count": len(disruption_rows),
+            "baseline_success_rate": sum(1 for row in disruption_rows if row["baseline_found"]) / len(disruption_rows),
+            "hybrid_success_rate": sum(1 for row in disruption_rows if row["hybrid_found"]) / len(disruption_rows),
+        })
+
+    return {
+        "csv_path": str(csv_path),
+        "rows": rows,
+        "by_disruption_class": by_disruption_class,
+    }

@@ -16,6 +16,15 @@ load_dotenv()
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
 
 
+def _default_model_name(*env_names: str, fallback: str) -> str:
+    """Resolve a model slug from env vars, then fall back to a safe default."""
+    for env_name in env_names:
+        token = str(os.environ.get(env_name) or "").strip()
+        if token:
+            return token
+    return str(fallback or "").strip()
+
+
 class LlmAgent(Agent):
     """Mixin-style agent that wires logging, tool analysis, and LLM access into SPADE agents."""
 
@@ -31,10 +40,8 @@ class LlmAgent(Agent):
         *,
         name: Optional[str] = None,
         agent_role: str = "",
-        #model: str = "gpt-4o",
-        #non_function_model: str = "gpt-4o",
-        model: str = "gpt-5",
-        non_function_model: str = "gpt-5",        
+        model: Optional[str] = None,
+        non_function_model: Optional[str] = None,
         instructions: Optional[str] = None,
         function_names: Optional[List[str]] = None,
     ) -> None:
@@ -43,8 +50,22 @@ class LlmAgent(Agent):
 
         self.agent_name = name or self.jid.localpart
         self.agent_role = (agent_role or "").lower()
-        self.model = model  # Main LLM that supports tool calling.
-        self.non_function_model = non_function_model  # Cheaper model for plain generations.
+        selected_model = str(model or "").strip() or _default_model_name(
+            "CAIS_SPADE_LLM_MODEL",
+            "OPENAI_MODEL",
+            "CASE3_RECOVERY_MODEL",
+            fallback="gpt-5",
+        )
+        selected_non_function_model = str(non_function_model or "").strip() or _default_model_name(
+            "CAIS_SPADE_NON_FUNCTION_MODEL",
+            "OPENAI_NON_FUNCTION_MODEL",
+            "CAIS_SPADE_LLM_MODEL",
+            "OPENAI_MODEL",
+            "CASE3_RECOVERY_MODEL",
+            fallback=selected_model,
+        )
+        self.model = selected_model  # Main LLM that supports tool calling.
+        self.non_function_model = selected_non_function_model  # Cheaper model for plain generations.
 
         # logging
         self.logger = logging.getLogger(f"agent:{self.agent_name}")
