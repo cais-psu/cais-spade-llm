@@ -83,27 +83,12 @@ def _load_geometry_for_destination_part(
     part_name: str,
     execution_mode: str,
 ) -> dict[str, Any]:
-    product_meta = _load_product_meta(token)
-    if not product_meta:
+    geometry_doc = _load_geometry_doc_for_destination(
+        token=token,
+        execution_mode=execution_mode,
+    )
+    if not geometry_doc:
         return {}
-
-    geometry_relpath = str(product_meta.get("product_geometry_file") or "").strip()
-    if not geometry_relpath:
-        return {}
-
-    geometry_path = _REPO_ROOT / geometry_relpath
-    if not geometry_path.exists():
-        return {}
-
-    try:
-        payload = json.loads(geometry_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    env_key = "real" if str(execution_mode or "").strip().lower() == "physical" else "gazebo"
-    geometry_doc = payload.get(env_key) if isinstance(payload, dict) else None
-    if not isinstance(geometry_doc, dict):
-        geometry_doc = payload if isinstance(payload, dict) else {}
 
     board = dict(geometry_doc.get("assembly_board") or {})
     parts = dict(geometry_doc.get("parts") or {})
@@ -118,6 +103,55 @@ def _load_geometry_for_destination_part(
         "slot_floor_z_m": board.get("slot_floor_z_m"),
         "board_center": board.get("center") or {},
     }
+
+
+@lru_cache(maxsize=32)
+def _load_geometry_doc_for_destination(
+    *,
+    token: str,
+    execution_mode: str,
+) -> dict[str, Any]:
+    for geometry_path in (
+        _product_geometry_path_for_token(token),
+        _direct_geometry_path_for_token(token),
+    ):
+        if geometry_path is None or not geometry_path.exists():
+            continue
+        try:
+            payload = json.loads(geometry_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        env_key = "real" if str(execution_mode or "").strip().lower() == "physical" else "gazebo"
+        geometry_doc = payload.get(env_key)
+        if not isinstance(geometry_doc, dict):
+            geometry_doc = payload
+        if isinstance(geometry_doc, dict):
+            return dict(geometry_doc)
+    return {}
+
+
+def _product_geometry_path_for_token(token: str) -> Path | None:
+    product_meta = _load_product_meta(token)
+    if not product_meta:
+        return None
+    geometry_relpath = str(product_meta.get("product_geometry_file") or "").strip()
+    if not geometry_relpath:
+        return None
+    return _REPO_ROOT / geometry_relpath
+
+
+def _direct_geometry_path_for_token(token: str) -> Path:
+    # Dry-run staging anchors such as printers may have geometry mocks without
+    # being registered as full product manifests.
+    return (
+        _PACKAGE_ROOT
+        / "specification"
+        / "products"
+        / "geometry"
+        / f"{token}.json"
+    )
 
 
 @lru_cache(maxsize=16)

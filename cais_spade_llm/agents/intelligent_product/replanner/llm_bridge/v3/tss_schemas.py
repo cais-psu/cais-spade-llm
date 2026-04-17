@@ -237,14 +237,12 @@ REPAIR_TURN_RESPONSE_SCHEMA: dict[str, Any] = {
                             "resource_jid": {"type": "string"},
                             "primitive": {"type": "string"},
                             "params": {"type": "object"},
-                            "store_as": {"type": "string"},
                         },
                     },
                     {"type": "null"},
                 ],
                 "description": (
-                    "For observe type: {resource_jid, primitive, params, "
-                    "store_as}"
+                    "For observe type: {resource_jid, primitive, params}"
                 ),
             },
             "observe_requests": {
@@ -261,7 +259,6 @@ REPAIR_TURN_RESPONSE_SCHEMA: dict[str, Any] = {
                                 "resource_jid": {"type": "string"},
                                 "primitive": {"type": "string"},
                                 "params": {"type": "object"},
-                                "store_as": {"type": "string"},
                             },
                         },
                     },
@@ -556,7 +553,6 @@ def parse_structured_response(
                 "resource_jid": observe_request.get("resource_jid"),
                 "primitive": observe_request.get("primitive"),
                 "params": params,
-                "store_as": observe_request.get("store_as", ""),
             })
         normalized["observe_requests"] = normalized_requests
         if normalized_requests:

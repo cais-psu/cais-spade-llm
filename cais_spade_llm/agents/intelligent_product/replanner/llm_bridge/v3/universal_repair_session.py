@@ -97,6 +97,30 @@ from cais_spade_llm.resources.resource_profile import (
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_observation_key_token(value: Any) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip())
+    token = re.sub(r"_+", "_", token)
+    return token.strip("_").lower()
+
+
+def _default_observation_key(
+    *,
+    semantic_operation: str,
+    target_entity: str,
+    primitive: str,
+    fallback_index: str,
+) -> str:
+    if semantic_operation == "observe_part_pose" and target_entity:
+        return f"observed_pose_{target_entity}"
+    key_parts = [
+        _sanitize_observation_key_token(semantic_operation)
+        or _sanitize_observation_key_token(primitive)
+        or "observation",
+        _sanitize_observation_key_token(target_entity) or fallback_index,
+    ]
+    return "_".join(part for part in key_parts if part) or f"observation_{fallback_index}"
+
 # Turn budget for the repair loop.
 _DEFAULT_MAX_TURNS = 8
 
@@ -1222,15 +1246,15 @@ class UniversalRepairSessionMixin:
             part_tracker[observed_part_name] = entry
             prepared_bridge_request["part_tracker"] = part_tracker
 
-        alias = str(action.get("store_as", "") or "").strip()
-        if not alias:
-            alias = f"observation_{int(time.monotonic())}"
+        observation_key = str(action.get("observation_key", "") or "").strip()
+        if not observation_key:
+            observation_key = f"observation_{int(time.monotonic())}"
 
         observation_row = {
             "resource_jid": resource_jid,
             "primitive": primitive,
             "params": deepcopy(params),
-            "store_as": alias,
+            "observation_key": observation_key,
             "observation": deepcopy(observation),
             "reason_summary": str(action.get("reason_summary", "") or "").strip(),
         }
@@ -2103,7 +2127,6 @@ def _maybe_auto_observe_grounding_response(
         or f"{part_name} requires a trusted observation before pose-dependent recovery."
     ).strip()
     observation_status = str(gap.get("observation_status") or "UNOBSERVED").strip()
-    store_alias = f"auto_obs_{part_name.lower()}_t{turn_index}"
 
     return {
         "type": "observe",
@@ -2147,7 +2170,6 @@ def _maybe_auto_observe_grounding_response(
                 "semantic_operation": semantic_operation,
                 "target_entity": part_name,
                 "params": params,
-                "store_as": store_alias,
             }
         ],
         "rationale": (
@@ -3823,11 +3845,17 @@ async def run_v3_repair_session(
             batch_results: list[dict[str, Any]] = []
             batch_errors: list[str] = []
             for request in observe_requests:
+                observation_key = _default_observation_key(
+                    semantic_operation=str(request.get("semantic_operation") or "").strip(),
+                    target_entity=str(request.get("target_entity") or "").strip(),
+                    primitive=str(request.get("primitive") or "").strip(),
+                    fallback_index=f"{turn_idx}_{len(batch_results) + 1}",
+                )
                 action = {
                     "resource_jid": request.get("resource_jid"),
                     "primitive": request.get("primitive"),
                     "params": request.get("params") or {},
-                    "store_as": request.get("store_as", ""),
+                    "observation_key": observation_key,
                 }
                 obs_row, obs_error = await self._execute_repair_observation(
                     prepared_bridge_request,
@@ -3843,12 +3871,8 @@ async def run_v3_repair_session(
                     )
                     continue
 
-                alias = (
-                    str(request.get("store_as", "")).strip()
-                    or f"obs_{turn_idx}_{len(batch_results) + 1}"
-                )
                 obs_data = deepcopy((obs_row or {}).get("observation") or {})
-                observation_store[alias] = obs_data
+                observation_store[observation_key] = obs_data
                 observation_history.append({
                     "turn_index": turn_idx,
                     "semantic_operation": request.get("semantic_operation"),
@@ -3856,7 +3880,7 @@ async def run_v3_repair_session(
                     "primitive": action["primitive"],
                     "resource_jid": action["resource_jid"],
                     "params": deepcopy(action["params"]),
-                    "store_as": alias,
+                    "observation_key": observation_key,
                     "observation": obs_data,
                 })
                 obs_debug_row = deepcopy(obs_row or {})

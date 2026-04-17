@@ -1376,6 +1376,20 @@ def _helper_pick_is_grounded(
     return False
 
 
+def _assign_local_event_fact(root: dict[str, Any], dotted_path: str, value: Any) -> None:
+    current = root
+    tokens = [str(token).strip() for token in str(dotted_path or "").split(".") if str(token).strip()]
+    if not tokens:
+        return
+    for token in tokens[:-1]:
+        next_value = current.get(token)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            current[token] = next_value
+        current = next_value
+    current[tokens[-1]] = deepcopy(value)
+
+
 def _helper_place_has_grounded_geometry(
     params: dict[str, Any],
     *,
@@ -1633,14 +1647,15 @@ def _observation_step_outputs_for_part(
     observed_pose: dict[str, Any] | None,
 ) -> dict[str, Any]:
     rows: dict[str, Any] = {}
-    for alias, payload in dict(observation_store or {}).items():
-        token = str(alias or "").strip()
+    for observation_key, payload in dict(observation_store or {}).items():
+        token = str(observation_key or "").strip()
         if not token or not isinstance(payload, dict):
             continue
         observed_part = str(payload.get("part_name") or "").strip()
         payload_pose = dict(payload.get("pose") or {})
         if observed_part == part_name:
             rows[token] = deepcopy(payload)
+            _assign_local_event_fact(rows, f"detected_part.{part_name}", payload)
             continue
         if payload_pose and _observed_pose_match(payload_pose, observed_pose):
             rows[token] = deepcopy(payload)
@@ -1702,15 +1717,13 @@ def _advance_synthesized_part_recovery(
     for primitive_step in fn_def.primitive_program or []:
         primitive_name = str(primitive_step.get("primitive") or "").strip()
         params = dict(primitive_step.get("params") or {})
-        store_as = str(primitive_step.get("store_as") or "").strip()
         step_targets_part = bool(
             _collect_param_part_refs(params, known_parts={part_name})
         ) or primitive_name in {"grasp_part", "release_part"}
 
         if primitive_name == "compute_pick_targets":
             if (
-                store_as
-                and isinstance(pick_preview, dict)
+                isinstance(pick_preview, dict)
                 and _helper_pick_is_grounded(
                     params,
                     part_name=part_name,
@@ -1718,7 +1731,11 @@ def _advance_synthesized_part_recovery(
                     step_outputs=local_step_outputs,
                 )
             ):
-                local_step_outputs[store_as] = deepcopy(pick_preview)
+                _assign_local_event_fact(
+                    local_step_outputs,
+                    f"pick_targets.{part_name}",
+                    pick_preview,
+                )
             continue
         if primitive_name == "compute_place_targets":
             resolved_helper_params = _resolve_recovery_motion_params(
@@ -1728,27 +1745,34 @@ def _advance_synthesized_part_recovery(
                 step_outputs=local_step_outputs,
             )
             if (
-                store_as
-                and isinstance(place_preview, dict)
+                isinstance(place_preview, dict)
                 and _helper_place_has_grounded_geometry(
                     resolved_helper_params,
                     part_name=part_name,
                 )
             ):
-                local_step_outputs[store_as] = deepcopy(place_preview)
+                _assign_local_event_fact(
+                    local_step_outputs,
+                    f"place_targets.{part_name}",
+                    place_preview,
+                )
             elif after_grasp and step_targets_part:
                 evidence["_ungrounded_place_helper"] = True
             continue
         if primitive_name == "detect_parts":
-            if store_as and isinstance(observed_pose, dict) and step_targets_part:
-                local_step_outputs[store_as] = {
+            if isinstance(observed_pose, dict) and step_targets_part:
+                _assign_local_event_fact(local_step_outputs, f"detected_part.{part_name}", {
                     "part_name": part_name,
                     "pose": deepcopy(observed_pose),
-                }
+                })
             continue
         if primitive_name == "get_current_pose":
-            if store_as and isinstance(current_pose, dict):
-                local_step_outputs[store_as] = {"pose": deepcopy(current_pose)}
+            if isinstance(current_pose, dict):
+                _assign_local_event_fact(
+                    local_step_outputs,
+                    "current_pose",
+                    {"pose": deepcopy(current_pose)},
+                )
             continue
 
         resolved_params = _resolve_recovery_motion_params(

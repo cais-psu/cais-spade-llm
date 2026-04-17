@@ -29,6 +29,7 @@ ExtractOutputResolver = Callable[
     [dict[str, Any], dict[str, Any]],
     tuple[dict[str, Any] | None, str | None],
 ]
+EventFactKeyResolver = Callable[[dict[str, Any]], tuple[str | None, str | None]]
 CarriedEntityLocationBuilder = Callable[[str, dict[str, Any] | None], str]
 
 
@@ -67,7 +68,8 @@ class ResourceProfile:
     observation_output_schema_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     preview_output_map: Mapping[str, PreviewOutputResolver] = field(default_factory=dict)
     extract_output_map: Mapping[str, ExtractOutputResolver] = field(default_factory=dict)
-    store_as_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
+    event_fact_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
+    event_fact_key_map: Mapping[str, EventFactKeyResolver] = field(default_factory=dict)
     primitive_event_target_contract_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     expected_end_state_projection_map: Mapping[str, dict[str, Any] | str] = field(
         default_factory=dict
@@ -78,14 +80,14 @@ class ResourceProfile:
     repair_example: str = ""
 
 
-def resource_store_as_contract(
+def resource_event_fact_contract(
     profile: ResourceProfile | None,
     primitive_name: str,
 ) -> dict[str, Any]:
     primitive_token = str(primitive_name or "").strip()
     if profile is None or not primitive_token:
         return {}
-    contract = dict((profile.store_as_contract_map or {}).get(primitive_token) or {})
+    contract = dict((profile.event_fact_contract_map or {}).get(primitive_token) or {})
     required_params = [
         str(param).strip()
         for param in (contract.get("required_params") or [])
@@ -105,7 +107,28 @@ def resource_store_as_contract(
         normalized["required_params"] = required_params
     if any_of_param_sets:
         normalized["any_of_param_sets"] = any_of_param_sets
+    path_templates = [
+        str(path).strip()
+        for path in (contract.get("path_templates") or [])
+        if str(path).strip()
+    ]
+    if path_templates:
+        normalized["path_templates"] = path_templates
     return normalized
+
+
+def resource_event_fact_key(
+    profile: ResourceProfile | None,
+    primitive_name: str,
+    params: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    primitive_token = str(primitive_name or "").strip()
+    if profile is None or not primitive_token:
+        return None, None
+    resolver = dict(profile.event_fact_key_map or {}).get(primitive_token)
+    if resolver is None:
+        return None, None
+    return resolver(deepcopy(params or {}))
 
 
 def resource_capability_decompositions(

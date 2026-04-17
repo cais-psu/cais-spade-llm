@@ -2,7 +2,7 @@
 
 Run directly:
     python test/test_case3_bridge_dryrun.py
-    python test/test_case3_bridge_dryrun.py --model gpt-4o
+    python test/test_case3_bridge_dryrun.py --model gpt-5
     python test/test_case3_bridge_dryrun.py --reasoning-mode hybrid
     python test/test_case3_bridge_dryrun.py --focus primitive_generation
     python test/test_case3_bridge_dryrun.py --show-llm-input
@@ -101,7 +101,7 @@ CASE_ID = "case3_llm_bridge"
 FAILED_TASK_ID = "REQ_2_T4"
 ANCHOR_TASK_ID = "REQ_2_T3"
 GOAL_STATE = "assembled"
-DEFAULT_LIVE_MODEL = os.environ.get("CASE3_RECOVERY_MODEL", "gpt-4o")
+DEFAULT_LIVE_MODEL = os.environ.get("CASE3_RECOVERY_MODEL", "gpt-5")
 DEBUG_DIR = Path("cais_spade_llm/monitor/debug")
 _POST_VALIDATION_INSPECTION_TURNS = 3
 CASE3_COMPLETED_TASK_IDS = (
@@ -510,6 +510,8 @@ class FakeBridgeRobot:
           held_part:
             equals: null
         effects:
+          current_state:
+            set: idle
           current_pose_ref:
             set_from_param: pose_name
           current_pose:
@@ -518,6 +520,7 @@ class FakeBridgeRobot:
             set_from_param: pose_name
         ---
         """
+        self._current_state = "idle"
         self._bridge_pose_ref = str(pose_name or "").strip() or None
         return {"success": True, "message": "fake move_to_named_pose ok"}
 
@@ -2356,7 +2359,7 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
 
         assert "current plant state" not in prompt.lower()
         assert "S_opaque_internal_state" not in prompt
-        assert "Accepted Outline Prefix" in prompt
+        assert "Accepted Outline Summary" in prompt
         assert "recover xarm6 to idle" in prompt
         assert "Plant Automaton Progress" not in prompt
         assert "Accepted trace" not in prompt
@@ -2407,8 +2410,8 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
         assert "outside_bounds" not in prompt
         assert "Location Reference Facts" not in prompt
         assert "staging anchors:" not in prompt
-        assert "workspace x[-0.70,0.70], y[-0.15,1.10], z[0.85,1.60]" in prompt
-        assert "workspace x[-0.60,0.60], y[-1.00,0.10], z[0.90,1.50]" in prompt
+        assert "workspace x[-0.70,0.70], y[-0.35,1.10], z[0.85,1.60]" in prompt
+        assert "workspace x[-0.60,0.60], y[-1.00,0.35], z[0.90,1.50]" in prompt
         assert "current_pose(" in prompt
         assert "pick LG again" not in prompt
         assert "move MCP onward" not in prompt
@@ -3199,7 +3202,7 @@ def test_v2_grounding_repeated_observe_request_becomes_grounded() -> None:
                 "turn_index": 1,
                 "validity": "current",
                 "freshness": "current_session",
-                "aliases": ["observed_pose_LG"],
+                "observation_key": "observed_pose_LG",
             }
         }
 
@@ -3255,7 +3258,7 @@ def test_v2_grounding_unresolved_observe_request_still_executes() -> None:
             "reason": "needed",
             "primitive": "detect_parts",
             "params": {"part_name": "LG"},
-            "store_as": "observed_pose_LG",
+            "observation_key": "observed_pose_LG",
             "output": {
                 "part_name": "LG",
                 "x": 0.0,
@@ -3992,6 +3995,14 @@ if __name__ == "__main__":
         choices=("full", "primitive_generation"),
         help="Run the full harness or start directly from the known Case 3 primitive-generation outline",
     )
+    parser.add_argument(
+        "--stop-before-primitive-generation",
+        action="store_true",
+        help=(
+            "Stop after outline completes so primitive_generation can be inspected. "
+            "Only applies when --focus full."
+        ),
+    )
     parser.add_argument("--no-debug", action="store_true", help="Skip writing debug artifacts")
     parser.add_argument(
         "--show-llm-input",
@@ -4012,6 +4023,7 @@ if __name__ == "__main__":
             write_debug=not args.no_debug,
             llm_model=args.model,
             reasoning_mode=args.reasoning_mode,
+            stop_before_primitive_generation=args.stop_before_primitive_generation,
             focus=args.focus,
         )
     )

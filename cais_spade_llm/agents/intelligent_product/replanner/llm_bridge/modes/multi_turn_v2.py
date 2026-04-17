@@ -473,7 +473,7 @@ def _is_grounding_observation_primitive(*, resource_type: str, primitive_name: s
     return str(primitive_name or "").strip() in allowlist if allowlist else True
 
 
-def _supports_store_as(*, resource_type: str, primitive_name: str) -> bool:
+def _supports_observation_output(*, resource_type: str, primitive_name: str) -> bool:
     profile = get_resource_profile(resource_type or "resource")
     token = str(primitive_name or "").strip()
     return (
@@ -501,7 +501,9 @@ def _lookup_world_observation_primitive(
             resource_type=resource_type, primitive_name=primitive_name,
         ):
             break
-        if not _supports_store_as(resource_type=resource_type, primitive_name=primitive_name):
+        if not _supports_observation_output(
+            resource_type=resource_type, primitive_name=primitive_name,
+        ):
             break
         return resource_jid, entry, resource_type
     return resource_jid, {}, resource_type
@@ -561,27 +563,68 @@ def _observation_fact_key(fact_type: str, entity: str, scope: Any = None) -> str
     return json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
 
 
-def _default_observe_store_as(
+def _sanitize_observation_key_token(value: Any) -> str:
+    raw_token = str(value or "").strip()
+    if not raw_token:
+        return ""
+    sanitized_chars: list[str] = []
+    for char in raw_token:
+        sanitized_chars.append(char if char.isalnum() else "_")
+    sanitized = "".join(sanitized_chars)
+    while "__" in sanitized:
+        sanitized = sanitized.replace("__", "_")
+    return sanitized.strip("_")
+
+
+def _default_observation_key(
     request: dict[str, Any],
     *,
-    session_state: dict[str, Any],
-    seen_aliases: set[str],
+    seen_keys: set[str],
 ) -> str:
     fact_type = str(request.get("fact_type") or "").strip()
     entity = str(request.get("entity") or "").strip()
+    primitive_name = str(request.get("primitive") or "").strip()
+    resource_jid = str(request.get("resource_jid") or "").strip()
+    params = dict(request.get("params") or {})
+
     if fact_type == "part_pose" and entity:
         prefix = "observed_pose"
-    elif fact_type:
-        prefix = fact_type.replace(" ", "_").lower() or "observed_fact"
+        entity_token = _sanitize_observation_key_token(entity) or entity
+        base = f"{prefix}_{entity_token}"
     else:
-        prefix = "observed_fact"
-    base = f"{prefix}_{entity}" if entity else prefix
-    alias = base
+        key_parts: list[str] = []
+        prefix = (
+            _sanitize_observation_key_token(fact_type)
+            or _sanitize_observation_key_token(primitive_name)
+            or "observation"
+        )
+        key_parts.append(prefix)
+        if entity:
+            key_parts.append(_sanitize_observation_key_token(entity) or entity)
+        elif resource_jid:
+            resource_token = _sanitize_observation_key_token(resource_jid)
+            if resource_token:
+                key_parts.append(resource_token)
+        if len(key_parts) == 1 and params:
+            for param_name in sorted(params.keys()):
+                param_token = _sanitize_observation_key_token(param_name)
+                if param_token:
+                    key_parts.append(param_token)
+                value = params.get(param_name)
+                if isinstance(value, (str, int, float, bool)):
+                    value_token = _sanitize_observation_key_token(value)
+                    if value_token:
+                        key_parts.append(value_token)
+                if len(key_parts) >= 4:
+                    break
+        base = "_".join(part for part in key_parts if part) or "observation"
+
+    observation_key = base
     counter = 2
-    while alias in seen_aliases:
-        alias = f"{base}_{counter}"
+    while observation_key in seen_keys:
+        observation_key = f"{base}_{counter}"
         counter += 1
-    return alias
+    return observation_key
 
 
 def _resolve_observation_request(
@@ -630,7 +673,6 @@ def _resolve_observation_request(
             "reason": reason,
             "primitive": primitive_name,
             "params": deepcopy(params),
-            "store_as": "",
             "resource_jid": resource_jid,
             "resource_type": resource_type,
             "fact_key": _observation_fact_key(fact_type, entity, scope),
@@ -653,7 +695,6 @@ def _resolve_observation_request(
         "reason": reason,
         "primitive": primitive_name,
         "params": deepcopy(params),
-        "store_as": "",
         "resource_jid": resource_jid,
         "resource_type": resource_type,
         "fact_key": "",
@@ -689,12 +730,7 @@ def _record_observation_fact(
         return
     ledger = dict(session_state.get("observation_fact_ledger") or {})
     existing = dict(ledger.get(fact_key) or {})
-    aliases = [
-        str(a).strip() for a in (existing.get("aliases") or []) if str(a).strip()
-    ]
-    store_as = str(observation_row.get("store_as") or "").strip()
-    if store_as and store_as not in aliases:
-        aliases.append(store_as)
+    observation_key = str(observation_row.get("observation_key") or "").strip()
     ledger[fact_key] = {
         "fact_key": fact_key,
         "fact_type": str(observation_row.get("fact_type") or "").strip(),
@@ -707,7 +743,9 @@ def _record_observation_fact(
         "turn_index": int(observation_row.get("turn_index") or 0),
         "validity": "current",
         "freshness": "current_session",
-        "aliases": aliases,
+        "observation_key": observation_key
+        or str(existing.get("observation_key") or "").strip()
+        or None,
     }
     session_state["observation_fact_ledger"] = ledger
 
@@ -746,7 +784,7 @@ def _seed_grounded_part_pose_observations(
         if isinstance(row, dict) and str(dict(row).get("part_name") or "").strip()
     }
     observation_store = dict(session_state.get("observation_store") or {})
-    seen_aliases = set(observation_store)
+    seen_observation_keys = set(observation_store)
 
     for part_name, tracker_entry in part_tracker.items():
         pose = _observation_pose(
@@ -754,10 +792,13 @@ def _seed_grounded_part_pose_observations(
         ) or _observation_pose(tracker_entry)
         if pose is None:
             continue
-        alias = _default_observe_store_as(
-            {"fact_type": "part_pose", "entity": part_name, "primitive": "grounding_context"},
-            session_state=session_state,
-            seen_aliases=seen_aliases,
+        observation_key = _default_observation_key(
+            {
+                "fact_type": "part_pose",
+                "entity": part_name,
+                "primitive": "grounding_context",
+            },
+            seen_keys=seen_observation_keys,
         )
         part_row = dict(llm_part_facts.get(part_name) or {})
         payload: dict[str, Any] = {"part_name": part_name, "pose": deepcopy(pose)}
@@ -772,8 +813,8 @@ def _seed_grounded_part_pose_observations(
         if holder_jid:
             payload["current_holder_resource_jid"] = holder_jid
 
-        observation_store[alias] = deepcopy(payload)
-        seen_aliases.add(alias)
+        observation_store[observation_key] = deepcopy(payload)
+        seen_observation_keys.add(observation_key)
         _record_observation_fact(session_state, {
             "fact_key": _observation_fact_key("part_pose", part_name, None),
             "fact_type": "part_pose",
@@ -782,7 +823,7 @@ def _seed_grounded_part_pose_observations(
             "scope": None,
             "primitive": "grounding_context",
             "params": {"part_name": part_name},
-            "store_as": alias,
+            "observation_key": observation_key,
             "output": deepcopy(payload),
             "turn_index": int(session_state.get("turn_index") or 0),
         })
@@ -821,7 +862,7 @@ def _build_world_observation_surface(
             resource_type=resource_type, primitive_name=name,
         ):
             continue
-        if not _supports_store_as(resource_type=resource_type, primitive_name=name):
+        if not _supports_observation_output(resource_type=resource_type, primitive_name=name):
             continue
         observation_primitives.append({
             "name": name,
@@ -842,7 +883,7 @@ async def _execute_observe_requests(
     """Execute observation requests and return (results, error)."""
     resource_agents = _resource_agent_map(planner)
     results: list[dict[str, Any]] = []
-    seen_aliases = set(dict(session_state.get("observation_store") or {}))
+    seen_observation_keys = set(dict(session_state.get("observation_store") or {}))
     seen_fact_rows: dict[str, dict[str, Any]] = {
         str(k).strip(): dict(v)
         for k, v in dict(session_state.get("observation_fact_ledger") or {}).items()
@@ -881,10 +922,11 @@ async def _execute_observe_requests(
                 f"observation {primitive_name!r} with these params already succeeded earlier"
             )
 
-        store_as = _default_observe_store_as(
-            normalized, session_state=session_state, seen_aliases=seen_aliases,
+        observation_key = _default_observation_key(
+            normalized,
+            seen_keys=seen_observation_keys,
         )
-        normalized["store_as"] = store_as
+        normalized["observation_key"] = observation_key
 
         # Validate primitive exists
         resource_jid = str(normalized.get("resource_jid") or "").strip()
@@ -935,11 +977,11 @@ async def _execute_observe_requests(
             "reason": str(normalized.get("reason") or "").strip(),
             "primitive": primitive_name,
             "params": deepcopy(params),
-            "store_as": store_as,
+            "observation_key": observation_key,
             "output": deepcopy(extracted_output),
         }
         results.append(observation_row)
-        seen_aliases.add(store_as)
+        seen_observation_keys.add(observation_key)
         seen_request_rows[request_key] = deepcopy(observation_row)
         if fact_key:
             seen_fact_rows[fact_key] = {
@@ -947,7 +989,7 @@ async def _execute_observe_requests(
                 "turn_index": int(session_state.get("turn_index") or 0),
                 "validity": "current",
                 "freshness": "current_session",
-                "aliases": [store_as],
+                "observation_key": observation_key,
             }
 
     return results, None
@@ -1090,8 +1132,18 @@ async def _handle_grounding_phase(
 
         # Store results
         for result in observation_results:
-            alias = str(result.get("store_as") or "").strip()
-            session_state["observation_store"][alias] = deepcopy(result.get("output") or {})
+            observation_key = str(result.get("observation_key") or "").strip()
+            if not observation_key:
+                turn_entry["error"] = "observation result missing observation_key"
+                session_state["phase_feedback"].append({
+                    "phase": "grounding",
+                    "issue": "observe_error",
+                    "detail": "observation result missing observation_key",
+                })
+                return decision, turn_entry
+            session_state["observation_store"][observation_key] = deepcopy(
+                result.get("output") or {}
+            )
             observation_event = {
                 "turn_index": int(session_state.get("turn_index") or 0),
                 "phase": "grounding",

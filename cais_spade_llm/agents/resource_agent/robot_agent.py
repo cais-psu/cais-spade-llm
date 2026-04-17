@@ -1765,6 +1765,7 @@ class RobotAgent(ResourceAgent):
         )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
+            event_fact_key_for_primitive,
             expand_composite_steps,
             extract_step_output,
             get_resource_bridge_snapshot,
@@ -1877,7 +1878,7 @@ class RobotAgent(ResourceAgent):
 
         # Execute each primitive step sequentially.
         results: list[Dict[str, Any]] = []
-        step_outputs: dict[str, Any] = {}
+        event_facts: dict[str, Any] = {}
         resource_type = str(
             dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
             or runtime_snapshot.get("resource_type")
@@ -1886,7 +1887,6 @@ class RobotAgent(ResourceAgent):
         for step_idx, step in enumerate(primitive_steps):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
             raw_params = step.get("params", {}) if isinstance(step, dict) else {}
-            store_as = str(step.get("store_as", "")).strip() if isinstance(step, dict) else ""
 
             if primitive not in self._BRIDGE_PRIMITIVES:
                 msg = (
@@ -1909,7 +1909,7 @@ class RobotAgent(ResourceAgent):
                 params = resolve_param_refs(
                     raw_params,
                     {},
-                    step_outputs=step_outputs,
+                    event_facts=event_facts,
                 )
             except Exception as exc:
                 msg = (
@@ -1925,7 +1925,7 @@ class RobotAgent(ResourceAgent):
                         "step_index": step_idx,
                         "primitive": primitive,
                         "raw_params": raw_params,
-                        "step_outputs": deepcopy(step_outputs),
+                        "event_facts": deepcopy(event_facts),
                     },
                 }
 
@@ -1988,7 +1988,27 @@ class RobotAgent(ResourceAgent):
                 )
                 sync_agent_from_bridge_snapshot(self, runtime_snapshot)
 
-            if store_as:
+            event_fact_key, event_fact_error = event_fact_key_for_primitive(
+                primitive=primitive,
+                params=params,
+                resource_type=resource_type,
+            )
+            if event_fact_error:
+                return {
+                    "status": "failed",
+                    "content": (
+                        f"Macro '{macro_name}' could not publish event facts at step {step_idx} "
+                        f"({primitive}): {event_fact_error}"
+                    ),
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "primitive_result": step_result,
+                        "completed_steps": len(results),
+                    },
+                }
+            if event_fact_key:
                 step_output, output_error = extract_step_output(
                     primitive=primitive,
                     params=params,
@@ -1999,7 +2019,7 @@ class RobotAgent(ResourceAgent):
                     return {
                         "status": "failed",
                         "content": (
-                            f"Macro '{macro_name}' could not store output at step {step_idx} "
+                            f"Macro '{macro_name}' could not publish event facts at step {step_idx} "
                             f"({primitive}): {output_error}"
                         ),
                         "observations": {
@@ -2007,11 +2027,20 @@ class RobotAgent(ResourceAgent):
                             "step_index": step_idx,
                             "primitive": primitive,
                             "primitive_result": step_result,
-                            "store_as": store_as,
+                            "event_fact_path": f"event_facts.{event_fact_key}",
                             "completed_steps": len(results),
                         },
                     }
-                step_outputs[store_as] = step_output
+                target = event_facts
+                tokens = [token for token in str(event_fact_key).split(".") if token]
+                for token in tokens[:-1]:
+                    child = target.get(token)
+                    if not isinstance(child, dict):
+                        child = {}
+                        target[token] = child
+                    target = child
+                if tokens:
+                    target[tokens[-1]] = deepcopy(step_output)
 
         # All steps succeeded. Update logical state if out_state specified.
         if out_state:

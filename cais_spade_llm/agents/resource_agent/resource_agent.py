@@ -162,6 +162,7 @@ class ResourceAgent(LlmAgent):
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
             apply_effects_to_snapshot,
             build_execution_primitive_catalog,
+            event_fact_key_for_primitive,
             expand_composite_steps,
             extract_step_output,
             get_resource_bridge_snapshot,
@@ -264,7 +265,7 @@ class ResourceAgent(LlmAgent):
             owner = profile.primitive_owner_resolver(self) or self
 
         results: list[Dict[str, Any]] = []
-        step_outputs: dict[str, Any] = {}
+        event_facts: dict[str, Any] = {}
         resource_type = str(
             dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
             or runtime_snapshot.get("resource_type")
@@ -275,7 +276,6 @@ class ResourceAgent(LlmAgent):
                 continue
             primitive = str(step.get("primitive", "")).strip()
             raw_params = dict(step.get("params") or {})
-            store_as = str(step.get("store_as", "") or "").strip()
 
             fn = getattr(owner, primitive, None) or getattr(self, primitive, None)
             if not callable(fn):
@@ -298,7 +298,7 @@ class ResourceAgent(LlmAgent):
                 params = resolve_param_refs(
                     raw_params,
                     grounding_context,
-                    step_outputs=step_outputs,
+                    event_facts=event_facts,
                 )
             except Exception as exc:
                 msg = (
@@ -313,7 +313,7 @@ class ResourceAgent(LlmAgent):
                         "step_index": step_idx,
                         "primitive": primitive,
                         "raw_params": raw_params,
-                        "step_outputs": deepcopy(step_outputs),
+                        "event_facts": deepcopy(event_facts),
                     },
                 }
 
@@ -384,7 +384,27 @@ class ResourceAgent(LlmAgent):
                 )
                 sync_agent_from_bridge_snapshot(self, runtime_snapshot)
 
-            if store_as:
+            event_fact_key, event_fact_error = event_fact_key_for_primitive(
+                primitive=primitive,
+                params=params,
+                resource_type=resource_type,
+            )
+            if event_fact_error:
+                return {
+                    "status": "failed",
+                    "content": (
+                        f"Macro '{macro_name}' could not publish event facts at step {step_idx} "
+                        f"({primitive}): {event_fact_error}"
+                    ),
+                    "observations": {
+                        "macro_name": macro_name,
+                        "step_index": step_idx,
+                        "primitive": primitive,
+                        "primitive_result": normalized_result,
+                        "completed_steps": len(results),
+                    },
+                }
+            if event_fact_key:
                 step_output, output_error = extract_step_output(
                     primitive=primitive,
                     params=params,
@@ -395,7 +415,7 @@ class ResourceAgent(LlmAgent):
                     return {
                         "status": "failed",
                         "content": (
-                            f"Macro '{macro_name}' could not store output at step {step_idx} "
+                            f"Macro '{macro_name}' could not publish event facts at step {step_idx} "
                             f"({primitive}): {output_error}"
                         ),
                         "observations": {
@@ -403,11 +423,20 @@ class ResourceAgent(LlmAgent):
                             "step_index": step_idx,
                             "primitive": primitive,
                             "primitive_result": normalized_result,
-                            "store_as": store_as,
+                            "event_fact_path": f"event_facts.{event_fact_key}",
                             "completed_steps": len(results),
                         },
                     }
-                step_outputs[store_as] = step_output
+                target = event_facts
+                tokens = [token for token in str(event_fact_key).split(".") if token]
+                for token in tokens[:-1]:
+                    child = target.get(token)
+                    if not isinstance(child, dict):
+                        child = {}
+                        target[token] = child
+                    target = child
+                if tokens:
+                    target[tokens[-1]] = deepcopy(step_output)
 
         if out_state:
             runtime_snapshot = resource_snapshot_set_field(
@@ -425,7 +454,7 @@ class ResourceAgent(LlmAgent):
                 "macro_name": macro_name,
                 "completed_steps": len(results),
                 "total_steps": len(steps),
-                "step_outputs": deepcopy(step_outputs),
+                "event_facts": deepcopy(event_facts),
             },
         }
 

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
+    resource_event_fact_key,
     resource_snapshot_field_value,
     resource_snapshot_fields_map,
     resource_snapshot_has_field,
@@ -122,14 +123,14 @@ def _is_step_output_ref(context_ref: Any) -> bool:
     if context_ref is None or not isinstance(context_ref, (str, list, tuple)):
         return False
     tokens = _context_ref_tokens(context_ref)
-    return bool(tokens) and tokens[0] == "step_outputs"
+    return bool(tokens) and tokens[0] in {"step_outputs", "event_facts"}
 
 
 def _looks_like_step_output_alias(context_ref: Any, grounding_context: dict[str, Any]) -> bool:
     if context_ref is None or not isinstance(context_ref, (str, list, tuple)):
         return False
     tokens = _context_ref_tokens(context_ref)
-    if not tokens or tokens[0] == "step_outputs" or len(tokens) < 2:
+    if not tokens or tokens[0] in {"step_outputs", "event_facts"} or len(tokens) < 2:
         return False
     root_keys = {str(key).strip() for key in (grounding_context or {})}
     return tokens[0] not in root_keys
@@ -155,7 +156,7 @@ def _looks_like_context_ref_string(
     if not tokens or len(tokens) < 2:
         return False
     root_keys = {str(key).strip() for key in (grounding_context or {})}
-    if tokens[0] == "step_outputs":
+    if tokens[0] in {"step_outputs", "event_facts"}:
         return True
     if tokens[0] in root_keys:
         return True
@@ -207,18 +208,19 @@ def resolve_context_ref(
     tokens = _context_ref_tokens(context_ref)
     root = dict(grounding_context or {})
     if step_outputs is not None:
+        root["event_facts"] = deepcopy(step_outputs)
         root["step_outputs"] = deepcopy(step_outputs)
-    available_step_outputs = root.get("step_outputs") if isinstance(root.get("step_outputs"), dict) else {}
+    available_event_facts = root.get("event_facts") if isinstance(root.get("event_facts"), dict) else {}
 
     def _resolve_step_output_alias_token(token: str) -> str | None:
-        if not isinstance(available_step_outputs, dict) or not token:
+        if not isinstance(available_event_facts, dict) or not token:
             return None
-        if token in available_step_outputs:
-            return token
+        if token in available_event_facts:
+            return str(token)
         canonical = _canonicalize_step_output_alias(token)
         if not canonical:
             return None
-        for key in available_step_outputs:
+        for key in available_event_facts:
             if _canonicalize_step_output_alias(key) == canonical:
                 return str(key)
         return None
@@ -226,15 +228,15 @@ def resolve_context_ref(
     if (
         tokens
         and tokens[0] not in root
-        and isinstance(available_step_outputs, dict)
+        and isinstance(available_event_facts, dict)
     ):
         resolved_alias = _resolve_step_output_alias_token(tokens[0])
         if resolved_alias is not None:
-            tokens = ["step_outputs", resolved_alias, *tokens[1:]]
-    elif len(tokens) >= 2 and tokens[0] == "step_outputs":
+            tokens = ["event_facts", resolved_alias, *tokens[1:]]
+    elif len(tokens) >= 2 and tokens[0] in {"step_outputs", "event_facts"}:
         resolved_alias = _resolve_step_output_alias_token(tokens[1])
         if resolved_alias is not None:
-            tokens = ["step_outputs", resolved_alias, *tokens[2:]]
+            tokens = ["event_facts", resolved_alias, *tokens[2:]]
     return deepcopy(_walk_context_tokens(root, tokens, context_ref=ref_display))
 
 
@@ -327,9 +329,7 @@ def _validate_store_as(store_as: Any) -> str | None:
     alias = str(store_as or "").strip()
     if not alias:
         return None
-    if not alias.replace("_", "").isalnum() or alias[0].isdigit():
-        return "store_as must be a snake_case-like identifier"
-    return None
+    return "legacy field 'store_as' is not supported"
 
 
 def _normalized_xyz_pose(payload: Any) -> dict[str, float] | None:
@@ -375,7 +375,7 @@ def preview_step_output(
     profile = get_resource_profile(resource_type or "resource")
     resolver = (profile.preview_output_map or {}).get(primitive)
     if not callable(resolver):
-        return None, f"primitive '{primitive}' does not support store_as"
+        return None, f"primitive '{primitive}' does not publish reusable event_facts"
     return resolver(params, snapshot, grounding_context)
 
 
@@ -390,8 +390,47 @@ def extract_step_output(
     profile = get_resource_profile(resource_type or "resource")
     resolver = (profile.extract_output_map or {}).get(primitive)
     if not callable(resolver):
-        return None, f"primitive '{primitive}' does not support store_as"
+        return None, f"primitive '{primitive}' does not publish reusable event_facts"
     return resolver(params, step_result)
+
+
+def _assign_nested_mapping(root: dict[str, Any], dotted_path: str, value: Any) -> None:
+    current = root
+    tokens = [str(token).strip() for token in str(dotted_path or "").split(".") if str(token).strip()]
+    if not tokens:
+        raise ValueError("event fact path is empty")
+    for token in tokens[:-1]:
+        next_value = current.get(token)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            current[token] = next_value
+        current = next_value
+    current[tokens[-1]] = deepcopy(value)
+
+
+def _event_fact_key_for_primitive(
+    *,
+    primitive: str,
+    params: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    resource_type = str(
+        dict(snapshot.get("resource_core") or {}).get("resource_type")
+        or snapshot.get("resource_type")
+        or ""
+    ).strip().lower()
+    profile = get_resource_profile(resource_type or "resource")
+    key = resource_event_fact_key(profile, primitive, params)
+    if not key:
+        return None, None
+    if not isinstance(key, str):
+        return None, f"primitive '{primitive}' returned an invalid event fact key"
+    normalized = str(key).strip()
+    if not normalized:
+        return None, None
+    if normalized.startswith("event_facts."):
+        normalized = normalized[len("event_facts."):]
+    return normalized, None
 
 
 def _required_params_from_signature(fn: Any) -> list[str]:
@@ -1156,7 +1195,7 @@ def validate_and_project_steps(
 ) -> tuple[bool, dict[str, Any], str | None]:
     """Validate a primitive sequence and project the resulting snapshot."""
     projected = deepcopy(snapshot or {})
-    step_outputs: dict[str, Any] = {}
+    event_facts: dict[str, Any] = {}
     try:
         normalized_steps = expand_composite_steps(steps, primitive_catalog)
     except Exception as exc:
@@ -1180,14 +1219,12 @@ def validate_and_project_steps(
         store_as_error = _validate_store_as(store_as)
         if store_as_error:
             return False, projected, f"step {index} {primitive}: {store_as_error}"
-        if store_as and store_as in step_outputs:
-            return False, projected, f"step {index} {primitive}: duplicate store_as '{store_as}'"
 
         try:
             resolved_params = resolve_param_refs(
                 step.get("params") or {},
                 grounding_context or {},
-                step_outputs=step_outputs,
+                step_outputs=event_facts,
             )
         except Exception as exc:
             return False, projected, f"step {index} {primitive}: {exc}"
@@ -1238,7 +1275,14 @@ def validate_and_project_steps(
                 projected, "current_state", "idle", profile=_profile,
             )
 
-        if store_as:
+        event_fact_key, event_fact_error = _event_fact_key_for_primitive(
+            primitive=primitive,
+            params=resolved_params,
+            snapshot=projected,
+        )
+        if event_fact_error:
+            return False, projected, f"step {index} {primitive}: {event_fact_error}"
+        if event_fact_key:
             preview_output, preview_error = preview_step_output(
                 primitive=primitive,
                 params=resolved_params,
@@ -1247,7 +1291,7 @@ def validate_and_project_steps(
             )
             if preview_error:
                 return False, projected, f"step {index} {primitive}: {preview_error}"
-            step_outputs[store_as] = preview_output
+            _assign_nested_mapping(event_facts, event_fact_key, preview_output)
 
     return True, projected, None
 

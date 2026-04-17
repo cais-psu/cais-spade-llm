@@ -24,7 +24,7 @@
         "workspace_bounds": {
           "x_min_m": -0.8,
           "x_max_m": 0.8,
-          "y_min_m": -0.25,
+          "y_min_m": -0.35,
           "y_max_m": 1.2,
           "z_min_m": 0.85,
           "z_max_m": 1.65

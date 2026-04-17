@@ -233,7 +233,6 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
                         "properties": {
                             "primitive": {"type": "string"},
                             "params": {"type": "object"},
-                            "store_as": {"type": "string"},
                         },
                         "required": ["primitive", "params"],
                     },
@@ -2408,7 +2407,9 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         "- Author primitive_steps for ONLY the active DES transition shown above.",
         "- outline_id and resource_jid MUST exactly match the active transition.",
         "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog; hidden primitives (e.g. move_pose, get_current_pose) are rejected.",
-        "- Each step MUST include params; bind params to grounded values via {\"context_ref\": \"step_outputs.<alias>.<field>\"} referencing prior steps' store_as aliases, or via literal values derived from retrieved poses. Do NOT hardcode pose/offset numeric constants.",
+        "- Each step MUST include params; bind params to grounded values via {\"context_ref\": \"event_facts.<path>\"} referencing deterministic event-local facts from prior data-producing primitives, or via literal values derived from retrieved poses. Do NOT hardcode pose/offset numeric constants.",
+        "- Data-producing primitives publish event_facts automatically: get_current_pose -> event_facts.current_pose; detect_parts(part_name=P) -> event_facts.detected_part.P; compute_pick_targets(part_name=P) -> event_facts.pick_targets.P; compute_place_targets(part_name=P) -> event_facts.place_targets.P.",
+        "- Do not include store_as or any per-step alias field. Action primitives do not publish custom event_facts.",
         "- If you need a grounded value (current_pose, observed_pose, contract card, projected snapshot, full event body), emit decision=need_context with refs in context_requests and leave primitive_steps empty; do not guess.",
         "- When capability decompositions are available for the active resource, retrieve the closest applicable /capability_decompositions/<function_name> before authoring primitive_steps.",
         "- /capability_decompositions/<function_name> accepts only names from Available Capability Decompositions. Primitive names like grasp_part and release_part must be retrieved via /primitive_contracts/<name> instead.",

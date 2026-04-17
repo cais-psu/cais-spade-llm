@@ -54,8 +54,8 @@ async def _harness() -> tuple[Any, dict[str, Any]]:
     return planner, prepared_bridge_request, session_state
 
 
-def _ctx(alias: str, field: str) -> dict[str, Any]:
-    return {"context_ref": f"step_outputs.{alias}.{field}"}
+def _ctx(fact_path: str, field: str) -> dict[str, Any]:
+    return {"context_ref": f"event_facts.{fact_path}.{field}"}
 
 
 def _acquire_seq3_steps() -> list[dict[str, Any]]:
@@ -64,27 +64,25 @@ def _acquire_seq3_steps() -> list[dict[str, Any]]:
         {
             "primitive": "detect_parts",
             "params": {"part_name": "LG"},
-            "store_as": "obs_lg",
         },
         {
             "primitive": "compute_pick_targets",
             "params": {"part_name": "LG"},
-            "store_as": "pick",
         },
         {
             "primitive": "move_cartesian",
             "params": {
-                "x": _ctx("pick", "approach_pose.x"),
-                "y": _ctx("pick", "approach_pose.y"),
-                "z": _ctx("pick", "approach_pose.z"),
+                "x": _ctx("pick_targets.LG", "approach_pose.x"),
+                "y": _ctx("pick_targets.LG", "approach_pose.y"),
+                "z": _ctx("pick_targets.LG", "approach_pose.z"),
             },
         },
         {
             "primitive": "move_cartesian",
             "params": {
-                "x": _ctx("pick", "target_pose.x"),
-                "y": _ctx("pick", "target_pose.y"),
-                "z": _ctx("pick", "target_pose.z"),
+                "x": _ctx("pick_targets.LG", "target_pose.x"),
+                "y": _ctx("pick_targets.LG", "target_pose.y"),
+                "z": _ctx("pick_targets.LG", "target_pose.z"),
             },
         },
         {
@@ -106,22 +104,21 @@ def _release_steps(
         {
             "primitive": "compute_place_targets",
             "params": compute_params,
-            "store_as": "place",
         },
         {
             "primitive": "move_cartesian",
             "params": {
-                "x": _ctx("place", "approach_pose.x"),
-                "y": _ctx("place", "approach_pose.y"),
-                "z": _ctx("place", "approach_pose.z"),
+                "x": _ctx(f"place_targets.{part_name}", "approach_pose.x"),
+                "y": _ctx(f"place_targets.{part_name}", "approach_pose.y"),
+                "z": _ctx(f"place_targets.{part_name}", "approach_pose.z"),
             },
         },
         {
             "primitive": "move_cartesian",
             "params": {
-                "x": _ctx("place", "target_pose.x"),
-                "y": _ctx("place", "target_pose.y"),
-                "z": _ctx("place", "target_pose.z"),
+                "x": _ctx(f"place_targets.{part_name}", "target_pose.x"),
+                "y": _ctx(f"place_targets.{part_name}", "target_pose.y"),
+                "z": _ctx(f"place_targets.{part_name}", "target_pose.z"),
             },
         },
         {
@@ -159,18 +156,14 @@ def _ungrounded_release_steps() -> list[dict[str, Any]]:
 
 def _non_target_grasp_steps() -> list[dict[str, Any]]:
     return [
-        {"primitive": "detect_parts", "params": {"part_name": "LG"}, "store_as": "obs"},
-        {
-            "primitive": "compute_pick_targets",
-            "params": {"part_name": "LG"},
-            "store_as": "pick",
-        },
+        {"primitive": "detect_parts", "params": {"part_name": "LG"}},
+        {"primitive": "compute_pick_targets", "params": {"part_name": "LG"}},
         {
             "primitive": "move_cartesian",
             "params": {
-                "x": _ctx("pick", "approach_pose.x"),
-                "y": _ctx("pick", "approach_pose.y"),
-                "z": _ctx("pick", "approach_pose.z"),
+                "x": _ctx("pick_targets.LG", "approach_pose.x"),
+                "y": _ctx("pick_targets.LG", "approach_pose.y"),
+                "z": _ctx("pick_targets.LG", "approach_pose.z"),
             },
         },
         {
@@ -211,6 +204,35 @@ def _active_event(session_state: dict[str, Any]) -> dict[str, Any]:
     _, active_event, _ = primitive_mode._active_primitive_outline_event(session_state)
     assert active_event is not None
     return active_event
+
+
+def _xarm_fault_recover_event() -> dict[str, Any]:
+    return {
+        "outline_id": "RECOVERY_SEQ1",
+        "resource_jid": "xarm6@localhost",
+        "event_name": "xarm6_fault_recover_to_idle",
+        "action_name": "xarm6_fault_recover_to_idle",
+        "description": (
+            "Clear fault on xarm6 and transition it to idle so it can handle LG "
+            "first as required by the guard."
+        ),
+        "expected_start_state": {
+            "resource_state": "failed",
+            "held_part": None,
+        },
+        "expected_end_state": {
+            "resource_state": "idle",
+        },
+        "candidate_outline_id": "RECOVERY_SEQ1_1",
+    }
+
+
+def _replace_active_outline_event(session_state: dict[str, Any], event: dict[str, Any]) -> None:
+    prefix = list(session_state.get("accepted_outline_prefix") or [])
+    assert prefix
+    prefix[0] = deepcopy(event)
+    session_state["accepted_outline_prefix"] = prefix
+    session_state["primitive_generation_cursor"] = 0
 
 
 def _primitive_prompt_text(
@@ -290,12 +312,11 @@ def test_initial_prompt_is_minimal() -> None:
         assert "Primitive names like grasp_part and release_part must be retrieved via /primitive_contracts/<name> instead." in text
         assert "known pick/place/release/home behavior" not in text
 
-        # Full cards and full event bodies should be retrievable, not injected.
+        # Full primitive cards should remain retrievable rather than injected.
         for banned in (
             '"preconditions"',
             '"effects"',
             '"output_schema"',
-            '"expected_start_state"',
         ):
             assert banned not in text
 
@@ -344,17 +365,29 @@ def test_named_pose_rules_section_is_present_for_release_event_without_home_note
     asyncio.run(_run())
 
 
-def test_primitive_prompt_renders_input_diagnostics_for_target_mismatch() -> None:
+def test_fault_recover_event_suggests_move_home_decomposition() -> None:
+    async def _run() -> None:
+        _, prepared, session_state = await _harness()
+        _replace_active_outline_event(session_state, _xarm_fault_recover_event())
+
+        text = _primitive_prompt_text(prepared=prepared, session_state=session_state)
+
+        assert "Suggested Capability Decompositions For This Event" in text
+        assert '"move_home"' in text
+
+    asyncio.run(_run())
+
+
+def test_primitive_prompt_renders_release_event_target_context() -> None:
     async def _run() -> None:
         _, prepared, session_state = await _harness()
         _set_cursor_to(session_state, "RECOVERY_SEQ1")
 
         text = _primitive_prompt_text(prepared=prepared, session_state=session_state)
 
-        assert "Input Diagnostics" in text
-        assert "target_location_mismatch" in text
-        assert '"outline_target_ref": "prusa-mk3"' in text
-        assert '"grounded_goal_location": "assembly_board-v1"' in text
+        assert "Active DES Transition (full event)" in text
+        assert '"target_ref": "prusa-mk4-2"' in text
+        assert '"target_location": "prusa-mk4-2"' in text
         assert "Suggested Capability Decompositions For This Event" in text
         assert '"place_approach"' in text
         assert '"place_insert"' in text
@@ -431,8 +464,8 @@ def test_capability_decompositions_retrievable_for_place_approach_and_insert() -
             "move_cartesian",
         ]
         serialized_approach = str(place_approach)
-        assert "step_outputs.place_targets.approach_pose" in serialized_approach
-        assert "step_outputs.place_targets.target_pose" in serialized_approach
+        assert "event_facts.place_targets.<PART>.approach_pose" in serialized_approach
+        assert "event_facts.place_targets.<PART>.target_pose" in serialized_approach
 
         insert_names = [
             step["primitive"] for step in place_insert["bridge_visible_steps"]
@@ -630,7 +663,36 @@ def test_explicit_release_destination_mismatch_is_rejected() -> None:
         reasons = " ".join(str(row.get("reason") or "") for row in feedback)
         assert "release_destination_mismatch" in codes
         assert "assembly_board-v1" in reasons
-        assert "prusa-mk3" in reasons
+        assert "prusa-mk4-2" in reasons
+
+    asyncio.run(_run())
+
+
+def test_release_seq1_accepts_matching_explicit_printer_destination() -> None:
+    async def _run() -> None:
+        planner, prepared, session_state = await _harness()
+        _set_cursor_to(session_state, "RECOVERY_SEQ1")
+
+        decision, _ = await multi_turn_v2_mode._handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response=_authored_response(
+                outline_id="RECOVERY_SEQ1",
+                resource_jid="ur5e@localhost",
+                primitive_steps=_release_steps(
+                    "MCP",
+                    destination_location="prusa-mk4-2",
+                ),
+            ),
+            prepared_bridge_request=prepared,
+            planner=planner,
+        )
+
+        assert decision in {"primitive_steps_ready", "draft_ready"}, (
+            f"expected acceptance, got {decision!r}: "
+            f"{session_state.get('primitive_rejection_feedback')}"
+        )
+        accepted = list(session_state.get("accepted_primitive_program") or [])
+        assert accepted and accepted[-1]["outline_id"] == "RECOVERY_SEQ1"
 
     asyncio.run(_run())
 
@@ -812,6 +874,93 @@ def test_home_named_pose_is_no_longer_rejected_by_authored_plan_gate() -> None:
                 "params": {"pose_name": "home"},
             }
         ]
+
+    asyncio.run(_run())
+
+
+def test_recovery_move_home_projects_idle_and_passes_validation() -> None:
+    async def _run() -> None:
+        _, prepared, session_state = await _harness()
+        _set_cursor_to(session_state, "RECOVERY_SEQ2")
+        active_event = _active_event(session_state)
+
+        result, feedback = primitive_mode._validate_single_event_primitive_steps(
+            session_state=session_state,
+            prepared_bridge_request=prepared,
+            outline_event=active_event,
+            primitive_steps=[
+                {
+                    "primitive": "move_to_named_pose",
+                    "params": {"pose_name": "home", "speed": 0.8},
+                }
+            ],
+        )
+
+        assert feedback == []
+        assert result.get("valid") is True
+        assert result.get("validation_error") is None
+        assert dict(result.get("projected_snapshot") or {}).get("current_state") == "idle"
+
+    asyncio.run(_run())
+
+
+def test_fault_recover_move_home_projects_idle_and_passes_validation() -> None:
+    async def _run() -> None:
+        _, prepared, session_state = await _harness()
+        fault_event = _xarm_fault_recover_event()
+        _replace_active_outline_event(session_state, fault_event)
+
+        result, feedback = primitive_mode._validate_single_event_primitive_steps(
+            session_state=session_state,
+            prepared_bridge_request=prepared,
+            outline_event=fault_event,
+            primitive_steps=[
+                {
+                    "primitive": "move_to_named_pose",
+                    "params": {"pose_name": "home", "speed": 0.8},
+                }
+            ],
+        )
+
+        assert feedback == []
+        assert result.get("valid") is True
+        assert result.get("validation_error") is None
+        assert dict(result.get("projected_snapshot") or {}).get("current_state") == "idle"
+
+    asyncio.run(_run())
+
+
+def test_premature_fault_clear_revision_serves_move_home_context() -> None:
+    async def _run() -> None:
+        planner, prepared, session_state = await _harness()
+        fault_event = _xarm_fault_recover_event()
+        _replace_active_outline_event(session_state, fault_event)
+        response = _authored_response(
+            outline_id="RECOVERY_SEQ1",
+            resource_jid="xarm6@localhost",
+            decision="need_primitive_revision",
+            primitive_steps=[],
+        )
+        response["rationale"] = (
+            "Contract gap: no visible primitive exists to clear/recover xarm6 "
+            "from failed state."
+        )
+
+        decision, turn_entry = await primitive_mode._handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response=response,
+            prepared_bridge_request=prepared,
+            planner=planner,
+        )
+
+        assert decision == "need_context"
+        assert session_state.get("primitive_rejection_feedback") == []
+        served_context = dict(session_state.get("primitive_served_context") or {})
+        assert "/capability_decompositions/move_home" in served_context
+        assert turn_entry.get("primitive_revision_deferred_for_context") is True
+        assert "/capability_decompositions/move_home" in (
+            turn_entry.get("auto_served_context_refs") or []
+        )
 
     asyncio.run(_run())
 
@@ -1335,19 +1484,15 @@ def test_witness_violation_rejects_grasp_after_non_target_motion() -> None:
         planner, prepared, session_state = await _harness()
         _set_cursor_to(session_state, "RECOVERY_SEQ3")
         steps = [
-            {"primitive": "detect_parts", "params": {"part_name": "LG"}, "store_as": "obs"},
-            {
-                "primitive": "compute_pick_targets",
-                "params": {"part_name": "LG"},
-                "store_as": "pick",
-            },
+            {"primitive": "detect_parts", "params": {"part_name": "LG"}},
+            {"primitive": "compute_pick_targets", "params": {"part_name": "LG"}},
             # Motion bound to APPROACH_POSE only — no motion lands on target_pose.
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _ctx("pick", "approach_pose.x"),
-                    "y": _ctx("pick", "approach_pose.y"),
-                    "z": _ctx("pick", "approach_pose.z"),
+                    "x": _ctx("pick_targets.LG", "approach_pose.x"),
+                    "y": _ctx("pick_targets.LG", "approach_pose.y"),
+                    "z": _ctx("pick_targets.LG", "approach_pose.z"),
                 },
             },
             {
@@ -1510,28 +1655,24 @@ def test_unmodeled_recovery_sequence_accepted() -> None:
         planner, prepared, session_state = await _harness()
         _set_cursor_to(session_state, "RECOVERY_SEQ3")
         steps = [
-            {"primitive": "detect_parts", "params": {"part_name": "LG"}, "store_as": "obs1"},
+            {"primitive": "detect_parts", "params": {"part_name": "LG"}},
             # Second observation, which no composer recipe produced.
-            {"primitive": "detect_parts", "params": {"part_name": "LG"}, "store_as": "obs2"},
-            {
-                "primitive": "compute_pick_targets",
-                "params": {"part_name": "LG"},
-                "store_as": "pick",
-            },
+            {"primitive": "detect_parts", "params": {"part_name": "LG"}},
+            {"primitive": "compute_pick_targets", "params": {"part_name": "LG"}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _ctx("pick", "approach_pose.x"),
-                    "y": _ctx("pick", "approach_pose.y"),
-                    "z": _ctx("pick", "approach_pose.z"),
+                    "x": _ctx("pick_targets.LG", "approach_pose.x"),
+                    "y": _ctx("pick_targets.LG", "approach_pose.y"),
+                    "z": _ctx("pick_targets.LG", "approach_pose.z"),
                 },
             },
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _ctx("pick", "target_pose.x"),
-                    "y": _ctx("pick", "target_pose.y"),
-                    "z": _ctx("pick", "target_pose.z"),
+                    "x": _ctx("pick_targets.LG", "target_pose.x"),
+                    "y": _ctx("pick_targets.LG", "target_pose.y"),
+                    "z": _ctx("pick_targets.LG", "target_pose.z"),
                 },
             },
             {

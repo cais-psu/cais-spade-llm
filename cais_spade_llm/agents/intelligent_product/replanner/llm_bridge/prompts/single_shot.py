@@ -61,9 +61,7 @@ def _single_shot_response_contract() -> dict[str, Any]:
                 "primitive",
                 "params",
             ],
-            "optional_fields": [
-                "store_as",
-            ],
+            "optional_fields": [],
         },
     }
 

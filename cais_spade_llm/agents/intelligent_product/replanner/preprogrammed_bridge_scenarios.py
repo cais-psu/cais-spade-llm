@@ -74,7 +74,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
     _part_model_name(grounding_context, "MCP")
     _part_model_name(grounding_context, "LG")
 
-    mcp_pick_q = _current_pose_orientation_params(alias="ur5e_home_pose")
+    mcp_pick_q = _current_pose_orientation_params(fact_path="current_pose")
     lg_observed_pose = _part_observed_pose(
         prepared_bridge_request,
         grounding_context=grounding_context,
@@ -91,7 +91,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             {
                 "primitive": "get_current_pose",
                 "params": {},
-                "store_as": "lg_pick_pose",
             },
             {
                 "primitive": "compute_pick_targets",
@@ -106,24 +105,23 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                     "ignore_current_height_for_travel_z": True,
                     "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
                 },
-                "store_as": "lg_pick_targets",
             },
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/x"},
-                    "y": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/y"},
-                    "z": {"context_ref": "/step_outputs/lg_pick_targets/approach_pose/z"},
+                    "x": {"context_ref": "/event_facts/pick_targets/LG/approach_pose/x"},
+                    "y": {"context_ref": "/event_facts/pick_targets/LG/approach_pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/LG/approach_pose/z"},
                     "speed": _UR5E_TRAVERSE_SPEED,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/x"},
-                    "y": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/y"},
-                    "z": {"context_ref": "/step_outputs/lg_pick_targets/target_pose/z"},
-                    **_current_pose_orientation_params(alias="lg_pick_pose"),
+                    "x": {"context_ref": "/event_facts/pick_targets/LG/target_pose/x"},
+                    "y": {"context_ref": "/event_facts/pick_targets/LG/target_pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/LG/target_pose/z"},
+                    **_current_pose_orientation_params(fact_path="current_pose"),
                     "speed": _UR5E_CAREFUL_SPEED,
                 },
             },
@@ -161,12 +159,10 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             {
                 "primitive": "detect_parts",
                 "params": {"part_name": "LG"},
-                "store_as": "detected_lg",
             },
             {
                 "primitive": "get_current_pose",
                 "params": {},
-                "store_as": "lg_pick_pose",
             },
             {
                 "primitive": "compute_pick_targets",
@@ -180,24 +176,23 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                     "ignore_current_height_for_travel_z": True,
                     "min_pick_tcp_z_override_m": _LG_RECOVERY_MIN_PICK_TCP_Z_M,
                 },
-                "store_as": "lg_pick_targets",
             },
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
-                    "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
-                    "z": {"context_ref": "/step_outputs/lg_pick_targets/travel_z"},
+                    "x": {"context_ref": "/event_facts/detected_part/LG/pose/x"},
+                    "y": {"context_ref": "/event_facts/detected_part/LG/pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/LG/travel_z"},
                     "speed": _UR5E_TRAVERSE_SPEED,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/detected_lg/pose/x"},
-                    "y": {"context_ref": "/step_outputs/detected_lg/pose/y"},
-                    "z": {"context_ref": "/step_outputs/lg_pick_targets/pick_z"},
-                    **_current_pose_orientation_params(alias="lg_pick_pose"),
+                    "x": {"context_ref": "/event_facts/detected_part/LG/pose/x"},
+                    "y": {"context_ref": "/event_facts/detected_part/LG/pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/LG/pick_z"},
+                    **_current_pose_orientation_params(fact_path="current_pose"),
                     "speed": _UR5E_CAREFUL_SPEED,
                 },
             },
@@ -245,7 +240,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             {
                 "primitive": "get_current_pose",
                 "params": {},
-                "store_as": "ur5e_home_pose",
             },
             {
                 "primitive": "compute_pick_targets",
@@ -257,23 +251,22 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                     ),
                     "target_pose": mcp_observed_pose,
                 },
-                "store_as": "mcp_pick_targets",
             },
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/x"},
-                    "y": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/y"},
-                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/approach_pose/z"},
+                    "x": {"context_ref": "/event_facts/pick_targets/MCP/approach_pose/x"},
+                    "y": {"context_ref": "/event_facts/pick_targets/MCP/approach_pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/MCP/approach_pose/z"},
                     "speed": _UR5E_TRAVERSE_SPEED,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/x"},
-                    "y": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/y"},
-                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/target_pose/z"},
+                    "x": {"context_ref": "/event_facts/pick_targets/MCP/target_pose/x"},
+                    "y": {"context_ref": "/event_facts/pick_targets/MCP/target_pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/MCP/target_pose/z"},
                     **mcp_pick_q,
                 },
             },
@@ -308,12 +301,10 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             {
                 "primitive": "get_current_pose",
                 "params": {},
-                "store_as": "ur5e_home_pose",
             },
             {
                 "primitive": "detect_parts",
                 "params": {"part_name": "MCP"},
-                "store_as": "detected_mcp",
             },
             {
                 "primitive": "compute_pick_targets",
@@ -324,23 +315,22 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                         part_name="MCP",
                     ),
                 },
-                "store_as": "mcp_pick_targets",
             },
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
-                    "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
-                    "z": {"context_ref": "/step_outputs/ur5e_home_pose/pose/z"},
+                    "x": {"context_ref": "/event_facts/detected_part/MCP/pose/x"},
+                    "y": {"context_ref": "/event_facts/detected_part/MCP/pose/y"},
+                    "z": {"context_ref": "/event_facts/current_pose/pose/z"},
                     "speed": _UR5E_TRAVERSE_SPEED,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": {"context_ref": "/step_outputs/detected_mcp/pose/x"},
-                    "y": {"context_ref": "/step_outputs/detected_mcp/pose/y"},
-                    "z": {"context_ref": "/step_outputs/mcp_pick_targets/pick_z"},
+                    "x": {"context_ref": "/event_facts/detected_part/MCP/pose/x"},
+                    "y": {"context_ref": "/event_facts/detected_part/MCP/pose/y"},
+                    "z": {"context_ref": "/event_facts/pick_targets/MCP/pick_z"},
                     **mcp_pick_q,
                 },
             },
@@ -517,7 +507,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                     {
                         "primitive": "get_current_pose",
                         "params": {},
-                        "store_as": "lg_insert_pose",
                     },
                     {
                         "primitive": "compute_place_targets",
@@ -529,24 +518,23 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                             ),
                             "z_adjustment_m": _LG_INSERT_Z_ADJUSTMENT_M,
                         },
-                        "store_as": "lg_insert_targets",
                     },
                     {
                         "primitive": "move_cartesian",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/lg_insert_targets/slot_x"},
-                            "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
-                            "z": {"context_ref": "/step_outputs/lg_insert_pose/pose/z"},
+                            "x": {"context_ref": "/event_facts/place_targets/LG/slot_x"},
+                            "y": {"context_ref": "/event_facts/place_targets/LG/slot_y"},
+                            "z": {"context_ref": "/event_facts/current_pose/pose/z"},
                             "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
                         "primitive": "move_pose",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/lg_insert_targets/slot_x"},
-                            "y": {"context_ref": "/step_outputs/lg_insert_targets/slot_y"},
-                            "z": {"context_ref": "/step_outputs/lg_insert_targets/place_z"},
-                            **_current_pose_orientation_params(alias="lg_insert_pose"),
+                            "x": {"context_ref": "/event_facts/place_targets/LG/slot_x"},
+                            "y": {"context_ref": "/event_facts/place_targets/LG/slot_y"},
+                            "z": {"context_ref": "/event_facts/place_targets/LG/place_z"},
+                            **_current_pose_orientation_params(fact_path="current_pose"),
                             "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
@@ -634,7 +622,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                     {
                         "primitive": "get_current_pose",
                         "params": {},
-                        "store_as": "mcp_insert_pose",
                     },
                     {
                         "primitive": "compute_place_targets",
@@ -645,24 +632,23 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
                                 part_name="MCP",
                             ),
                         },
-                        "store_as": "mcp_insert_targets",
                     },
                     {
                         "primitive": "move_cartesian",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/mcp_insert_targets/slot_x"},
-                            "y": {"context_ref": "/step_outputs/mcp_insert_targets/slot_y"},
-                            "z": {"context_ref": "/step_outputs/mcp_insert_pose/pose/z"},
+                            "x": {"context_ref": "/event_facts/place_targets/MCP/slot_x"},
+                            "y": {"context_ref": "/event_facts/place_targets/MCP/slot_y"},
+                            "z": {"context_ref": "/event_facts/current_pose/pose/z"},
                             "speed": _UR5E_TRAVERSE_SPEED,
                         },
                     },
                     {
                         "primitive": "move_pose",
                         "params": {
-                            "x": {"context_ref": "/step_outputs/mcp_insert_targets/slot_x"},
-                            "y": {"context_ref": "/step_outputs/mcp_insert_targets/slot_y"},
-                            "z": {"context_ref": "/step_outputs/mcp_insert_targets/place_z"},
-                            **_current_pose_orientation_params(alias="mcp_insert_pose"),
+                            "x": {"context_ref": "/event_facts/place_targets/MCP/slot_x"},
+                            "y": {"context_ref": "/event_facts/place_targets/MCP/slot_y"},
+                            "z": {"context_ref": "/event_facts/place_targets/MCP/place_z"},
+                            **_current_pose_orientation_params(fact_path="current_pose"),
                             "speed": _UR5E_CAREFUL_SPEED,
                         },
                     },
@@ -1007,17 +993,17 @@ def _part_orientation_params(
     grounding_context: dict[str, Any],
     *,
     part_name: str,
-    alias: str,
+    fact_path: str,
     fallback: dict[str, float],
 ) -> dict[str, Any]:
     parts = dict(grounding_context.get("parts") or {})
     observed_pose = dict((parts.get(part_name) or {}).get("observed_pose") or {})
     if {"qx", "qy", "qz", "qw"} <= set(observed_pose.keys()):
         return {
-            "qx": {"context_ref": f"/step_outputs/{alias}/pose/qx"},
-            "qy": {"context_ref": f"/step_outputs/{alias}/pose/qy"},
-            "qz": {"context_ref": f"/step_outputs/{alias}/pose/qz"},
-            "qw": {"context_ref": f"/step_outputs/{alias}/pose/qw"},
+            "qx": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qx"},
+            "qy": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qy"},
+            "qz": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qz"},
+            "qw": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qw"},
         }
     return dict(fallback)
 
@@ -1056,10 +1042,10 @@ def _part_observed_pose(
     return None
 
 
-def _current_pose_orientation_params(*, alias: str) -> dict[str, Any]:
+def _current_pose_orientation_params(*, fact_path: str) -> dict[str, Any]:
     return {
-        "qx": {"context_ref": f"/step_outputs/{alias}/pose/qx"},
-        "qy": {"context_ref": f"/step_outputs/{alias}/pose/qy"},
-        "qz": {"context_ref": f"/step_outputs/{alias}/pose/qz"},
-        "qw": {"context_ref": f"/step_outputs/{alias}/pose/qw"},
+        "qx": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qx"},
+        "qy": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qy"},
+        "qz": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qz"},
+        "qw": {"context_ref": f"/event_facts/{fact_path.replace('.', '/')}/pose/qw"},
     }

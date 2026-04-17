@@ -6,11 +6,9 @@ by ``execute_recovery_macro``.
 
 Binding rules
 -------------
-* ``store_as`` writes to function-local scope.
-* ``context_ref`` resolves in order: (1) function-local scope
-  (prior ``store_as`` outputs), (2) function inputs,
-  (3) session ``observation_store``.
-* Forward references to later ``store_as`` are validation errors.
+* ``store_as`` is legacy and rejected.
+* ``context_ref`` resolves against function inputs and session
+  ``observation_store``.
 * Cross-function references are not allowed — data flows between
   functions only via explicit function inputs.
 """
@@ -219,9 +217,8 @@ def _validate_bindings(
     primitive_program: list[dict[str, Any]],
     observation_store: dict[str, Any],
 ) -> list[str]:
-    """Validate store_as / context_ref binding rules."""
+    """Validate legacy-field rejection and context_ref binding rules."""
     errors: list[str] = []
-    defined_outputs: set[str] = set()
 
     for i, step in enumerate(primitive_program):
         if not isinstance(step, dict):
@@ -231,25 +228,21 @@ def _validate_bindings(
         # Check context_refs in params.
         params = step.get("params") or {}
         _check_context_refs_in_params(
-            params, defined_outputs, observation_store,
+            params, observation_store,
             step_index=i, primitive=prim, errors=errors,
         )
 
-        # Register store_as output.
         store_as = str(step.get("store_as") or "").strip()
         if store_as:
-            if store_as in defined_outputs:
-                errors.append(
-                    f"step {i} {prim}: duplicate store_as '{store_as}'"
-                )
-            defined_outputs.add(store_as)
+            errors.append(
+                f"step {i} {prim}: legacy field 'store_as' is not supported"
+            )
 
     return errors
 
 
 def _check_context_refs_in_params(
     params: Any,
-    defined_outputs: set[str],
     observation_store: dict[str, Any],
     *,
     step_index: int,
@@ -265,25 +258,25 @@ def _check_context_refs_in_params(
             # Extract the root key (before first dot).
             root_key = ref_str.split(".")[0] if "." in ref_str else ref_str
             if (
-                root_key not in defined_outputs
+                root_key not in {"event_facts"}
                 and root_key not in observation_store
             ):
                 errors.append(
                     f"step {step_index} {primitive}: context_ref '{ref_str}' "
                     f"references undefined output '{root_key}' "
-                    f"(available: {sorted(defined_outputs | set(observation_store.keys()))})"
+                    f"(available: {sorted({'event_facts'} | set(observation_store.keys()))})"
                 )
         else:
             for key, value in params.items():
                 _check_context_refs_in_params(
-                    value, defined_outputs, observation_store,
+                    value, observation_store,
                     step_index=step_index, primitive=primitive,
                     errors=errors, path=f"{path}.{key}" if path else key,
                 )
     elif isinstance(params, (list, tuple)):
         for idx, item in enumerate(params):
             _check_context_refs_in_params(
-                item, defined_outputs, observation_store,
+                item, observation_store,
                 step_index=step_index, primitive=primitive,
                 errors=errors, path=f"{path}[{idx}]",
             )

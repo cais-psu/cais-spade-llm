@@ -667,7 +667,6 @@ def normalize_bridge_turn_response(
         resource_jid = str(parsed.get("resource_jid", "")).strip()
         primitive = str(parsed.get("primitive", "")).strip()
         params = parsed.get("params") or {}
-        store_as = str(parsed.get("store_as", "") or "").strip()
         if not resource_jid:
             return None, "observe.resource_jid is required"
         if allowed_resources and resource_jid not in allowed_resources:
@@ -678,15 +677,16 @@ def normalize_bridge_turn_response(
             return None, f"observe.primitive '{primitive}' is not allowed in this phase"
         if not isinstance(params, dict):
             return None, "observe.params must be an object"
-        if store_as:
-            if not store_as.replace("_", "").isalnum() or store_as[0].isdigit():
-                return None, "observe.store_as must be a snake_case-like identifier"
+        if str(parsed.get("store_as", "") or "").strip():
+            return None, (
+                "observe.store_as is no longer supported; "
+                "observation keys are assigned automatically"
+            )
         return {
             "type": "observe",
             "resource_jid": resource_jid,
             "primitive": primitive,
             "params": deepcopy(params),
-            "store_as": store_as,
             "reason_summary": str(parsed.get("reason_summary", "") or "").strip(),
             "react_trace": _normalize_bridge_react_trace(parsed.get("react_trace")),
         }, None
@@ -988,18 +988,14 @@ def _normalize_primitive_bridge_proposal(
                 logger.warning("[EnvironmentModel] Bridge macro_task %d step params must be an object.", index)
                 return None
             normalized_step = {"primitive": primitive, "params": dict(params)}
-            store_as = str(step.get("store_as") or "").strip()
-            if store_as:
-                semantics = dict((primitive_rows.get(primitive) or {}).get("bridge_semantics") or {})
-                if bool(semantics.get("produces_observation")):
-                    normalized_step["store_as"] = store_as
-                else:
-                    logger.warning(
-                        "[EnvironmentModel] Bridge macro_task %d step %d ignored unsupported store_as on primitive '%s'.",
-                        index,
-                        len(validated_steps) + 1,
-                        primitive,
-                    )
+            if str(step.get("store_as") or "").strip():
+                logger.warning(
+                    "[EnvironmentModel] Bridge macro_task %d step %d rejected legacy store_as on primitive '%s'.",
+                    index,
+                    len(validated_steps) + 1,
+                    primitive,
+                )
+                return None
             validated_steps.append(normalized_step)
 
         dynamic_grounding_context = _projected_bridge_grounding_context(

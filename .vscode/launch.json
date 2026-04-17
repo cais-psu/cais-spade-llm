@@ -5,11 +5,11 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Case 3 Bridge Dry-Run: Primitive Generation (F5 Default)",
+            "name": "Case 3 Bridge Dry-Run: Full (Grounding + Outline + Primitive Generation) (F5 Default)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/test/test_case3_bridge_dryrun.py",
-            "args": ["--reasoning-mode", "multi_turn", "--focus", "primitive_generation"],
+            "args": ["--reasoning-mode", "multi_turn", "--focus", "full"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/scripts/ros_python.sh"

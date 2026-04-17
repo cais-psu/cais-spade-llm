@@ -30,7 +30,7 @@
         ],
         "workspace_bounds": {
           "x_min_m": -0.70, "x_max_m": 0.70,
-          "y_min_m": -0.15, "y_max_m": 1.10,
+          "y_min_m": -0.35, "y_max_m": 1.10,
           "z_min_m": 0.85, "z_max_m": 1.60
         },
         "staging_areas": {

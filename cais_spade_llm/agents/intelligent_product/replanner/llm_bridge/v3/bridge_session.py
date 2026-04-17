@@ -89,6 +89,7 @@ class BridgeSessionMixin:
         )
         observation_store = deepcopy(bridge_session.get("observation_store") or {})
         if observation_store:
+            grounding_context["event_facts"] = deepcopy(observation_store)
             grounding_context["step_outputs"] = observation_store
 
         prepared_bridge_request["bridge_snapshot"] = bridge_snapshot

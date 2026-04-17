@@ -689,7 +689,7 @@ def _robot_seed_trace_facts_from_context(
 
     observation_like_sources = [
         ("observation_store", dict(context.get("observation_store") or {})),
-        ("step_outputs", dict(context.get("step_outputs") or {})),
+        ("event_facts", dict(context.get("event_facts") or {})),
     ]
     for source_name, rows in observation_like_sources:
         for alias, payload in rows.items():
@@ -908,7 +908,7 @@ def _robot_primitive_sequence_validator(
         grounding_context=grounding_context,
     )
 
-    # Track aliases emitted by target-computing primitives so we can detect
+    # Track event-fact paths emitted by target-computing primitives so we can detect
     # motion steps whose params are actually bound to the computed target_pose
     # (the motion-witness for downstream grasp_part / release_part).
     target_alias_to_part: dict[str, str] = {}
@@ -924,21 +924,24 @@ def _robot_primitive_sequence_validator(
             for ref in (step_result.get("context_refs") or [])
             if str(ref or "").strip()
         ]
-        store_as = _robot_token(step_result.get("store_as"))
+        event_fact_path = str(step_result.get("event_fact_path") or "").strip()
 
-        if primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"} and store_as:
+        if primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"} and event_fact_path:
             part_token = _robot_token(params.get("part_name") or authored_params.get("part_name"))
             if part_token:
-                target_alias_to_part[store_as] = part_token
+                normalized_fact = event_fact_path.replace("/", ".").strip(".")
+                fact_parts = [seg for seg in normalized_fact.split(".") if seg]
+                if len(fact_parts) >= 3 and fact_parts[0] == "event_facts":
+                    target_alias_to_part[".".join(fact_parts[1:3])] = part_token
 
         if primitive in {"move_cartesian", "move_pose"}:
             for ref in context_refs:
                 normalized = ref.replace("/", ".").strip(".")
                 parts = [seg for seg in normalized.split(".") if seg]
-                if len(parts) < 3 or parts[0] != "step_outputs":
+                if len(parts) < 4 or parts[0] != "event_facts":
                     continue
-                alias = parts[1]
-                if "target_pose" not in parts[2:]:
+                alias = ".".join(parts[1:3])
+                if "target_pose" not in parts[3:]:
                     continue
                 part_token = target_alias_to_part.get(alias)
                 if not part_token:
@@ -1227,7 +1230,7 @@ def _preview_detect_output(
 ) -> tuple[dict[str, Any] | None, str | None]:
     item_name = str(params.get("part_name") or "").strip()
     if not item_name:
-        return None, "store_as requires params.part_name"
+        return None, "event_facts.detected_part requires params.part_name"
     item_info = (grounding_context or {}).get("parts", {}).get(item_name, {})
     observed_pose = _normalized_xyz_pose((item_info or {}).get("observed_pose")) or {
         "x": 0.0,
@@ -1301,7 +1304,7 @@ def _preview_pick_targets_output(
 ) -> tuple[dict[str, Any] | None, str | None]:
     item_name = str(params.get("part_name") or "").strip()
     if not item_name:
-        return None, "store_as requires params.part_name"
+        return None, "event_facts.pick_targets requires params.part_name"
     product_geometry = params.get("product_geometry")
     if product_geometry is not None and not isinstance(product_geometry, dict):
         return None, "params.product_geometry must be an object when provided"
@@ -1378,7 +1381,7 @@ def _preview_place_targets_output(
     normalized_pick_ctx = dict(pick_ctx or {})
     item_name = str(params.get("part_name") or normalized_pick_ctx.get("part_name") or "").strip()
     if not item_name:
-        return None, "store_as requires params.part_name or params.pick_ctx.part_name"
+        return None, "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name"
     geometry = resolve_place_geometry(
         part_name=item_name,
         destination_location=str(params.get("destination_location") or ""),
@@ -1438,15 +1441,18 @@ def _extract_detect_output(
 ) -> tuple[dict[str, Any] | None, str | None]:
     item_name = str(params.get("part_name") or "").strip()
     if not item_name:
-        return None, "store_as requires params.part_name"
+        return None, "event_facts.detected_part requires params.part_name"
     items = step_result.get("data")
     if not isinstance(items, list):
-        return None, "store_as expected list result data"
+        return None, "event_facts.detected_part expected list result data"
     if len(items) != 1:
-        return None, f"store_as expected exactly one result for '{item_name}', found {len(items)}"
+        return None, (
+            f"event_facts.detected_part expected exactly one result for '{item_name}', "
+            f"found {len(items)}"
+        )
     output = _normalize_detected_item_output(items[0], fallback_name=item_name)
     if output is None:
-        return None, "store_as result did not contain x/y/z fields"
+        return None, "event_facts.detected_part result did not contain x/y/z fields"
     return output, None
 
 
@@ -1456,7 +1462,7 @@ def _extract_pose_output(
 ) -> tuple[dict[str, Any] | None, str | None]:
     output = _normalize_pose_output(step_result.get("pose"))
     if output is None:
-        return None, "store_as result did not contain pose x/y/z"
+        return None, "event_facts.current_pose result did not contain pose x/y/z"
     return output, None
 
 
@@ -1465,7 +1471,7 @@ def _extract_pick_targets_output(
     step_result: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(step_result, dict) or not step_result.get("success"):
-        return None, "store_as expected successful dict result"
+        return None, "event_facts.pick_targets expected successful dict result"
     required_keys = {
         "part_name",
         "tx",
@@ -1481,7 +1487,7 @@ def _extract_pick_targets_output(
         "start_z",
     }
     if not required_keys <= set(step_result.keys()):
-        return None, "store_as result was missing expected keys"
+        return None, "event_facts.pick_targets result was missing expected keys"
     return {
         "part_name": str(step_result.get("part_name") or ""),
         "model_name": str(step_result.get("model_name") or ""),
@@ -1514,7 +1520,7 @@ def _extract_place_targets_output(
     step_result: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(step_result, dict) or not step_result.get("success"):
-        return None, "store_as expected successful dict result"
+        return None, "event_facts.place_targets expected successful dict result"
     required_keys = {
         "slot_x",
         "slot_y",
@@ -1526,7 +1532,7 @@ def _extract_place_targets_output(
         "grasp_tcp_to_part_origin_z",
     }
     if not required_keys <= set(step_result.keys()):
-        return None, "store_as result was missing expected keys"
+        return None, "event_facts.place_targets result was missing expected keys"
     return {
         "part_name": str(step_result.get("part_name") or ""),
         "slot_x": float(step_result["slot_x"]),
@@ -1549,6 +1555,44 @@ def _extract_place_targets_output(
         "grasp_tcp_to_part_origin_z": float(step_result["grasp_tcp_to_part_origin_z"]),
         "model_name": str(step_result.get("model_name") or ""),
     }, None
+
+
+def _part_token_from_event_fact_params(params: dict[str, Any]) -> str:
+    pick_ctx = dict(params.get("pick_ctx") or {})
+    return str(params.get("part_name") or pick_ctx.get("part_name") or "").strip()
+
+
+def _event_fact_key_current_pose(
+    _params: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    return "current_pose", None
+
+
+def _event_fact_key_detected_part(
+    params: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    item_name = str(params.get("part_name") or "").strip()
+    if not item_name:
+        return None, "event_facts.detected_part requires params.part_name"
+    return f"detected_part.{item_name}", None
+
+
+def _event_fact_key_pick_targets(
+    params: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    item_name = str(params.get("part_name") or "").strip()
+    if not item_name:
+        return None, "event_facts.pick_targets requires params.part_name"
+    return f"pick_targets.{item_name}", None
+
+
+def _event_fact_key_place_targets(
+    params: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    item_name = _part_token_from_event_fact_params(params)
+    if not item_name:
+        return None, "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name"
+    return f"place_targets.{item_name}", None
 
 
 def _robot_primitive_owner(agent: Any) -> Any | None:
@@ -1677,12 +1721,21 @@ def _home_steps(compiler: Any, *, resource_jid: str, speed: float = 0.8) -> list
     return []
 
 
-def _orientation_params(compiler: Any, *, alias: str) -> dict[str, Any]:
+def _bridge_event_fact_ref(compiler: Any, path: str) -> dict[str, Any]:
+    normalized = "/".join(token for token in str(path or "").split(".") if token)
+    return _bridge_ref(compiler, f"/event_facts/{normalized}")
+
+
+def _event_fact_ref(path: str) -> dict[str, str]:
+    return {"context_ref": f"event_facts.{path}"}
+
+
+def _orientation_params(compiler: Any, *, fact_path: str) -> dict[str, Any]:
     return {
-        "qx": _bridge_ref(compiler, f"/step_outputs/{alias}/pose/qx"),
-        "qy": _bridge_ref(compiler, f"/step_outputs/{alias}/pose/qy"),
-        "qz": _bridge_ref(compiler, f"/step_outputs/{alias}/pose/qz"),
-        "qw": _bridge_ref(compiler, f"/step_outputs/{alias}/pose/qw"),
+        "qx": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qx"),
+        "qy": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qy"),
+        "qz": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qz"),
+        "qw": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qw"),
     }
 
 
@@ -1750,13 +1803,13 @@ def _compile_clear_macro(
         steps = _home_steps(compiler, resource_jid=resource_jid)
     if not steps:
         steps = [
-            {"primitive": "get_current_pose", "params": {}, "store_as": "current_pose"},
+            {"primitive": "get_current_pose", "params": {}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/current_pose/pose/x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/current_pose/pose/y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/current_pose/pose/z"),
+                    "x": _bridge_event_fact_ref(compiler, "current_pose.pose.x"),
+                    "y": _bridge_event_fact_ref(compiler, "current_pose.pose.y"),
+                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 0.8,
                 },
             },
@@ -1812,29 +1865,25 @@ def _compile_pick_macro(
             "part_transition": part_transition,
         },
         "primitive_steps": [
-            {"primitive": "detect_parts", "params": {"part_name": part_name}, "store_as": "detected_part"},
-            {"primitive": "get_current_pose", "params": {}, "store_as": "pre_pick_pose"},
-            {
-                "primitive": "compute_pick_targets",
-                "params": {"part_name": part_name, "product_geometry": geometry},
-                "store_as": "part_pick_targets",
-            },
+            {"primitive": "detect_parts", "params": {"part_name": part_name}},
+            {"primitive": "get_current_pose", "params": {}},
+            {"primitive": "compute_pick_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/detected_part/pose/x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/detected_part/pose/y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_pick_targets/travel_z"),
+                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
                     "speed": 1.2,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/detected_part/pose/x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/detected_part/pose/y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_pick_targets/pick_z"),
-                    **_orientation_params(compiler, alias="pre_pick_pose"),
+                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
+                    **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.8,
                 },
             },
@@ -1887,7 +1936,7 @@ def _compile_release_macro(
             "part_transition": part_transition,
         },
         "primitive_steps": [
-            {"primitive": "get_current_pose", "params": {}, "store_as": "pre_release_pose"},
+            {"primitive": "get_current_pose", "params": {}},
             {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": -0.03, "speed": 0.6}},
             {"primitive": "open_gripper", "params": {}},
             {
@@ -1937,28 +1986,24 @@ def _compile_place_macro(
             "part_transition": part_transition,
         },
         "primitive_steps": [
-            {"primitive": "get_current_pose", "params": {}, "store_as": "pre_place_pose"},
-            {
-                "primitive": "compute_place_targets",
-                "params": {"part_name": part_name, "product_geometry": geometry},
-                "store_as": "part_place_targets",
-            },
+            {"primitive": "get_current_pose", "params": {}},
+            {"primitive": "compute_place_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/pre_place_pose/pose/z"),
+                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 1.2,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_place_targets/place_z"),
-                    **_orientation_params(compiler, alias="pre_place_pose"),
+                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
+                    **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.8,
                 },
             },
@@ -2010,29 +2055,25 @@ def _compile_pick_place_macro(
             "part_transition": part_transition,
         },
         "primitive_steps": [
-            {"primitive": "detect_parts", "params": {"part_name": part_name}, "store_as": "detected_part"},
-            {"primitive": "get_current_pose", "params": {}, "store_as": "pre_pick_pose"},
-            {
-                "primitive": "compute_pick_targets",
-                "params": {"part_name": part_name, "product_geometry": geometry},
-                "store_as": "part_pick_targets",
-            },
+            {"primitive": "detect_parts", "params": {"part_name": part_name}},
+            {"primitive": "get_current_pose", "params": {}},
+            {"primitive": "compute_pick_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/detected_part/pose/x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/detected_part/pose/y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_pick_targets/travel_z"),
+                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
                     "speed": 1.2,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/detected_part/pose/x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/detected_part/pose/y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_pick_targets/pick_z"),
-                    **_orientation_params(compiler, alias="pre_pick_pose"),
+                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
+                    **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.8,
                 },
             },
@@ -2045,28 +2086,24 @@ def _compile_pick_place_macro(
                 },
             },
             {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8}},
-            {"primitive": "get_current_pose", "params": {}, "store_as": "pre_place_pose"},
-            {
-                "primitive": "compute_place_targets",
-                "params": {"part_name": part_name, "product_geometry": geometry},
-                "store_as": "part_place_targets",
-            },
+            {"primitive": "get_current_pose", "params": {}},
+            {"primitive": "compute_place_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/pre_place_pose/pose/z"),
+                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 1.2,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_x"),
-                    "y": _bridge_ref(compiler, "/step_outputs/part_place_targets/slot_y"),
-                    "z": _bridge_ref(compiler, "/step_outputs/part_place_targets/place_z"),
-                    **_orientation_params(compiler, alias="pre_place_pose"),
+                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
+                    **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.8,
                 },
             },
@@ -2083,8 +2120,8 @@ def _compile_pick_place_macro(
     }
 
 
-def _step_ref(alias: str, path: str) -> dict[str, str]:
-    return {"context_ref": f"step_outputs.{alias}.{path}"}
+def _step_ref(fact_path: str, path: str) -> dict[str, str]:
+    return _event_fact_ref(f"{fact_path}.{path}")
 
 
 def _robot_capability_decompositions(
@@ -2109,28 +2146,26 @@ def _robot_capability_decompositions(
                 {
                     "primitive": "detect_parts",
                     "params": {"part_name": "<PART>"},
-                    "store_as": "detected_part",
                     "note": "May be skipped only when equivalent observed pose was retrieved.",
                 },
                 {
                     "primitive": "compute_pick_targets",
                     "params": {"part_name": "<PART>"},
-                    "store_as": "pick_targets",
                 },
                 {
                     "primitive": "move_cartesian",
                     "params": {
-                        "x": _step_ref("pick_targets", "approach_pose.x"),
-                        "y": _step_ref("pick_targets", "approach_pose.y"),
-                        "z": _step_ref("pick_targets", "approach_pose.z"),
+                        "x": _step_ref("pick_targets.<PART>", "approach_pose.x"),
+                        "y": _step_ref("pick_targets.<PART>", "approach_pose.y"),
+                        "z": _step_ref("pick_targets.<PART>", "approach_pose.z"),
                     },
                 },
                 {
                     "primitive": "move_cartesian",
                     "params": {
-                        "x": _step_ref("pick_targets", "target_pose.x"),
-                        "y": _step_ref("pick_targets", "target_pose.y"),
-                        "z": _step_ref("pick_targets", "target_pose.z"),
+                        "x": _step_ref("pick_targets.<PART>", "target_pose.x"),
+                        "y": _step_ref("pick_targets.<PART>", "target_pose.y"),
+                        "z": _step_ref("pick_targets.<PART>", "target_pose.z"),
                     },
                 },
             ],
@@ -2182,22 +2217,21 @@ def _robot_capability_decompositions(
                         "part_name": "<PART>",
                         "destination_location": "<DESTINATION_LOCATION>",
                     },
-                    "store_as": "place_targets",
                 },
                 {
                     "primitive": "move_cartesian",
                     "params": {
-                        "x": _step_ref("place_targets", "approach_pose.x"),
-                        "y": _step_ref("place_targets", "approach_pose.y"),
-                        "z": _step_ref("place_targets", "approach_pose.z"),
+                        "x": _step_ref("place_targets.<PART>", "approach_pose.x"),
+                        "y": _step_ref("place_targets.<PART>", "approach_pose.y"),
+                        "z": _step_ref("place_targets.<PART>", "approach_pose.z"),
                     },
                 },
                 {
                     "primitive": "move_cartesian",
                     "params": {
-                        "x": _step_ref("place_targets", "target_pose.x"),
-                        "y": _step_ref("place_targets", "target_pose.y"),
-                        "z": _step_ref("place_targets", "target_pose.z"),
+                        "x": _step_ref("place_targets.<PART>", "target_pose.x"),
+                        "y": _step_ref("place_targets.<PART>", "target_pose.y"),
+                        "z": _step_ref("place_targets.<PART>", "target_pose.z"),
                     },
                 },
             ],
@@ -2386,7 +2420,7 @@ ROBOT_PROFILE = ResourceProfile(
             "entity_kind": "part",
             "primitive": "detect_parts",
             "entity_param": "part_name",
-            "request_fields": ("fact_type", "entity", "store_as"),
+            "request_fields": ("fact_type", "entity"),
             "optional_request_fields": ("scope", "reason"),
         },
     },
@@ -2432,17 +2466,28 @@ ROBOT_PROFILE = ResourceProfile(
         "compute_pick_targets": _extract_pick_targets_output,
         "compute_place_targets": _extract_place_targets_output,
     },
-    store_as_contract_map={
+    event_fact_contract_map={
         "detect_parts": {
             "required_params": ["part_name"],
+            "path_templates": ["event_facts.detected_part.<PART>"],
         },
-        "get_current_pose": {},
+        "get_current_pose": {
+            "path_templates": ["event_facts.current_pose"],
+        },
         "compute_pick_targets": {
             "required_params": ["part_name"],
+            "path_templates": ["event_facts.pick_targets.<PART>"],
         },
         "compute_place_targets": {
             "any_of_param_sets": [["part_name"], ["pick_ctx.part_name"]],
+            "path_templates": ["event_facts.place_targets.<PART>"],
         },
+    },
+    event_fact_key_map={
+        "detect_parts": _event_fact_key_detected_part,
+        "get_current_pose": _event_fact_key_current_pose,
+        "compute_pick_targets": _event_fact_key_pick_targets,
+        "compute_place_targets": _event_fact_key_place_targets,
     },
     primitive_event_target_contract_map={
         "compute_place_targets": {

@@ -764,6 +764,8 @@ class Ros2PickPlaceController:
           held_part:
             equals: null
         effects:
+          current_state:
+            set: idle
           current_pose_ref:
             set_from_param: pose_name
           current_pose:

@@ -1421,7 +1421,6 @@ async def handle_evaluate_grounding(
             "resource_jid": str(prepared_bridge_request.get("ra_jid") or ""),
             "function_name": "detect_parts",
             "params": {"part_name": part_name},
-            "store_as": f"detected_{part_name.lower()}",
             "background": False,
         })
 

@@ -22,7 +22,8 @@ from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
-    resource_store_as_contract,
+    resource_event_fact_contract,
+    resource_event_fact_key,
     resource_snapshot_availability,
     resource_snapshot_field_value,
     resource_snapshot_set_field,
@@ -30,7 +31,7 @@ from cais_spade_llm.resources.resource_profile import (
 
 
 _MISSING = object()
-_KNOWN_CONTEXT_ROOTS = {"resource", "resources", "parts", "bridge_resources", "step_outputs"}
+_KNOWN_CONTEXT_ROOTS = {"resource", "resources", "parts", "bridge_resources", "event_facts"}
 
 
 def _normalized_symbol(value: Any) -> str:
@@ -71,17 +72,17 @@ def _iter_ref_tokens(ref: str) -> list[str]:
     return [token for token in text.split(".") if token]
 
 
-def _is_step_output_ref(ref: str, grounding_context: dict[str, Any] | None = None) -> bool:
+def _is_event_fact_ref(ref: str, grounding_context: dict[str, Any] | None = None) -> bool:
     text = str(ref or "").strip()
     if not text:
         return False
-    if text.startswith("/step_outputs/"):
+    if text.startswith("/event_facts/"):
         return True
     tokens = _iter_ref_tokens(text)
     if not tokens:
         return False
     first = _normalized_symbol(tokens[0])
-    if first == "step_outputs":
+    if first == "event_facts":
         return True
     roots = {
         _normalized_symbol(key)
@@ -166,7 +167,7 @@ def _effective_catalog_required_params(
 ) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
-    contract = resource_store_as_contract(profile, primitive_name)
+    contract = resource_event_fact_contract(profile, primitive_name)
     for raw_name in list(required or []) + list(contract.get("required_params") or []):
         token = str(raw_name or "").strip()
         if not token or token in seen:
@@ -190,6 +191,7 @@ def resolve_context_ref(
     ref: str,
     grounding_context: dict[str, Any] | None = None,
     *,
+    event_facts: dict[str, Any] | None = None,
     step_outputs: dict[str, Any] | None = None,
 ) -> Any:
     """Resolve a dotted or JSON-pointer-like path against grounding context."""
@@ -198,20 +200,22 @@ def resolve_context_ref(
         raise KeyError("empty context_ref")
 
     combined = deepcopy(dict(grounding_context or {}))
-    existing_step_outputs = dict(combined.get("step_outputs") or {})
+    existing_event_facts = dict(combined.get("event_facts") or {})
+    if event_facts:
+        existing_event_facts.update(deepcopy(event_facts))
     if step_outputs:
-        existing_step_outputs.update(deepcopy(step_outputs))
-    combined["step_outputs"] = existing_step_outputs
+        existing_event_facts.update(deepcopy(step_outputs))
+    combined["event_facts"] = existing_event_facts
 
     first = tokens[0]
     current: Any = _MISSING
-    if _normalized_symbol(first) == "step_outputs":
-        current = combined["step_outputs"]
+    if _normalized_symbol(first) == "event_facts":
+        current = combined["event_facts"]
         tokens = tokens[1:]
     else:
         current, found = _mapping_lookup(combined, first)
         if not found:
-            current, found = _mapping_lookup(combined["step_outputs"], first)
+            current, found = _mapping_lookup(combined["event_facts"], first)
             if not found:
                 raise KeyError(f"context_ref root '{first}' was not found")
         tokens = tokens[1:]
@@ -235,24 +239,33 @@ def resolve_param_refs(
     value: Any,
     grounding_context: dict[str, Any] | None = None,
     *,
+    event_facts: dict[str, Any] | None = None,
+    preserve_event_fact_refs: bool = False,
     step_outputs: dict[str, Any] | None = None,
     preserve_step_output_refs: bool = False,
 ) -> Any:
     """Resolve ``context_ref`` dictionaries and reference-like strings."""
+    preserve_event_fact_refs = preserve_event_fact_refs or preserve_step_output_refs
     if isinstance(value, dict):
         if set(value.keys()) == {"context_ref"}:
             ref = str(value.get("context_ref") or "").strip()
             if not ref:
                 return None
-            if preserve_step_output_refs and _is_step_output_ref(ref, grounding_context):
+            if preserve_event_fact_refs and _is_event_fact_ref(ref, grounding_context):
                 return deepcopy(value)
-            return resolve_context_ref(ref, grounding_context, step_outputs=step_outputs)
+            return resolve_context_ref(
+                ref,
+                grounding_context,
+                event_facts=event_facts,
+                step_outputs=step_outputs,
+            )
         return {
             str(key): resolve_param_refs(
                 item,
                 grounding_context,
+                event_facts=event_facts,
                 step_outputs=step_outputs,
-                preserve_step_output_refs=preserve_step_output_refs,
+                preserve_event_fact_refs=preserve_event_fact_refs,
             )
             for key, item in value.items()
         }
@@ -261,8 +274,9 @@ def resolve_param_refs(
             resolve_param_refs(
                 item,
                 grounding_context,
+                event_facts=event_facts,
                 step_outputs=step_outputs,
-                preserve_step_output_refs=preserve_step_output_refs,
+                preserve_event_fact_refs=preserve_event_fact_refs,
             )
             for item in value
         ]
@@ -270,10 +284,15 @@ def resolve_param_refs(
         ref = value.strip()
         if not ref:
             return value
-        if preserve_step_output_refs and _is_step_output_ref(ref, grounding_context):
+        if preserve_event_fact_refs and _is_event_fact_ref(ref, grounding_context):
             return value
         try:
-            return resolve_context_ref(ref, grounding_context, step_outputs=step_outputs)
+            return resolve_context_ref(
+                ref,
+                grounding_context,
+                event_facts=event_facts,
+                step_outputs=step_outputs,
+            )
         except Exception:
             return value
     return deepcopy(value)
@@ -294,9 +313,33 @@ def _collect_context_refs(value: Any) -> list[str]:
         return refs
     if isinstance(value, str):
         text = value.strip()
-        if text.startswith("/") or text.startswith("step_outputs."):
+        if text.startswith("/") or text.startswith("event_facts."):
             return [text]
     return refs
+
+
+def _assign_nested_mapping(target: dict[str, Any], path: str, value: Any) -> None:
+    tokens = [token for token in str(path or "").split(".") if token]
+    if not tokens:
+        return
+    current = target
+    for token in tokens[:-1]:
+        child = current.get(token)
+        if not isinstance(child, dict):
+            child = {}
+            current[token] = child
+        current = child
+    current[tokens[-1]] = deepcopy(value)
+
+
+def event_fact_key_for_primitive(
+    *,
+    primitive: str,
+    params: dict[str, Any],
+    resource_type: str = "",
+) -> tuple[str | None, str | None]:
+    profile = get_resource_profile(resource_type or _infer_resource_type_for_primitive(primitive))
+    return resource_event_fact_key(profile, primitive, params)
 
 
 def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
@@ -632,11 +675,6 @@ def expand_composite_steps(
             {
                 "primitive": primitive,
                 "params": deepcopy(raw_step.get("params") or {}),
-                **(
-                    {"store_as": str(raw_step.get("store_as") or "").strip()}
-                    if str(raw_step.get("store_as") or "").strip()
-                    else {}
-                ),
             }
         )
     return expanded
@@ -826,7 +864,7 @@ def validate_and_project_steps_with_trace(
             "validation_error": str(exc),
             "normalized_steps": [],
             "step_results": [],
-            "step_outputs": {},
+            "event_facts": {},
         }
 
     catalog_by_name = {
@@ -840,7 +878,7 @@ def validate_and_project_steps_with_trace(
         or projected.get("resource_type")
         or "resource"
     ).strip() or "resource"
-    step_outputs: dict[str, Any] = {}
+    event_facts: dict[str, Any] = {}
     step_results: list[dict[str, Any]] = []
 
     for step_index, step in enumerate(normalized_steps):
@@ -863,14 +901,14 @@ def validate_and_project_steps_with_trace(
                 "validation_error": validation_error,
                 "normalized_steps": deepcopy(normalized_steps),
                 "step_results": step_results,
-                "step_outputs": deepcopy(step_outputs),
+                "event_facts": deepcopy(event_facts),
             }
 
         try:
             resolved_params = resolve_param_refs(
                 dict(step.get("params") or {}),
                 grounding_context or {},
-                step_outputs=step_outputs,
+                event_facts=event_facts,
             )
         except Exception as exc:
             validation_error = f"param resolution failed at step {step_index} ({primitive}): {exc}"
@@ -882,7 +920,7 @@ def validate_and_project_steps_with_trace(
                 "validation_error": validation_error,
                 "normalized_steps": deepcopy(normalized_steps),
                 "step_results": step_results,
-                "step_outputs": deepcopy(step_outputs),
+                "event_facts": deepcopy(event_facts),
             }
         step_result["resolved_params"] = deepcopy(resolved_params)
 
@@ -902,7 +940,7 @@ def validate_and_project_steps_with_trace(
                     "validation_error": validation_error,
                     "normalized_steps": deepcopy(normalized_steps),
                     "step_results": step_results,
-                    "step_outputs": deepcopy(step_outputs),
+                    "event_facts": deepcopy(event_facts),
                 }
 
         preconditions = dict(primitive_meta.get("preconditions") or {})
@@ -919,23 +957,39 @@ def validate_and_project_steps_with_trace(
                     "validation_error": validation_error,
                     "normalized_steps": deepcopy(normalized_steps),
                     "step_results": step_results,
-                    "step_outputs": deepcopy(step_outputs),
+                    "event_facts": deepcopy(event_facts),
                 }
 
         preview_input = {**step, "params": deepcopy(resolved_params)}
         projected = apply_effects_to_snapshot(preview_input, primitive_meta, projected)
         step_result["projected_snapshot"] = deepcopy(projected)
 
-        store_as = str(step.get("store_as") or "").strip()
-        if store_as:
-            step_result["store_as"] = store_as
+        event_fact_key, event_fact_error = event_fact_key_for_primitive(
+            primitive=primitive,
+            params=resolved_params,
+            resource_type=runtime_resource_type,
+        )
+        if event_fact_error is not None:
+            validation_error = f"{event_fact_error} at step {step_index} ({primitive})"
+            step_result["validation_error"] = validation_error
+            step_results.append(step_result)
+            return {
+                "valid": False,
+                "projected_snapshot": projected,
+                "validation_error": validation_error,
+                "normalized_steps": deepcopy(normalized_steps),
+                "step_results": step_results,
+                "event_facts": deepcopy(event_facts),
+            }
+        if event_fact_key:
+            step_result["event_fact_path"] = f"event_facts.{event_fact_key}"
             preview, preview_error = preview_step_output(
                 primitive=primitive,
                 params=resolved_params,
                 snapshot=projected,
                 grounding_context={
                     **deepcopy(grounding_context or {}),
-                    "step_outputs": deepcopy(step_outputs),
+                    "event_facts": deepcopy(event_facts),
                 },
                 resource_type=runtime_resource_type,
             )
@@ -952,9 +1006,9 @@ def validate_and_project_steps_with_trace(
                     "validation_error": validation_error,
                     "normalized_steps": deepcopy(normalized_steps),
                     "step_results": step_results,
-                    "step_outputs": deepcopy(step_outputs),
+                    "event_facts": deepcopy(event_facts),
                 }
-            step_outputs[store_as] = preview
+            _assign_nested_mapping(event_facts, event_fact_key, preview)
             step_result["preview_output"] = deepcopy(preview)
         step_results.append(step_result)
 
@@ -964,7 +1018,7 @@ def validate_and_project_steps_with_trace(
         "validation_error": None,
         "normalized_steps": deepcopy(normalized_steps),
         "step_results": step_results,
-        "step_outputs": deepcopy(step_outputs),
+        "event_facts": deepcopy(event_facts),
     }
 
 

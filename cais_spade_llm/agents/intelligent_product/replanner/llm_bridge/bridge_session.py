@@ -32,7 +32,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resou
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
-    resource_store_as_contract,
+    resource_event_fact_contract,
     resource_snapshot_carried_entity,
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
@@ -2804,30 +2804,37 @@ class BridgeSessionMixin:
             hard_preconditions = deepcopy(raw_item.get("preconditions") or {})
             if hard_preconditions:
                 prompt_item["hard_preconditions"] = hard_preconditions
-            supports_store_as = (
+            publishes_event_facts = (
                 primitive_name in preview_output_map or primitive_name in extract_output_map
             )
-            prompt_item["supports_store_as"] = supports_store_as
-            if supports_store_as:
-                store_as_contract = resource_store_as_contract(profile, primitive_name)
-                store_as_required_params = [
+            prompt_item["publishes_event_facts"] = publishes_event_facts
+            if publishes_event_facts:
+                event_fact_contract = resource_event_fact_contract(profile, primitive_name)
+                event_fact_required_params = [
                     str(item).strip()
-                    for item in (store_as_contract.get("required_params") or [])
+                    for item in (event_fact_contract.get("required_params") or [])
                     if str(item).strip()
                 ]
-                store_as_any_of_param_sets = [
+                event_fact_any_of_param_sets = [
                     [
                         str(item).strip()
                         for item in (param_set or [])
                         if str(item).strip()
                     ]
-                    for param_set in (store_as_contract.get("any_of_param_sets") or [])
+                    for param_set in (event_fact_contract.get("any_of_param_sets") or [])
                     if isinstance(param_set, (list, tuple))
                 ]
-                if store_as_required_params:
-                    prompt_item["store_as_required_params"] = store_as_required_params
-                if store_as_any_of_param_sets:
-                    prompt_item["store_as_any_of_param_sets"] = store_as_any_of_param_sets
+                event_fact_path_templates = [
+                    str(item).strip()
+                    for item in (event_fact_contract.get("path_templates") or [])
+                    if str(item).strip()
+                ]
+                if event_fact_required_params:
+                    prompt_item["event_fact_required_params"] = event_fact_required_params
+                if event_fact_any_of_param_sets:
+                    prompt_item["event_fact_any_of_param_sets"] = event_fact_any_of_param_sets
+                if event_fact_path_templates:
+                    prompt_item["event_fact_paths"] = event_fact_path_templates
             prompt_catalog.append(prompt_item)
         return prompt_catalog
 
