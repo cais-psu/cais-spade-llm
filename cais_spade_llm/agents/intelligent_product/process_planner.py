@@ -3174,7 +3174,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             text = str(status or "").strip().lower()
             if text == "completed":
                 return "completed"
-            if any(marker in text for marker in ("running", "dispatched", "accepted")):
+            if any(marker in text for marker in ("running", "dispatched", "accepted", "safety_check", "waiting_for_safety")):
                 return "active"
             if "pending" in text:
                 return "pending"

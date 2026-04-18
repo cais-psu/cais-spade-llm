@@ -6,7 +6,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
+import time
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from spade.behaviour import CyclicBehaviour  # Behaviour base used for our inbox loop.
@@ -14,9 +17,20 @@ from spade.message import Message  # SPADE message objects (XMPP stanzas under t
 from spade.template import Template  # Filters incoming messages by metadata.
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
     build_failure_event,
 )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trace_with_timestamp(trace: Any, key: str) -> dict[str, Any]:
+    out = dict(trace or {}) if isinstance(trace, dict) else {}
+    out[key] = _utc_now_iso()
+    return out
 
 
 class ResourceAgent(LlmAgent):
@@ -42,6 +56,7 @@ class ResourceAgent(LlmAgent):
         allowed_senders: Optional[Iterable[str]] = None,
         llm_timeout_s: int = 30,
         tool_timeout_s: int = 300,
+        safety_decision_timeout_s: float = 30.0,
         cca_jid: Optional[str] = None,   # <-- NEW
         **kw: Any,
     ) -> None:
@@ -70,8 +85,14 @@ class ResourceAgent(LlmAgent):
         # Separate timeouts keep LLM latency (planning) independent from tool runtime (execution).
         self.llm_timeout_s = int(llm_timeout_s)
         self.tool_timeout_s = int(tool_timeout_s)
+        try:
+            self.safety_decision_timeout_s = max(0.0, float(safety_decision_timeout_s))
+        except (TypeError, ValueError):
+            self.safety_decision_timeout_s = 30.0
 
         self._safety_decisions: dict[str, str] = {}
+        self._safety_decision_traces: dict[str, dict[str, Any]] = {}
+        self._safety_decision_reasons: dict[str, str] = {}
 
         # Register bridge recovery executor for all resource types.
         # RobotAgent overrides the method but no longer needs to re-register.
@@ -498,16 +519,32 @@ class ResourceAgent(LlmAgent):
         )
         return deepcopy(failure_event.get("failure_context") or {})
 
-    async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
+    async def _wait_for_safety_decision(
+        self,
+        task_id: str,
+        timeout_s: float | None = None,
+    ) -> Optional[str]:
         """
         Block until a safety_decision is available for this task_id.
-        No timeout: waits indefinitely until CCA replies.
+        Returns None when CCA does not answer inside the diagnostic timeout.
         """
+        raw_timeout = self.safety_decision_timeout_s if timeout_s is None else timeout_s
+        try:
+            timeout_value = float(raw_timeout)
+        except (TypeError, ValueError):
+            timeout_value = 30.0
+        deadline = time.monotonic() + timeout_value if timeout_value >= 0 else None
         while True:
             decision = self._safety_decisions.pop(task_id, None)
             if decision is not None:
                 return decision
-            await asyncio.sleep(0.1)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                await asyncio.sleep(min(0.1, remaining))
+            else:
+                await asyncio.sleep(0.1)
     # ------------------------------------------------------------------ #
     # Behaviours
     # ------------------------------------------------------------------ ##
@@ -545,10 +582,11 @@ class ResourceAgent(LlmAgent):
             task_id = data.get("task_id")
             instruction = data.get("instruction", "")
             phase_id = data.get("phase_id")  # optional multi-phase flow identifier
+            trace = _trace_with_timestamp(data.get("trace"), "resource_received_at")
 
             if not task_id:
                 agent.logger.warning("[Resource] Task without task_id.")
-                await self._ack(msg, task_id="?", status="failed:missing_task_id")
+                await self._ack(msg, task_id="?", status="failed:missing_task_id", trace=trace)
                 return
 
             agent.logger.info(
@@ -566,7 +604,7 @@ class ResourceAgent(LlmAgent):
 
             if not fn_name:
                 # ----- EARLY ACK (non-recovery only) ----- #
-                await self._ack(msg, task_id=task_id, status="accepted")
+                await self._ack(msg, task_id=task_id, status="accepted", trace=trace)
                 try:
                     # Force the LLM to pick an explicit tool so we never free-text a task.
                     llm_resp = await asyncio.wait_for(
@@ -578,7 +616,7 @@ class ResourceAgent(LlmAgent):
                         timeout=agent.llm_timeout_s,
                     )
                 except asyncio.TimeoutError:
-                    await self._ack(msg, task_id=task_id, status="llm_timeout")
+                    await self._ack(msg, task_id=task_id, status="llm_timeout", trace=trace)
                     return
                 except Exception as e:
                     agent.logger.exception("[Resource] LLM failure")
@@ -586,6 +624,7 @@ class ResourceAgent(LlmAgent):
                         msg,
                         task_id=task_id,
                         status=f"failed:llm:{type(e).__name__}",
+                        trace=trace,
                     )
                     return
 
@@ -594,7 +633,7 @@ class ResourceAgent(LlmAgent):
                 agent.logger.info(
                     f"[Resource] ({task_id}) no_tool_match; responding."
                 )
-                await self._ack(msg, task_id=task_id, status="no_tool_match")
+                await self._ack(msg, task_id=task_id, status="no_tool_match", trace=trace)
                 return
 
             # Recovery bridge macros use a fast path: skip the "accepted" ACK,
@@ -618,6 +657,7 @@ class ResourceAgent(LlmAgent):
                     msg,
                     task_id=task_id,
                     status=f"failed:unknown_tool:{fn_name}",
+                    trace=trace,
                 )
                 return
 
@@ -633,14 +673,20 @@ class ResourceAgent(LlmAgent):
                 try:
                     running_msg = Message(to=agent.cca_jid)
                     running_msg.set_metadata("type", "resource_event")
+                    trace = _trace_with_timestamp(trace, "resource_running_sent_at")
                     running_msg.body = json.dumps({
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
                         "function_name": fn_name,
                         "params": fn_args,
                         "status": "running",
+                        "trace": trace,
                     })
-                    await self.send(running_msg)
+                    await send_agent_message(
+                        self,
+                        running_msg,
+                        transport_label="resource_running",
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[Resource] Failed to send running event for recovery macro %s (ignored).",
@@ -648,47 +694,134 @@ class ResourceAgent(LlmAgent):
                     )
             else:
                 # ----- EARLY ACK (normal tasks) ----- #
-                await self._ack(msg, task_id=task_id, status="accepted")
+                await self._ack(msg, task_id=task_id, status="accepted", trace=trace)
 
                 # ----- RESOURCE EVENT (FOR SAFETY) NOTIFICATION TO CCA ----- #
                 try:
+                    await self._ack(msg, task_id=task_id, status="safety_check", trace=trace)
                     # 1) Send request permission, not running
                     resource_msg = Message(to=agent.cca_jid)
                     resource_msg.set_metadata("type", "resource_event")
+                    trace = _trace_with_timestamp(trace, "resource_safety_sent_at")
                     resource_msg.body = json.dumps({
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
                         "function_name": fn_name,
                         "params": fn_args,
                         "status": "safety_check",   # <-- REQUEST permission
+                        "trace": trace,
                     })
-                    await self.send(resource_msg)
+                    agent.logger.info(
+                        "[Resource] Safety request sent task=%s resource=%s cca=%s fn=%s",
+                        task_id,
+                        str(agent.jid),
+                        str(agent.cca_jid or ""),
+                        fn_name,
+                    )
+                    await send_agent_message(
+                        self,
+                        resource_msg,
+                        transport_label="resource_safety",
+                    )
                 except Exception:
                     agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
 
             # 2) Wait for CCA decision (instant for recovery macros, blocks for normal tasks)
             decision = await agent._wait_for_safety_decision(task_id)
+            decision_trace = agent._safety_decision_traces.pop(task_id, None)
+            decision_reason = agent._safety_decision_reasons.pop(task_id, "")
+            if isinstance(decision_trace, dict):
+                trace.update(decision_trace)
+
+            if decision is None:
+                trace = _trace_with_timestamp(trace, "resource_safety_timeout_at")
+                status = "failed:safety_decision_timeout"
+                timeout_s = float(getattr(agent, "safety_decision_timeout_s", 0.0) or 0.0)
+                agent.logger.error(
+                    "[Resource] Safety decision timeout task=%s resource=%s cca=%s timeout=%.2fs",
+                    task_id,
+                    str(agent.jid),
+                    str(agent.cca_jid or ""),
+                    timeout_s,
+                )
+                try:
+                    state_after = agent._snapshot_state()
+                    timeout_msg = Message(to=agent.cca_jid)
+                    timeout_msg.set_metadata("type", "resource_event")
+                    timeout_msg.body = json.dumps({
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": status,
+                        "current_state": state_after.get("current_state", "idle"),
+                        "trace": trace,
+                    })
+                    await send_agent_message(
+                        self,
+                        timeout_msg,
+                        transport_label="resource_timeout",
+                    )
+                except Exception:
+                    agent.logger.exception(
+                        "[Resource] Failed to notify CCA about safety timeout for task=%s.",
+                        task_id,
+                    )
+                await self._ack(
+                    msg,
+                    task_id=task_id,
+                    status=status,
+                    content=(
+                        "Timed out waiting for CCA safety decision "
+                        f"after {timeout_s:.2f}s"
+                    ),
+                    trace=trace,
+                )
+                return
+
+            agent.logger.info(
+                "[Resource] Safety decision task=%s decision=%s reason=%s",
+                task_id,
+                decision,
+                decision_reason or "-",
+            )
 
             if decision == "block":
-                await self._ack(msg, task_id=task_id, status="blocked")
+                await self._ack(
+                    msg,
+                    task_id=task_id,
+                    status="blocked",
+                    content=decision_reason,
+                    trace=trace,
+                )
                 return
 
             if not is_recovery_macro:
                 # ---------------------------
                 #  SAFETY PASSED → RUNNING
                 # ---------------------------
-                await self._ack(msg, task_id=task_id, status="running")
+                agent.logger.info(
+                    "[Resource] Safety passed; task=%s transitioning to running",
+                    task_id,
+                )
+                await self._ack(msg, task_id=task_id, status="running", trace=trace)
 
                 running_msg = Message(to=agent.cca_jid)
                 running_msg.set_metadata("type", "resource_event")
+                trace = _trace_with_timestamp(trace, "resource_running_sent_at")
                 running_msg.body = json.dumps({
                     "task_id": task_id,
                     "resource_jid": str(agent.jid),
                     "function_name": fn_name,
                     "params": fn_args,
                     "status": "running",
+                    "trace": trace,
                 })
-                await self.send(running_msg)
+                await send_agent_message(
+                    self,
+                    running_msg,
+                    transport_label="resource_running",
+                )
 
             # ---------------------------
             #  EXECUTE THE TOOL
@@ -731,6 +864,7 @@ class ResourceAgent(LlmAgent):
 
                     done_msg = Message(to=agent.cca_jid)
                     done_msg.set_metadata("type", "resource_event")
+                    trace = _trace_with_timestamp(trace, "resource_done_sent_at")
                     done_msg.body = json.dumps({
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
@@ -739,9 +873,16 @@ class ResourceAgent(LlmAgent):
                         "status": final_status,  # e.g. "completed", "blocked", etc.
                         "failure_context": failure_context,
                         "current_state": state_after.get("current_state", "idle"),
+                        "trace": trace,
                     })
                     # fire-and-forget so we don't block on CCA
-                    asyncio.create_task(self.send(done_msg))
+                    asyncio.create_task(
+                        send_agent_message(
+                            self,
+                            done_msg,
+                            transport_label="resource_done",
+                        )
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[Resource] Failed to send final resource_event to CCA (ignored)."
@@ -768,6 +909,7 @@ class ResourceAgent(LlmAgent):
                     )
                     fail_msg = Message(to=agent.cca_jid)
                     fail_msg.set_metadata("type", "resource_event")
+                    trace = _trace_with_timestamp(trace, "resource_fail_sent_at")
                     fail_msg.body = json.dumps({
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
@@ -776,8 +918,13 @@ class ResourceAgent(LlmAgent):
                         "status": final_status,
                         "failure_context": failure_context,
                         "current_state": state_after.get("current_state", "idle"),
+                        "trace": trace,
                     })
-                    await self.send(fail_msg)
+                    await send_agent_message(
+                        self,
+                        fail_msg,
+                        transport_label="resource_fail",
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[Resource] Failed to send fail resource_event to CCA."
@@ -799,6 +946,7 @@ class ResourceAgent(LlmAgent):
                 status=final_status,
                 content=ack_content,
                 observations=ack_observations,
+                trace=trace,
             )
 
         async def _ack(
@@ -809,17 +957,28 @@ class ResourceAgent(LlmAgent):
             status: str,
             content: str = "",
             observations: Dict[str, Any] | None = None,
+            trace: Dict[str, Any] | None = None,
         ) -> None:
             """Send an acknowledgement/status update back to the originating ProductAgent."""
             reply = Message(to=str(msg.sender))
             reply.set_metadata("type", "ack")
             payload = {"task_id": task_id, "status": status}
+            if isinstance(trace, dict):
+                trace_out = _trace_with_timestamp(trace, "resource_ack_sent_at")
+                status_key = re.sub(r"[^a-z0-9_]+", "_", str(status or "").strip().lower()).strip("_")
+                if status_key:
+                    trace_out[f"resource_ack_{status_key}_sent_at"] = trace_out["resource_ack_sent_at"]
+                payload["trace"] = trace_out
             if content:
                 payload["content"] = str(content).strip()
             if isinstance(observations, dict) and observations:
                 payload["observations"] = observations
             reply.body = json.dumps(payload)
-            await self.send(reply)
+            await send_agent_message(
+                self,
+                reply,
+                transport_label="resource_ack",
+            )
 
     class _SafetyDecisionInbox(CyclicBehaviour):
         """Receives safety_decision messages from CCA and stores them on the agent."""
@@ -838,6 +997,7 @@ class ResourceAgent(LlmAgent):
 
             task_id = data.get("task_id")
             decision = data.get("decision")
+            reason = str(data.get("reason") or "").strip()
 
             if not task_id or decision not in ("allow", "block"):
                 agent.logger.warning(
@@ -846,10 +1006,18 @@ class ResourceAgent(LlmAgent):
                 return
 
             agent._safety_decisions[task_id] = decision
+            agent._safety_decision_reasons[task_id] = reason
+            trace = data.get("trace")
+            if isinstance(trace, dict):
+                agent._safety_decision_traces[task_id] = _trace_with_timestamp(
+                    trace,
+                    "resource_decision_received_at",
+                )
             agent.logger.info(
-                "[Resource] Stored safety_decision=%s for task=%s",
+                "[Resource] Stored safety_decision=%s for task=%s reason=%s",
                 decision,
                 task_id,
+                reason or "-",
             )
 
 # --------------------------------------------------------------------------- #

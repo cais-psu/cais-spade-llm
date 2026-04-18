@@ -5,24 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Case 3 Bridge Dry-Run: Full (Grounding + Outline + Primitive Generation) (F5 Default)",
+            "name": "Python: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/test/test_case3_bridge_dryrun.py",
-            "args": ["--reasoning-mode", "multi_turn", "--focus", "full"],
+            "program": "${file}",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/scripts/ros_python.sh"
-        },
-        {
-            "name": "Case 3 Bridge Dry-Run: Hybrid DES",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/test/test_hybrid_des_case3_dryrun.py",
-            "args": [],
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/scripts/ros_python.sh"
+            "python": "${workspaceFolder}/.venv/bin/python"
         }
     ]
 }

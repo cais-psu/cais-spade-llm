@@ -125,6 +125,7 @@ def render(bridge: SystemBridge) -> None:
                 start_click_state = {"locked": False}
                 gazebo_launch_state = {"busy": False}
                 start_task: asyncio.Task | None = None
+                action_banner_state = {"kind": "", "message": ""}
 
                 def _selected_files() -> tuple[str, str]:
                     req_file = str(requirement_select.value or "").strip()
@@ -193,6 +194,13 @@ def render(bridge: SystemBridge) -> None:
 
                 def _set_action_banner(kind: str, message: str, *, auto_hide_s: float | None = None) -> None:
                     nonlocal banner_hide_task
+                    text = str(message or "").strip()
+                    if (
+                        auto_hide_s is None
+                        and action_banner_state["kind"] == str(kind)
+                        and action_banner_state["message"] == text
+                    ):
+                        return
                     style_map = {
                         "info": ("info", "text-blue-700 bg-blue-50"),
                         "success": ("check_circle", "text-green-700 bg-green-50"),
@@ -204,8 +212,10 @@ def render(bridge: SystemBridge) -> None:
                     action_banner_icon.name = icon_name
                     action_banner.classes(remove="text-blue-700 bg-blue-50 text-green-700 bg-green-50 text-amber-700 bg-amber-50 text-red-700 bg-red-50")
                     action_banner.classes(add=color_classes)
-                    action_banner_label.text = message
+                    action_banner_label.text = text
                     action_banner.style("display:flex;")
+                    action_banner_state["kind"] = str(kind)
+                    action_banner_state["message"] = text
 
                     if banner_hide_task and not banner_hide_task.done():
                         banner_hide_task.cancel()
@@ -218,6 +228,8 @@ def render(bridge: SystemBridge) -> None:
                             except asyncio.CancelledError:
                                 return
                             action_banner.style("display:none;")
+                            action_banner_state["kind"] = ""
+                            action_banner_state["message"] = ""
 
                         banner_hide_task = asyncio.create_task(_hide_later())
 
@@ -269,7 +281,10 @@ def render(bridge: SystemBridge) -> None:
                                 )
                                 return
                             try:
-                                bridge.selected_product = bridge.resolve_product_init_for_requirement(bundle_req_file)
+                                bridge.selected_product = await asyncio.to_thread(
+                                    bridge.resolve_product_init_for_requirement,
+                                    bundle_req_file,
+                                )
                             except Exception as exc:
                                 _set_action_banner(
                                     "error",
@@ -299,7 +314,10 @@ def render(bridge: SystemBridge) -> None:
                                 bridge.selected_product = selected_product
                             else:
                                 try:
-                                    bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
+                                    bridge.selected_product = await asyncio.to_thread(
+                                        bridge.resolve_product_init_for_requirement,
+                                        req_file,
+                                    )
                                 except Exception as exc:
                                     _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
                                     return
@@ -311,23 +329,32 @@ def render(bridge: SystemBridge) -> None:
                         _set_action_banner("error", f"Failed to configure startup source: {exc}", auto_hide_s=8.0)
                         return
 
-                    if not _check_prerequisites(
-                        bridge,
-                        internal,
+                    # Lock + show banner up-front so the user gets instant feedback
+                    # and the event loop returns before any blocking checks run.
+                    start_click_state["locked"] = True
+                    _update_controls()
+                    _set_action_banner("info", "Start System clicked. Checking prerequisites...")
+
+                    prereq_state = await asyncio.to_thread(
+                        _gather_prereq_state, bridge, internal
+                    )
+                    prereqs_ok = _render_prereq_banner(
+                        prereq_state,
                         prereq_banner,
                         launch_simulation=_launch_gazebo_dual,
                         launch_simulation_busy=gazebo_launch_state["busy"],
-                    ):
+                    )
+                    if not prereqs_ok:
                         detail = f" {bridge.last_error}" if bridge.last_error else ""
                         _set_action_banner(
                             "warning",
                             "Startup is not done yet." + detail,
                             auto_hide_s=6.0,
                         )
+                        start_click_state["locked"] = False
+                        _update_controls()
                         return
-                    start_click_state["locked"] = True
-                    _update_controls()
-                    _set_action_banner("info", "Start System clicked. Starting agents...")
+                    _set_action_banner("info", "Prerequisites OK. Starting agents...")
                     if start_task is None or start_task.done():
                         async def _run_start_in_background() -> None:
                             if hasattr(bridge, "_diag_emit"):
@@ -543,6 +570,14 @@ def render(bridge: SystemBridge) -> None:
                             asyncio.create_task(_probe_hw())
 
                     if bridge._starting and not bridge.system_running:
+                        describe_phase = getattr(bridge, "describe_startup_phase", None)
+                        if callable(describe_phase):
+                            try:
+                                startup_phase_message = str(describe_phase() or "").strip()
+                            except Exception:
+                                startup_phase_message = ""
+                            if startup_phase_message:
+                                _set_action_banner("info", startup_phase_message)
                         prereqs_met = False
                     else:
                         prereqs_met = _check_prerequisites(
@@ -1730,7 +1765,7 @@ def render(bridge: SystemBridge) -> None:
                     if not active:
                         active = next(
                             (k for k, v in reversed(ts.items())
-                             if any(s in v.lower() for s in ("dispatched", "accepted", "completed", "failed"))),
+                             if any(s in v.lower() for s in ("dispatched", "accepted", "safety_check", "waiting_for_safety", "completed", "failed"))),
                             None,
                         )
                     if active:
@@ -1796,41 +1831,17 @@ def render(bridge: SystemBridge) -> None:
         )
 
 
-def _check_prerequisites(
-    bridge: SystemBridge,
-    mode: str,
-    banner: ui.column,
-    *,
-    launch_simulation: Callable[[], Any] | None = None,
-    launch_simulation_busy: bool = False,
-) -> bool:
-    """Check if prerequisites are met for the selected mode. Updates the banner. Returns True if OK."""
-    banner.clear()
-
-    def _suppress_sim_ready_note(message: str) -> bool:
-        text = str(message or "").strip().lower()
-        return text.startswith("perception is still warming up:")
-
-    if bridge.system_running:
-        return True  # Already running, don't block.
-
-    if bridge._starting:
-        with banner:
-            with ui.row().classes("items-center gap-2 text-blue-600 bg-blue-50 p-3 rounded"):
-                ui.icon("hourglass_top").classes("text-lg")
-                ui.label("System startup in progress...").classes("text-sm font-semibold")
-        return False
-
-    if mode == "dry_run":
-        # Dry Run has no prerequisites.
-        with banner:
-            with ui.row().classes("items-center gap-2 text-green-600"):
-                ui.icon("check_circle").classes("text-sm")
-                ui.label("Dry Run mode — no prerequisites required.").classes("text-sm")
-        return True
+def _gather_prereq_state(bridge: SystemBridge, mode: str) -> dict:
+    """Collect prerequisite state from the bridge. Safe to call via asyncio.to_thread."""
+    state: dict = {
+        "mode": mode,
+        "system_running": bridge.system_running,
+        "starting": bridge._starting,
+    }
+    if state["system_running"] or state["starting"] or mode == "dry_run":
+        return state
 
     if mode == "simulation":
-        # Simulation needs Gazebo stack plus MoveIt/services ready.
         statuses = bridge.ros2_all_statuses()
         gazebo_running = any(
             statuses.get(k) == "running"
@@ -1842,6 +1853,60 @@ def _check_prerequisites(
             sim_ready, sim_reason = bridge.simulation_start_ready()
         elif gazebo_running:
             sim_ready = True
+        state["gazebo_running"] = gazebo_running
+        state["sim_ready"] = sim_ready
+        state["sim_reason"] = sim_reason
+    elif mode == "physical":
+        if hasattr(bridge, "hardware_connection_statuses_cached"):
+            hw = bridge.hardware_connection_statuses_cached()
+        elif hasattr(bridge, "hardware_connection_statuses"):
+            hw = bridge.hardware_connection_statuses()
+        else:
+            hw = {}
+        ready, reason = bridge.physical_perception_ready()
+        state["hw"] = hw
+        state["perception_ready"] = ready
+        state["perception_reason"] = reason
+    return state
+
+
+def _render_prereq_banner(
+    state: dict,
+    banner: ui.column,
+    *,
+    launch_simulation: Callable[[], Any] | None = None,
+    launch_simulation_busy: bool = False,
+) -> bool:
+    """Render the prerequisite banner from a gathered state snapshot. Returns True if OK."""
+    banner.clear()
+
+    def _suppress_sim_ready_note(message: str) -> bool:
+        text = str(message or "").strip().lower()
+        return text.startswith("perception is still warming up:")
+
+    if state.get("system_running"):
+        return True  # Already running, don't block.
+
+    if state.get("starting"):
+        with banner:
+            with ui.row().classes("items-center gap-2 text-blue-600 bg-blue-50 p-3 rounded"):
+                ui.icon("hourglass_top").classes("text-lg")
+                ui.label("System startup in progress...").classes("text-sm font-semibold")
+        return False
+
+    mode = state.get("mode")
+
+    if mode == "dry_run":
+        with banner:
+            with ui.row().classes("items-center gap-2 text-green-600"):
+                ui.icon("check_circle").classes("text-sm")
+                ui.label("Dry Run mode — no prerequisites required.").classes("text-sm")
+        return True
+
+    if mode == "simulation":
+        gazebo_running = bool(state.get("gazebo_running"))
+        sim_ready = bool(state.get("sim_ready"))
+        sim_reason = str(state.get("sim_reason") or "")
 
         with banner:
             if gazebo_running and sim_ready and sim_reason and not _suppress_sim_ready_note(sim_reason):
@@ -1877,16 +1942,11 @@ def _check_prerequisites(
         return gazebo_running and sim_ready
 
     if mode == "physical":
-        # Physical mode requires real perception backend availability.
-        if hasattr(bridge, "hardware_connection_statuses_cached"):
-            hw = bridge.hardware_connection_statuses_cached()
-        elif hasattr(bridge, "hardware_connection_statuses"):
-            hw = bridge.hardware_connection_statuses()
-        else:
-            hw = {}
+        hw = state.get("hw") or {}
         xarm = hw.get("xarm6", {})
         ur5e = hw.get("ur5e", {})
-        ready, reason = bridge.physical_perception_ready()
+        ready = bool(state.get("perception_ready"))
+        reason = str(state.get("perception_reason") or "")
 
         def _line(name: str, entry: dict) -> str:
             ip = entry.get("ip", "?")
@@ -1916,6 +1976,24 @@ def _check_prerequisites(
         return ready
 
     return True
+
+
+def _check_prerequisites(
+    bridge: SystemBridge,
+    mode: str,
+    banner: ui.column,
+    *,
+    launch_simulation: Callable[[], Any] | None = None,
+    launch_simulation_busy: bool = False,
+) -> bool:
+    """Check prerequisites synchronously. For use in non-async contexts only."""
+    state = _gather_prereq_state(bridge, mode)
+    return _render_prereq_banner(
+        state,
+        banner,
+        launch_simulation=launch_simulation,
+        launch_simulation_busy=launch_simulation_busy,
+    )
 
 
 def _stat_card(label: str, value: str, icon: str) -> None:

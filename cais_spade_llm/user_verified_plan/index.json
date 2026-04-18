@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case3_llm_bridge",
+  "active_bundle_id": "case1_one_arm_no_move_home",
   "bundles": [
     {
       "bundle_id": "20260408T013419Z__case2_two_arm_mutex__simulation__gazebo__5a97a08a",

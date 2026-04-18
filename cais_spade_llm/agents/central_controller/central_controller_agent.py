@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections import deque
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Iterable, Dict, List, Set, Tuple
 
@@ -14,12 +15,24 @@ from spade.message import Message
 from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
 from cais_spade_llm.agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
 from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trace_with_timestamp(trace: Any, key: str) -> dict[str, Any]:
+    out = dict(trace or {}) if isinstance(trace, dict) else {}
+    out[key] = _utc_now_iso()
+    return out
+
 
 class CentralControllerAgent(LlmAgent):
     """
@@ -1054,12 +1067,24 @@ class CentralControllerAgent(LlmAgent):
             event = agent.safety_monitor.parse_resource_event(msg)
             if not event:
                 return
+            event["trace"] = _trace_with_timestamp(
+                event.get("trace"),
+                "cca_resource_event_received_at",
+            )
 
             task_id = event["task_id"]
             status = event["status"]
             resource_jid = event["resource_jid"]
             function_name = event["function_name"]
             product_jid = (event.get("params") or {}).get("product_jid")
+            agent.logger.info(
+                "[CCA] Resource event received task=%s status=%s resource=%s fn=%s product=%s",
+                task_id,
+                status,
+                resource_jid,
+                function_name,
+                product_jid or "-",
+            )
 
             # 2. HANDLE 'SAFETY_CHECK' (Start Event)
             if status == "safety_check":
@@ -1097,11 +1122,23 @@ class CentralControllerAgent(LlmAgent):
                     agent.plan_fsa_monitor.current_state
                 )
                 if task_id not in enabled:
-                    agent.logger.warning(
-                        "[CCA] PLAN BLOCK: task=%s not enabled in FSA (predecessor may have failed).",
-                        task_id,
+                    reason = (
+                        "plan_block:not_enabled "
+                        f"state={agent.plan_fsa_monitor.current_state} "
+                        f"enabled={','.join(enabled) or '-'}"
                     )
-                    await self._send_decision(resource_jid, task_id, "block")
+                    agent.logger.warning(
+                        "[CCA] PLAN BLOCK: task=%s reason=%s",
+                        task_id,
+                        reason,
+                    )
+                    await self._send_decision(
+                        resource_jid,
+                        task_id,
+                        "block",
+                        trace=event.get("trace"),
+                        reason=reason,
+                    )
                     if product_jid:
                         # Use the root-cause failure event so the LLM gets the
                         # actual failure_context (mode, retryable, etc.), not
@@ -1116,7 +1153,11 @@ class CentralControllerAgent(LlmAgent):
                                 "blocked_task_id": task_id,
                             },
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     return
 
             candidate_aps = agent.safety_monitor._map_task_to_aps(
@@ -1137,10 +1178,16 @@ class CentralControllerAgent(LlmAgent):
             if not allowed:
                 violated_rule = info.get("violated_rule")
                 running_snapshot = info.get("running_snapshot", [])
+                reason = (
+                    "safety_violation "
+                    f"rule={violated_rule or '-'} "
+                    f"running={','.join(str(item) for item in running_snapshot) or '-'}"
+                )
 
                 agent.logger.warning(
-                    "[CCA] SAFETY VIOLATION: task=%s rule=%s (running=%s)",
-                    task_id, violated_rule, running_snapshot
+                    "[CCA] SAFETY VIOLATION: task=%s reason=%s",
+                    task_id,
+                    reason,
                 )
 
                 # Queue the task to retry later
@@ -1153,7 +1200,13 @@ class CentralControllerAgent(LlmAgent):
                     "[CCA] Queued task=%s as temporarily unsafe.", task_id
                 )
 
-                await self._send_decision(resource_jid, task_id, "block")
+                await self._send_decision(
+                    resource_jid,
+                    task_id,
+                    "block",
+                    trace=event.get("trace"),
+                    reason=reason,
+                )
 
                 if product_jid:
                     # Forward-simulate the composite FSA to check if the
@@ -1180,12 +1233,22 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=info,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                 return
 
             if agent.online_supervisor:
                 allowed_by_supervisor, diagnosis = agent.online_supervisor.check_candidate(event)
                 if not allowed_by_supervisor:
+                    reason = (
+                        "supervisor_block "
+                        f"status={diagnosis.get('status') or '-'} "
+                        f"reason={diagnosis.get('reason') or '-'} "
+                        f"safe_next={','.join(str(item) for item in (diagnosis.get('safe_next_task_ids') or [])) or '-'}"
+                    )
                     agent.logger.warning(
                         "[CCA] SUPERVISOR BLOCK: task=%s status=%s safe_next=%s reason=%s",
                         task_id,
@@ -1200,7 +1263,13 @@ class CentralControllerAgent(LlmAgent):
                             "violated_rule": diagnosis.get("rule_ids"),
                         }
 
-                    await self._send_decision(resource_jid, task_id, "block")
+                    await self._send_decision(
+                        resource_jid,
+                        task_id,
+                        "block",
+                        trace=event.get("trace"),
+                        reason=reason,
+                    )
 
                     if product_jid and diagnosis.get("status") in {"inevitable_violation", "violated"}:
                         replan_msg = agent._build_replan_message(
@@ -1209,7 +1278,11 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=diagnosis,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     return
                 if diagnosis.get("status") == "deferred_monitoring":
                     agent.logger.info(
@@ -1221,16 +1294,32 @@ class CentralControllerAgent(LlmAgent):
 
             allowed, info = agent.safety_monitor.process_start_event(event)
             if not allowed:
+                reason = "safety_commit_failed"
+                if isinstance(info, dict) and info:
+                    reason += f":{json.dumps(info, ensure_ascii=False)[:400]}"
                 agent.logger.warning(
-                    "[CCA] Safety state changed before task=%s could be committed; blocking start.",
+                    "[CCA] Safety state changed before task=%s could be committed; reason=%s",
                     task_id,
+                    reason,
                 )
-                await self._send_decision(resource_jid, task_id, "block")
+                await self._send_decision(
+                    resource_jid,
+                    task_id,
+                    "block",
+                    trace=event.get("trace"),
+                    reason=reason,
+                )
                 return
 
             # If allowed
-            agent.logger.debug("[CCA] Safety OK: task=%s allowed.", task_id)
-            await self._send_decision(resource_jid, task_id, "allow")
+            agent.logger.info("[CCA] Safety OK: task=%s allowed.", task_id)
+            await self._send_decision(
+                resource_jid,
+                task_id,
+                "allow",
+                trace=event.get("trace"),
+                reason="safety_check_allowed",
+            )
 
         async def _handle_runtime_event(
             self,
@@ -1296,7 +1385,11 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=diagnosis,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     elif status_token == "pending_obligation":
                         agent.logger.info(
                             "[CCA] Supervisor pending obligation after task=%s: rules=%s safe_next=%s",
@@ -1334,7 +1427,11 @@ class CentralControllerAgent(LlmAgent):
                                     "running_tasks": plan_running_tasks,
                                 },
                             )
-                            await self.send(replan_msg)
+                            await send_agent_message(
+                                self,
+                                replan_msg,
+                                transport_label="cca_replan",
+                            )
 
         async def _retry_blocked_tasks(self) -> None:
             """
@@ -1407,7 +1504,11 @@ class CentralControllerAgent(LlmAgent):
                     "task_ids": task_ids,
                     "reason": "safety_unblocked",
                 })
-                await self.send(retry_msg)
+                await send_agent_message(
+                    self,
+                    retry_msg,
+                    transport_label="cca_retry_ready",
+                )
                 agent.logger.info(
                     "[CCA] Notified product=%s to requeue %d task(s) after transient safety block cleared: %s",
                     product_jid,
@@ -1415,11 +1516,37 @@ class CentralControllerAgent(LlmAgent):
                     ", ".join(task_ids),
                 )
 
-        async def _send_decision(self, to_jid: str, task_id: str, decision: str):
+        async def _send_decision(
+            self,
+            to_jid: str,
+            task_id: str,
+            decision: str,
+            *,
+            trace: dict[str, Any] | None = None,
+            reason: str = "",
+        ):
+            agent: "CentralControllerAgent" = self.agent  # type: ignore
             msg = Message(to=to_jid)
             msg.set_metadata("type", "safety_decision")
-            msg.body = json.dumps({"task_id": task_id, "decision": decision})
-            await self.send(msg)
+            payload = {"task_id": task_id, "decision": decision}
+            reason_text = str(reason or "").strip()
+            if reason_text:
+                payload["reason"] = reason_text
+            if isinstance(trace, dict):
+                payload["trace"] = _trace_with_timestamp(trace, "cca_decision_sent_at")
+            msg.body = json.dumps(payload)
+            agent.logger.info(
+                "[CCA] Sending safety decision task=%s to=%s decision=%s reason=%s",
+                task_id,
+                to_jid,
+                decision,
+                reason_text or "-",
+            )
+            await send_agent_message(
+                self,
+                msg,
+                transport_label="cca_decision",
+            )
 
 
     class _InitCCA(OneShotBehaviour):
@@ -1718,6 +1845,10 @@ class CentralControllerAgent(LlmAgent):
                     "ok": ok,
                     "violations": violations
                 })
-                await self.send(reply)
+                await send_agent_message(
+                    self,
+                    reply,
+                    transport_label="cca_plan_result",
+                )
             except Exception:
                 agent.logger.exception("Failed to send reply.")
