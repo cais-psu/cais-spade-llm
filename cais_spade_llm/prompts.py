@@ -121,7 +121,7 @@ OUTPUT FORMAT:
 {
   "tasks": [
     {
-      "req_id": "...",                   
+      "req_id": "...",
       "id": "...",
       "requirement_id": "...",
       "function_name": "...",
@@ -251,16 +251,12 @@ Guidelines:
   - infer a likely phase and process_type consistent with the text and the tools catalogue,
   - include context keys that appear in required_context_keys of tools sharing that phase/process_type,
     but only when the NL clearly implies them (e.g. printer, origin, destination, material, machine_id).
-- If the NL clearly refers to a known symbolic location token, normalize context.origin/context.destination to that exact token.
-- context.resource may be included as a hint when the instruction explicitly names a robot, but it is not the authoritative final grounding.
 - Never fabricate machines, parts, or locations that are not implied.
 """)
 
 def build_requirement_parse_prompt(
     requirement_text: str,
     tools_catalog: list,
-    known_location_tokens: list | None = None,
-    active_product_token: str = "",
     refinement_feedback: str = "",
     previous_preview_requirements: list[dict] | None = None,
 ) -> str:
@@ -290,12 +286,6 @@ Use this refinement context to improve the new structured requirements.
 
 TOOLS_CATALOGUE (for reference):
 {json.dumps(tools_catalog, ensure_ascii=False)}
-
-KNOWN_SYMBOLIC_LOCATIONS:
-{json.dumps(list(known_location_tokens or []), ensure_ascii=False)}
-
-ACTIVE_PRODUCT_TOKEN:
-{json.dumps(str(active_product_token or ""), ensure_ascii=False)}
 {refinement_section}
 
 Convert the following instructions into structured requirements:
@@ -348,9 +338,6 @@ FIELD RULES
   - If the rule does NOT care which specific resource executes the action, either:
     - use ["any"].
   - Avoid over-specifying resources just because they exist in the tools catalogue.
-  - `resources` is reserved for robot/tool owner identifiers present in
-    `TOOLS_CATALOGUE.function_owner_agent`. Never invent resource tokens, and
-    never put a part/product token in `resources` — parts go in `product`.
 
 • resource_types
   - Use this when the rule is about a class of resources rather than named resources
@@ -382,14 +369,10 @@ FIELD RULES
 
 • product
   - List ALL specific referenced products/parts (e.g. ["pin", "gear"]).
-  - Any token present in `KNOWN_PRODUCT_PARTS` is a part/product and MUST be
-    placed here, never in `resources`.
-  - If a rule describes an ordering between Part A and Part B, include BOTH in
-    this list and leave `resources` empty (or `["any"]` if the NL text does
-    not constrain which executor performs the action).
+  - If a rule describes an ordering between Part A and Part B, include BOTH in this list.
   - Even if only one product is mentioned, return a list with one item (e.g. ["pin"]).
   - Do NOT use "any" if specific parts are named.
-                             
+
 ------------------------------------------------------------
 GENERAL RULES
 ------------------------------------------------------------
@@ -417,15 +400,12 @@ def build_safety_parse_prompt(
     capability_overview: str = "",
     refinement_feedback: str = "",
     previous_preview_rules: list[dict] | None = None,
-    known_parts: list[str] | None = None,
 ) -> str:
     """
     Prompt to convert raw NL safety text into structured safety rules.
     Includes tools and capability information for grounding.
     """
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
-    known_parts_list = [str(p).strip() for p in (known_parts or []) if str(p or "").strip()]
-    known_parts_json = json.dumps(known_parts_list, ensure_ascii=False)
     previous_preview_json = json.dumps(
         previous_preview_rules or [], ensure_ascii=False, indent=2
     )
@@ -455,16 +435,11 @@ You are the SAFETY RULE PARSER.
 TOOLS_CATALOGUE:
 {tools_json}
 
-KNOWN_PRODUCT_PARTS:
-{known_parts_json}
-
 CAPABILITY_OVERVIEW:
 {capability_overview}
 
 Use these catalogues to choose grounded processes, events, resources,
-and canonical context identifiers. Tokens listed in KNOWN_PRODUCT_PARTS
-are part/product identifiers and must populate the `product` field, never
-the `resources` field.
+and canonical context identifiers.
 {refinement_section}
 
 SAFETY_TEXT:
@@ -561,37 +536,6 @@ Natural-language: "Event A must happen before Event B (one-time constraint)." / 
 APs: a (prerequisite), b (dependent event)
 LTLf: (!b) U a
 Note: Use ONLY for one-shot prerequisites where B is blocked until A fires. Do NOT use for recurring "must follow" obligations — use Example B instead.
-
-Example F (Part-ordered one-off prerequisite — distinct PARTS, same function):
-Natural-language: "Part A must place_approach first before Part B place_approach to <destination>."
-APs:
-  a = ap_event/<process>/a/any/place_approach/destination=<dest>
-  b = ap_event/<process>/b/any/place_approach/destination=<dest>
-LTLf: (!b) U a
-formula_ast:
-  {
-    "op": "U",
-    "left": {
-      "op": "!",
-      "arg": {
-        "type": "ap_event_atom",
-        "product": "b",
-        "resource": "any",
-        "function": "place_approach",
-        "context": {"destination": "<dest>"}
-      }
-    },
-    "right": {
-      "type": "ap_event_atom",
-      "product": "a",
-      "resource": "any",
-      "function": "place_approach",
-      "context": {"destination": "<dest>"}
-    }
-  }
-Note: Per-part ordering is encoded with the atom-level `product` field (lowercased)
-plus `resource: "any"`. Do NOT introduce distinct `resource_var` placeholders
-(e.g. `$a`/`$b`) — the compiler rejects multiple resource_vars in one rule.
 """).strip()
 
 SAFETY_FORMULA_AST_TEMPLATE_DOC = dedent("""
@@ -656,16 +600,7 @@ General grounding rules:
 - `states` is optional; omit it when the compiler should infer the relevant persistent states.
 - If the structured rule already names concrete resources, prefer concrete `resource`
   fields over `resource_var`.
-- Per-PART discrimination is the `product` field, NOT `resource_var`.
-  If the structured rule's `product` list has more than one entry, every relevant
-  atom MUST set its own atom-level `product` field (lowercased) to identify which
-  part it describes. Use `resource: "any"` when the NL text does not constrain
-  which executor performs the action. Do NOT invent distinct `resource_var` names
-  like `$sg`/`$mrp` to encode per-part differences — that produces multiple
-  distinct `resource_var` names in one rule and is rejected by the compiler.
-- Do NOT emit multiple distinct `resource_var` names in one `formula_ast`
-  (this is just a restatement of the per-part rule above: use `product`, not
-  `resource_var`, to distinguish parts).
+- Do NOT emit multiple distinct `resource_var` names in one `formula_ast`.
 - Reuse canonical context keys from INPUT RULES / TOOLS_CATALOGUE; do not replace them
   with generic stand-ins like `location`.
 - Keep one selector branch aligned to one context-role family and state slice.
@@ -784,11 +719,6 @@ MANDATORY GROUNDING:
   Do not mix rows that require different context keys.
 - If a rule already names specific resources, use concrete `resource` fields rather
   than multiple distinct `resource_var` names.
-- If `rule.product` has more than one entry, set the `product` field on each
-  relevant `ap_event_atom`/`ap_state_atom` explicitly (lowercased). Do not rely
-  on the rule-level fallback in `_normalize_atom_product`, which defaults to
-  `'any'` when more than one product is listed. Encoding per-part differences
-  via distinct `resource_var` names is forbidden — use the `product` field.
 
 === TOOLS_CATALOGUE ===
 {tools_json}
@@ -1378,3 +1308,14 @@ RESOURCE_AGENTS (workspace boundaries and staging areas):
 {state_section}
 """)
 
+# ----------------------------------------------------------------------
+# Bridge prompt compatibility exports
+# ----------------------------------------------------------------------
+# Bridge prompt bodies live under llm_bridge/prompts.  Keep these imports so
+# older callers of cais_spade_llm.prompts continue to work while bridge code
+# imports from the bridge prompt package directly.
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.bridge_react import (
+    _bridge_generalize_location_summary,
+    build_bridge_turn_prompt,
+    build_state_exploration_prompt,
+)

@@ -1,2 +1,0 @@
-"""Archived bridge prompt builders."""
-

@@ -10,10 +10,8 @@ from nicegui import ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
-from cais_spade_llm.ui.components.dag_graph import build_fsa_dag_overlay, nodes_to_mermaid
+from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
 from cais_spade_llm.ui.components.fsa_graph import fsa_state_index_text, fsa_to_mermaid
-
-_DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS = 5
 
 
 def render(bridge: SystemBridge) -> None:
@@ -82,7 +80,7 @@ def render(bridge: SystemBridge) -> None:
                 with ui.row().classes("gap-2 mt-3 flex-wrap"):
                     auto_replan_input = ui.number(
                         "Auto-replan max",
-                        value=_DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS,
+                        value=3,
                         min=0,
                         max=10,
                         step=1,
@@ -155,7 +153,7 @@ def render(bridge: SystemBridge) -> None:
                         f"validation_ok={result.get('validation_ok')} "
                         f"witnesses={result.get('witness_count')} "
                         f"auto-replans={result.get('auto_replans_used', 0)}/"
-                        f"{result.get('auto_replan_max_attempts', _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS)} "
+                        f"{result.get('auto_replan_max_attempts', 3)} "
                         f"stop_reason={result.get('stop_reason', '')}"
                     )
                 except Exception as exc:
@@ -258,18 +256,12 @@ def render(bridge: SystemBridge) -> None:
             data = manifest if isinstance(manifest, dict) else {}
             replan_policy = data.get("replan_policy", {})
             validation = data.get("validation_summary", {})
-            max_attempts = _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
+            max_attempts = 3
             if isinstance(replan_policy, dict):
                 try:
-                    max_attempts = int(
-                        replan_policy.get(
-                            "auto_replan_max_attempts",
-                            _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS,
-                        )
-                        or 0
-                    )
+                    max_attempts = int(replan_policy.get("auto_replan_max_attempts", 3) or 0)
                 except Exception:
-                    max_attempts = _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
+                    max_attempts = 3
             auto_replans_used = 0
             if isinstance(validation, dict):
                 try:
@@ -421,14 +413,7 @@ def render(bridge: SystemBridge) -> None:
                 artifacts = bridge.get_bundle_artifacts(bundle_id)
                 nodes = artifacts.get("plan_nodes", [])
                 fsa = artifacts.get("global_fsa", {})
-                dag_overlay = build_fsa_dag_overlay(
-                    nodes if isinstance(nodes, list) else [],
-                    fsa if isinstance(fsa, dict) else {},
-                )
-                dag_mermaid.content = nodes_to_mermaid(
-                    nodes if isinstance(nodes, list) else [],
-                    overlay=dag_overlay,
-                )
+                dag_mermaid.content = nodes_to_mermaid(nodes if isinstance(nodes, list) else [])
                 fsa_mermaid.content = fsa_to_mermaid(fsa if isinstance(fsa, dict) else {})
                 fsa_index.content = fsa_state_index_text(fsa if isinstance(fsa, dict) else {})
             except Exception as exc:
@@ -690,9 +675,6 @@ def render(bridge: SystemBridge) -> None:
                     refinement_feedback=feedback_text,
                     parent_bundle_id=parent_bundle_id,
                 )
-                notice = bridge.consume_notice()
-                if notice:
-                    ui.notify(notice, type="info")
                 summary = result.get("summary", {})
                 manifest = result.get("manifest", {}) if isinstance(result.get("manifest"), dict) else {}
                 validation = (
@@ -723,9 +705,6 @@ def render(bridge: SystemBridge) -> None:
                         type="positive",
                     )
             except Exception as exc:
-                notice = bridge.consume_notice()
-                if notice:
-                    ui.notify(notice, type="info")
                 _set_generation_banner("error", f"Plan-set generation failed: {exc}")
                 ui.notify(f"Plan-set generation failed: {exc}", type="negative")
             finally:

@@ -23,7 +23,6 @@ _NAV_ITEMS = [
     ("Control", "/control", "gamepad"),
     ("Plans", "/plans", "schema"),
     ("Safety", "/safety", "shield"),
-    ("Experiments", "/experiments", "science"),
     ("Products", "/products", "inventory_2"),
     ("Resources", "/resources", "precision_manufacturing"),
 ]
@@ -117,7 +116,6 @@ def create_app() -> None:
     _patch_nicegui_lifecycle()
     bridge = SystemBridge.instance()
     watchdog_task: asyncio.Task | None = None
-    xmpp_prewarm_task: asyncio.Task | None = None
 
     # Serve static assets and set Penn State favicon.
     app.add_static_files("/static", str(_STATIC_DIR))
@@ -129,7 +127,7 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products, experiments
+    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products
 
     @ui.page("/")
     def index_page():
@@ -150,11 +148,6 @@ def create_app() -> None:
     def resources_page():
         _page_wrapper(bridge)
         resources.render(bridge)
-
-    @ui.page("/experiments")
-    def experiments_page():
-        _page_wrapper(bridge)
-        experiments.render(bridge)
 
     @ui.page("/safety")
     def safety_page():
@@ -191,33 +184,17 @@ def create_app() -> None:
                     pass
 
     async def _on_startup() -> None:
-        nonlocal watchdog_task, xmpp_prewarm_task
+        nonlocal watchdog_task
         watchdog_task = asyncio.create_task(_ui_watchdog())
-        xmpp_prewarm_task = asyncio.create_task(_prewarm_xmpp())
-        track_task = getattr(bridge, "_track_background_task", None)
-        if callable(track_task):
-            track_task(xmpp_prewarm_task, label="app startup xmpp prewarm")
-
-    async def _prewarm_xmpp() -> None:
-        """Warm the embedded XMPP subprocess without blocking UI startup."""
-        import logging
-
-        log = logging.getLogger("ui.app")
-        try:
-            await bridge._ensure_xmpp_server()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.debug("App startup: XMPP prewarm skipped", exc_info=True)
 
     async def _on_shutdown() -> None:
         """Clean up all background resources when the app exits."""
-        nonlocal watchdog_task, xmpp_prewarm_task
         import logging
         log = logging.getLogger("ui.app")
         log.info("App shutdown: cleaning up resources...")
 
         # Stop watchdog first.
+        nonlocal watchdog_task
         if watchdog_task is not None:
             watchdog_task.cancel()
             try:
@@ -227,17 +204,6 @@ def create_app() -> None:
             except Exception:
                 log.debug("App shutdown: watchdog cleanup skipped")
             watchdog_task = None
-
-        # Stop XMPP prewarm if shutdown races with app startup.
-        if xmpp_prewarm_task is not None and not xmpp_prewarm_task.done():
-            xmpp_prewarm_task.cancel()
-            try:
-                await xmpp_prewarm_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                log.debug("App shutdown: XMPP prewarm cleanup skipped")
-            xmpp_prewarm_task = None
 
         # 1) Stop SPADE agents (which also shuts down robot controllers).
         if bridge.system_running:
@@ -276,5 +242,5 @@ def create_app() -> None:
         port=8080,
         reload=False,
         show=False,
-        reconnect_timeout=300.0,
+        reconnect_timeout=30.0,
     )

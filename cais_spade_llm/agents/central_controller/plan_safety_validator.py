@@ -6,7 +6,6 @@ from collections import defaultdict, deque
 from copy import deepcopy
 import json
 import re
-import time
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
@@ -59,7 +58,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
         # BaseSafetyChecker signature is (dfa_map, rules)
         super().__init__(dfa_map, rules, tools_catalog=tools_catalog)
         self.rule_lookup: Dict[str, Dict[str, Any]] = {r["id"]: r for r in rules if r.get("id")}
-        self.last_run_stats: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     # PUBLIC ENTRY POINT
@@ -87,14 +85,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
         Xm = set(A.get("Xm") or [])
 
         if not x0 or not Tr:
-            self.last_run_stats = {
-                "fsa_reachable_states": 0,
-                "fsa_transitions": len(Tr),
-                "per_rule_product_states_explored": {},
-                "total_product_states_explored": 0,
-                "verification_time_ms": 0.0,
-                "product_state_limit_hit": False,
-            }
             return True, []
 
         self.logger.info(
@@ -104,7 +94,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
         )
 
         enabled = self._index_enabled(Tr)
-        start_ts = time.perf_counter()
 
         # Optional: task_id -> node lookup from plan
         task_lookup = self._build_task_lookup(plan)
@@ -113,9 +102,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
         initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
 
         all_violations: List[Dict[str, Any]] = []
-        per_rule_product_states_explored: Dict[str, int] = {}
-        total_product_states_explored = 0
-        product_state_limit_hit = False
 
         for rule in self.safety_rules:
             rule_id = rule.get("id")
@@ -130,7 +116,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if not aps_for_rule:
                 continue
 
-            violations, rule_stats = self._check_rule_on_fsa_product(
+            violations = self._check_rule_on_fsa_product(
                 rule_id=rule_id,
                 rule=rule,
                 x0=x0,
@@ -141,25 +127,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 task_meta_lookup=task_meta_lookup,
                 initial_resource_states=initial_resource_states,
             )
-            explored = int(rule_stats.get("product_states_explored", 0) or 0)
-            per_rule_product_states_explored[str(rule_id)] = explored
-            total_product_states_explored += explored
-            product_state_limit_hit = product_state_limit_hit or bool(
-                rule_stats.get("product_state_limit_hit", False)
-            )
 
             # Keep only ONE witness per rule
             if violations:
                 all_violations.append(violations[0])
-
-        self.last_run_stats = {
-            "fsa_reachable_states": self._reachable_fsa_state_count(enabled, str(x0)),
-            "fsa_transitions": len(Tr),
-            "per_rule_product_states_explored": per_rule_product_states_explored,
-            "total_product_states_explored": total_product_states_explored,
-            "verification_time_ms": (time.perf_counter() - start_ts) * 1000.0,
-            "product_state_limit_hit": product_state_limit_hit,
-        }
         return (len(all_violations) == 0), all_violations
 
     # Backward-compatible alias kept during the validator rename migration.
@@ -182,27 +153,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 continue
             enabled[str(frm)].append(t)
         return enabled
-
-    def _reachable_fsa_state_count(
-        self,
-        enabled: Dict[str, List[Dict[str, Any]]],
-        x0: str,
-    ) -> int:
-        start = str(x0 or "").strip()
-        if not start:
-            return 0
-
-        queue = deque([start])
-        seen = {start}
-        while queue:
-            state = queue.popleft()
-            for transition in enabled.get(state, []):
-                successor = str(transition.get("to") or "").strip()
-                if not successor or successor in seen:
-                    continue
-                seen.add(successor)
-                queue.append(successor)
-        return len(seen)
 
     def _build_task_lookup(self, plan: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
@@ -775,7 +725,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         task_lookup: Dict[str, Dict[str, Any]],
         task_meta_lookup: Dict[str, Dict[str, Any]],
         initial_resource_states: Dict[str, Dict[str, Any]],
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         """
         Explore reachable (x,q) states and detect any violation.
         """
@@ -803,7 +753,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
         seen: Set[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]] = {start}
 
         violations: List[Dict[str, Any]] = []
-        product_state_limit_hit = False
 
         while stack:
             node = stack.pop()
@@ -895,16 +844,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                         self.MAX_PRODUCT_STATES,
                         rule_id,
                     )
-                    product_state_limit_hit = True
-                    return violations, {
-                        "product_states_explored": len(seen),
-                        "product_state_limit_hit": product_state_limit_hit,
-                    }
+                    return violations
 
-        return violations, {
-            "product_states_explored": len(seen),
-            "product_state_limit_hit": product_state_limit_hit,
-        }
+        return violations
 
     def _reconstruct_trace(
         self,

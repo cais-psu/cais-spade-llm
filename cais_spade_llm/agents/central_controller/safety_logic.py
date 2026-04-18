@@ -86,7 +86,7 @@ class SafetyLogic:
                 ap_map[label] = full
 
         normalized = re.sub(r"\s+", "", ltlf)
-        precedence_match = (
+        order_match = (
             re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
             or re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
         )
@@ -107,9 +107,9 @@ class SafetyLogic:
             response = ap_map.get(response_match.group(2), response_match.group(2))
             return f"Whenever {trigger} happens, {response} must eventually happen afterwards."
 
-        if precedence_match:
-            later = ap_map.get(precedence_match.group(1), precedence_match.group(1))
-            earlier = ap_map.get(precedence_match.group(2), precedence_match.group(2))
+        if order_match:
+            earlier = ap_map.get(order_match.group(1), order_match.group(1))
+            later = ap_map.get(order_match.group(2), order_match.group(2))
             return f"The generated ordering requires {earlier} to occur before {later}."
 
         if " U " in ltlf:
@@ -605,26 +605,6 @@ class SafetyLogic:
             return f"({left} U {right})"
 
         return None
-
-    @classmethod
-    def _prefer_deterministic_ltlf(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        fallback_ltlf: str,
-        *,
-        refinement_feedback: str = "",
-    ) -> str:
-        deterministic_ltlf = cls._compile_ltlf_for_rule(
-            rule,
-            aps,
-            refinement_feedback=refinement_feedback,
-        )
-        if deterministic_ltlf and all(
-            str(ap).startswith(("ap_event/", "ap/")) for ap in aps
-        ):
-            return deterministic_ltlf
-        return fallback_ltlf
 
     def _tool_grounding(self) -> tuple[set[str], dict[str, str], set[str], set[str]]:
         """
@@ -1355,8 +1335,6 @@ class SafetyLogic:
         self,
         rule: dict[str, Any],
         formula_ast: dict[str, Any],
-        *,
-        refinement_feedback: str = "",
     ) -> Dict[str, Any]:
         ast = deepcopy(formula_ast)
         resource_vars = self._collect_resource_var_names(ast)
@@ -1378,30 +1356,17 @@ class SafetyLogic:
                 raise RuntimeError(
                     f"formula_ast for rule {rule.get('id')} has resource_var but no grounded resources"
                 )
-            compiled_aps = self._dedupe_keep_order(aps)
-            compiled_ltlf = " & ".join(compiled_terms)
             return {
                 "formula_ast": formula_ast,
-                "aps": compiled_aps,
-                "ltlf": self._prefer_deterministic_ltlf(
-                    rule,
-                    compiled_aps,
-                    compiled_ltlf,
-                    refinement_feedback=refinement_feedback,
-                ),
+                "aps": self._dedupe_keep_order(aps),
+                "ltlf": " & ".join(compiled_terms),
             }
 
         formula, aps = self._compile_formula_ast_node(rule, ast)
-        compiled_aps = self._dedupe_keep_order(aps)
         return {
             "formula_ast": formula_ast,
-            "aps": compiled_aps,
-            "ltlf": self._prefer_deterministic_ltlf(
-                rule,
-                compiled_aps,
-                formula,
-                refinement_feedback=refinement_feedback,
-            ),
+            "aps": self._dedupe_keep_order(aps),
+            "ltlf": formula,
         }
 
     @classmethod
@@ -1796,15 +1761,12 @@ class SafetyLogic:
             except Exception:
                 capability_overview = ""
 
-        known_parts = list(getattr(self.controller_agent, "safety_known_parts", []) or [])
-
         prompt = build_safety_parse_prompt(
             safety_text,
             tools_catalog,
             capability_overview,
             refinement_feedback=refinement_feedback,
             previous_preview_rules=previous_preview_rules,
-            known_parts=known_parts,
         )
 
         raw = await self.controller_agent.ask_llm(
@@ -1942,11 +1904,7 @@ class SafetyLogic:
             formula_ast = item.get("formula_ast")
             if isinstance(formula_ast, dict):
                 try:
-                    compiled = self._compile_formula_ast_for_rule(
-                        rule,
-                        formula_ast,
-                        refinement_feedback=refinement_feedback,
-                    )
+                    compiled = self._compile_formula_ast_for_rule(rule, formula_ast)
                 except Exception:
                     if self.logger:
                         self.logger.error(
@@ -2100,13 +2058,16 @@ class SafetyLogic:
             if unresolved_events_for_rule:
                 unresolved[rid] = self._dedupe_keep_order(unresolved_events_for_rule)
 
-            ltlf_text = self._prefer_deterministic_ltlf(
+            deterministic_ltlf = self._compile_ltlf_for_rule(
                 rule,
                 sanitized_aps,
-                ltlf_text,
                 refinement_feedback=refinement_feedback,
             )
-            if sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
+            if deterministic_ltlf and all(
+                str(ap).startswith(("ap_event/", "ap/")) for ap in sanitized_aps
+            ):
+                ltlf_text = deterministic_ltlf
+            elif sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
                 ltlf_text = " & ".join(sanitized_aps) if len(sanitized_aps) > 1 else sanitized_aps[0]
 
             result[str(rid)] = {

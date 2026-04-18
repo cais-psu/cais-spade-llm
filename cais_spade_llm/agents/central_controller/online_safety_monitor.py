@@ -64,7 +64,6 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             "status": status,
             "current_state": current_state,
             "failure_context": data.get("failure_context") or {},
-            "trace": data.get("trace") if isinstance(data.get("trace"), dict) else {},
         }
 
     def seed_resource_states(self, resource_snapshots: Dict[str, Dict[str, Any]]) -> None:

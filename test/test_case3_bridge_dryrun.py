@@ -3,6 +3,7 @@
 Run directly:
     python test/test_case3_bridge_dryrun.py
     python test/test_case3_bridge_dryrun.py --model gpt-5
+    python test/test_case3_bridge_dryrun.py --reasoning-mode hybrid
     python test/test_case3_bridge_dryrun.py --focus primitive_generation
     python test/test_case3_bridge_dryrun.py --show-llm-input
     python test/test_case3_bridge_dryrun.py --show-prompt
@@ -71,10 +72,8 @@ _load_local_env(ROOT / ".env")
 
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-    des_recovery as des_recovery_mode,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-    des_recovery_outline_runtime as des_recovery_outline_runtime,
+    build_hybrid_session_seed,
+    multi_turn_v2 as multi_turn_v2_mode,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
@@ -215,7 +214,7 @@ class FakeProductAgent:
             else {}
         )
         self._bridge_reasoning_mode = str(
-            precomputed_policy.get("bridge_reasoning_mode", "des_recovery") or "des_recovery"
+            precomputed_policy.get("bridge_reasoning_mode", "hybrid") or "hybrid"
         ).strip().lower()
         bundle_artifacts = dict(self.precomputed_bundle.get("artifacts") or {})
         self.structured_requirements_path = Path(
@@ -1558,20 +1557,20 @@ def _relax_recovery_clear_precondition(prepared_bridge_request: dict[str, Any]) 
 def _configure_live_bridge_session(
     prepared_bridge_request: dict[str, Any],
     *,
-    reasoning_mode: str = "des_recovery",
+    reasoning_mode: str = "hybrid",
 ) -> None:
     """Tune the prepared bridge session for the direct dry-run harness."""
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    normalized_mode = str(reasoning_mode or "des_recovery").strip().lower() or "des_recovery"
+    normalized_mode = str(reasoning_mode or "multi_turn").strip().lower() or "multi_turn"
     bridge_session["reasoning_mode"] = normalized_mode
     bridge_session["max_turns"] = max(int(bridge_session.get("max_turns", 6) or 6), 1000)
     bridge_session["repair_mode"] = "recover"
     bridge_session["observation_backend"] = "mock_detect_parts_harness"
-    if normalized_mode == "des_recovery":
-        bridge_session["des_recovery_engine"] = "des_recovery"
+    if normalized_mode == "multi_turn":
+        bridge_session["multi_turn_engine"] = "v2"
         bridge_session["outline_mode"] = "incremental_candidates_validated"
     else:
-        bridge_session.pop("des_recovery_engine", None)
+        bridge_session.pop("multi_turn_engine", None)
         bridge_session.pop("outline_mode", None)
     prepared_bridge_request["bridge_session"] = bridge_session
 
@@ -1722,6 +1721,7 @@ def _seed_case3_primitive_generation_focus(session_state: dict[str, Any]) -> dic
 async def _prepare_bridge_dryrun_harness(
     *,
     llm_model: str | None = None,
+    reasoning_mode: str = "multi_turn",
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any]]:
     """Load configs, build fake agents, prepare the bridge request."""
     paths = _case3_paths()
@@ -1743,7 +1743,9 @@ async def _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
         precomputed_bundle=bundle_context,
     )
-    product_agent._bridge_reasoning_mode = "des_recovery"
+    product_agent._bridge_reasoning_mode = (
+        str(reasoning_mode or "hybrid").strip().lower() or "hybrid"
+    )
 
     ur5e = FakeBridgeRobot(
         config=ur5e_config,
@@ -1818,9 +1820,16 @@ async def _prepare_bridge_dryrun_harness(
         prepared_bridge_request,
         reasoning_mode=product_agent._bridge_reasoning_mode,
     )
-    prepared_bridge_request["des_recovery_session_seed"] = (
-        des_recovery_mode.build_des_recovery_session_seed(prepared_bridge_request)
-    )
+    if product_agent._bridge_reasoning_mode == "hybrid":
+        prepared_bridge_request["hybrid_session_seed"] = build_hybrid_session_seed(
+            prepared_bridge_request
+        )
+        prepared_bridge_request.pop("multi_turn_session_seed", None)
+    else:
+        prepared_bridge_request["multi_turn_session_seed"] = (
+            multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
+        )
+        prepared_bridge_request.pop("hybrid_session_seed", None)
 
     return fixture, product_agent, planner, prepared_bridge_request
 
@@ -1834,6 +1843,7 @@ async def run_case3_bridge_dryrun(
     write_debug: bool = True,
     *,
     llm_model: str | None = None,
+    reasoning_mode: str = "hybrid",
     stop_before_primitive_generation: bool = True,
     focus: str = "full",
 ) -> dict[str, Any]:
@@ -1846,6 +1856,7 @@ async def run_case3_bridge_dryrun(
         stop_before_primitive_generation = False
     _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
+        reasoning_mode=reasoning_mode,
     )
 
     if write_debug:
@@ -1858,14 +1869,16 @@ async def run_case3_bridge_dryrun(
 
     proposal: dict[str, Any] | None = None
     if normalized_focus == "primitive_generation":
+        if str(reasoning_mode or "").strip().lower() != "multi_turn":
+            raise ValueError("--focus primitive_generation requires --reasoning-mode multi_turn")
         seed = deepcopy(
-            prepared_bridge_request.get("des_recovery_session_seed")
-            or des_recovery_mode.build_des_recovery_session_seed(prepared_bridge_request)
+            prepared_bridge_request.get("multi_turn_session_seed")
+            or multi_turn_v2_mode.build_multi_turn_session_seed(prepared_bridge_request)
         )
         seed = _seed_case3_primitive_generation_focus(seed)
-        prepared_bridge_request["des_recovery_session_seed"] = deepcopy(seed)
+        prepared_bridge_request["multi_turn_session_seed"] = deepcopy(seed)
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-            execute_des_recovery_bridge as _resume_bridge,
+            execute_multi_turn_bridge as _resume_bridge,
         )
         proposal = await _resume_bridge(
             planner,
@@ -1876,101 +1889,134 @@ async def run_case3_bridge_dryrun(
         # First run: grounding + first outline task
         proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
 
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-        execute_des_recovery_bridge as _resume_bridge,
-    )
-    max_resume = max(
-        10,
-        int(
-            dict(prepared_bridge_request.get("bridge_session") or {}).get("max_turns")
-            or dict(prepared_bridge_request.get("des_recovery_session_seed") or {}).get("max_turns")
-            or 0
-        ),
-    )
-    post_validation_resume_budget = 0
-    for _resume_i in range(max_resume):
-        ss = prepared_bridge_request.get("des_recovery_session_state") or {}
-        current_status = str(ss.get("status") or "")
-        if current_status in {
-            "paused_after_primitive_stuck",
-            "paused_after_primitive_blocked",
-        }:
-            diagnostics = [
-                deepcopy(row)
-                for row in (ss.get("primitive_escalation_diagnostics") or [])
-                if isinstance(row, dict)
-            ]
-            feedback = [
-                deepcopy(row)
-                for row in (ss.get("primitive_rejection_feedback") or [])
-                if isinstance(row, dict)
-            ]
-            summary = str((diagnostics[0] or {}).get("reason") or "").strip() if diagnostics else ""
-            if not summary and feedback:
-                summary = str((feedback[0] or {}).get("reason") or "").strip()
-            logging.getLogger("case3_bridge_dryrun").warning(
-                "[DryRun] Primitive generation paused%s%s%s",
-                (
-                    " on blocked event"
-                    if current_status == "paused_after_primitive_blocked"
-                    else " on stuck event"
-                ),
-                (
-                    f" {str((diagnostics[0] or {}).get('outline_id') or '').strip()}"
-                    if diagnostics else ""
-                ),
-                (f": {summary}" if summary else ""),
-            )
-            break
-        if current_status not in {
-            "paused_after_outline_turn",
-            "paused_after_primitive_turn",
-        }:
-            break
-        if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Outline completed; stopping before primitive_generation for inspection"
-            )
-            break
-        if stop_before_primitive_generation:
+    if str(reasoning_mode or "multi_turn").strip().lower() == "multi_turn":
+        # Resume loop: keep running while paused after outline turns
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_multi_turn_bridge as _resume_bridge,
+        )
+        max_resume = max(
+            10,
+            int(
+                dict(prepared_bridge_request.get("bridge_session") or {}).get("max_turns")
+                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+                or 0
+            ),
+        )
+        post_validation_resume_budget = 0
+        for _resume_i in range(max_resume):
+            ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+            current_status = str(ss.get("status") or "")
+            if current_status in {
+                "paused_after_primitive_stuck",
+                "paused_after_primitive_blocked",
+            }:
+                diagnostics = [
+                    deepcopy(row)
+                    for row in (ss.get("primitive_escalation_diagnostics") or [])
+                    if isinstance(row, dict)
+                ]
+                feedback = [
+                    deepcopy(row)
+                    for row in (ss.get("primitive_rejection_feedback") or [])
+                    if isinstance(row, dict)
+                ]
+                summary = str((diagnostics[0] or {}).get("reason") or "").strip() if diagnostics else ""
+                if not summary and feedback:
+                    summary = str((feedback[0] or {}).get("reason") or "").strip()
+                logging.getLogger("case3_bridge_dryrun").warning(
+                    "[DryRun] Primitive generation paused%s%s%s",
+                    (
+                        " on blocked event"
+                        if current_status == "paused_after_primitive_blocked"
+                        else " on stuck event"
+                    ),
+                    (
+                        f" {str((diagnostics[0] or {}).get('outline_id') or '').strip()}"
+                        if diagnostics else ""
+                    ),
+                    (f": {summary}" if summary else ""),
+                )
+                break
+            if current_status not in {
+                "paused_after_outline_turn",
+                "paused_after_primitive_turn",
+            }:
+                break
+            if stop_before_primitive_generation and str(ss.get("current_phase") or "").strip().lower() == "primitive_generation":
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Outline completed; stopping before primitive_generation for inspection"
+                )
+                break
+            if stop_before_primitive_generation:
+                proposal = await _resume_bridge(
+                    planner, prepared_bridge_request, session_state=ss,
+                )
+                continue
+            findings = list(ss.get("outline_validation_findings") or [])
+            if not findings and str(ss.get("outline_mode") or "").strip().lower() == "incremental_candidates_validated":
+                findings = [
+                    deepcopy(row)
+                    for row in (ss.get("candidate_rejection_feedback") or [])
+                    if isinstance(row, dict)
+                ]
+            if findings and post_validation_resume_budget <= 0:
+                logging.getLogger("case3_bridge_dryrun").info(
+                    "[DryRun] Validation rejection detected (%d findings) — resuming %d more turns",
+                    len(findings),
+                    _POST_VALIDATION_INSPECTION_TURNS,
+                )
+                post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
             proposal = await _resume_bridge(
                 planner, prepared_bridge_request, session_state=ss,
             )
-            continue
-        findings = list(ss.get("outline_validation_findings") or [])
-        if not findings and str(ss.get("outline_mode") or "").strip().lower() == "incremental_candidates_validated":
-            findings = [
-                deepcopy(row)
-                for row in (ss.get("candidate_rejection_feedback") or [])
-                if isinstance(row, dict)
-            ]
-        if findings and post_validation_resume_budget <= 0:
-            logging.getLogger("case3_bridge_dryrun").info(
-                "[DryRun] Validation rejection detected (%d findings) — resuming %d more turns",
-                len(findings),
-                _POST_VALIDATION_INSPECTION_TURNS,
-            )
-            post_validation_resume_budget = _POST_VALIDATION_INSPECTION_TURNS
-        proposal = await _resume_bridge(
-            planner, prepared_bridge_request, session_state=ss,
+            if post_validation_resume_budget > 0:
+                post_validation_resume_budget -= 1
+                next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+                if (
+                    post_validation_resume_budget == 0
+                    and next_ss.get("status") == "paused_after_outline_turn"
+                ):
+                    logging.getLogger("case3_bridge_dryrun").info(
+                        "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"
+                    )
+                    break
+
+    elif str(reasoning_mode or "hybrid").strip().lower() == "hybrid":
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_hybrid_des_bridge as _resume_hybrid,
         )
-        if post_validation_resume_budget > 0:
-            post_validation_resume_budget -= 1
-            next_ss = prepared_bridge_request.get("des_recovery_session_state") or {}
-            if (
-                post_validation_resume_budget == 0
-                and next_ss.get("status") == "paused_after_outline_turn"
-            ):
-                logging.getLogger("case3_bridge_dryrun").info(
-                    "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"
-                )
+        for _resume_i in range(5):
+            ss = prepared_bridge_request.get("hybrid_session_state") or prepared_bridge_request.get("multi_turn_session_result") or {}
+            if ss.get("status") != "paused_after_grounding":
                 break
+
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Mocking actual sensor observation for hybrid grounding block..."
+            )
+            # Mock the camera response by directly mutating the symbolic_parts in the state
+            parts = ss.get("symbolic_parts") or {}
+            if "LG" in parts:
+                parts["LG"]["observed_pose"] = {"x": 0.0, "y": 0.200, "z": 1.035, "q_x": 0, "q_y": 0, "q_z": 0, "q_w": 1}
+                # Optional: specify location if testing boundary conditions
+                parts["LG"]["current_location"] = "prusa-mk4-1"
+
+            ss["status"] = "pending"
+            prepared_bridge_request["hybrid_session_state"] = ss
+            if "multi_turn_session_result" in prepared_bridge_request:
+                del prepared_bridge_request["multi_turn_session_result"]
+
+            logging.getLogger("case3_bridge_dryrun").info(
+                "[DryRun] Resuming hybrid bridge (round %d) after grounding...", _resume_i + 1
+            )
+            proposal = await _resume_hybrid(
+                planner, prepared_bridge_request, session_state=ss,
+            )
 
     bridge_debug = planner.get_last_bridge_debug()
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-    reasoning_mode = str(bridge_session.get("reasoning_mode") or "des_recovery").strip()
-    des_recovery_session = dict((bridge_debug or {}).get("des_recovery_session") or {})
-    turns = list(des_recovery_session.get("turns") or [])
+    reasoning_mode = str(bridge_session.get("reasoning_mode") or "hybrid").strip()
+    multi_turn_session = dict((bridge_debug or {}).get("multi_turn_session") or {})
+    turns = list(multi_turn_session.get("turns") or [])
 
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
@@ -1981,7 +2027,7 @@ async def run_case3_bridge_dryrun(
         "prepared_bridge_request": prepared_bridge_request,
         "context_summary": deepcopy(prepared_bridge_request.get("context_summary") or {}),
         "llm_input": deepcopy(prepared_bridge_request.get("llm_input") or {}),
-        "des_recovery_session": deepcopy(des_recovery_session),
+        "multi_turn_session": deepcopy(multi_turn_session),
         "turns": deepcopy(turns),
         "turn_log": deepcopy(product_agent.turn_log),
         "prompt_artifact_path": None,
@@ -2025,7 +2071,7 @@ def _write_debug_artifacts(
 def _assert_bridge_dryrun(
     result: dict[str, Any],
     *,
-    expected_reasoning_mode: str = "des_recovery",
+    expected_reasoning_mode: str = "hybrid",
 ) -> None:
     bridge_debug = result.get("bridge_debug") or {}
     status = str(bridge_debug.get("status") or "")
@@ -2033,8 +2079,8 @@ def _assert_bridge_dryrun(
     assert reasoning_mode == expected_reasoning_mode, (
         f"Expected {expected_reasoning_mode} reasoning mode; got {reasoning_mode!r}"
     )
-    des_recovery_session = result.get("des_recovery_session") or {}
-    session_status = str(des_recovery_session.get("status") or "")
+    multi_turn_session = result.get("multi_turn_session") or {}
+    session_status = str(multi_turn_session.get("status") or "")
     assert session_status in (
         "completed",
         "paused_after_primitive_turn",
@@ -2046,10 +2092,10 @@ def _assert_bridge_dryrun(
         "des_deadlock",
         "error",
     ), (
-        f"Unexpected DES recovery session status: {session_status!r}"
+        f"Unexpected multi-turn session status: {session_status!r}"
     )
     turns = result.get("turns") or []
-    assert len(turns) >= 1, "Expected at least one turn in DES recovery session"
+    assert len(turns) >= 1, "Expected at least one turn in multi-turn session"
 
 
 def _format_pose_brief(value: Any) -> str:
@@ -2223,10 +2269,10 @@ def _seed_case3_post_mcp_release_state(session_state: dict[str, Any]) -> None:
     session_state["symbolic_parts"]["MCP"]["current_holder_resource_jid"] = None
 
 
-def test_des_recovery_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
+def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
     async def _run() -> None:
         _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["current_phase"] = "outline"
@@ -2306,24 +2352,24 @@ def test_des_recovery_candidate_prompt_keeps_feedback_without_symbolic_tables() 
             }
         ]
 
-        _prompt_input, prompt = des_recovery_mode._build_phase_prompt(
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
             prepared_bridge_request,
             session_state,
         )
 
         assert "current plant state" not in prompt.lower()
         assert "S_opaque_internal_state" not in prompt
-        assert "Accepted Transition Prefix" in prompt
+        assert "Accepted Outline Summary" in prompt
         assert "recover xarm6 to idle" in prompt
         assert "Plant Automaton Progress" not in prompt
         assert "Accepted trace" not in prompt
         assert "DES Supervisor Context" not in prompt
         assert "controllable recovery events" not in prompt
-        assert "Open Guard / Marking Conditions" in prompt
+        assert "Current Recovery Conditions" in prompt
         assert "xarm6@localhost must reach idle" in prompt
         assert "Rejected Events (do not re-propose)" not in prompt
         assert "Last Rejected Candidates" not in prompt
-        assert "Disabled And Blocked Candidate Events" in prompt
+        assert "Recent Rejected Candidate Feedback" in prompt
         assert "Recent Rejected Candidates And Validator Feedback" not in prompt
         assert "Assembly Requirements" not in prompt
         assert "xarm6 Assemble LG" not in prompt
@@ -2338,12 +2384,8 @@ def test_des_recovery_candidate_prompt_keeps_feedback_without_symbolic_tables() 
         assert "xarm6@localhost: outside workspace (y=0.20 > y_max_m=0.10)" not in prompt
         assert "ur5e@localhost: inside workspace" not in prompt
         assert "Rejected Candidate Facts" not in prompt
-        assert "workspace_unreachable" not in prompt
-        assert "part_relocation_without_carrier" not in prompt
-        assert "candidate_event=RECOVERY_SEQ3_1/xarm6@localhost/LG" in prompt
-        assert "diagnosis=feasibility_guard_disabled" in prompt
-        assert "candidate_event=RECOVERY_SEQ3_2/ur5e@localhost/MCP->assembly_board-v1" in prompt
-        assert "diagnosis=event_not_enabled" in prompt
+        assert "workspace_unreachable" in prompt
+        assert "part_relocation_without_carrier" in prompt
         assert "Candidate Field Semantics" not in prompt
         assert "Candidate Encoding Guide" not in prompt
         assert "Candidate Field Notes" not in prompt
@@ -2369,33 +2411,33 @@ def test_des_recovery_candidate_prompt_keeps_feedback_without_symbolic_tables() 
         assert "Location Reference Facts" not in prompt
         assert "staging anchors:" not in prompt
         assert "workspace x[-0.70,0.70], y[-0.35,1.10], z[0.85,1.60]" in prompt
-        assert "workspace x[-0.60,0.60], y[-1.00,0.10], z[0.90,1.50]" in prompt
+        assert "workspace x[-0.60,0.60], y[-1.00,0.35], z[0.90,1.50]" in prompt
         assert "current_pose(" in prompt
         assert "pick LG again" not in prompt
         assert "move MCP onward" not in prompt
-        assert "xarm6@localhost / LG [workspace_unreachable]: outside workspace" not in prompt
-        assert "diagnosis persists until the relevant projected state facts change" in prompt
+        assert "xarm6@localhost / LG [workspace_unreachable]: outside workspace" in prompt
+        assert "persists while observed_pose and workspace_bounds are unchanged" in prompt
         assert (
             "ur5e@localhost / MCP to assembly_board-v1 "
             "[part_relocation_without_carrier]: resource does not hold MCP"
-        ) not in prompt
+        ) in prompt
         assert "Rejected action label should not be rendered." not in prompt
         assert "Another rejected label should not be rendered." not in prompt
         assert "LG by xarm6" not in prompt
         assert "MCP by ur5e" not in prompt
         assert '"current_holder_resource_jid": "ur5e@localhost"' not in prompt
         assert '"current_holder_resource_jid": null' in prompt
-        assert "root cause of each rejection" not in prompt
-        assert "Prior Rejected-Turn Reasoning" not in prompt
-        assert "xarm6 should handle LG because it is near the assembly station." not in prompt
+        assert "root cause of each rejection" in prompt
+        assert "Prior Rejected-Turn Reasoning" in prompt
+        assert "xarm6 should handle LG because it is near the assembly station." in prompt
 
     asyncio.run(_run())
 
 
-def test_des_recovery_candidate_prompt_hides_derived_causal_carrier_relations() -> None:
+def test_v2_candidate_prompt_hides_derived_causal_carrier_relations() -> None:
     async def _run() -> None:
         _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["current_phase"] = "outline"
@@ -2413,7 +2455,7 @@ def test_des_recovery_candidate_prompt_hides_derived_causal_carrier_relations() 
             }
         }
 
-        _prompt_input, prompt = des_recovery_mode._build_phase_prompt(
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
             prepared_bridge_request,
             session_state,
         )
@@ -2429,10 +2471,10 @@ def test_des_recovery_candidate_prompt_hides_derived_causal_carrier_relations() 
     asyncio.run(_run())
 
 
-def test_des_recovery_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
+def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
     async def _run() -> None:
         _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["current_phase"] = "outline"
@@ -2499,7 +2541,7 @@ def test_des_recovery_candidate_prompt_resets_rejected_history_after_acceptance(
             },
         ]
 
-        _prompt_input, prompt = des_recovery_mode._build_phase_prompt(
+        _prompt_input, prompt = multi_turn_v2_mode._build_phase_prompt(
             prepared_bridge_request,
             session_state,
         )
@@ -2515,10 +2557,10 @@ def test_des_recovery_candidate_prompt_resets_rejected_history_after_acceptance(
     asyncio.run(_run())
 
 
-def test_des_recovery_candidate_validator_rejects_unlisted_target_ref() -> None:
+def test_v2_candidate_validator_rejects_unlisted_target_ref() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["outline_mode"] = "incremental_candidates_validated"
@@ -2531,7 +2573,7 @@ def test_des_recovery_candidate_validator_rejects_unlisted_target_ref() -> None:
         session_state["symbolic_parts"]["LG"]["current_holder_resource_jid"] = "ur5e@localhost"
 
         decision, turn_entry = await (
-            des_recovery_outline_runtime._handle_outline_incremental_candidates_validated(
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
                 session_state=session_state,
                 parsed_response={
                     "thought": "Invent an unlisted target ref.",
@@ -2563,10 +2605,10 @@ def test_des_recovery_candidate_validator_rejects_unlisted_target_ref() -> None:
     asyncio.run(_run())
 
 
-def test_des_recovery_observation_store_does_not_reapply_stale_holder() -> None:
+def test_v2_observation_store_does_not_reapply_stale_holder() -> None:
     async def _run() -> None:
         _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         _seed_case3_post_mcp_release_state(session_state)
@@ -2582,13 +2624,11 @@ def test_des_recovery_observation_store_does_not_reapply_stale_holder() -> None:
             }
         }
 
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.des_recovery_validation_context import (
-            projected_outline_validation_context,
-        )
-
-        _resources_by_jid, parts_by_name = projected_outline_validation_context(
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
+        _resources_by_jid, parts_by_name = (
+            multi_turn_v2_mode._projected_outline_validation_context(
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+            )
         )
 
         assert parts_by_name["MCP"]["current_location"] == "assembly_board-approach"
@@ -2602,10 +2642,10 @@ def test_des_recovery_observation_store_does_not_reapply_stale_holder() -> None:
     asyncio.run(_run())
 
 
-def test_des_recovery_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
+def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["outline_mode"] = "incremental_candidates_validated"
@@ -2621,7 +2661,7 @@ def test_des_recovery_candidate_selection_accepts_ur5e_lg_acquire_as_progress() 
         }
 
         decision, turn_entry = await (
-            des_recovery_outline_runtime._handle_outline_incremental_candidates_validated(
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
                 session_state=session_state,
                 parsed_response={
                     "thought": "Use an open vocabulary acquisition candidate.",
@@ -2652,10 +2692,10 @@ def test_des_recovery_candidate_selection_accepts_ur5e_lg_acquire_as_progress() 
     asyncio.run(_run())
 
 
-def test_des_recovery_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
+def test_v2_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["outline_mode"] = "incremental_candidates_validated"
@@ -2674,7 +2714,7 @@ def test_des_recovery_candidate_stagnation_does_not_deadlock_outline_loop() -> N
         }
 
         decision, turn_entry = await (
-            des_recovery_outline_runtime._handle_outline_incremental_candidates_validated(
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
                 session_state=session_state,
                 parsed_response={
                     "thought": "Still trying an invalid candidate.",
@@ -2703,17 +2743,17 @@ def test_des_recovery_candidate_stagnation_does_not_deadlock_outline_loop() -> N
 
 
 
-def test_des_recovery_split_modules_are_wired_into_phase_handlers() -> None:
+def test_v2_split_modules_are_wired_into_phase_handlers() -> None:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-        des_recovery_outline_runtime as outline_mode,
+        multi_turn_outline_generation as outline_mode,
     )
     from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-        des_recovery_primitive_generation as primitive_mode,
+        multi_turn_primitive_generation as primitive_mode,
     )
 
-    assert des_recovery_mode._PHASE_HANDLERS["outline"] is outline_mode._handle_outline_phase
+    assert multi_turn_v2_mode._PHASE_HANDLERS["outline"] is outline_mode._handle_outline_phase
     assert (
-        des_recovery_mode._PHASE_HANDLERS["primitive_generation"]
+        multi_turn_v2_mode._PHASE_HANDLERS["primitive_generation"]
         is primitive_mode._handle_primitive_generation_phase
     )
 
@@ -3053,12 +3093,12 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
         }
         prepared_bridge_request = {
             "bridge_session": {
-                "reasoning_mode": "des_recovery",
-                "des_recovery_engine": "des_recovery",
+                "reasoning_mode": "multi_turn",
+                "multi_turn_engine": "v2",
                 "outline_mode": "incremental_candidates_validated",
                 "max_turns": 20,
             },
-            "des_recovery_session_seed": deepcopy(seed),
+            "multi_turn_session_seed": deepcopy(seed),
             "context_summary": {},
             "llm_input": {},
             "bridge_resources": {},
@@ -3072,8 +3112,8 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
             def get_last_bridge_debug(self) -> dict[str, Any]:
                 return {
                     "status": "paused_after_primitive_generation",
-                    "des_recovery_session": deepcopy(
-                        prepared_bridge_request["des_recovery_session_state"]
+                    "multi_turn_session": deepcopy(
+                        prepared_bridge_request["multi_turn_session_state"]
                     ),
                 }
 
@@ -3082,10 +3122,10 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
 
         async def _fake_prepare_bridge_dryrun_harness(
             llm_model: str | None = None,
-            reasoning_mode: str = "des_recovery",
+            reasoning_mode: str = "multi_turn",
         ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
             del llm_model
-            assert reasoning_mode == "des_recovery"
+            assert reasoning_mode == "multi_turn"
             return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
 
         async def _fake_resume_bridge(
@@ -3098,19 +3138,20 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
             captured_seed.update(deepcopy(session_state))
             state = deepcopy(session_state)
             state["status"] = "paused_after_primitive_generation"
-            prepared_request["des_recovery_session_state"] = deepcopy(state)
-            return {"engine": "des_recovery", "focus": "primitive_generation"}
+            prepared_request["multi_turn_session_state"] = deepcopy(state)
+            return {"engine": "multi_turn_v2", "focus": "primitive_generation"}
 
         with patch.object(
             sys.modules[__name__],
             "_prepare_bridge_dryrun_harness",
             side_effect=_fake_prepare_bridge_dryrun_harness,
         ), patch(
-            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_des_recovery_bridge",
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
             side_effect=_fake_resume_bridge,
         ):
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
+                reasoning_mode="multi_turn",
                 focus="primitive_generation",
             )
 
@@ -3122,17 +3163,17 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
         assert captured_seed.get("primitive_rejection_feedback") == []
         assert "observed_pose_LG" in dict(captured_seed.get("observation_store") or {})
         assert result.get("proposal") == {
-            "engine": "des_recovery",
+            "engine": "multi_turn_v2",
             "focus": "primitive_generation",
         }
 
     asyncio.run(_run())
 
 
-def test_des_recovery_grounding_repeated_observe_request_becomes_grounded() -> None:
+def test_v2_grounding_repeated_observe_request_becomes_grounded() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         fact_key = json.dumps(
@@ -3170,11 +3211,11 @@ def test_des_recovery_grounding_repeated_observe_request_becomes_grounded() -> N
             raise AssertionError("_execute_observe_requests should not be called")
 
         with patch.object(
-            des_recovery_mode,
+            multi_turn_v2_mode,
             "_execute_observe_requests",
             new=_fail_if_called,
         ):
-            decision, turn_entry = await des_recovery_mode._handle_grounding_phase(
+            decision, turn_entry = await multi_turn_v2_mode._handle_grounding_phase(
                 session_state=session_state,
                 parsed_response={
                     "decision": "observe",
@@ -3196,10 +3237,10 @@ def test_des_recovery_grounding_repeated_observe_request_becomes_grounded() -> N
     asyncio.run(_run())
 
 
-def test_des_recovery_grounding_unresolved_observe_request_still_executes() -> None:
+def test_v2_grounding_unresolved_observe_request_still_executes() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         captured_requests: list[dict[str, Any]] = []
@@ -3238,11 +3279,11 @@ def test_des_recovery_grounding_unresolved_observe_request_still_executes() -> N
             return [deepcopy(fake_result)], None
 
         with patch.object(
-            des_recovery_mode,
+            multi_turn_v2_mode,
             "_execute_observe_requests",
             new=_fake_execute_observe_requests,
         ):
-            decision, turn_entry = await des_recovery_mode._handle_grounding_phase(
+            decision, turn_entry = await multi_turn_v2_mode._handle_grounding_phase(
                 session_state=session_state,
                 parsed_response={
                     "decision": "observe",
@@ -3265,10 +3306,10 @@ def test_des_recovery_grounding_unresolved_observe_request_still_executes() -> N
     asyncio.run(_run())
 
 
-def test_des_recovery_outline_validation_findings_persist_until_resolved() -> None:
+def test_v2_outline_validation_findings_persist_until_resolved() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         workspace_finding = {
@@ -3303,7 +3344,7 @@ def test_des_recovery_outline_validation_findings_persist_until_resolved() -> No
             }
         }
 
-        decision, _turn_entry = await des_recovery_outline_runtime._handle_outline_incremental_validated(
+        decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
             session_state=session_state,
             parsed_response={
                 "next_task": {
@@ -3325,10 +3366,10 @@ def test_des_recovery_outline_validation_findings_persist_until_resolved() -> No
     asyncio.run(_run())
 
 
-def test_des_recovery_outline_validation_findings_clear_once_resolved() -> None:
+def test_v2_outline_validation_findings_clear_once_resolved() -> None:
     async def _run() -> None:
         _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
-        session_state = des_recovery_mode.build_des_recovery_session_seed(
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
             prepared_bridge_request
         )
         session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] = "idle"
@@ -3351,7 +3392,7 @@ def test_des_recovery_outline_validation_findings_clear_once_resolved() -> None:
             }
         }
 
-        decision, _turn_entry = await des_recovery_outline_runtime._handle_outline_incremental_validated(
+        decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
             session_state=session_state,
             parsed_response={
                 "next_task": {
@@ -3380,7 +3421,7 @@ def test_des_recovery_outline_validation_findings_clear_once_resolved() -> None:
     asyncio.run(_run())
 
 
-def test_des_recovery_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
+def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
     async def _run() -> None:
         responses = [
             {
@@ -3629,10 +3670,11 @@ def test_des_recovery_dryrun_allows_turn_7_after_first_validation_rejection() ->
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
                 llm_model="mock",
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
-        session = result.get("des_recovery_session") or {}
+        session = result.get("multi_turn_session") or {}
         assert session.get("turn_index") == 7
         assert str(session.get("status") or "") == "paused_after_outline_turn"
 
@@ -3643,8 +3685,8 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
     async def _run() -> None:
         prepared_bridge_request = {
             "bridge_session": {"max_turns": 20},
-            "des_recovery_session_seed": {"max_turns": 20},
-            "des_recovery_session_state": {
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
                 "status": "paused_after_outline_turn",
                 "current_phase": "outline",
                 "turn_index": 4,
@@ -3660,8 +3702,8 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
 
             def get_last_bridge_debug(self) -> dict[str, Any]:
                 return {
-                    "status": str(prepared_bridge_request["des_recovery_session_state"].get("status") or ""),
-                    "des_recovery_session": deepcopy(prepared_bridge_request["des_recovery_session_state"]),
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
                 }
 
         class _FakeProductAgent:
@@ -3669,7 +3711,7 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
 
         async def _fake_prepare_bridge_dryrun_harness(
             llm_model: str | None = None,
-            reasoning_mode: str = "des_recovery",
+            reasoning_mode: str = "multi_turn",
         ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
             del llm_model, reasoning_mode
             return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
@@ -3681,14 +3723,14 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
             session_state: dict[str, Any],
         ) -> dict[str, Any]:
             del planner, session_state
-            state = dict(prepared_request.get("des_recovery_session_state") or {})
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
             state["turn_index"] = int(state.get("turn_index") or 0) + 1
             state["status"] = (
                 "completed"
                 if int(state.get("turn_index") or 0) >= int(state.get("max_turns") or 0)
                 else "paused_after_outline_turn"
             )
-            prepared_request["des_recovery_session_state"] = state
+            prepared_request["multi_turn_session_state"] = state
             return {"turn_index": state["turn_index"]}
 
         with patch.object(
@@ -3696,15 +3738,16 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
             "_prepare_bridge_dryrun_harness",
             side_effect=_fake_prepare_bridge_dryrun_harness,
         ), patch(
-            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_des_recovery_bridge",
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
             side_effect=_fake_resume_bridge,
         ):
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
-        session_state = dict(result.get("prepared_bridge_request", {}).get("des_recovery_session_state") or {})
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
         assert int(session_state.get("turn_index") or 0) == 20
         assert str(session_state.get("status") or "") == "completed"
 
@@ -3714,9 +3757,9 @@ def test_case3_dryrun_resume_loop_uses_session_max_turns() -> None:
 def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
     async def _run() -> None:
         prepared_bridge_request = {
-            "bridge_session": {"reasoning_mode": "des_recovery", "max_turns": 20},
-            "des_recovery_session_seed": {"max_turns": 20},
-            "des_recovery_session_state": {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 20},
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
                 "status": "paused_after_primitive_turn",
                 "current_phase": "primitive_generation",
                 "turn_index": 8,
@@ -3734,8 +3777,8 @@ def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
 
             def get_last_bridge_debug(self) -> dict[str, Any]:
                 return {
-                    "status": str(prepared_bridge_request["des_recovery_session_state"].get("status") or ""),
-                    "des_recovery_session": deepcopy(prepared_bridge_request["des_recovery_session_state"]),
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
                 }
 
         class _FakeProductAgent:
@@ -3743,7 +3786,7 @@ def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
 
         async def _fake_prepare_bridge_dryrun_harness(
             llm_model: str | None = None,
-            reasoning_mode: str = "des_recovery",
+            reasoning_mode: str = "multi_turn",
         ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
             del llm_model, reasoning_mode
             return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
@@ -3757,7 +3800,7 @@ def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
             nonlocal resume_calls
             del planner, session_state
             resume_calls += 1
-            state = dict(prepared_request.get("des_recovery_session_state") or {})
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
             state["status"] = "paused_after_primitive_stuck"
             state["primitive_escalation_diagnostics"] = [
                 {
@@ -3765,7 +3808,7 @@ def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
                     "reason": "primitive authoring stalled on the active event",
                 }
             ]
-            prepared_request["des_recovery_session_state"] = state
+            prepared_request["multi_turn_session_state"] = state
             return {"turn_index": state.get("turn_index")}
 
         with patch.object(
@@ -3773,15 +3816,16 @@ def test_case3_dryrun_stops_on_primitive_stuck_pause() -> None:
             "_prepare_bridge_dryrun_harness",
             side_effect=_fake_prepare_bridge_dryrun_harness,
         ), patch(
-            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_des_recovery_bridge",
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
             side_effect=_fake_resume_bridge,
         ):
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
-        session_state = dict(result.get("prepared_bridge_request", {}).get("des_recovery_session_state") or {})
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
         assert resume_calls == 1
         assert str(session_state.get("status") or "") == "paused_after_primitive_stuck"
 
@@ -3794,9 +3838,9 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
         from unittest.mock import patch
 
         prepared_bridge_request = {
-            "bridge_session": {"reasoning_mode": "des_recovery", "max_turns": 20},
-            "des_recovery_session_seed": {"max_turns": 20},
-            "des_recovery_session_state": {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 20},
+            "multi_turn_session_seed": {"max_turns": 20},
+            "multi_turn_session_state": {
                 "status": "paused_after_primitive_turn",
                 "current_phase": "primitive_generation",
                 "turn_index": 8,
@@ -3814,8 +3858,8 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
 
             def get_last_bridge_debug(self) -> dict[str, Any]:
                 return {
-                    "status": str(prepared_bridge_request["des_recovery_session_state"].get("status") or ""),
-                    "des_recovery_session": deepcopy(prepared_bridge_request["des_recovery_session_state"]),
+                    "status": str(prepared_bridge_request["multi_turn_session_state"].get("status") or ""),
+                    "multi_turn_session": deepcopy(prepared_bridge_request["multi_turn_session_state"]),
                 }
 
         class _FakeProductAgent:
@@ -3823,7 +3867,7 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
 
         async def _fake_prepare_bridge_dryrun_harness(
             llm_model: str | None = None,
-            reasoning_mode: str = "des_recovery",
+            reasoning_mode: str = "multi_turn",
         ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
             del llm_model, reasoning_mode
             return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
@@ -3837,7 +3881,7 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
             nonlocal resume_calls
             del planner, session_state
             resume_calls += 1
-            state = dict(prepared_request.get("des_recovery_session_state") or {})
+            state = dict(prepared_request.get("multi_turn_session_state") or {})
             state["status"] = "paused_after_primitive_blocked"
             state["primitive_rejection_feedback"] = [
                 {
@@ -3846,7 +3890,7 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
                     "reason": "active event remains contradictory after capability retrieval",
                 }
             ]
-            prepared_request["des_recovery_session_state"] = state
+            prepared_request["multi_turn_session_state"] = state
             return {"turn_index": state.get("turn_index")}
 
         with patch.object(
@@ -3854,17 +3898,82 @@ def test_case3_dryrun_stops_resume_loop_on_primitive_blocked() -> None:
             "_prepare_bridge_dryrun_harness",
             side_effect=_fake_prepare_bridge_dryrun_harness,
         ), patch(
-            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_des_recovery_bridge",
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
             side_effect=_fake_resume_bridge,
         ):
             result = await run_case3_bridge_dryrun(
                 write_debug=False,
+                reasoning_mode="multi_turn",
                 stop_before_primitive_generation=False,
             )
 
-        session_state = dict(result.get("prepared_bridge_request", {}).get("des_recovery_session_state") or {})
+        session_state = dict(result.get("prepared_bridge_request", {}).get("multi_turn_session_state") or {})
         assert resume_calls == 1
         assert str(session_state.get("status") or "") == "paused_after_primitive_blocked"
+
+    asyncio.run(_run())
+
+
+def test_case3_dryrun_hybrid_mode_skips_multi_turn_resume_loop() -> None:
+    async def _run() -> None:
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "hybrid", "max_turns": 20},
+            "hybrid_session_seed": {"max_turns": 20},
+            "hybrid_session_state": {
+                "status": "completed",
+                "current_phase": "finalize",
+                "turn_index": 3,
+                "max_turns": 20,
+            },
+            "context_summary": {},
+            "llm_input": {},
+        }
+        proposal = {"engine": "hybrid_des_v1", "outline_tasks": []}
+
+        class _FakePlanner:
+            async def execute_prepared_bridge_request(
+                self,
+                _prepared: dict[str, Any],
+            ) -> dict[str, Any]:
+                return deepcopy(proposal)
+
+            def get_last_bridge_debug(self) -> dict[str, Any]:
+                return {
+                    "status": "completed",
+                    "multi_turn_session": deepcopy(
+                        prepared_bridge_request["hybrid_session_state"]
+                    ),
+                }
+
+        class _FakeProductAgent:
+            turn_log: list[dict[str, Any]] = []
+
+        async def _fake_prepare_bridge_dryrun_harness(
+            llm_model: str | None = None,
+            reasoning_mode: str = "multi_turn",
+        ) -> tuple[None, _FakeProductAgent, _FakePlanner, dict[str, Any]]:
+            del llm_model
+            assert reasoning_mode == "hybrid"
+            return None, _FakeProductAgent(), _FakePlanner(), prepared_bridge_request
+
+        with patch.object(
+            sys.modules[__name__],
+            "_prepare_bridge_dryrun_harness",
+            side_effect=_fake_prepare_bridge_dryrun_harness,
+        ), patch(
+            "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+            side_effect=AssertionError("multi-turn resume should not run in hybrid mode"),
+        ):
+            result = await run_case3_bridge_dryrun(
+                write_debug=False,
+                reasoning_mode="hybrid",
+                stop_before_primitive_generation=False,
+            )
+
+        assert result.get("proposal") == proposal
+        assert result.get("reasoning_mode") == "hybrid"
+        assert dict(result.get("prepared_bridge_request") or {}).get("hybrid_session_seed")
+        assert not dict(result.get("prepared_bridge_request") or {}).get("multi_turn_session_seed")
 
     asyncio.run(_run())
 
@@ -3874,6 +3983,12 @@ if __name__ == "__main__":
         description="Case 3 LG-slippage bridge dry-run harness"
     )
     parser.add_argument("--model", default=DEFAULT_LIVE_MODEL, help="OpenAI model name")
+    parser.add_argument(
+        "--reasoning-mode",
+        default="multi_turn",
+        choices=("multi_turn", "hybrid"),
+        help="Bridge reasoning mode to run in the dry-run harness",
+    )
     parser.add_argument(
         "--focus",
         default="full",
@@ -3899,19 +4014,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Print the rendered single-shot prompt",
     )
-    args, unknown_args = parser.parse_known_args()
+    args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     _configure_dryrun_logging()
-    if unknown_args:
-        logging.getLogger("case3_bridge_dryrun").info(
-            "[DryRun] Ignoring unknown CLI args: %s",
-            " ".join(str(arg) for arg in unknown_args),
-        )
     result = asyncio.run(
         run_case3_bridge_dryrun(
             write_debug=not args.no_debug,
             llm_model=args.model,
+            reasoning_mode=args.reasoning_mode,
             stop_before_primitive_generation=args.stop_before_primitive_generation,
             focus=args.focus,
         )

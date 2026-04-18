@@ -5,13 +5,33 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Current File",
+            "name": "CAIS UI (Current Repo)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "${workspaceFolder}/cais_spade_llm/ui_main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python"
+        },
+        {
+            "name": "Case 3 Bridge Dry-Run: Full (Grounding + Outline + Primitive Generation) (F5 Default)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test/test_case3_bridge_dryrun.py",
+            "args": ["--reasoning-mode", "multi_turn", "--focus", "full"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/scripts/ros_python.sh"
+        },
+        {
+            "name": "Case 3 Bridge Dry-Run: Hybrid DES",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test/test_hybrid_des_case3_dryrun.py",
+            "args": [],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/scripts/ros_python.sh"
         }
     ]
 }

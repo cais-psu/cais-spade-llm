@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
 from cais_spade_llm.bundles.models import (
@@ -35,10 +35,8 @@ from cais_spade_llm.bundles.models import (
     sha256_file,
     sha256_text,
 )
-from cais_spade_llm.experiments import OfflineStudyRunner, latest_study_run_summary
 
 log = logging.getLogger("ui.bridge")
-_DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS = 5
 
 # Filesystem locations (mirror spade_main.py constants).
 _BASE = Path(__file__).resolve().parent.parent          # cais_spade_llm/
@@ -53,14 +51,9 @@ _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
-_XARM6_2_RESOURCE = _RESOURCE_DIR / "robot_xarm6_2.json"
-_UR5E_2_RESOURCE = _RESOURCE_DIR / "robot_ur5e_2.json"
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
-_EXPERIMENTS_DIR = _PROJECT_ROOT / "writing" / "experiments"
-_EXPERIMENT_RESOURCES_DIR = _EXPERIMENTS_DIR / "resources"
-_EXPERIMENT_RESULTS_DIR = _EXPERIMENTS_DIR / "results"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
 _SAFETY_INTENT_PREVIEWS = _USER_VERIFIED_SAFETY / "intent_previews.json"
 _SAFETY_PREVIEW_DIR = _USER_VERIFIED_SAFETY / "previews"
@@ -121,35 +114,6 @@ class SystemBridge:
         "gazebo_xarm6": "xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ur5e_rg2_moveit_gazebo.launch.py",
     }
-    _PRIMARY_RESOURCE_KEYS = ("xarm6", "ur5e")
-    _RESOURCE_LABELS = {
-        "xarm6": "xArm6",
-        "ur5e": "UR5e",
-        "xarm6-2": "xArm6-2",
-        "ur5e-2": "UR5e-2",
-    }
-    _STARTUP_PHASE_LABELS = {
-        "idle": "Idle",
-        "start_requested": "Preparing startup",
-        "archive_monitors": "Archiving prior monitor files",
-        "prepare_environment": "Preparing environment",
-        "simulation_readiness": "Checking simulation readiness",
-        "physical_readiness": "Checking physical readiness",
-        "xmpp_server": "Starting embedded XMPP server",
-        "import_agent_creator": "Loading agent factory",
-        "configure_agent_creator_runtime": "Configuring agent factory",
-        "collect_init_files": "Collecting initialization files",
-        "resolve_bundle_context": "Resolving verified plan set",
-        "create_agents": "Creating agents",
-        "build_tools_catalogue": "Preparing tools catalogue",
-        "start_resource_agents": "Starting resource agents",
-        "start_cca": "Starting central controller",
-        "start_user": "Starting user agent",
-        "start_product_agents": "Starting product agents",
-        "wait_product_startup_readiness": "Waiting for product startup readiness",
-        "startup_complete": "Startup complete",
-        "startup_failed": "Startup failed",
-    }
 
     @classmethod
     def instance(cls) -> SystemBridge:
@@ -168,8 +132,6 @@ class SystemBridge:
         self._xmpp_proc: Optional[subprocess.Popen] = None
         self._xmpp_host: str = "127.0.0.1"
         self._xmpp_port: int = 5222
-        self._xmpp_start_lock: asyncio.Lock | None = None
-        self._xmpp_start_lock_loop: Any | None = None
         self._gazebo_reset_pose_cache: dict[str, tuple[float, float, float, float, float, float]] | None = None
 
         # Lifecycle flags.
@@ -188,7 +150,6 @@ class SystemBridge:
         # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
         # any other value -> explicit safety text file path.
         self.selected_safety_file: str = ""
-        self.selected_resource_keys: list[str] = []
         self.bundle_store = BundleStore(_USER_VERIFIED_PLAN)
         self.bundle_compiler = BundleCompiler(
             store=self.bundle_store,
@@ -222,26 +183,17 @@ class SystemBridge:
         self._startup_seq: int = 0
         self._startup_phase: str = "idle"
         self._startup_phase_ts: float = time.monotonic()
-        self._last_startup_summary: dict[str, Any] = {}
         self._cached_plan_safety_alerts: list[dict[str, Any]] = []
-        self._active_tools_signature: tuple[Any, ...] | None = None
-        self._startup_tools_signature: tuple[Any, ...] | None = None
-        self._startup_tools_path: str = ""
-        self._startup_bundle_compatibility_cache: dict[tuple[Any, ...], tuple[bool, list[str]]] = {}
         self._agent_creator_cached: Any | None = None
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
         self._agent_creator_prefetch_thread: Optional[threading.Thread] = None
-        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._ui_diag_enabled: bool = str(os.getenv("CAIS_UI_DIAG", "0")).strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-        self.selected_resource_keys = self._default_selected_resource_keys(
-            self._resource_manifest_entries()
-        )
         self._maybe_start_agent_creator_prefetch()
 
     # ------------------------------------------------------------------
@@ -263,37 +215,6 @@ class SystemBridge:
         self._startup_phase = str(phase)
         self._startup_phase_ts = time.monotonic()
         self._diag_emit(f"startup phase -> {self._startup_phase}")
-
-    def _startup_phase_label(self, phase: str | None = None) -> str:
-        key = str(phase or self._startup_phase or "").strip().lower()
-        if not key:
-            return "Starting system"
-        return self._STARTUP_PHASE_LABELS.get(
-            key,
-            key.replace("_", " ").strip().capitalize() or "Starting system",
-        )
-
-    def describe_startup_phase(self) -> str:
-        phase = str(self._startup_phase or "").strip().lower()
-        if phase in {"", "idle", "startup_complete", "startup_failed"}:
-            return ""
-        age = max(0.0, time.monotonic() - float(self._startup_phase_ts))
-        return f"Starting system: {self._startup_phase_label(phase)} ({age:.1f}s)"
-
-    def _track_background_task(self, task: asyncio.Task[Any], *, label: str) -> None:
-        self._background_tasks.add(task)
-
-        def _done(done: asyncio.Task[Any]) -> None:
-            self._background_tasks.discard(done)
-            try:
-                done.result()
-            except asyncio.CancelledError:
-                self._diag_emit(f"{label} cancelled")
-            except Exception as exc:
-                self._diag_emit(f"{label} failed: {exc}")
-                log.exception("%s failed", label)
-
-        task.add_done_callback(_done)
 
     def _gazebo_timing_emit(self, message: str) -> None:
         """Emit Gazebo/MoveIt startup timing lines when explicitly enabled."""
@@ -542,532 +463,6 @@ class SystemBridge:
             return []
         return sorted(str(p) for p in _RESOURCE_DIR.glob("*.json"))
 
-    @classmethod
-    def _resource_sort_key(cls, key: str) -> tuple[int, str]:
-        preferred = ["xarm6", "ur5e", "xarm6-2", "ur5e-2"]
-        order = {token: idx for idx, token in enumerate(preferred)}
-        token = str(key or "").strip().lower()
-        return (order.get(token, len(order)), token)
-
-    @classmethod
-    def resource_label(cls, key: str) -> str:
-        token = str(key or "").strip().lower()
-        if token in cls._RESOURCE_LABELS:
-            return cls._RESOURCE_LABELS[token]
-        return token or "resource"
-
-    def _resource_manifest_entries(
-        self,
-        resource_files: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
-        for raw_path in resource_files or self.list_resource_files():
-            path = Path(str(raw_path or "").strip())
-            if not path.exists():
-                continue
-            try:
-                payload = self.load_config(str(path))
-                key, meta = self._first_manifest_entry(payload)
-            except Exception:
-                continue
-            key_token = str(key or "").strip().split("@", 1)[0].lower()
-            if not key_token or not isinstance(meta, dict):
-                continue
-            entries.append(
-                {
-                    "key": key_token,
-                    "label": self.resource_label(key_token),
-                    "path": str(path.resolve()),
-                    "jid": str(meta.get("jid") or f"{key_token}@{meta.get('domain', 'localhost')}").strip(),
-                    "kind": str(meta.get("type") or "").strip().lower(),
-                    "name": str(meta.get("name") or key_token).strip() or key_token,
-                }
-            )
-        entries.sort(key=lambda item: self._resource_sort_key(str(item.get("key") or "")))
-        return entries
-
-    @classmethod
-    def _default_selected_resource_keys(
-        cls,
-        entries: list[dict[str, Any]],
-    ) -> list[str]:
-        available = [
-            str(entry.get("key") or "").strip().lower()
-            for entry in entries
-            if str(entry.get("key") or "").strip()
-        ]
-        if all(key in available for key in cls._PRIMARY_RESOURCE_KEYS):
-            return list(cls._PRIMARY_RESOURCE_KEYS)
-        return available
-
-    def _sanitize_selected_resource_keys(
-        self,
-        keys: list[str] | tuple[str, ...] | set[str] | None,
-    ) -> list[str]:
-        requested = {
-            str(key or "").strip().lower()
-            for key in (keys or [])
-            if str(key or "").strip()
-        }
-        ordered_available = [
-            str(entry.get("key") or "").strip().lower()
-            for entry in self._resource_manifest_entries()
-            if str(entry.get("key") or "").strip()
-        ]
-        selected = [key for key in ordered_available if key in requested]
-        return selected or self._default_selected_resource_keys(self._resource_manifest_entries())
-
-    def get_selected_resource_keys(self) -> list[str]:
-        normalized = self._sanitize_selected_resource_keys(self.selected_resource_keys)
-        if normalized != list(self.selected_resource_keys):
-            self.selected_resource_keys = list(normalized)
-        return list(normalized)
-
-    def set_selected_resource_keys(self, keys: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
-        normalized = self._sanitize_selected_resource_keys(keys)
-        self.selected_resource_keys = list(normalized)
-        self._active_tools_signature = None
-        return list(normalized)
-
-    def list_available_resource_entries(self) -> list[dict[str, Any]]:
-        return [dict(entry) for entry in self._resource_manifest_entries()]
-
-    def list_selected_resource_entries(self) -> list[dict[str, Any]]:
-        selected = set(self.get_selected_resource_keys())
-        return [
-            dict(entry)
-            for entry in self._resource_manifest_entries()
-            if str(entry.get("key") or "").strip().lower() in selected
-        ]
-
-    def selected_resource_summary(self) -> str:
-        labels = [str(entry.get("label") or "").strip() for entry in self.list_selected_resource_entries()]
-        return ", ".join(label for label in labels if label) or "No active robots selected"
-
-    def resource_chat_options(self, *, active_only: bool = True) -> dict[str, str]:
-        entries = self.list_selected_resource_entries() if active_only else self.list_available_resource_entries()
-        return {
-            str(entry.get("key") or ""): str(entry.get("label") or entry.get("key") or "")
-            for entry in entries
-            if str(entry.get("key") or "").strip()
-        }
-
-    def _selected_resource_files(self, resource_files: list[str] | None = None) -> list[str]:
-        selected = set(self.get_selected_resource_keys())
-        return [
-            str(entry.get("path") or "")
-            for entry in self._resource_manifest_entries(resource_files)
-            if str(entry.get("key") or "").strip().lower() in selected
-        ]
-
-    def _active_tools_signature_payload(self) -> tuple[Any, ...]:
-        selected_files = self._selected_resource_files()
-        file_state = tuple(
-            (
-                str(Path(path).resolve()),
-                Path(path).stat().st_mtime_ns,
-                Path(path).stat().st_size,
-            )
-            for path in selected_files
-            if Path(path).exists()
-        )
-        return (
-            str(self.robot_env or "gazebo").strip().lower() or "gazebo",
-            tuple(self.get_selected_resource_keys()),
-            file_state,
-        )
-
-    def _refresh_active_tools_catalogue(self, *, force: bool = False) -> Path:
-        signature = self._active_tools_signature_payload()
-        if not force and self._active_tools_signature == signature and _TOOLS_OUT.exists():
-            return _TOOLS_OUT
-
-        resource_files = self._selected_resource_files()
-        if not resource_files:
-            raise ValueError("no active resource manifests are selected")
-
-        try:
-            import agent_creator
-            from function_analyzer import FunctionAnalyzer
-        except ImportError:
-            from cais_spade_llm import agent_creator
-            from cais_spade_llm.function_analyzer import FunctionAnalyzer
-
-        agent_creator.configure_runtime(
-            robot_env=str(self.robot_env or "gazebo").strip().lower() or "gazebo",
-            execution_mode="dry_run",
-            perception_backend="none",
-        )
-        agent_creator.ALLOWED_FUNCS.clear()
-        resource_agents = agent_creator.create_resource_agents(
-            resource_files,
-            str(_CCA_INIT),
-        )
-        allowed = {
-            key: set(value)
-            for key, value in dict(agent_creator.ALLOWED_FUNCS).items()
-        }
-        FunctionAnalyzer.build_tools_catalogue(
-            agents=resource_agents,
-            allowed=allowed,
-            outfile=_TOOLS_OUT,
-        )
-        try:
-            from agents.shared_information.llm_agent import LlmAgent
-        except ImportError:
-            from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-        LlmAgent.configure_shared_tools_catalogue(_TOOLS_OUT)
-        self._active_tools_signature = signature
-        return _TOOLS_OUT
-
-    def _startup_tools_signature_payload(
-        self,
-        *,
-        bundle_context: dict[str, Any] | None = None,
-        perception_backend: str = "",
-    ) -> tuple[Any, ...]:
-        selected_files = self._selected_resource_files()
-        file_state = tuple(
-            (
-                str(Path(path).resolve()),
-                Path(path).stat().st_mtime_ns,
-                Path(path).stat().st_size,
-            )
-            for path in selected_files
-            if Path(path).exists()
-        )
-        resolved_tools_path, using_bundle_tools = self._resolve_llm_tools_catalogue_path(bundle_context)
-        tools_state: tuple[Any, ...]
-        if using_bundle_tools and resolved_tools_path.exists():
-            stat = resolved_tools_path.stat()
-            tools_state = (
-                "bundle",
-                str(resolved_tools_path.resolve()),
-                int(stat.st_mtime_ns),
-                int(stat.st_size),
-            )
-        else:
-            tools_state = ("generated", str(_TOOLS_OUT.resolve()))
-        return (
-            str(self.execution_mode or "").strip().lower() or "dry_run",
-            str(self.robot_env or "").strip().lower() or "gazebo",
-            str(perception_backend or "").strip().lower(),
-            tuple(self.get_selected_resource_keys()),
-            file_state,
-            tools_state,
-        )
-
-    def _prepare_startup_tools_catalogue(
-        self,
-        agent_creator_module: Any,
-        *,
-        bundle_context: dict[str, Any] | None = None,
-        perception_backend: str = "",
-    ) -> tuple[str, dict[str, Any]]:
-        from function_analyzer import FunctionAnalyzer
-
-        resolved_tools_path, using_bundle_tools = self._resolve_llm_tools_catalogue_path(bundle_context)
-        signature = self._startup_tools_signature_payload(
-            bundle_context=bundle_context,
-            perception_backend=perception_backend,
-        )
-        cache_hit = (
-            self._startup_tools_signature == signature
-            and str(Path(self._startup_tools_path or "").strip()) == str(resolved_tools_path.resolve())
-            and resolved_tools_path.exists()
-        )
-        rebuilt = False
-        if not using_bundle_tools and (not cache_hit or not _TOOLS_OUT.exists()):
-            FunctionAnalyzer.build_tools_catalogue(
-                self.product_agents + self.resource_agents,
-                agent_creator_module.ALLOWED_FUNCS,
-                str(_TOOLS_OUT),
-            )
-            rebuilt = True
-
-        tools_catalogue_path = self._configure_llm_tools_catalogue(bundle_context)
-        self._startup_tools_signature = signature
-        self._startup_tools_path = str(Path(tools_catalogue_path).resolve())
-        return tools_catalogue_path, {
-            "rebuilt": rebuilt,
-            "using_bundle_tools": using_bundle_tools,
-            "cache_hit": bool(cache_hit and not rebuilt),
-            "resolved_tools_path": str(resolved_tools_path.resolve()),
-        }
-
-    @staticmethod
-    def _startup_json_payload(path: Path | str | None) -> Any:
-        raw = str(path or "").strip()
-        if not raw:
-            return None
-        p = Path(raw)
-        if not p.exists():
-            return None
-        with p.open("r", encoding="utf-8") as f:
-            return json.load(f)
-
-    @staticmethod
-    def _resource_owner_token(value: Any) -> str:
-        token = str(value or "").strip().lower()
-        if not token:
-            return ""
-        if "@" in token:
-            token = token.split("@", 1)[0]
-        return token
-
-    @classmethod
-    def _collect_plan_resource_jids(cls, payload: Any) -> set[str]:
-        found: set[str] = set()
-
-        def _walk(value: Any) -> None:
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    if key == "resource_jid" and str(child or "").strip():
-                        found.add(str(child).strip())
-                    else:
-                        _walk(child)
-            elif isinstance(value, list):
-                for child in value:
-                    _walk(child)
-
-        _walk(payload)
-        return found
-
-    @classmethod
-    def _collect_tools_owner_tokens(cls, payload: Any) -> set[str]:
-        owners: set[str] = set()
-
-        def _walk(value: Any) -> None:
-            if isinstance(value, dict):
-                owner = (
-                    value.get("function_owner_agent")
-                    or value.get("owner_jid")
-                    or value.get("resource_jid")
-                )
-                token = cls._resource_owner_token(owner)
-                if token:
-                    owners.add(token)
-                for child in value.values():
-                    _walk(child)
-            elif isinstance(value, list):
-                for child in value:
-                    _walk(child)
-
-        _walk(payload)
-        return owners
-
-    def _emit_startup_consistency_diagnostics(
-        self,
-        *,
-        startup_id: int,
-        selected_requirement_file: str,
-        selected_safety_file: str | None,
-        selected_resource_files: list[str],
-        bundle_context: dict[str, Any] | None,
-        tools_catalogue_path: str,
-        tools_meta: dict[str, Any],
-        perception_backend: str = "",
-    ) -> list[str]:
-        active_bundle_id = (
-            str(bundle_context.get("bundle_id", "")).strip()
-            if isinstance(bundle_context, dict)
-            else str(self.bundle_store.get_active_bundle_id() or "").strip()
-        )
-        selected_entries = self.list_selected_resource_entries()
-        selected_tokens = {
-            self._resource_owner_token(entry.get("jid") or entry.get("key"))
-            for entry in selected_entries
-            if self._resource_owner_token(entry.get("jid") or entry.get("key"))
-        }
-        selected_resource_names = [
-            Path(path).name
-            for path in selected_resource_files
-            if str(path or "").strip()
-        ]
-        live_jids = {
-            str(getattr(agent, "jid", "") or "").strip()
-            for agent in (self.resource_agents or [])
-            if str(getattr(agent, "jid", "") or "").strip()
-        }
-        live_tokens = {
-            self._resource_owner_token(jid)
-            for jid in live_jids
-            if self._resource_owner_token(jid)
-        }
-
-        tools_payload = self._startup_json_payload(tools_catalogue_path)
-        tool_owner_tokens = self._collect_tools_owner_tokens(tools_payload)
-        plan_jids: set[str] = set()
-        if isinstance(bundle_context, dict):
-            artifacts = bundle_context.get("artifacts", {})
-            plan_path = artifacts.get("plan_json") if isinstance(artifacts, dict) else ""
-            plan_payload = self._startup_json_payload(plan_path)
-            plan_jids = self._collect_plan_resource_jids(plan_payload)
-        plan_tokens = {
-            self._resource_owner_token(jid)
-            for jid in plan_jids
-            if self._resource_owner_token(jid)
-        }
-
-        self._diag_emit(
-            "startup#"
-            f"{startup_id} consistency active_bundle={active_bundle_id or '-'} "
-            f"selected_requirement={selected_requirement_file or '-'} "
-            f"selected_safety={selected_safety_file or '-'} "
-            f"selected_resources={','.join(selected_resource_names) or '-'} "
-            f"execution_mode={self.execution_mode} robot_env={self.robot_env} "
-            f"perception_backend={perception_backend or '-'} "
-            f"tools_source={'bundle' if bool(tools_meta.get('using_bundle_tools', False)) else 'generated'} "
-            f"tools_path={tools_catalogue_path or '-'} "
-            f"tool_owners={','.join(sorted(tool_owner_tokens)) or '-'} "
-            f"live_resources={','.join(sorted(live_jids)) or '-'} "
-            f"plan_resources={','.join(sorted(plan_jids)) or '-'}"
-        )
-
-        warnings: list[str] = []
-
-        def _warn(message: str) -> None:
-            warnings.append(message)
-            self._diag_emit(f"startup#{startup_id} WARNING {message}")
-            log.warning("startup#%s %s", startup_id, message)
-
-        if isinstance(bundle_context, dict):
-            bundle_req = str(bundle_context.get("product_spec_file", "") or "").strip()
-            selected_req = str(selected_requirement_file or "").strip()
-            if selected_req and bundle_req:
-                selected_req_abs = self._norm_path(self._abs_project_path(selected_req))
-                if self._norm_path(bundle_req) != selected_req_abs:
-                    _warn(
-                        "active verified plan set requirement does not match UI selection "
-                        f"(bundle={bundle_req}, selected={selected_req_abs})"
-                    )
-
-            bundle_safety = str(bundle_context.get("safety_file", "") or "").strip()
-            selected_safety = str(selected_safety_file or "").strip()
-            if selected_safety.upper() == "__NONE__" and bundle_safety:
-                _warn(
-                    "active verified plan set has a safety file but UI safety is disabled "
-                    f"(bundle={bundle_safety})"
-                )
-            elif selected_safety and bundle_safety:
-                selected_safety_abs = self._norm_path(self._abs_project_path(selected_safety))
-                if self._norm_path(bundle_safety) != selected_safety_abs:
-                    _warn(
-                        "active verified plan set safety file does not match UI selection "
-                        f"(bundle={bundle_safety}, selected={selected_safety_abs})"
-                    )
-
-        if plan_tokens and selected_tokens:
-            missing_selected = sorted(plan_tokens - selected_tokens)
-            extra_selected = sorted(selected_tokens - plan_tokens)
-            if missing_selected:
-                _warn(
-                    "verified plan references resources that are not selected for startup "
-                    f"(missing={','.join(missing_selected)}, selected={','.join(sorted(selected_tokens))})"
-                )
-            elif extra_selected:
-                self._diag_emit(
-                    f"startup#{startup_id} NOTE selected startup resources include extra robots "
-                    f"not used by this verified plan (plan={','.join(sorted(plan_tokens))}, "
-                    f"extra={','.join(extra_selected)})"
-                )
-        if plan_tokens and tool_owner_tokens:
-            missing_tools = sorted(plan_tokens - tool_owner_tokens)
-            if missing_tools:
-                _warn(
-                    "verified plan references resources missing from active tools catalogue: "
-                    + ",".join(missing_tools)
-                )
-        if plan_tokens and live_tokens:
-            missing_live = sorted(plan_tokens - live_tokens)
-            if missing_live:
-                _warn(
-                    "verified plan references resources without live resource agents: "
-                    + ",".join(missing_live)
-                )
-        if tool_owner_tokens and live_tokens:
-            tools_without_live = sorted(tool_owner_tokens - live_tokens)
-            if tools_without_live:
-                _warn(
-                    "active tools catalogue includes owners without live resource agents: "
-                    + ",".join(tools_without_live)
-                )
-
-        return warnings
-
-    def _extract_explicit_resource_mentions(self, text: str) -> list[str]:
-        normalized = str(text or "")
-        mentions: list[str] = []
-        for entry in self.list_available_resource_entries():
-            key = str(entry.get("key") or "").strip().lower()
-            if not key:
-                continue
-            pattern = rf"(?<![A-Za-z0-9_-]){re.escape(key)}(?![A-Za-z0-9_-])"
-            if re.search(pattern, normalized, flags=re.IGNORECASE):
-                mentions.append(key)
-        mentions.sort(key=self._resource_sort_key)
-        return mentions
-
-    def _ensure_selected_resources_cover_safety_text(
-        self,
-        safety_text: str,
-        *,
-        purpose: str = "safety generation",
-    ) -> list[str]:
-        mentioned = self._extract_explicit_resource_mentions(safety_text)
-        if not mentioned:
-            return self.get_selected_resource_keys()
-        active_keys = self.get_selected_resource_keys()
-        active = set(active_keys)
-        missing = [key for key in mentioned if key not in active]
-        if not missing:
-            return active_keys
-        merged_keys = [
-            str(entry.get("key") or "").strip().lower()
-            for entry in self._resource_manifest_entries()
-            if str(entry.get("key") or "").strip().lower() in (active | set(missing))
-        ]
-        normalized = self.set_selected_resource_keys(merged_keys)
-        activated_labels = ", ".join(self.resource_label(key) for key in missing)
-        self.last_notice = (
-            f"Activated robots referenced by the safety requirement for {purpose}: "
-            f"{activated_labels}. Active robots: {self.selected_resource_summary()}."
-        )
-        return normalized
-
-    def list_experiment_manifest_files(self) -> list[str]:
-        if not _EXPERIMENTS_DIR.exists():
-            return []
-        return sorted(str(p) for p in _EXPERIMENTS_DIR.glob("*.json"))
-
-    def list_experiment_resource_files(self) -> list[str]:
-        if not _EXPERIMENT_RESOURCES_DIR.exists():
-            return []
-        return sorted(str(p) for p in _EXPERIMENT_RESOURCES_DIR.glob("*.json"))
-
-    def load_experiment_study(self, manifest_file: str) -> dict[str, Any]:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            raise ValueError("study manifest is required")
-        runner = OfflineStudyRunner(
-            manifest_path,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
-        )
-        return runner.load_editor_context()
-
-    def load_experiment_editor_context(self, manifest_file: str) -> dict[str, Any]:
-        return self.load_experiment_study(manifest_file)
-
-    def save_experiment_study(self, manifest_file: str, data: dict[str, Any]) -> dict[str, Any]:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            raise ValueError("study manifest is required")
-        canonical = OfflineStudyRunner.canonicalize_manifest(dict(data or {}))
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(canonical, f, indent=2)
-        return self.load_experiment_study(manifest_path)
-
     def load_config(self, path: str) -> dict:
         with open(path) as f:
             return json.load(f)
@@ -1075,15 +470,6 @@ class SystemBridge:
     def save_config(self, path: str, data: dict) -> None:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        try:
-            saved_path = Path(path).resolve()
-        except Exception:
-            saved_path = Path(path)
-        if _RESOURCE_DIR in saved_path.parents or saved_path == _RESOURCE_DIR:
-            self._active_tools_signature = None
-            self.selected_resource_keys = self._sanitize_selected_resource_keys(
-                self.selected_resource_keys
-            )
 
     # ------------------------------------------------------------------
     # Verified bundle management
@@ -1127,7 +513,6 @@ class SystemBridge:
         if not safety_text:
             raise ValueError(f"safety file empty: {safety_file}")
 
-        self._refresh_active_tools_catalogue()
         if not _TOOLS_OUT.exists():
             raise FileNotFoundError(f"tools catalogue missing: {_TOOLS_OUT}")
         prompts_path = _BASE / "prompts.py"
@@ -1138,31 +523,6 @@ class SystemBridge:
             "safety_sha256": sha256_text(safety_text),
             "tools_sha256": sha256_file(_TOOLS_OUT),
             "prompts_sha256": sha256_file(prompts_path),
-        }
-
-    @staticmethod
-    def _file_signature(path: Path | str) -> tuple[Any, ...]:
-        p = Path(path)
-        if not p.exists():
-            return (str(p.resolve()), None, None)
-        stat = p.stat()
-        return (str(p.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
-
-    def _compute_requirement_safety_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
-        if not requirement_file.exists():
-            raise FileNotFoundError(f"requirements file missing: {requirement_file}")
-        if not safety_file.exists():
-            raise FileNotFoundError(f"safety file missing: {safety_file}")
-
-        requirement_text = requirement_file.read_text(encoding="utf-8").strip()
-        if not requirement_text:
-            raise ValueError(f"requirements file empty: {requirement_file}")
-        safety_text = safety_file.read_text(encoding="utf-8").strip()
-        if not safety_text:
-            raise ValueError(f"safety file empty: {safety_file}")
-        return {
-            "requirements_sha256": sha256_text(requirement_text),
-            "safety_sha256": sha256_text(safety_text),
         }
 
     def _compute_source_hashes(self, requirement_file: Path, safety_file: Path) -> dict[str, str]:
@@ -1202,68 +562,6 @@ class SystemBridge:
             raise FileNotFoundError(f"requirements file missing: {req_file}")
         return req_file.resolve(), None
 
-    def _resolve_active_product_part_tokens(self) -> list[str]:
-        """
-        Return the lowercase part-token list for the currently selected product
-        (e.g. ["sg", "mrp", "lcp"] for assembly_board-v1). Used by the safety
-        rule preview to ground part identifiers in the parser prompt.
-
-        Falls back to the only product init manifest in the system if
-        ``self.selected_product`` is unset, mirroring
-        :meth:`_resolve_product_init_for_requirement`. Returns an empty list
-        when nothing usable can be located — callers must tolerate that.
-        """
-        candidates: list[str] = []
-        selected = str(self.selected_product or "").strip()
-        if selected:
-            candidates.append(selected)
-        else:
-            init_files = self.list_product_files()
-            if len(init_files) == 1:
-                candidates.append(init_files[0])
-
-        for init_file in candidates:
-            try:
-                init_path = self._abs_project_path(init_file)
-                if not init_path.exists():
-                    continue
-                raw = self.load_config(str(init_path))
-                _, product_meta = self._first_manifest_entry(raw)
-                geometry_ref = str(
-                    product_meta.get("product_geometry_file", "") or ""
-                ).strip()
-                if not geometry_ref:
-                    continue
-                geometry_path = self._abs_project_path(geometry_ref)
-                if not geometry_path.exists():
-                    continue
-                geometry_payload = self.load_config(str(geometry_path))
-                gazebo = geometry_payload.get("gazebo", {})
-                if not isinstance(gazebo, dict):
-                    continue
-                parts = gazebo.get("parts", {})
-                if not isinstance(parts, dict):
-                    continue
-                model_map = parts.get("model_map", {})
-                if not isinstance(model_map, dict):
-                    continue
-                tokens: list[str] = []
-                seen: set[str] = set()
-                for name in model_map.keys():
-                    token = str(name or "").strip()
-                    if not token:
-                        continue
-                    lower = token.lower()
-                    if lower in seen:
-                        continue
-                    seen.add(lower)
-                    tokens.append(token)
-                if tokens:
-                    return tokens
-            except Exception:
-                continue
-        return []
-
     def _resolve_product_init_for_requirement(self, requirement_file: str) -> dict[str, Any]:
         req_norm = self._norm_path(self._abs_project_path(requirement_file))
         candidates: list[dict[str, Any]] = []
@@ -1291,43 +589,6 @@ class SystemBridge:
         """Return product init JSON path that maps to the given requirement file."""
         ctx = self._resolve_product_init_for_requirement(requirement_file)
         return str(ctx["product_init_file"])
-
-    def _selected_product_matches_requirement(
-        self,
-        selected_product_file: str,
-        selected_requirement_file: str,
-    ) -> bool:
-        selected_product = str(selected_product_file or "").strip()
-        selected_requirement = str(selected_requirement_file or "").strip()
-        if not selected_product or not selected_requirement:
-            return False
-        try:
-            ctx = self._resolve_product_context(selected_product, include_hashes=False)
-        except Exception:
-            return False
-        return self._norm_path(ctx.get("product_spec_file", "")) == self._norm_path(
-            self._abs_project_path(selected_requirement)
-        )
-
-    def _resolve_startup_product_file(
-        self,
-        selected_requirement_file: str,
-        prod_files: list[str],
-    ) -> str:
-        """Resolve the startup product while avoiding duplicate full scans when safe."""
-        selected_product_file = str(self.selected_product or "").strip()
-        selected_requirement = str(selected_requirement_file or "").strip()
-        if selected_requirement:
-            if selected_product_file and self._selected_product_matches_requirement(
-                selected_product_file,
-                selected_requirement,
-            ):
-                return selected_product_file
-            return self.resolve_product_init_for_requirement(selected_requirement)
-
-        if selected_product_file:
-            return selected_product_file
-        return str(prod_files[0]) if prod_files else ""
 
     def list_product_requirement_files(self, product_init_file: str | None = None) -> list[str]:
         options: set[str] = set()
@@ -1583,8 +844,6 @@ class SystemBridge:
                 "safety_sha256": current_hashes["safety_sha256"],
                 "tools_sha256": current_hashes["tools_sha256"],
                 "prompts_sha256": current_hashes["prompts_sha256"],
-                "selected_resource_keys": list(record.get("selected_resource_keys", []) or []),
-                "selected_resource_summary": str(record.get("selected_resource_summary", "") or "").strip(),
             },
             "approved",
         )
@@ -2413,8 +1672,6 @@ class SystemBridge:
             "safety_file": safety_key,
             "current_hash": current_hash,
             "hash_matches_current": hash_matches,
-            "current_selected_resource_keys": self.get_selected_resource_keys(),
-            "current_selected_resource_summary": self.selected_resource_summary(),
             "record": latest,
             "failure": failure,
             "refinement_feedback": str(latest.get("refinement_feedback", "")).strip(),
@@ -2451,11 +1708,6 @@ class SystemBridge:
         safety_text = safety_path.read_text(encoding="utf-8").strip()
         if not safety_text:
             raise ValueError(f"safety requirement file is empty: {safety_path}")
-        self._ensure_selected_resources_cover_safety_text(
-            safety_text,
-            purpose="safety preview generation",
-        )
-        self._refresh_active_tools_catalogue(force=True)
 
         safety_hashes = self._compute_safety_generation_hashes(safety_path)
         safety_hash = safety_hashes["safety_sha256"]
@@ -2488,17 +1740,14 @@ class SystemBridge:
 
         _, CentralControllerAgent, _, _, _ = self.bundle_compiler._import_runtime_classes()
         resources = self.bundle_compiler._collect_resource_refs(
-            robot_env=str(self.robot_env or "gazebo"),
-            resource_files=self._selected_resource_files(),
+            robot_env=str(self.robot_env or "gazebo")
         )
-        known_parts = self._resolve_active_product_part_tokens()
         cca_agent = CentralControllerAgent(
             "cca_preview@localhost",
             "none",
             name="cca_preview",
             resource_agents=resources,
             safety_file=str(safety_path),
-            safety_known_parts=known_parts,
         )
         safety_logic = getattr(cca_agent, "safety_logic", None)
         if safety_logic is None:
@@ -2538,8 +1787,6 @@ class SystemBridge:
             "safety_sha256": safety_hash,
             "tools_sha256": safety_hashes["tools_sha256"],
             "prompts_sha256": safety_hashes["prompts_sha256"],
-            "selected_resource_keys": self.get_selected_resource_keys(),
-            "selected_resource_summary": self.selected_resource_summary(),
             "refinement_feedback": str(refinement_feedback or "").strip(),
             "parent_preview_id": str(parent_record.get("preview_id", "")).strip(),
             "preview_dir": str(preview_dir.resolve()),
@@ -2720,8 +1967,6 @@ class SystemBridge:
             "safety_sha256": current_hashes["safety_sha256"],
             "tools_sha256": current_hashes["tools_sha256"],
             "prompts_sha256": current_hashes["prompts_sha256"],
-            "selected_resource_keys": self.get_selected_resource_keys(),
-            "selected_resource_summary": self.selected_resource_summary(),
             "note": str(note or "").strip(),
             "preview_id": preview_id,
             "preview_generated_at_utc": str(preview_record.get("generated_at_utc", "")).strip(),
@@ -2986,8 +2231,6 @@ class SystemBridge:
         execution_mode: str,
         robot_env: str,
         safety_requirement_file: str | None = None,
-        *,
-        refresh_tools: bool = True,
     ) -> tuple[bool, list[str]]:
         bid = str(bundle_id).strip()
         if not bid:
@@ -3035,30 +2278,22 @@ class SystemBridge:
             return False, ["context_error:missing safety_file reference"]
 
         try:
-            if refresh_tools:
-                expected_hashes = self._compute_source_hashes(
-                    Path(self._norm_path(req_file)),
-                    safety_for_hash,
-                )
-            else:
-                expected_hashes = self._compute_requirement_safety_hashes(
-                    Path(self._norm_path(req_file)),
-                    safety_for_hash,
-                )
+            expected_hashes = self._compute_source_hashes(
+                Path(self._norm_path(req_file)),
+                safety_for_hash,
+            )
         except Exception as exc:
             return False, [f"context_error:{exc}"]
 
         got_hashes = manifest.get("source_hashes", {}) if isinstance(manifest.get("source_hashes"), dict) else {}
         tools_snapshot_ok = self._bundle_tools_snapshot_matches_manifest(bid, manifest)
-        if not refresh_tools and "tools_sha256" in got_hashes and tools_snapshot_ok is False:
-            reasons.append("tools_sha256")
         for key, expected in expected_hashes.items():
             # Prompt text changes affect future offline generation, but a
             # user-verified bundle should still be reusable at startup.
             if key == "prompts_sha256":
                 continue
             if key == "tools_sha256":
-                if tools_snapshot_ok is False or str(got_hashes.get(key, "")) != str(expected):
+                if tools_snapshot_ok is False:
                     reasons.append(key)
                 continue
             if str(got_hashes.get(key, "")) != str(expected):
@@ -3128,94 +2363,6 @@ class SystemBridge:
             ordered.append(item)
         return ", ".join(ordered) if ordered else "current selection no longer matches the plan set"
 
-    def _startup_bundle_compatibility_signature(
-        self,
-        bundle_id: str,
-        product_spec_file: str,
-        execution_mode: str,
-        robot_env: str,
-        safety_requirement_file: str | None = None,
-    ) -> tuple[Any, ...]:
-        bid = str(bundle_id or "").strip()
-        manifest = self.bundle_store.load_manifest(bid) if bid and hasattr(self.bundle_store, "load_manifest") else None
-        manifest_path = self.bundle_store.manifest_path(bid) if bid and hasattr(self.bundle_store, "manifest_path") else ""
-        manifest_sig = self._file_signature(manifest_path) if manifest_path else ("", None, None)
-        snapshot_sig: tuple[Any, ...] = ("", None, None)
-        if isinstance(manifest, dict):
-            artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
-            rel = str(artifacts.get("tools_json", "")).strip()
-            if rel and hasattr(self.bundle_store, "bundle_dir"):
-                snapshot_sig = self._file_signature(self.bundle_store.bundle_dir(bid) / rel)
-
-        try:
-            req_file, default_safety = self._resolve_requirement_input(product_spec_file)
-            selected_safety = str(safety_requirement_file or "").strip()
-            if selected_safety and selected_safety.upper() != "__NONE__":
-                safety_file: Path | str = self._abs_project_path(selected_safety)
-            elif isinstance(manifest, dict) and str(manifest.get("safety_file", "")).strip():
-                safety_file = self._abs_project_path(str(manifest.get("safety_file", "")).strip())
-            elif default_safety:
-                safety_file = self._abs_project_path(default_safety)
-            else:
-                safety_file = ""
-            file_sigs = (self._file_signature(req_file), self._file_signature(safety_file)) if safety_file else (
-                self._file_signature(req_file),
-                ("", None, None),
-            )
-        except Exception as exc:
-            file_sigs = (("context_error", str(exc)),)
-
-        try:
-            resource_sig = self._active_tools_signature_payload()
-        except Exception as exc:
-            resource_sig = ("resource_context_error", str(exc))
-
-        return (
-            bid,
-            str(product_spec_file or "").strip(),
-            str(safety_requirement_file or "").strip(),
-            str(execution_mode or "").strip(),
-            str(robot_env or "").strip(),
-            resource_sig,
-            manifest_sig,
-            snapshot_sig,
-            file_sigs,
-        )
-
-    def _check_startup_bundle_compatibility_cached(
-        self,
-        bundle_id: str,
-        product_spec_file: str,
-        execution_mode: str,
-        robot_env: str,
-        safety_requirement_file: str | None = None,
-    ) -> tuple[bool, list[str]]:
-        cache = getattr(self, "_startup_bundle_compatibility_cache", None)
-        if cache is None:
-            cache = {}
-            self._startup_bundle_compatibility_cache = cache
-        signature = self._startup_bundle_compatibility_signature(
-            bundle_id,
-            product_spec_file,
-            execution_mode,
-            robot_env,
-            safety_requirement_file,
-        )
-        if signature in cache:
-            ok, reasons = cache[signature]
-            return ok, list(reasons)
-
-        ok, reasons = self.check_bundle_compatibility(
-            bundle_id,
-            product_spec_file,
-            execution_mode,
-            robot_env,
-            safety_requirement_file,
-            refresh_tools=False,
-        )
-        cache[signature] = (ok, list(reasons))
-        return ok, reasons
-
     def _resolve_startup_bundle_context(
         self,
         *,
@@ -3226,11 +2373,9 @@ class SystemBridge:
     ) -> tuple[dict[str, Any] | None, str | None]:
         active_id = self.bundle_store.get_active_bundle_id()
         if not active_id:
-            self._diag_emit("[Bundle] No active verified plan set selected; resolving live startup context")
             return None, None
 
-        self._diag_emit(f"[Bundle] Checking active verified plan set {active_id}")
-        ok, reasons = self._check_startup_bundle_compatibility_cached(
+        ok, reasons = self.check_bundle_compatibility(
             active_id,
             product_spec_file,
             execution_mode,
@@ -3248,14 +2393,12 @@ class SystemBridge:
             log.warning("Auto-deactivated incompatible active plan set %s: %s", active_id, detail)
             return None, notice
 
-        self._diag_emit(f"[Bundle] Accepted active verified plan set {active_id}")
         return (
             self._resolve_active_bundle_context(
                 product_spec_file=product_spec_file,
                 execution_mode=execution_mode,
                 robot_env=robot_env,
                 safety_requirement_file=safety_requirement_file,
-                skip_compatibility_check=True,
             ),
             None,
         )
@@ -3270,70 +2413,6 @@ class SystemBridge:
         if requirement_file:
             return requirement_file
         return str(selected_product_file or "").strip()
-
-    async def _start_agent_group_for_startup(
-        self,
-        agents: Iterable[Any],
-        *,
-        startup_id: int,
-        group_label: str,
-    ) -> None:
-        """Start a group of agents concurrently while emitting per-agent timings."""
-        specs = [(self._agent_startup_label(agent), agent) for agent in list(agents or []) if agent]
-        if not specs:
-            return
-
-        async def _start_one(agent: Any, label: str) -> None:
-            t0 = time.monotonic()
-            try:
-                await agent.start(auto_register=True)
-                self._diag_emit(
-                    f"startup#{startup_id} {group_label} agent {label} started "
-                    f"in {time.monotonic() - t0:.2f}s"
-                )
-            except Exception:
-                self._diag_emit(
-                    f"startup#{startup_id} {group_label} agent {label} FAILED "
-                    f"after {time.monotonic() - t0:.2f}s"
-                )
-                raise
-
-        t_group = time.monotonic()
-        self._diag_emit(f"startup#{startup_id} starting {len(specs)} {group_label} agents")
-        results = await asyncio.gather(
-            *(_start_one(agent, label) for label, agent in specs),
-            return_exceptions=True,
-        )
-        failures = [
-            (label, result)
-            for (label, _agent), result in zip(specs, results)
-            if isinstance(result, BaseException)
-        ]
-        if failures:
-            detail = "; ".join(f"{label}: {exc}" for label, exc in failures)
-            raise RuntimeError(
-                f"Failed to start {len(failures)}/{len(specs)} {group_label} agents: {detail}"
-            ) from failures[0][1]
-        self._diag_emit(
-            f"startup#{startup_id} {group_label} agents started in {time.monotonic() - t_group:.2f}s"
-        )
-
-    @staticmethod
-    def _agent_startup_label(agent: Any) -> str:
-        return str(
-            getattr(agent, "agent_name", None)
-            or getattr(agent, "name", None)
-            or getattr(agent, "jid", "?")
-            or "?"
-        )
-
-    async def _start_resource_agents_for_startup(self, startup_id: int) -> None:
-        """Start resource agents concurrently while emitting per-agent timings."""
-        await self._start_agent_group_for_startup(
-            self.resource_agents,
-            startup_id=startup_id,
-            group_label="resource",
-        )
 
     def list_compatible_bundles(
         self,
@@ -3472,12 +2551,6 @@ class SystemBridge:
         selected_safety_file = str(
             safety_override or product_ctx.get("safety_file") or ""
         ).strip() or None
-        if selected_safety_file:
-            self._ensure_selected_resources_cover_safety_text(
-                self._abs_project_path(selected_safety_file).read_text(encoding="utf-8").strip(),
-                purpose="bundle generation",
-            )
-        self._refresh_active_tools_catalogue(force=True)
         precomputed_safety_artifacts: dict[str, Any] | None = None
         if selected_safety_file:
             safety_eval = self.evaluate_safety_intent_approval(selected_safety_file)
@@ -3496,11 +2569,7 @@ class SystemBridge:
                 raise ValueError(
                     self._approval_refresh_error(str(safety_eval.get("reason", "") or ""))
                 )
-        resolved_auto_replan_max_attempts = (
-            _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
-            if auto_replan_max_attempts is None
-            else auto_replan_max_attempts
-        )
+        resolved_auto_replan_max_attempts = 3 if auto_replan_max_attempts is None else auto_replan_max_attempts
 
         return asyncio.run(
             self.bundle_compiler.compile_bundle(
@@ -3510,82 +2579,10 @@ class SystemBridge:
                 product_requirement_file=req_file or None,
                 safety_requirement_file=safety_override,
                 precomputed_safety_artifacts=precomputed_safety_artifacts,
-                resource_files=self._selected_resource_files(),
-                selected_resource_keys=self.get_selected_resource_keys(),
                 auto_replan_max_attempts=resolved_auto_replan_max_attempts,
                 refinement_feedback=str(refinement_feedback or "").strip(),
                 parent_bundle_id=str(parent_bundle_id or "").strip(),
             )
-        )
-
-    def run_experiment_study(self, manifest_file: str, *, scenario_id: str = "") -> dict[str, Any]:
-        if self.system_running or self._starting or self._stopping:
-            raise RuntimeError("cannot run experiments while system lifecycle is active")
-
-        self._ensure_called_from_worker_thread("run_experiment_study")
-        runner = OfflineStudyRunner(
-            manifest_file,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
-        )
-        return runner.run(scenario_id=scenario_id)
-
-    def get_latest_experiment_run(self, manifest_file: str) -> dict[str, Any] | None:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            return None
-        return latest_study_run_summary(
-            manifest_path,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
-        )
-
-    def list_experiment_runs(self, manifest_file: str) -> list[dict[str, Any]]:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            return []
-        return OfflineStudyRunner.list_runs(
-            manifest_path,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
-        )
-
-    def analyze_experiment_run(
-        self,
-        manifest_file: str,
-        *,
-        run_root: str = "",
-    ) -> dict[str, Any] | None:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            return None
-        return OfflineStudyRunner.load_run_summary(
-            manifest_path,
-            run_root=run_root or None,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
-        )
-
-    def get_experiment_trial_details(
-        self,
-        manifest_file: str,
-        *,
-        run_root: str,
-        scenario_id: str,
-        method: str,
-        trial_index: int,
-    ) -> dict[str, Any]:
-        manifest_path = str(manifest_file or "").strip()
-        if not manifest_path:
-            raise ValueError("study manifest is required")
-        return OfflineStudyRunner.load_trial_details(
-            manifest_path,
-            run_root=run_root,
-            scenario_id=scenario_id,
-            method=method,
-            trial_index=trial_index,
-            project_root=_PROJECT_ROOT,
-            results_root=_EXPERIMENT_RESULTS_DIR,
         )
 
     def verify_bundle(self, bundle_id: str) -> dict[str, Any]:
@@ -3782,7 +2779,6 @@ class SystemBridge:
         artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
 
         plan_rel = str(artifacts.get("plan_json", "")).strip()
-        requirements_rel = str(artifacts.get("requirements_json", "")).strip()
         fsa_rel = str(artifacts.get("global_fsa_json", "")).strip()
         safety_logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
         validation_rel = self._plan_validation_artifact_rel(artifacts)
@@ -3790,7 +2786,6 @@ class SystemBridge:
             raise ValueError("plan set is missing required plan/safety artifacts")
 
         plan_path = (root / plan_rel).resolve()
-        requirements_path = (root / requirements_rel).resolve() if requirements_rel else None
         fsa_path = (root / fsa_rel).resolve()
         safety_logic_path = (root / safety_logic_rel).resolve()
         validation_path = (root / validation_rel).resolve()
@@ -3862,8 +2857,6 @@ class SystemBridge:
             camera=CameraModule(backend="none"),
         )
         product_agent.process_planner.load(plan_path)
-        if requirements_path is not None and requirements_path.exists():
-            product_agent.process_planner.load_requirements(requirements_path)
         product_agent.safety_text = safety_text
 
         try:
@@ -3893,15 +2886,9 @@ class SystemBridge:
             )
             replan_policy = manifest.get("replan_policy", {}) if isinstance(manifest.get("replan_policy"), dict) else {}
             try:
-                auto_replan_max_attempts = int(
-                    replan_policy.get(
-                        "auto_replan_max_attempts",
-                        _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS,
-                    )
-                    or 0
-                )
+                auto_replan_max_attempts = int(replan_policy.get("auto_replan_max_attempts", 3) or 0)
             except Exception:
-                auto_replan_max_attempts = _DEFAULT_AUTO_REPLAN_MAX_ATTEMPTS
+                auto_replan_max_attempts = 3
             auto_replan_max_attempts = max(0, min(auto_replan_max_attempts, 10))
 
             validation_payload = asyncio.run(
@@ -3938,27 +2925,6 @@ class SystemBridge:
                 "witness_count": witness_count,
                 "auto_replans_used": int(validation_payload.get("auto_replans_used", 0)),
                 "stop_reason": str(validation_payload.get("stop_reason", "")),
-                "cumulative_validation_time_ms": float(
-                    validation_payload.get("cumulative_validation_time_ms", 0.0) or 0.0
-                ),
-                "validation_call_count": int(
-                    validation_payload.get("validation_call_count", 0) or 0
-                ),
-                "grounding_summary": (
-                    dict(validation_payload.get("grounding_summary", {}))
-                    if isinstance(validation_payload.get("grounding_summary"), dict)
-                    else {}
-                ),
-                "validator_stats": (
-                    dict(validation_payload.get("validator_stats", {}))
-                    if isinstance(validation_payload.get("validator_stats"), dict)
-                    else {}
-                ),
-                "repair_history": (
-                    list(validation_payload.get("repair_history", []))
-                    if isinstance(validation_payload.get("repair_history"), list)
-                    else []
-                ),
             }
             self.bundle_store.overwrite_manifest(bid, manifest)
             summary = self.bundle_store.update_bundle_summary(
@@ -3999,25 +2965,23 @@ class SystemBridge:
         execution_mode: str,
         robot_env: str,
         safety_requirement_file: str | None = None,
-        skip_compatibility_check: bool = False,
     ) -> dict[str, Any] | None:
         active_id = self.bundle_store.get_active_bundle_id()
         if not active_id:
             return None
-        if not skip_compatibility_check:
-            ok, reasons = self.check_bundle_compatibility(
-                active_id,
-                product_spec_file,
-                execution_mode,
-                robot_env,
-                safety_requirement_file,
+        ok, reasons = self.check_bundle_compatibility(
+            active_id,
+            product_spec_file,
+            execution_mode,
+            robot_env,
+            safety_requirement_file,
+        )
+        if not ok:
+            msg = ", ".join(reasons) if reasons else "unknown mismatch"
+            self._diag_emit(f"[Bundle] Compatibility check failed: {msg}")
+            raise RuntimeError(
+                f"Active plan set '{active_id}' is incompatible with current selection: {msg}"
             )
-            if not ok:
-                msg = ", ".join(reasons) if reasons else "unknown mismatch"
-                self._diag_emit(f"[Bundle] Compatibility check failed: {msg}")
-                raise RuntimeError(
-                    f"Active plan set '{active_id}' is incompatible with current selection: {msg}"
-                )
 
         manifest = self.bundle_store.load_manifest(active_id)
         if not manifest:
@@ -4065,14 +3029,6 @@ class SystemBridge:
         except Exception:
             return False
 
-    def _get_xmpp_start_lock(self) -> asyncio.Lock:
-        """Return an event-loop-local lock for XMPP startup/prewarm."""
-        loop = asyncio.get_running_loop()
-        if self._xmpp_start_lock is None or self._xmpp_start_lock_loop is not loop:
-            self._xmpp_start_lock = asyncio.Lock()
-            self._xmpp_start_lock_loop = loop
-        return self._xmpp_start_lock
-
     async def _wait_for_xmpp_ready(self, timeout_sec: float = 45.0) -> None:
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         while time.monotonic() < deadline:
@@ -4095,27 +3051,24 @@ class SystemBridge:
 
     async def _ensure_xmpp_server(self) -> None:
         """Ensure an embedded XMPP server is reachable on localhost:5222."""
-        async with self._get_xmpp_start_lock():
-            if self._xmpp_proc is not None and self._xmpp_proc.poll() is None:
-                await self._wait_for_xmpp_ready(timeout_sec=45.0)
-                return
+        if self._xmpp_proc is not None and self._xmpp_proc.poll() is None:
+            return
+        # If an external XMPP is already up, reuse it.
+        already_up = await asyncio.to_thread(self._tcp_port_open, self._xmpp_host, self._xmpp_port, 0.25)
+        if already_up:
+            self._diag_emit("xmpp already listening on localhost:5222 (reusing existing server)")
+            return
 
-            # If an external XMPP is already up, reuse it.
-            already_up = await asyncio.to_thread(self._tcp_port_open, self._xmpp_host, self._xmpp_port, 0.25)
-            if already_up:
-                self._diag_emit("xmpp already listening on localhost:5222 (reusing existing server)")
-                return
-
-            cmd = [sys.executable, "-m", "cais_spade_llm.ui.xmpp_server_runner"]
-            self._xmpp_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=os.setsid,
-            )
-            self._diag_emit(f"spawned xmpp runner pid={self._xmpp_proc.pid}")
-            await self._wait_for_xmpp_ready(timeout_sec=45.0)
-            log.info("Embedded XMPP server started on localhost:5222 (pid=%s)", self._xmpp_proc.pid)
+        cmd = [sys.executable, "-m", "cais_spade_llm.ui.xmpp_server_runner"]
+        self._xmpp_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+        self._diag_emit(f"spawned xmpp runner pid={self._xmpp_proc.pid}")
+        await self._wait_for_xmpp_ready(timeout_sec=45.0)
+        log.info("Embedded XMPP server started on localhost:5222 (pid=%s)", self._xmpp_proc.pid)
 
     async def _stop_xmpp_server(self) -> None:
         proc = self._xmpp_proc
@@ -4157,108 +3110,19 @@ class SystemBridge:
         self._startup_seq += 1
         startup_id = self._startup_seq
         startup_t0 = time.monotonic()
-        startup_notices: list[str] = []
-        startup_phase_timings: dict[str, float] = {}
-        current_phase_name = ""
-        current_phase_started = startup_t0
-        tools_meta: dict[str, Any] = {
-            "rebuilt": False,
-            "using_bundle_tools": False,
-            "cache_hit": False,
-            "resolved_tools_path": "",
-        }
-        prewarm_reused = False
-        prewarm_bypassed = False
-        kickoff_requires_replan = False
-        schedule_prewarm_shutdown = False
-        archive_cutoff_ns = time.time_ns()
-
-        def _append_notice(message: str | None) -> None:
-            text = str(message or "").strip()
-            if text and text not in startup_notices:
-                startup_notices.append(text)
-
-        def _finish_phase(now: float | None = None) -> None:
-            nonlocal current_phase_name, current_phase_started
-            if not current_phase_name:
-                return
-            end_ts = time.monotonic() if now is None else float(now)
-            elapsed = max(0.0, end_ts - current_phase_started)
-            startup_phase_timings[current_phase_name] = (
-                float(startup_phase_timings.get(current_phase_name, 0.0)) + elapsed
-            )
-            self._diag_emit(
-                f"startup#{startup_id} phase_done name={current_phase_name} elapsed={elapsed:.2f}s"
-            )
-            current_phase_name = ""
-
-        def _enter_phase(name: str) -> None:
-            nonlocal current_phase_name, current_phase_started
-            now = time.monotonic()
-            _finish_phase(now)
-            self._set_startup_phase(name)
-            current_phase_name = str(name)
-            current_phase_started = time.monotonic()
-
-        def _emit_startup_summary(status: str) -> None:
-            total = time.monotonic() - startup_t0
-            slowest_phase = ""
-            slowest_elapsed = 0.0
-            for phase_name, elapsed in startup_phase_timings.items():
-                if elapsed > slowest_elapsed:
-                    slowest_phase = str(phase_name)
-                    slowest_elapsed = float(elapsed)
-            summary = {
-                "startup_id": startup_id,
-                "status": str(status),
-                "total_seconds": round(total, 3),
-                "slowest_phase": slowest_phase,
-                "slowest_phase_seconds": round(slowest_elapsed, 3),
-                "phase_timings": {key: round(val, 3) for key, val in startup_phase_timings.items()},
-                "tools_rebuilt": bool(tools_meta.get("rebuilt", False)),
-                "tools_cache_hit": bool(tools_meta.get("cache_hit", False)),
-                "tools_source": "bundle" if bool(tools_meta.get("using_bundle_tools", False)) else "generated",
-                "tools_path": str(tools_meta.get("resolved_tools_path", "") or ""),
-                "prewarm_reused": bool(prewarm_reused),
-                "prewarm_bypassed": bool(prewarm_bypassed),
-                "kickoff_requires_replan": bool(kickoff_requires_replan),
-            }
-            self._last_startup_summary = summary
-            slowest_label = self._startup_phase_label(slowest_phase) if slowest_phase else "n/a"
-            self._diag_emit(
-                "startup#"
-                f"{startup_id} summary status={status} total={total:.2f}s "
-                f"slowest_phase={slowest_label}:{slowest_elapsed:.2f}s "
-                f"tools_rebuilt={summary['tools_rebuilt']} "
-                f"tools_cache_hit={summary['tools_cache_hit']} "
-                f"tools_source={summary['tools_source']} "
-                f"prewarm_reused={summary['prewarm_reused']} "
-                f"prewarm_bypassed={summary['prewarm_bypassed']} "
-                f"kickoff_requires_replan={summary['kickoff_requires_replan']}"
-            )
-
-        async def _archive_previous_monitors() -> None:
-            t_archive = time.monotonic()
-            counts = await asyncio.to_thread(
-                self._archive_monitors,
-                archive_cutoff_ns,
-            )
-            moved = sum(int(value or 0) for value in counts.values())
-            self._diag_emit(
-                f"startup#{startup_id} archive_monitors background moved={moved} "
-                f"in {time.monotonic() - t_archive:.2f}s"
-            )
-
-        _enter_phase("start_requested")
+        self._set_startup_phase("start_requested")
         self._diag_emit(f"startup#{startup_id} begin mode={self.execution_mode} env={self.robot_env}")
-        self._track_background_task(
-            asyncio.create_task(_archive_previous_monitors()),
-            label=f"startup#{startup_id} archive_monitors",
-        )
 
         try:
+            # Archive previous monitor outputs.
+            self._set_startup_phase("archive_monitors")
+            await asyncio.to_thread(self._archive_monitors)
+            self._diag_emit(
+                f"startup#{startup_id} archive_monitors done in {time.monotonic() - startup_t0:.2f}s"
+            )
+
             # Set environment variables that agent_creator reads.
-            _enter_phase("prepare_environment")
+            self._set_startup_phase("prepare_environment")
             os.environ["ROBOT_ENV"] = self.robot_env
             os.environ["EXECUTION_MODE"] = self.execution_mode
             perception_backend = self._perception_backend_for_mode()
@@ -4267,27 +3131,19 @@ class SystemBridge:
             mode = str(self.execution_mode or "").strip().lower()
             prewarmed: dict[str, Any] = {}
             if mode == "simulation":
-                _enter_phase("simulation_readiness")
+                self._set_startup_phase("simulation_readiness")
                 sim_ready, sim_reason = await asyncio.to_thread(
                     self.simulation_start_ready,
                     True,
                 )
                 if not sim_ready:
                     raise RuntimeError(sim_reason)
-                _append_notice(sim_reason)
+                # Hand off prewarmed controllers to SPADE agents instead of
+                # destroying them — avoids duplicate ROS2 init on first task.
                 with self._gazebo_prewarm_lock:
-                    prewarm_done = self._gazebo_prewarm_done.is_set()
-                    prewarm_inflight = bool(
-                        (self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive())
-                        or self._gazebo_prewarm_pending
-                    )
-                    if prewarm_done:
-                        prewarmed = dict(self._gazebo_prewarm_controllers)
-                        self._gazebo_prewarm_controllers.clear()
-                        self._gazebo_prewarm_pending.clear()
-                    else:
-                        prewarm_bypassed = prewarm_inflight
-                        schedule_prewarm_shutdown = prewarm_inflight
+                    prewarmed = dict(self._gazebo_prewarm_controllers)
+                    self._gazebo_prewarm_controllers.clear()
+                    self._gazebo_prewarm_pending.clear()
                 # Drop any stale prewarmed controller whose spin thread died.
                 invalid_keys: list[str] = []
                 for key, ctrl in list(prewarmed.items()):
@@ -4307,36 +3163,31 @@ class SystemBridge:
                     self._diag_emit(
                         "discarded stale prewarmed controllers: " + ",".join(sorted(invalid_keys))
                     )
-                prewarm_reused = bool(prewarmed)
                 if prewarmed:
                     log.info(
                         "Handing off prewarmed controllers to agents: %s",
                         ",".join(sorted(prewarmed.keys())),
                     )
-                elif prewarm_bypassed:
-                    log.info(
-                        "Proceeding without controller handoff; Gazebo prewarm is still running in the background."
-                    )
                 else:
                     log.info("No prewarmed controllers available for handoff.")
 
-            _enter_phase("physical_readiness")
+            self._set_startup_phase("physical_readiness")
             ready, reason = self.physical_perception_ready()
             if not ready:
                 raise RuntimeError(reason)
 
             # Ensure XMPP server is up.
-            _enter_phase("xmpp_server")
+            self._set_startup_phase("xmpp_server")
             await self._ensure_xmpp_server()
 
             # Import/configure agent_creator off the UI event loop.
-            _enter_phase("import_agent_creator")
+            self._set_startup_phase("import_agent_creator")
             self._maybe_start_agent_creator_prefetch()
             ac = self._agent_creator_cached
             if ac is None:
                 ac = await asyncio.to_thread(self._import_agent_creator_module)
                 self._agent_creator_cached = ac
-            _enter_phase("configure_agent_creator_runtime")
+            self._set_startup_phase("configure_agent_creator_runtime")
             await asyncio.to_thread(
                 self._configure_agent_creator_runtime,
                 ac,
@@ -4344,30 +3195,26 @@ class SystemBridge:
                 self.execution_mode,
                 perception_backend,
             )
+            from function_analyzer import FunctionAnalyzer
 
             # Collect init files.
-            _enter_phase("collect_init_files")
+            self._set_startup_phase("collect_init_files")
             prod_files, res_files = await asyncio.to_thread(self._collect_init_files)
             if not prod_files:
                 raise RuntimeError("No product initialization files found.")
-            res_files = self._selected_resource_files(res_files)
-            if not res_files:
-                raise RuntimeError("No active robot manifests are selected.")
 
             selected_requirement_file = str(self.selected_requirement_file or "").strip()
-            try:
-                selected_product_file = await asyncio.to_thread(
-                    self._resolve_startup_product_file,
-                    selected_requirement_file,
-                    prod_files,
-                )
-                if selected_product_file:
+            if selected_requirement_file:
+                try:
+                    selected_product_file = await asyncio.to_thread(
+                        self.resolve_product_init_for_requirement,
+                        selected_requirement_file,
+                    )
                     self.selected_product = selected_product_file
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to resolve product init for requirement file "
-                    f"'{selected_requirement_file}': {exc}"
-                ) from exc
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to resolve product init for requirement file '{selected_requirement_file}': {exc}"
+                    ) from exc
 
             selected_product_file = str(self.selected_product or "").strip()
             if not selected_product_file:
@@ -4396,7 +3243,6 @@ class SystemBridge:
                 selected_requirement_file,
             )
 
-            _enter_phase("resolve_bundle_context")
             bundle_context, bundle_notice = await asyncio.to_thread(
                 self._resolve_startup_bundle_context,
                 product_spec_file=startup_bundle_scope,
@@ -4404,7 +3250,8 @@ class SystemBridge:
                 robot_env=self.robot_env,
                 safety_requirement_file=selected_safety_for_compat,
             )
-            _append_notice(bundle_notice)
+            if bundle_notice:
+                self.last_notice = bundle_notice
             if bundle_context:
                 self._diag_emit(
                     f"[Bundle] startup using bundle_id={bundle_context.get('bundle_id', '')}"
@@ -4423,7 +3270,7 @@ class SystemBridge:
                 runtime_overrides["safety_file_override_set"] = False
 
             # Create agents, passing prewarmed controllers for reuse.
-            _enter_phase("create_agents")
+            self._set_startup_phase("create_agents")
             (
                 self.user_agent,
                 self.resource_agents,
@@ -4453,135 +3300,102 @@ class SystemBridge:
 
             # Build tools catalogue unless a verified bundle already provides
             # an exact snapshot for this startup context.
-            _enter_phase("build_tools_catalogue")
-            tools_catalogue_path, tools_meta = await asyncio.to_thread(
-                self._prepare_startup_tools_catalogue,
-                ac,
-                bundle_context=bundle_context,
-                perception_backend=perception_backend,
+            self._set_startup_phase("build_tools_catalogue")
+            resolved_tools_path, using_bundle_tools = await asyncio.to_thread(
+                self._resolve_llm_tools_catalogue_path,
+                bundle_context,
             )
-            if bool(tools_meta.get("using_bundle_tools", False)):
+            if using_bundle_tools:
                 self._diag_emit(
-                    f"startup#{startup_id} skipping tools rebuild; using bundled catalogue "
-                    f"{tools_meta.get('resolved_tools_path', '')}"
+                    f"startup#{startup_id} skipping tools rebuild; using bundled catalogue {resolved_tools_path}"
                 )
-            elif bool(tools_meta.get("cache_hit", False)):
-                self._diag_emit(
-                    f"startup#{startup_id} reusing cached tools catalogue {tools_catalogue_path}"
+            else:
+                await asyncio.to_thread(
+                    FunctionAnalyzer.build_tools_catalogue,
+                    self.product_agents + self.resource_agents,
+                    ac.ALLOWED_FUNCS,
+                    str(_TOOLS_OUT),
                 )
+            tools_catalogue_path = await asyncio.to_thread(
+                self._configure_llm_tools_catalogue,
+                bundle_context,
+            )
             self._diag_emit(
                 f"startup#{startup_id} tools catalogue ready in {time.monotonic() - startup_t0:.2f}s"
             )
             self._diag_emit(
                 f"startup#{startup_id} llm tools catalogue source={tools_catalogue_path}"
             )
-            consistency_warnings = self._emit_startup_consistency_diagnostics(
-                startup_id=startup_id,
-                selected_requirement_file=selected_requirement_file,
-                selected_safety_file=selected_safety_for_compat,
-                selected_resource_files=res_files,
-                bundle_context=bundle_context,
-                tools_catalogue_path=tools_catalogue_path,
-                tools_meta=tools_meta,
-                perception_backend=perception_backend,
-            )
-            for warning in consistency_warnings:
-                _append_notice(warning)
 
             # Start agents in order: resources → CCA → user → products.
-            _enter_phase("start_resource_agents")
-            await self._start_resource_agents_for_startup(startup_id)
+            self._set_startup_phase("start_resource_agents")
+            ra_tasks = []
+            for ra in self.resource_agents:
+                ra_tasks.append(ra.start(auto_register=True))
+            if ra_tasks:
+                t_ra = time.monotonic()
+                self._diag_emit(f"startup#{startup_id} starting {len(ra_tasks)} resource agents")
+                await asyncio.gather(*ra_tasks)
+                self._diag_emit(
+                    f"startup#{startup_id} resource agents started in {time.monotonic() - t_ra:.2f}s"
+                )
 
-            _enter_phase("start_cca")
+            self._set_startup_phase("start_cca")
             if self.cca:
-                await self._start_agent_group_for_startup(
-                    [self.cca],
-                    startup_id=startup_id,
-                    group_label="cca",
+                t_cca = time.monotonic()
+                await self.cca.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s"
                 )
 
-            _enter_phase("start_user")
+            self._set_startup_phase("start_user")
             if self.user_agent:
-                await self._start_agent_group_for_startup(
-                    [self.user_agent],
-                    startup_id=startup_id,
-                    group_label="user",
+                t_user = time.monotonic()
+                await self.user_agent.start(auto_register=True)
+                self._diag_emit(
+                    f"startup#{startup_id} user started in {time.monotonic() - t_user:.2f}s"
                 )
 
-            _enter_phase("start_product_agents")
-            if self.product_agents:
-                await self._start_agent_group_for_startup(
-                    self.product_agents,
-                    startup_id=startup_id,
-                    group_label="product",
-                )
-
-            _enter_phase("wait_product_startup_readiness")
-            readiness_waiters = []
+            self._set_startup_phase("start_product_agents")
+            pa_tasks = []
             for pa in self.product_agents:
-                wait_for_startup = getattr(pa, "wait_for_startup_readiness", None)
-                if callable(wait_for_startup):
-                    readiness_waiters.append(wait_for_startup(timeout=180.0))
-                    continue
+                pa_tasks.append(pa.start(auto_register=True))
+            if pa_tasks:
+                t_pa = time.monotonic()
+                self._diag_emit(f"startup#{startup_id} starting {len(pa_tasks)} product agents")
+                await asyncio.gather(*pa_tasks)
+                self._diag_emit(
+                    f"startup#{startup_id} product agents started in {time.monotonic() - t_pa:.2f}s"
+                )
 
+            self._set_startup_phase("wait_product_kickoff")
+            kickoff_results: list[dict[str, Any]] = []
+            for pa in self.product_agents:
                 wait_for_kickoff = getattr(pa, "wait_for_kickoff_result", None)
-                if callable(wait_for_kickoff):
-                    async def _wait_via_final_kickoff(
-                        product_agent: Any = pa,
-                        waiter: Callable[..., Any] = wait_for_kickoff,
-                    ) -> dict[str, Any]:
-                        result = await waiter(timeout=180.0)
-                        if not isinstance(result, dict):
-                            return {
-                                "startup_ready": False,
-                                "success": False,
-                                "continuing": False,
-                                "execution_blocked": True,
-                                "message": (
-                                    f"{getattr(product_agent, 'agent_name', getattr(product_agent, 'jid', 'product'))}: "
-                                    "invalid kickoff result"
-                                ),
-                            }
-                        normalized = dict(result)
-                        message = str(normalized.get("message", "")).strip().lower()
-                        normalized.setdefault("startup_ready", "timed out" not in message)
-                        normalized.setdefault("continuing", False)
-                        normalized.setdefault(
-                            "execution_blocked",
-                            not bool(normalized.get("success", False)),
-                        )
-                        return normalized
-
-                    readiness_waiters.append(_wait_via_final_kickoff())
-                    continue
-
-                async def _missing_startup_readiness(product_agent: Any = pa) -> dict[str, Any]:
-                        return {
-                            "startup_ready": False,
+                if not callable(wait_for_kickoff):
+                    kickoff_results.append(
+                        {
                             "success": False,
-                            "continuing": False,
-                            "execution_blocked": True,
-                            "message": (
-                                f"{getattr(product_agent, 'agent_name', getattr(product_agent, 'jid', 'product'))}: "
-                                "startup readiness wait unavailable"
-                            ),
+                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: kickoff wait unavailable",
                         }
+                    )
+                    continue
+                result = await wait_for_kickoff(timeout=180.0)
+                if isinstance(result, dict):
+                    kickoff_results.append(result)
+                else:
+                    kickoff_results.append(
+                        {
+                            "success": False,
+                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: invalid kickoff result",
+                        }
+                    )
 
-                readiness_waiters.append(_missing_startup_readiness())
-
-            startup_readiness_results: list[dict[str, Any]] = []
-            if readiness_waiters:
-                startup_readiness_results = list(await asyncio.gather(*readiness_waiters))
-
-            readiness_failures = [
-                result
-                for result in startup_readiness_results
-                if not bool(result.get("startup_ready", False))
-            ]
-            if readiness_failures:
+            kickoff_failures = [r for r in kickoff_results if not bool(r.get("success", False))]
+            if kickoff_failures:
                 cached_alerts = []
                 messages = []
-                for failure in readiness_failures:
+                for failure in kickoff_failures:
                     alert = failure.get("alert")
                     if isinstance(alert, dict) and alert:
                         cached_alerts.append(alert)
@@ -4590,53 +3404,25 @@ class SystemBridge:
                         messages.append(msg)
                 if cached_alerts:
                     self._cache_plan_safety_alerts(cached_alerts)
-                raise RuntimeError(" ; ".join(messages) or "product startup readiness failed")
-
-            kickoff_requires_replan = any(
-                bool(result.get("continuing", False))
-                or int(result.get("retries_used", 0) or 0) > 0
-                for result in startup_readiness_results
-            )
-            startup_warnings = [
-                str(result.get("message", "")).strip()
-                for result in startup_readiness_results
-                if bool(result.get("execution_blocked", False))
-                and str(result.get("message", "")).strip()
-            ]
-            if startup_warnings:
-                _append_notice("System started with warnings: " + " ; ".join(startup_warnings))
+                raise RuntimeError(" ; ".join(messages) or "product kickoff safety validation failed")
 
             self.system_running = True
             self._clear_cached_plan_safety_alerts()
-            _finish_phase()
             self._set_startup_phase("startup_complete")
-            if startup_notices:
-                self.last_notice = " ; ".join(startup_notices)
             log.info("All agents started successfully.")
             self._diag_emit(
                 f"startup#{startup_id} complete in {time.monotonic() - startup_t0:.2f}s"
             )
-            _emit_startup_summary("success")
 
         except Exception as exc:
             self.last_error = str(exc)
-            _finish_phase()
             self._set_startup_phase("startup_failed")
             self._diag_emit(
                 f"startup#{startup_id} failed after {time.monotonic() - startup_t0:.2f}s: {exc}"
             )
-            _emit_startup_summary("failed")
             log.exception("Failed to start system")
             await self._cleanup_agents()
         finally:
-            if schedule_prewarm_shutdown:
-                async def _shutdown_prewarm_after_bypass() -> None:
-                    await asyncio.to_thread(self._shutdown_gazebo_prewarm_controllers)
-
-                self._track_background_task(
-                    asyncio.create_task(_shutdown_prewarm_after_bypass()),
-                    label=f"startup#{startup_id} shutdown_prewarm_after_bypass",
-                )
             self._starting = False
             if not self.system_running:
                 self._set_startup_phase("idle")
@@ -4681,7 +3467,7 @@ class SystemBridge:
             log.debug("CameraModule cleanup skipped (not loaded or already destroyed).")
 
     @staticmethod
-    def _archive_monitors(cutoff_mtime_ns: int | None = None) -> dict[str, int]:
+    def _archive_monitors() -> dict[str, int]:
         archived_counts: dict[str, int] = {}
         for sub, pattern in [
             ("history", "*.jsonl"),
@@ -4693,17 +3479,7 @@ class SystemBridge:
             if not d.exists():
                 archived_counts[sub] = 0
                 continue
-            files = []
-            for p in d.glob(pattern):
-                if not p.is_file():
-                    continue
-                if cutoff_mtime_ns is not None:
-                    try:
-                        if int(p.stat().st_mtime_ns) > int(cutoff_mtime_ns):
-                            continue
-                    except Exception:
-                        continue
-                files.append(p)
+            files = [p for p in d.glob(pattern) if p.is_file()]
             if not files:
                 archived_counts[sub] = 0
                 continue
@@ -5259,14 +4035,6 @@ class SystemBridge:
             return result
 
         if prewarm_inflight:
-            if force:
-                result = self._probe_sim_services(timeout_sec=3.0)
-                if result[0]:
-                    warning = self._simulation_background_prewarm_warning(result[1])
-                    result = (True, warning)
-                    self._sim_ready_cache_ts = now
-                    self._sim_ready_cache = result
-                    return result
             result = (
                 False,
                 "Simulation startup is still initializing ROS services and controller prewarm. Please wait...",
@@ -5359,15 +4127,6 @@ class SystemBridge:
             + ", ".join(missing)
             + ". Start is allowed, but perception-dependent tasks may need a few more seconds."
         )
-
-    @classmethod
-    def _simulation_background_prewarm_warning(cls, base_message: str = "") -> str:
-        parts = []
-        base = str(base_message or "").strip()
-        if base:
-            parts.append(base)
-        parts.append("Controller prewarm is still running in the background.")
-        return " ".join(parts)
 
     @staticmethod
     def _simulation_prewarm_failure_message(

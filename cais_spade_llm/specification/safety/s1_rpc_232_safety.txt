@@ -1,3 +1,0 @@
-[Safety Requirements]
-- MRP must be pick_approach first before SG pick_approach to the assembly station.
-- xarm6 and ur5e should not be place_approach at the same time to the assembly station.

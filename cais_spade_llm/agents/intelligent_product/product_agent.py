@@ -21,10 +21,6 @@ from spade.message import Message
 from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-from cais_spade_llm.agents.shared_information.local_dispatch import (
-    send_agent_message,
-    send_agent_message_sync,
-)
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
@@ -37,28 +33,8 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artif
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
-_DEFAULT_REPAIR_MAX_ATTEMPTS = 5
 _CASE3_PREPROGRAMMED_SCENARIO_ID = "case3_llm_bridge"
 _CASE3_PREPROGRAMMED_REQUIREMENT_FILES = frozenset({"case3_two_arm_llm_bridge.txt"})
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _trace_with_timestamp(trace: Any, key: str) -> dict[str, Any]:
-    out = dict(trace or {}) if isinstance(trace, dict) else {}
-    out[key] = _utc_now_iso()
-    return out
-
-
-def _trace_delta_ms(trace: dict[str, Any], start_key: str, end_key: str) -> float | None:
-    try:
-        start = datetime.fromisoformat(str(trace.get(start_key) or ""))
-        end = datetime.fromisoformat(str(trace.get(end_key) or ""))
-    except Exception:
-        return None
-    return max(0.0, (end - start).total_seconds() * 1000.0)
 
 
 class ProductAgent(LlmAgent):
@@ -145,7 +121,7 @@ class ProductAgent(LlmAgent):
         self._plan_result_inbox_registered = False
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
-        self._runtime_repair_max_attempts = _DEFAULT_REPAIR_MAX_ATTEMPTS
+        self._runtime_repair_max_attempts = 3
         self._bridge_generation_mode = "auto"
         self._bridge_reasoning_mode = "single_shot"
         self.runtime_repair_state = "idle"
@@ -165,24 +141,6 @@ class ProductAgent(LlmAgent):
             "stage": "kickoff",
             "alert": None,
         }
-        self.startup_readiness: dict[str, Any] = {
-            "startup_ready": False,
-            "success": False,
-            "continuing": True,
-            "execution_blocked": True,
-            "message": "kickoff pending",
-            "retries_used": 0,
-            "retries_max": 0,
-            "violated_rules": [],
-            "witness_count": 0,
-            "updated_at_utc": "",
-            "product_name": name,
-            "product_jid": str(self.jid),
-            "stage": "kickoff",
-            "alert": None,
-            "used_precomputed_bundle": False,
-        }
-        self._startup_readiness_event = asyncio.Event()
         self._kickoff_result_event = asyncio.Event()
         precomputed_policy = (
             self.precomputed_bundle.get("replan_policy", {})
@@ -193,19 +151,10 @@ class ProductAgent(LlmAgent):
             try:
                 self._runtime_repair_max_attempts = max(
                     0,
-                    min(
-                        int(
-                            precomputed_policy.get(
-                                "auto_replan_max_attempts",
-                                _DEFAULT_REPAIR_MAX_ATTEMPTS,
-                            )
-                            or 0
-                        ),
-                        10,
-                    ),
+                    min(int(precomputed_policy.get("auto_replan_max_attempts", 3) or 0), 10),
                 )
             except Exception:
-                self._runtime_repair_max_attempts = _DEFAULT_REPAIR_MAX_ATTEMPTS
+                self._runtime_repair_max_attempts = 3
             self._bridge_generation_mode = str(
                 precomputed_policy.get("bridge_generation_mode", "auto") or "auto"
             ).strip().lower()
@@ -297,12 +246,19 @@ class ProductAgent(LlmAgent):
         trace_category: str = "agent",
     ) -> None:
         """Send a SPADE message synchronously from local helper code."""
-        send_agent_message_sync(
-            self,
-            msg,
-            trace_category=trace_category,
-            transport_label=trace_category,
-        )
+        if msg.empty_sender():
+            msg.sender = str(self.jid)
+
+        if self.container.has_agent(str(msg.to)):
+            self.container.get_agent(str(msg.to)).dispatch(msg)
+        else:
+            if self.client is None:
+                raise RuntimeError("agent client is not connected")
+            slixmpp_msg = msg.prepare(self.client)
+            slixmpp_msg.send()
+
+        msg.sent = True
+        self.traces.append(msg, category=trace_category)
 
     def _run_coroutine_on_agent_loop_sync(
         self,
@@ -603,76 +559,6 @@ class ProductAgent(LlmAgent):
         }
         if not self._kickoff_result_event.is_set():
             self._kickoff_result_event.set()
-
-    def _set_startup_readiness(
-        self,
-        *,
-        startup_ready: bool,
-        success: bool,
-        continuing: bool,
-        message: str,
-        retries_used: int,
-        retries_max: int,
-        violations: list[dict[str, Any]] | None = None,
-        alert: dict[str, Any] | None = None,
-        used_precomputed_bundle: bool = False,
-    ) -> None:
-        violated_rules, witness_count = self._violation_summary(violations)
-        self.startup_readiness = {
-            "startup_ready": bool(startup_ready),
-            "success": bool(success),
-            "continuing": bool(continuing),
-            "execution_blocked": not bool(success),
-            "message": str(message),
-            "retries_used": int(retries_used),
-            "retries_max": int(retries_max),
-            "violated_rules": violated_rules,
-            "witness_count": witness_count,
-            "updated_at_utc": self._utc_now_iso(),
-            "product_name": self.agent_name,
-            "product_jid": str(self.jid),
-            "stage": "kickoff",
-            "alert": dict(alert) if isinstance(alert, dict) else None,
-            "used_precomputed_bundle": bool(used_precomputed_bundle),
-        }
-        if not self._startup_readiness_event.is_set():
-            self._startup_readiness_event.set()
-
-    async def wait_for_startup_readiness(self, timeout: float | None = None) -> dict[str, Any]:
-        if not self._startup_readiness_event.is_set():
-            try:
-                if timeout is None:
-                    await self._startup_readiness_event.wait()
-                else:
-                    await asyncio.wait_for(self._startup_readiness_event.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                message = (
-                    f"{self.agent_name}: startup readiness timed out after {timeout:.1f}s."
-                )
-                return {
-                    "startup_ready": False,
-                    "success": False,
-                    "continuing": False,
-                    "execution_blocked": True,
-                    "message": message,
-                    "retries_used": 0,
-                    "retries_max": 0,
-                    "violated_rules": [],
-                    "witness_count": 0,
-                    "updated_at_utc": self._utc_now_iso(),
-                    "product_name": self.agent_name,
-                    "product_jid": str(self.jid),
-                    "stage": "kickoff",
-                    "alert": self._build_plan_safety_alert(
-                        stage="kickoff",
-                        message=message,
-                        retries_used=0,
-                        retries_max=0,
-                        violations=[],
-                    ),
-                    "used_precomputed_bundle": False,
-                }
-        return dict(self.startup_readiness)
 
     async def wait_for_kickoff_result(self, timeout: float | None = None) -> dict[str, Any]:
         if not self._kickoff_result_event.is_set():
@@ -1164,11 +1050,7 @@ class ProductAgent(LlmAgent):
     ) -> Message:
         """Create the structured SPADE Message that drives resource-agent task execution."""
         # Build a JSON payload with the instruction plus optional phase metadata.
-        body = {
-            "task_id": task_id,
-            "instruction": instruction,
-            "trace": _trace_with_timestamp({}, "product_dispatch_sent_at"),
-        }
+        body = {"task_id": task_id, "instruction": instruction}
         if phase_id:
             body["phase_id"] = phase_id
         msg = Message(to=to)
@@ -3535,11 +3417,7 @@ class ProductAgent(LlmAgent):
                     msg = Message(to=agent.cca_jid)
                     msg.set_metadata("type", "plan_safety_check")
                     msg.body = json.dumps(payload)
-                    await send_agent_message(
-                        self,
-                        msg,
-                        transport_label="product_plan_check",
-                    )
+                    await self.send(msg)
 
                     reply = None
                     while reply is None:
@@ -3564,16 +3442,6 @@ class ProductAgent(LlmAgent):
                         agent._clear_plan_safety_alert()
                         agent._ensure_plan_result_inbox()
                         agent.add_behaviour(agent._PlanExecutor())
-                        agent._set_startup_readiness(
-                            startup_ready=True,
-                            success=True,
-                            continuing=False,
-                            message=message,
-                            retries_used=retries_used,
-                            retries_max=max_retries,
-                            violations=[],
-                            used_precomputed_bundle=used_precomputed,
-                        )
                         agent._set_kickoff_result(
                             success=True,
                             message=message,
@@ -3600,17 +3468,6 @@ class ProductAgent(LlmAgent):
                             violations=violations,
                             paused=False,
                         )
-                        agent._set_startup_readiness(
-                            startup_ready=True,
-                            success=False,
-                            continuing=False,
-                            message=message,
-                            retries_used=0,
-                            retries_max=0,
-                            violations=violations,
-                            alert=alert,
-                            used_precomputed_bundle=used_precomputed,
-                        )
                         agent._set_kickoff_result(
                             success=False,
                             message=message,
@@ -3635,17 +3492,6 @@ class ProductAgent(LlmAgent):
                             violations=violations,
                             paused=False,
                         )
-                        agent._set_startup_readiness(
-                            startup_ready=True,
-                            success=False,
-                            continuing=False,
-                            message=message,
-                            retries_used=retries_used,
-                            retries_max=max_retries,
-                            violations=violations,
-                            alert=alert,
-                            used_precomputed_bundle=used_precomputed,
-                        )
                         agent._set_kickoff_result(
                             success=False,
                             message=message,
@@ -3664,30 +3510,6 @@ class ProductAgent(LlmAgent):
                         next_attempt,
                         max_retries,
                     )
-                    startup_message = (
-                        f"{agent.agent_name}: startup plan failed initial safety validation "
-                        f"({len(violations)} witness(es)); auto-replan {next_attempt}/{max_retries} "
-                        "running in background."
-                    )
-                    startup_alert = agent._set_plan_safety_alert(
-                        stage="kickoff",
-                        message=startup_message,
-                        retries_used=next_attempt,
-                        retries_max=max_retries,
-                        violations=violations,
-                        paused=False,
-                    )
-                    agent._set_startup_readiness(
-                        startup_ready=True,
-                        success=False,
-                        continuing=True,
-                        message=startup_message,
-                        retries_used=next_attempt,
-                        retries_max=max_retries,
-                        violations=violations,
-                        alert=startup_alert,
-                        used_precomputed_bundle=used_precomputed,
-                    )
                     try:
                         retries_used = next_attempt
                         await agent.process_planner.replan_with_feedback_offline(violations)
@@ -3703,17 +3525,6 @@ class ProductAgent(LlmAgent):
                                 retries_max=max_retries,
                                 violations=violations,
                                 paused=False,
-                            )
-                            agent._set_startup_readiness(
-                                startup_ready=True,
-                                success=False,
-                                continuing=False,
-                                message=message,
-                                retries_used=retries_used,
-                                retries_max=max_retries,
-                                violations=violations,
-                                alert=alert,
-                                used_precomputed_bundle=used_precomputed,
                             )
                             agent._set_kickoff_result(
                                 success=False,
@@ -3741,17 +3552,6 @@ class ProductAgent(LlmAgent):
                             violations=violations,
                             paused=False,
                         )
-                        agent._set_startup_readiness(
-                            startup_ready=True,
-                            success=False,
-                            continuing=False,
-                            message=message,
-                            retries_used=retries_used,
-                            retries_max=max_retries,
-                            violations=violations,
-                            alert=alert,
-                            used_precomputed_bundle=used_precomputed,
-                        )
                         agent._set_kickoff_result(
                             success=False,
                             message=message,
@@ -3771,17 +3571,6 @@ class ProductAgent(LlmAgent):
                     retries_max=max_retries,
                     violations=[],
                     paused=False,
-                )
-                agent._set_startup_readiness(
-                    startup_ready=False,
-                    success=False,
-                    continuing=False,
-                    message=message,
-                    retries_used=retries_used,
-                    retries_max=max_retries,
-                    violations=[],
-                    alert=alert,
-                    used_precomputed_bundle=used_precomputed,
                 )
                 agent._set_kickoff_result(
                     success=False,
@@ -3813,7 +3602,6 @@ class ProductAgent(LlmAgent):
             observations = payload.get("observations")
             if not isinstance(observations, dict):
                 observations = None
-            trace = _trace_with_timestamp(payload.get("trace"), "product_ack_received_at")
 
             # 1) Keep existing state map for UI/debug
             agent.task_states[task_id] = status
@@ -3831,15 +3619,13 @@ class ProductAgent(LlmAgent):
                     break
 
             # 3) Track execution timeline
-            timeline_row = {
+            from datetime import datetime, timezone
+            agent.execution_timeline.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "task_id": task_id,
                 "status": status,
                 "resource_jid": str(msg.sender),
-            }
-            if trace:
-                timeline_row["trace"] = trace
-            agent.execution_timeline.append(timeline_row)
+            })
 
             # 4) Update part location tracking
             if task_node:
@@ -3879,35 +3665,6 @@ class ProductAgent(LlmAgent):
             agent.logger.info(
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
             )
-            if trace:
-                hop_labels = [
-                    ("product_to_resource", "product_dispatch_sent_at", "resource_received_at"),
-                    ("resource_to_cca", "resource_safety_sent_at", "cca_resource_event_received_at"),
-                    ("cca_to_resource", "cca_decision_sent_at", "resource_decision_received_at"),
-                    ("resource_to_product_ack", "resource_ack_sent_at", "product_ack_received_at"),
-                ]
-                parts = []
-                for label, start_key, end_key in hop_labels:
-                    delta = _trace_delta_ms(trace, start_key, end_key)
-                    if delta is not None:
-                        parts.append(f"{label}={delta:.0f}ms")
-                if parts:
-                    agent.logger.info(
-                        "[Product] ACK trace (%s) %s",
-                        task_id,
-                        ", ".join(parts),
-                    )
-                transport_parts = [
-                    f"{key[:-10]}={value}"
-                    for key, value in sorted(trace.items())
-                    if str(key).endswith("_transport") and value
-                ]
-                if transport_parts:
-                    agent.logger.info(
-                        "[Product] ACK transport (%s) %s",
-                        task_id,
-                        ", ".join(transport_parts),
-                    )
 
     class _ReplanInbox(CyclicBehaviour):
         """Handle online replan requests from the CCA."""
@@ -4067,11 +3824,7 @@ class ProductAgent(LlmAgent):
                 check_msg = Message(to=agent.cca_jid)
                 check_msg.set_metadata("type", "plan_safety_check")
                 check_msg.body = json.dumps(check_payload)
-                await send_agent_message(
-                    self,
-                    check_msg,
-                    transport_label="product_plan_check",
-                )
+                await self.send(check_msg)
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
                 await asyncio.to_thread(agent._persist_resource_state)
@@ -4190,11 +3943,7 @@ class ProductAgent(LlmAgent):
             # Mark as "dispatched" (still waiting for ACK to flip to "completed")
             task_node["status"] = "dispatched"
 
-            await send_agent_message(
-                self,
-                msg,
-                transport_label="product_dispatch",
-            )
+            await self.send(msg)
             agent.logger.info(
                 f"[Product] Dispatched DAG task {task_id} -> {to} ({instruction})"
             )
