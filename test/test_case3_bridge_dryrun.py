@@ -70,6 +70,22 @@ def _load_local_env(path: Path) -> None:
 
 _load_local_env(ROOT / ".env")
 
+
+def _env_default(*env_names: str, fallback: str) -> str:
+    for env_name in env_names:
+        token = str(os.environ.get(env_name) or "").strip()
+        if token:
+            return token
+    return str(fallback or "").strip()
+
+
+def _normalize_reasoning_effort_for_model(model_name: str, effort: str) -> str:
+    normalized_model = str(model_name or "").strip().lower()
+    normalized_effort = str(effort or "").strip().lower()
+    if normalized_model.startswith("gpt-5.4") and normalized_effort == "minimal":
+        return "none"
+    return normalized_effort
+
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
     build_hybrid_session_seed,
@@ -101,7 +117,17 @@ CASE_ID = "case3_llm_bridge"
 FAILED_TASK_ID = "REQ_2_T4"
 ANCHOR_TASK_ID = "REQ_2_T3"
 GOAL_STATE = "assembled"
-DEFAULT_LIVE_MODEL = os.environ.get("CASE3_RECOVERY_MODEL", "gpt-5")
+DEFAULT_LIVE_MODEL = _env_default(
+    "CAIS_SPADE_LLM_MODEL",
+    "OPENAI_MODEL",
+    "CASE3_RECOVERY_MODEL",
+    fallback="gpt-5.4-mini",
+)
+DEFAULT_REASONING_EFFORT = _env_default(
+    "CAIS_SPADE_REASONING_EFFORT",
+    "OPENAI_REASONING_EFFORT",
+    fallback="medium",
+)
 DEBUG_DIR = Path("cais_spade_llm/monitor/debug")
 _POST_VALIDATION_INSPECTION_TURNS = 3
 CASE3_COMPLETED_TASK_IDS = (
@@ -194,6 +220,7 @@ class FakeProductAgent:
         tools_catalog: list[dict[str, Any]],
         product_geometry: dict[str, Any],
         llm_model: str | None = None,
+        llm_reasoning_effort: str | None = None,
         precomputed_bundle: dict[str, Any] | None = None,
     ) -> None:
         self.jid = "assembly_board-v1@localhost"
@@ -207,6 +234,10 @@ class FakeProductAgent:
         self.tools_catalog = deepcopy(tools_catalog)
         self.product_geometry = deepcopy(product_geometry)
         self.llm_model = str(llm_model or DEFAULT_LIVE_MODEL).strip()
+        self.llm_reasoning_effort = _normalize_reasoning_effort_for_model(
+            self.llm_model,
+            str(llm_reasoning_effort or DEFAULT_REASONING_EFFORT).strip(),
+        )
         self.precomputed_bundle = deepcopy(precomputed_bundle or {})
         precomputed_policy = (
             self.precomputed_bundle.get("replan_policy", {})
@@ -261,6 +292,7 @@ class FakeProductAgent:
             r = client.chat.completions.create(
                 model=self.llm_model,
                 messages=[{"role": "user", "content": prompt}],
+                reasoning_effort=self.llm_reasoning_effort,
             )
             return (r.choices[0].message.content or "").strip()
 
@@ -292,6 +324,7 @@ class FakeProductAgent:
                 kwargs: dict[str, Any] = {
                     "model": self.llm_model,
                     "messages": msgs,
+                    "reasoning_effort": self.llm_reasoning_effort,
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": response_format,
@@ -1580,7 +1613,7 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         {
             "outline_id": "RECOVERY_SEQ1",
             "resource_jid": "ur5e@localhost",
-            "action_name": "release MCP to prusa-mk4-2",
+            "event_name": "release MCP to prusa-mk4-2",
             "description": "Move UR5e to a non-interfering position preparing for MCP delivery.",
             "part_name": "MCP",
             "target_ref": "prusa-mk4-2",
@@ -1603,7 +1636,7 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         {
             "outline_id": "RECOVERY_SEQ2",
             "resource_jid": "xarm6@localhost",
-            "action_name": "recover resource",
+            "event_name": "recover resource",
             "description": "Attempt to restart xarm6 to transition from failed to idle state.",
             "action_type": "recover_resource",
             "expected_start_state": {
@@ -1617,7 +1650,7 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         {
             "outline_id": "RECOVERY_SEQ3",
             "resource_jid": "ur5e@localhost",
-            "action_name": "acquire LG",
+            "event_name": "acquire LG",
             "description": "Position UR5e to pick up LG which is misplaced at observed_pose.",
             "part_name": "LG",
             "action_type": "acquire_part",
@@ -1639,7 +1672,7 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         {
             "outline_id": "RECOVERY_SEQ4",
             "resource_jid": "ur5e@localhost",
-            "action_name": "release LG to assembly_board-v1",
+            "event_name": "release LG to assembly_board-v1",
             "description": "Position UR5e to place LG at the designated assembly board location.",
             "part_name": "LG",
             "target_ref": "assembly_board-v1",
@@ -2285,7 +2318,7 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
             {
                 "outline_id": "RECOVERY_SEQ1",
                 "resource_jid": "xarm6@localhost",
-                "action_name": "recover xarm6 to idle",
+                "event_name": "recover xarm6 to idle",
                 "description": "Accepted prefix should be rendered as feedback.",
             }
         ]
@@ -2315,7 +2348,7 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
                 "candidate_index": 0,
                 "task": {
                     "resource_jid": "xarm6@localhost",
-                    "action_name": "pick LG again",
+                    "event_name": "pick LG again",
                     "description": "Rejected action label should not be rendered.",
                     "part_name": "LG",
                     "outline_id": "RECOVERY_SEQ3_1",
@@ -2334,7 +2367,7 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
                 "candidate_index": 1,
                 "task": {
                     "resource_jid": "ur5e@localhost",
-                    "action_name": "move MCP onward",
+                    "event_name": "move MCP onward",
                     "description": "Another rejected label should not be rendered.",
                     "part_name": "MCP",
                     "target_ref": "assembly_board-v1",
@@ -2359,17 +2392,17 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
 
         assert "current plant state" not in prompt.lower()
         assert "S_opaque_internal_state" not in prompt
-        assert "Accepted Outline Summary" in prompt
+        assert "Accepted Transition Prefix" in prompt
         assert "recover xarm6 to idle" in prompt
         assert "Plant Automaton Progress" not in prompt
         assert "Accepted trace" not in prompt
         assert "DES Supervisor Context" not in prompt
         assert "controllable recovery events" not in prompt
-        assert "Current Recovery Conditions" in prompt
+        assert "Open Guard / Marking Conditions" in prompt
         assert "xarm6@localhost must reach idle" in prompt
         assert "Rejected Events (do not re-propose)" not in prompt
         assert "Last Rejected Candidates" not in prompt
-        assert "Recent Rejected Candidate Feedback" in prompt
+        assert "Disabled And Blocked Candidate Events" in prompt
         assert "Recent Rejected Candidates And Validator Feedback" not in prompt
         assert "Assembly Requirements" not in prompt
         assert "xarm6 Assemble LG" not in prompt
@@ -2384,8 +2417,10 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
         assert "xarm6@localhost: outside workspace (y=0.20 > y_max_m=0.10)" not in prompt
         assert "ur5e@localhost: inside workspace" not in prompt
         assert "Rejected Candidate Facts" not in prompt
-        assert "workspace_unreachable" in prompt
-        assert "part_relocation_without_carrier" in prompt
+        assert "candidate_event=RECOVERY_SEQ3_1/xarm6@localhost/LG" in prompt
+        assert "diagnosis=feasibility_guard_disabled" in prompt
+        assert "candidate_event=RECOVERY_SEQ3_2/ur5e@localhost/MCP->assembly_board-v1" in prompt
+        assert "diagnosis=event_not_enabled" in prompt
         assert "Candidate Field Semantics" not in prompt
         assert "Candidate Encoding Guide" not in prompt
         assert "Candidate Field Notes" not in prompt
@@ -2411,25 +2446,25 @@ def test_v2_candidate_prompt_keeps_feedback_without_symbolic_tables() -> None:
         assert "Location Reference Facts" not in prompt
         assert "staging anchors:" not in prompt
         assert "workspace x[-0.70,0.70], y[-0.35,1.10], z[0.85,1.60]" in prompt
-        assert "workspace x[-0.60,0.60], y[-1.00,0.35], z[0.90,1.50]" in prompt
+        assert "workspace x[-0.60,0.60], y[-1.00,0.10], z[0.90,1.50]" in prompt
         assert "current_pose(" in prompt
         assert "pick LG again" not in prompt
         assert "move MCP onward" not in prompt
-        assert "xarm6@localhost / LG [workspace_unreachable]: outside workspace" in prompt
-        assert "persists while observed_pose and workspace_bounds are unchanged" in prompt
+        assert "state_evidence=resource_jid=xarm6@localhost; part_name=LG" in prompt
+        assert "persistence=diagnosis persists until the relevant projected state facts change" in prompt
         assert (
-            "ur5e@localhost / MCP to assembly_board-v1 "
-            "[part_relocation_without_carrier]: resource does not hold MCP"
+            "state_evidence=resource_jid=ur5e@localhost; part_name=MCP; "
+            "target_ref=assembly_board-v1; current_location=assembly_board-approach"
         ) in prompt
         assert "Rejected action label should not be rendered." not in prompt
         assert "Another rejected label should not be rendered." not in prompt
         assert "LG by xarm6" not in prompt
         assert "MCP by ur5e" not in prompt
         assert '"current_holder_resource_jid": "ur5e@localhost"' not in prompt
-        assert '"current_holder_resource_jid": null' in prompt
-        assert "root cause of each rejection" in prompt
-        assert "Prior Rejected-Turn Reasoning" in prompt
-        assert "xarm6 should handle LG because it is near the assembly station." in prompt
+        assert "current_holder_resource_jid=null" in prompt
+        assert "root cause of each rejection" not in prompt
+        assert "Prior Rejected-Turn Reasoning" not in prompt
+        assert "xarm6 should handle LG because it is near the assembly station." not in prompt
 
     asyncio.run(_run())
 
@@ -2493,7 +2528,7 @@ def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
                         "candidate_index": 0,
                         "task": {
                             "resource_jid": "ur5e@localhost",
-                            "action_name": "old direct LG placement",
+                            "event_name": "old direct LG placement",
                             "description": "Old rejection from a prior state.",
                             "part_name": "LG",
                             "target_ref": "assembly_board-v1",
@@ -2515,7 +2550,7 @@ def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
                 "selected_next_task": {
                     "outline_id": "RECOVERY_SEQ3",
                     "resource_jid": "ur5e@localhost",
-                    "action_name": "acquire LG",
+                    "event_name": "acquire LG",
                     "description": "Accepted state-changing event.",
                     "part_name": "LG",
                 },
@@ -2524,7 +2559,7 @@ def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
                         "candidate_index": 1,
                         "task": {
                             "resource_jid": "xarm6@localhost",
-                            "action_name": "old xarm6 LG attempt",
+                            "event_name": "old xarm6 LG attempt",
                             "description": "Rejected in the same accepted batch.",
                             "part_name": "LG",
                         },
@@ -2580,10 +2615,24 @@ def test_v2_candidate_validator_rejects_unlisted_target_ref() -> None:
                     "candidate_tasks": [
                         {
                             "resource_jid": "ur5e@localhost",
-                            "action_name": "move LG to invented anchor",
+                            "event_name": "move LG to invented anchor",
                             "description": "Release LG to an unlisted intermediate anchor.",
                             "part_name": "LG",
                             "target_ref": "prusa-mk4-2@intermediate_anchor",
+                            "expected_start_state": {
+                                "resource_state": "picked",
+                                "held_part": "LG",
+                                "part_state": "in_gripper",
+                                "part_location": "ur5e@localhost_gripper",
+                                "part_holder_resource_jid": "ur5e@localhost",
+                            },
+                            "expected_end_state": {
+                                "resource_state": "idle",
+                                "held_part": None,
+                                "part_state": "misplaced",
+                                "part_location": "prusa-mk4-2@intermediate_anchor",
+                                "part_holder_resource_jid": None,
+                            },
                         }
                     ],
                 },
@@ -2600,6 +2649,61 @@ def test_v2_candidate_validator_rejects_unlisted_target_ref() -> None:
         assert "references unknown location token" in str(finding.get("reason") or "")
         assert dict(finding.get("evidence") or {}).get("location_token") == (
             "prusa-mk4-2@intermediate_anchor"
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_validator_rejects_legacy_event_label_field() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        _seed_case3_post_mcp_release_state(session_state)
+        legacy_field = "action" + "_name"
+
+        decision, turn_entry = await (
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "Try the removed alias field.",
+                    "candidate_tasks": [
+                        {
+                            "resource_jid": "ur5e@localhost",
+                            legacy_field: "recover grounded LG",
+                            "description": "Acquire LG from the observed pose.",
+                            "part_name": "LG",
+                            "expected_start_state": {
+                                "resource_state": "idle",
+                                "held_part": None,
+                                "part_state": "misplaced",
+                                "part_location": None,
+                                "part_holder_resource_jid": None,
+                            },
+                            "expected_end_state": {
+                                "resource_state": "picked",
+                                "held_part": "LG",
+                                "part_state": "in_gripper",
+                                "part_location": "ur5e@localhost_gripper",
+                                "part_holder_resource_jid": "ur5e@localhost",
+                            },
+                        }
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_revision"
+        evaluation = dict((turn_entry.get("candidate_evaluations") or [])[0])
+        assert evaluation.get("valid") is False
+        finding = dict((evaluation.get("validation_findings") or [])[0])
+        assert dict(finding.get("evidence") or {}).get("field") == "event_name"
+        assert "candidate must include event_name naming the DES event" in str(
+            finding.get("reason") or ""
         )
 
     asyncio.run(_run())
@@ -2668,9 +2772,23 @@ def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
                     "candidate_tasks": [
                         {
                             "resource_jid": "ur5e@localhost",
-                            "action_name": "recover grounded LG",
+                            "event_name": "recover grounded LG",
                             "description": "Acquire LG from the observed pose.",
                             "part_name": "LG",
+                            "expected_start_state": {
+                                "resource_state": "idle",
+                                "held_part": None,
+                                "part_state": "misplaced",
+                                "part_location": None,
+                                "part_holder_resource_jid": None,
+                            },
+                            "expected_end_state": {
+                                "resource_state": "picked",
+                                "held_part": "LG",
+                                "part_state": "in_gripper",
+                                "part_location": "ur5e@localhost_gripper",
+                                "part_holder_resource_jid": "ur5e@localhost",
+                            },
                         }
                     ],
                 },
@@ -2683,7 +2801,8 @@ def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
         selected = dict(turn_entry.get("selected_next_task") or {})
         assert selected.get("resource_jid") == "ur5e@localhost"
         assert selected.get("part_name") == "LG"
-        assert selected.get("action_type") == "acquire_part"
+        assert selected.get("event_name") == "recover grounded LG"
+        assert dict(selected.get("action_target") or {}).get("source_location") == "observed_pose"
         evaluation = dict((turn_entry.get("candidate_evaluations") or [])[0])
         assert evaluation.get("valid") is True
         assert dict(evaluation.get("progress_detail") or {}).get("blocker_part_acquired") == 1
@@ -2721,9 +2840,23 @@ def test_v2_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
                     "candidate_tasks": [
                         {
                             "resource_jid": "xarm6@localhost",
-                            "action_name": "try LG again",
+                            "event_name": "try LG again",
                             "description": "Attempt the unreachable LG pose again.",
                             "part_name": "LG",
+                            "expected_start_state": {
+                                "resource_state": "idle",
+                                "held_part": None,
+                                "part_state": "misplaced",
+                                "part_location": None,
+                                "part_holder_resource_jid": None,
+                            },
+                            "expected_end_state": {
+                                "resource_state": "picked",
+                                "held_part": "LG",
+                                "part_state": "in_gripper",
+                                "part_location": "xarm6@localhost_gripper",
+                                "part_holder_resource_jid": "xarm6@localhost",
+                            },
                         }
                     ],
                 },
@@ -3450,7 +3583,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_3A",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "idle prep",
+                        "event_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "failed"},
                         "expected_end_state": {"resource_state": "failed"},
@@ -3458,7 +3591,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "FIX_XARM6",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "reset resource",
+                        "event_name": "reset resource",
                         "description": "Reset xarm6 to idle.",
                         "expected_start_state": {"resource_state": "failed"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3466,7 +3599,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_3C",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "relocate part",
+                        "event_name": "relocate part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
                         "target_ref": "assembly_board-v1",
@@ -3484,7 +3617,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4A",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "pick up",
+                        "event_name": "pick up",
                         "description": "Pick unreachable LG.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3499,7 +3632,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4B",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "idle prep",
+                        "event_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3507,7 +3640,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_4C",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "place part",
+                        "event_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
                         "target_ref": "assembly_board-v1",
@@ -3526,7 +3659,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5A",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "idle prep",
+                        "event_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3534,7 +3667,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5B",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "pick up",
+                        "event_name": "pick up",
                         "description": "Pick unreachable LG again.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3549,7 +3682,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_5C",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "place part",
+                        "event_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
                         "target_ref": "assembly_board-v1",
@@ -3568,7 +3701,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6A",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "place part",
+                        "event_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
                         "target_ref": "assembly_board-v1",
@@ -3582,7 +3715,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6B",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "idle prep",
+                        "event_name": "idle prep",
                         "description": "No-op prep step.",
                         "expected_start_state": {"resource_state": "idle"},
                         "expected_end_state": {"resource_state": "idle"},
@@ -3590,7 +3723,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_6C",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "pick up",
+                        "event_name": "pick up",
                         "description": "Pick unreachable LG.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3610,7 +3743,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7A",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "pick up",
+                        "event_name": "pick up",
                         "description": "Pick unreachable LG again.",
                         "part_name": "LG",
                         "expected_start_state": {"resource_state": "idle"},
@@ -3625,7 +3758,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7B",
                         "resource_jid": "ur5e@localhost",
-                        "action_name": "hold position",
+                        "event_name": "hold position",
                         "description": "Hold position while xarm6 recovery remains unresolved.",
                         "expected_start_state": {"resource_state": "picked"},
                         "expected_end_state": {"resource_state": "picked"},
@@ -3633,7 +3766,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
                     {
                         "outline_id": "BAD_7C",
                         "resource_jid": "xarm6@localhost",
-                        "action_name": "place part",
+                        "event_name": "place part",
                         "description": "Relocate LG without carrying it.",
                         "part_name": "LG",
                         "target_ref": "assembly_board-v1",

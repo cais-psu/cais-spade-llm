@@ -551,11 +551,7 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("des_plant") or {},
         event_name=event_name,
         event_dict={
-            "name": str(
-                selected_next_task.get("event_name")
-                or selected_next_task.get("action_name")
-                or ""
-            ).strip(),
+            "name": str(selected_next_task.get("event_name") or "").strip(),
             "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
             "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
             "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
@@ -571,11 +567,7 @@ async def _handle_outline_incremental_candidates_validated(
     if safety_dfas:
         _violates, new_q, _violated_ids = _shared._advance_des_safety_state(
             candidate_event={
-                "name": str(
-                    selected_next_task.get("event_name")
-                    or selected_next_task.get("action_name")
-                    or ""
-                ).strip(),
+                "name": str(selected_next_task.get("event_name") or "").strip(),
                 "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
                 "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
                 "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,

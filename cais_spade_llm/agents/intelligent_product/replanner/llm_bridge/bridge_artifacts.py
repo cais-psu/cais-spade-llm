@@ -46,14 +46,14 @@ def _artifact_task_action_summary(task: dict[str, Any]) -> str:
     description = str(task.get("description") or "").strip()
     if description:
         return description
-    action_name = str(task.get("action_name") or task.get("name") or "").strip()
+    event_name = str(task.get("event_name") or task.get("name") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
     location_ref = str(task.get("location_ref") or task.get("target_ref") or "").strip()
-    if action_name:
+    if event_name:
         qualifiers = [item for item in (part_name, location_ref) if item]
         if qualifiers:
-            return f"{action_name} ({' -> '.join(qualifiers)})"
-        return action_name
+            return f"{event_name} ({' -> '.join(qualifiers)})"
+        return event_name
     if part_name and location_ref:
         return f"{part_name} -> {location_ref}"
     return part_name or location_ref or "state transition"

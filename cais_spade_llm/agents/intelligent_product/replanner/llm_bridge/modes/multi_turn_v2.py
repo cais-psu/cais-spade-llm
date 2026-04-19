@@ -2591,16 +2591,6 @@ def _resource_current_state_token(resource_row: dict[str, Any]) -> str:
     return str(resource_row.get("current_state") or resource_row.get("state") or "").strip()
 
 
-def _candidate_action_name_from_task(task: dict[str, Any]) -> str:
-    event_name = str(task.get("event_name") or "").strip()
-    if event_name:
-        return event_name
-    legacy_action_name = str(task.get("action_name") or "").strip()
-    if legacy_action_name:
-        return legacy_action_name
-    return ""
-
-
 def _candidate_target_ref_from_surface_task(task: dict[str, Any]) -> str:
     if str(task.get("target_ref") or "").strip():
         return str(task.get("target_ref") or "").strip()
@@ -2639,23 +2629,6 @@ def _task_ends_with_part_clear_of_resource(task: dict[str, Any]) -> bool:
     )
 
 
-def _normalize_place_verb_in_action_name(task: dict[str, Any]) -> None:
-    """Rewrite 'release X to Y' -> 'place X at Y' when the event drops a held part at a target.
-
-    Leaves event_name untouched so DES-level identity tokens remain stable.
-    """
-    if not _task_ends_with_part_clear_of_resource(task):
-        return
-    action_name = str(task.get("action_name") or "").strip()
-    if not action_name:
-        return
-    first, _, rest = action_name.partition(" ")
-    if first.lower() != "release":
-        return
-    rewritten = f"place {rest}".replace(" to ", " at ", 1) if rest else "place"
-    task["action_name"] = rewritten
-
-
 def _candidate_effect_match_key(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "expected_end_state": deepcopy(task.get("expected_end_state") or {}),
@@ -2674,19 +2647,24 @@ def _normalize_candidate_task(
     normalized: dict[str, Any] = {
         "resource_jid": str(raw_task.get("resource_jid") or "").strip(),
     }
-    action_name = _candidate_action_name_from_task(raw_task)
+    event_name = str(raw_task.get("event_name") or "").strip()
     description = str(raw_task.get("description") or "").strip()
     part_name = str(raw_task.get("part_name") or "").strip()
     target_ref = _candidate_target_ref_from_surface_task(raw_task)
-    if action_name:
-        normalized["event_name"] = action_name
-        normalized["action_name"] = action_name
+    if event_name:
+        normalized["event_name"] = event_name
     if description:
         normalized["description"] = description
     if part_name:
         normalized["part_name"] = part_name
     if target_ref:
         normalized["target_ref"] = target_ref
+    raw_start_state = raw_task.get("expected_start_state")
+    if isinstance(raw_start_state, dict):
+        normalized["expected_start_state"] = deepcopy(raw_start_state)
+    raw_end_state = raw_task.get("expected_end_state")
+    if isinstance(raw_end_state, dict):
+        normalized["expected_end_state"] = deepcopy(raw_end_state)
     if original_outline_id:
         normalized["llm_outline_id"] = original_outline_id
     normalized["outline_id"] = _candidate_outline_id(
@@ -2694,6 +2672,90 @@ def _normalize_candidate_task(
         candidate_index=candidate_index,
     )
     return normalized
+
+
+def _candidate_state_completeness_findings(
+    *,
+    candidate_task: dict[str, Any],
+    part_name: str,
+    start_state: dict[str, Any],
+    end_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Require the LLM to emit every canonical predicate key.
+
+    Because the bridge no longer synthesizes state, any missing key would
+    leave the symbolic state stale. Surface the omission as a schema
+    finding so the LLM is asked to emit the field.
+    """
+    findings: list[dict[str, Any]] = []
+    required_always = ("resource_state",)
+    required_with_part = (
+        "held_part",
+        "part_state",
+        "part_location",
+        "part_holder_resource_jid",
+    )
+    required_keys = list(required_always) + (list(required_with_part) if part_name else [])
+    for side, state in (("expected_start_state", start_state), ("expected_end_state", end_state)):
+        missing = [key for key in required_keys if key not in state]
+        if missing:
+            findings.append(
+                _candidate_schema_finding(
+                    task=candidate_task,
+                    reason=(
+                        f"{side} is missing required predicate key(s): "
+                        f"{', '.join(missing)}"
+                    ),
+                    evidence={"field": side, "missing": missing},
+                )
+            )
+    return findings
+
+
+def _candidate_state_consistency_findings(
+    *,
+    candidate_task: dict[str, Any],
+    resource_jid: str,
+    part_name: str,
+    end_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    if part_name and "held_part" in end_state:
+        held = end_state.get("held_part")
+        if held not in (None, "", part_name):
+            findings.append(
+                _candidate_schema_finding(
+                    task=candidate_task,
+                    reason=(
+                        f"expected_end_state.held_part '{held}' contradicts "
+                        f"part_name slot '{part_name}' (must equal part_name or null)"
+                    ),
+                    evidence={
+                        "field": "expected_end_state.held_part",
+                        "held_part": held,
+                        "part_name": part_name,
+                    },
+                )
+            )
+    if resource_jid and "part_holder_resource_jid" in end_state:
+        holder = end_state.get("part_holder_resource_jid")
+        if holder not in (None, "", resource_jid):
+            findings.append(
+                _candidate_schema_finding(
+                    task=candidate_task,
+                    reason=(
+                        f"expected_end_state.part_holder_resource_jid '{holder}' "
+                        f"contradicts resource_jid slot '{resource_jid}' "
+                        "(must equal resource_jid or null)"
+                    ),
+                    evidence={
+                        "field": "expected_end_state.part_holder_resource_jid",
+                        "part_holder_resource_jid": holder,
+                        "resource_jid": resource_jid,
+                    },
+                )
+            )
+    return findings
 
 
 def _derive_candidate_outline_task(
@@ -2707,11 +2769,7 @@ def _derive_candidate_outline_task(
         prepared_bridge_request=prepared_bridge_request,
     )
     resource_jid = str(candidate_task.get("resource_jid") or "").strip()
-    action_name = str(
-        candidate_task.get("event_name")
-        or candidate_task.get("action_name")
-        or ""
-    ).strip()
+    event_name = str(candidate_task.get("event_name") or "").strip()
     part_name = str(candidate_task.get("part_name") or "").strip()
     target_ref = str(candidate_task.get("target_ref") or "").strip()
     description = str(candidate_task.get("description") or "").strip()
@@ -2727,14 +2785,11 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    if not action_name:
+    if not event_name:
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason=(
-                    "candidate must include event_name naming the DES event "
-                    "(legacy action_name accepted)"
-                ),
+                reason="candidate must include event_name naming the DES event",
                 evidence={"field": "event_name"},
             )
         ]
@@ -2758,64 +2813,64 @@ def _derive_candidate_outline_task(
                 )
             ]
 
-    start_state: dict[str, Any] = {}
-    current_resource_state = _resource_current_state_token(resource_row)
-    if current_resource_state or "current_state" in resource_row or "state" in resource_row:
-        start_state["resource_state"] = current_resource_state or None
-    if "held_part" in resource_row:
-        start_state["held_part"] = resource_row.get("held_part") or None
+    raw_start_state = candidate_task.get("expected_start_state")
+    if not isinstance(raw_start_state, dict):
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason="candidate must include expected_start_state object",
+                evidence={"field": "expected_start_state"},
+            )
+        ]
+    raw_end_state = candidate_task.get("expected_end_state")
+    if not isinstance(raw_end_state, dict):
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason="candidate must include expected_end_state object",
+                evidence={"field": "expected_end_state"},
+            )
+        ]
+    start_state: dict[str, Any] = deepcopy(raw_start_state)
+    end_state: dict[str, Any] = deepcopy(raw_end_state)
 
-    if part_name:
-        current_part_state = _part_current_state_token(part_row)
-        current_part_location = _part_current_location_token(part_row)
-        current_part_holder = _part_current_holder_token(part_row)
-        if current_part_state or "current_state" in part_row or "state" in part_row:
-            start_state["part_state"] = current_part_state or None
-        if current_part_location:
-            start_state["part_location"] = current_part_location
-        elif isinstance(part_row.get("observed_pose"), dict) and "x" in dict(part_row.get("observed_pose") or {}):
-            start_state["part_location"] = "observed_pose"
-        else:
-            start_state["part_location"] = None
-        if current_part_holder or "current_holder_resource_jid" in part_row or "holder_resource_jid" in part_row:
-            start_state["part_holder_resource_jid"] = current_part_holder or None
+    completeness_findings = _candidate_state_completeness_findings(
+        candidate_task=candidate_task,
+        part_name=part_name,
+        start_state=start_state,
+        end_state=end_state,
+    )
+    if completeness_findings:
+        return None, completeness_findings
+
+    consistency_findings = _candidate_state_consistency_findings(
+        candidate_task=candidate_task,
+        resource_jid=resource_jid,
+        part_name=part_name,
+        end_state=end_state,
+    )
+    if consistency_findings:
+        return None, consistency_findings
 
     action_target: dict[str, Any] = {}
-    end_state: dict[str, Any] = {}
-
     if part_name and not target_ref:
         current_part_location = _part_current_location_token(part_row)
         if current_part_location:
             action_target["source_location"] = current_part_location
         elif isinstance(part_row.get("observed_pose"), dict) and "x" in dict(part_row.get("observed_pose") or {}):
             action_target["source_location"] = "observed_pose"
-        end_state.update({
-            "resource_state": "picked",
-            "held_part": part_name,
-            "part_location": f"{resource_jid}_gripper",
-            "part_holder_resource_jid": resource_jid,
-        })
     elif part_name and target_ref:
         action_target["target_location"] = target_ref
-        end_state.update({
-            "resource_state": "idle",
-            "held_part": None,
-            "part_location": target_ref,
-            "part_holder_resource_jid": None,
-        })
-    else:
-        end_state["resource_state"] = "idle"
-        if target_ref:
-            if target_ref in _candidate_named_pose_tokens(resource_row):
-                action_target["named_pose"] = target_ref
-            else:
-                action_target["target_location"] = target_ref
+    elif target_ref:
+        if target_ref in _candidate_named_pose_tokens(resource_row):
+            action_target["named_pose"] = target_ref
+        else:
+            action_target["target_location"] = target_ref
 
     normalized_task: dict[str, Any] = {
         "outline_id": str(candidate_task.get("outline_id") or "").strip(),
         "resource_jid": resource_jid,
-        "event_name": action_name,
-        "action_name": action_name,
+        "event_name": event_name,
         "description": description,
         "expected_start_state": start_state,
         "expected_end_state": end_state,
@@ -2839,7 +2894,6 @@ def _commit_selected_candidate_task(
     committed = deepcopy(task or {})
     committed["candidate_outline_id"] = str(committed.get("outline_id") or "").strip()
     committed["outline_id"] = _committed_outline_id(sequence_index=sequence_index)
-    _normalize_place_verb_in_action_name(committed)
     return committed
 
 
@@ -2847,18 +2901,20 @@ def _apply_task_effects_to_symbolic_state(
     task: dict[str, Any],
     session_state: dict[str, Any],
 ) -> None:
-    """Update symbolic resource/part state based on accepted task's expected_end_state."""
+    """Update symbolic resource/part state from accepted task's expected_end_state.
+
+    Pass-through only: the LLM is authoritative. No slot-based inference.
+    Missing end-state keys leave the corresponding symbolic field unchanged;
+    a completeness check in _derive_candidate_outline_task surfaces omissions
+    at candidate-validation time.
+    """
     resource_jid = str(task.get("resource_jid") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
-    target_ref = str(task.get("target_ref") or "").strip()
     end_state = dict(task.get("expected_end_state") or {})
-    ends_with_part_held = _task_ends_with_part_held_by_resource(task)
-    ends_with_part_clear = _task_ends_with_part_clear_of_resource(task)
 
     symbolic_resources = dict(session_state.get("symbolic_resources") or {})
     symbolic_parts = dict(session_state.get("symbolic_parts") or {})
 
-    # Update resource
     if resource_jid:
         res = symbolic_resources.setdefault(resource_jid, {"resource_jid": resource_jid})
         if "resource_state" in end_state:
@@ -2867,41 +2923,16 @@ def _apply_task_effects_to_symbolic_state(
             res["held_part"] = end_state["held_part"] or None
             res["gripper_state"] = "closed" if end_state["held_part"] else "open"
 
-    # Update part
     if part_name:
         part = symbolic_parts.setdefault(part_name, {"part_name": part_name})
         if "part_state" in end_state:
             part["current_state"] = end_state["part_state"]
-        elif ends_with_part_held:
-            part["current_state"] = "in_gripper"
-        elif ends_with_part_clear:
-            goal_location = str(part.get("goal_location") or "").strip()
-            resolved_target = str(end_state.get("part_location") or target_ref or "").strip()
-            part["current_state"] = "placed" if goal_location and resolved_target == goal_location else "misplaced"
         if "part_location" in end_state:
             part["current_location"] = end_state["part_location"] or None
-        elif ends_with_part_held and resource_jid:
-            part["current_location"] = f"{resource_jid}_gripper"
-        elif ends_with_part_clear:
-            part["current_location"] = target_ref or None
         if "part_holder_resource_jid" in end_state:
             part["current_holder_resource_jid"] = (
                 end_state["part_holder_resource_jid"] or None
             )
-        elif ends_with_part_held:
-            part["current_holder_resource_jid"] = resource_jid or None
-        elif ends_with_part_clear:
-            part["current_holder_resource_jid"] = None
-        elif "held_part" in end_state:
-            part["current_holder_resource_jid"] = resource_jid if end_state["held_part"] == part_name else None
-        if "held_part" in end_state and end_state["held_part"] == part_name and "part_location" not in end_state:
-            part["current_location"] = f"{resource_jid}_gripper"
-        elif (
-            "held_part" in end_state
-            and end_state["held_part"] in (None, "")
-            and "part_holder_resource_jid" not in end_state
-        ):
-            part["current_holder_resource_jid"] = None
 
     session_state["symbolic_resources"] = symbolic_resources
     session_state["symbolic_parts"] = symbolic_parts
@@ -3403,11 +3434,7 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("des_plant") or {},
         event_name=event_name,
         event_dict={
-            "name": str(
-                selected_next_task.get("event_name")
-                or selected_next_task.get("action_name")
-                or ""
-            ).strip(),
+            "name": str(selected_next_task.get("event_name") or "").strip(),
             "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
             "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
             "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
@@ -3424,11 +3451,7 @@ async def _handle_outline_incremental_candidates_validated(
     if safety_dfas:
         _violates, new_q, _violated_ids = _advance_des_safety_state(
             candidate_event={
-                "name": str(
-                    selected_next_task.get("event_name")
-                    or selected_next_task.get("action_name")
-                    or ""
-                ).strip(),
+                "name": str(selected_next_task.get("event_name") or "").strip(),
                 "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
                 "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
                 "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
@@ -4001,12 +4024,7 @@ async def _handle_primitive_generation_phase(
             "des_event_id": outline_id,
             "resource_jid": resource_jid,
             "part_name": str(expected_event.get("part_name") or "").strip() or None,
-            "event_name": str(
-                expected_event.get("event_name")
-                or expected_event.get("action_name")
-                or ""
-            ).strip(),
-            "action_name": str(expected_event.get("action_name") or "").strip(),
+            "event_name": str(expected_event.get("event_name") or "").strip(),
             "description": str(expected_event.get("description") or "").strip(),
             "primitive_steps": deepcopy(primitive_steps),
             "projected_snapshot": deepcopy(projected_snapshot),
@@ -4158,7 +4176,6 @@ _ARTIFACT_TASK_KEYS = (
     "llm_outline_id",
     "resource_jid",
     "event_name",
-    "action_name",
     "description",
     "part_name",
     "target_ref",
@@ -4448,9 +4465,7 @@ def _build_final_output_payload(
             "des_event_id": outline_id,
             "event_name": str(
                 event.get("event_name")
-                or event.get("action_name")
                 or primitive_row.get("event_name")
-                or primitive_row.get("action_name")
                 or ""
             ).strip(),
             "resource_jid": str(event.get("resource_jid") or "").strip(),

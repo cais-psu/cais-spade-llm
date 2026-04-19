@@ -598,7 +598,7 @@ def _outline_task_action_candidates(
                 row.get("resource_type")
             )
 
-    modeled_action_names: set[str] = set()
+    modeled_task_actions: set[str] = set()
     pending_task_resource_by_id: dict[str, str] = {}
 
     actions_by_resource: dict[str, dict[str, dict[str, Any]]] = {
@@ -608,14 +608,14 @@ def _outline_task_action_candidates(
     def _merge_action(
         *,
         resource_jid: str,
-        action_name: str,
+        task_action: str,
         source_type: str,
         description: str = "",
         primitive_kind: str = "",
         required_params: list[str] | None = None,
     ) -> None:
         jid = str(resource_jid or "").strip()
-        action = str(action_name or "").strip()
+        action = str(task_action or "").strip()
         if not jid or not action:
             return
         if jid not in actions_by_resource:
@@ -659,10 +659,10 @@ def _outline_task_action_candidates(
     focused_resource_jid = str(fault_event.get("focused_resource_jid") or "").strip()
     blocked_at_function = str(fault_event.get("blocked_at_function") or "").strip()
     if focused_resource_jid and blocked_at_function:
-        modeled_action_names.add(blocked_at_function)
+        modeled_task_actions.add(blocked_at_function)
         _merge_action(
             resource_jid=focused_resource_jid,
-            action_name=blocked_at_function,
+            task_action=blocked_at_function,
             source_type="fault_event",
         )
 
@@ -676,7 +676,7 @@ def _outline_task_action_candidates(
             pending_task_resource_by_id[task_id] = resource_jid
         if not resource_jid or not task_action:
             continue
-        modeled_action_names.add(task_action)
+        modeled_task_actions.add(task_action)
         description_parts: list[str] = []
         part_name = str(row.get("part") or "").strip()
         if part_name:
@@ -686,7 +686,7 @@ def _outline_task_action_candidates(
             description_parts.append("blocked continuation task")
         _merge_action(
             resource_jid=resource_jid,
-            action_name=task_action,
+            task_action=task_action,
             source_type="pending_nominal_task",
             description=" | ".join(description_parts),
         )
@@ -697,7 +697,7 @@ def _outline_task_action_candidates(
         task_action = str(row.get("source_function_name") or "").strip()
         if not task_action:
             continue
-        modeled_action_names.add(task_action)
+        modeled_task_actions.add(task_action)
         candidate_resources: list[str] = []
         entity_kind = str(row.get("entity_kind") or "").strip().lower()
         entity = str(row.get("entity") or "").strip()
@@ -715,7 +715,7 @@ def _outline_task_action_candidates(
         for resource_jid in candidate_resources:
             _merge_action(
                 resource_jid=resource_jid,
-                action_name=task_action,
+                task_action=task_action,
                 source_type="continuation_condition",
                 description=str(row.get("blocking_reason") or "").strip(),
             )
@@ -729,20 +729,20 @@ def _outline_task_action_candidates(
         for primitive in (row.get("allowed_primitives") or []):
             if not isinstance(primitive, dict):
                 continue
-            action_name = str(primitive.get("name") or "").strip()
-            if not action_name:
+            primitive_name = str(primitive.get("name") or "").strip()
+            if not primitive_name:
                 continue
             primitive_kind = str(primitive.get("primitive_kind") or "").strip().lower()
-            if action_name.startswith("compute_"):
+            if primitive_name.startswith("compute_"):
                 continue
             if (
-                action_name not in modeled_action_names
+                primitive_name not in modeled_task_actions
                 and primitive_kind not in {"pick", "place", "release", "home"}
             ):
                 continue
             _merge_action(
                 resource_jid=resource_jid,
-                action_name=action_name,
+                task_action=primitive_name,
                 source_type="allowed_primitive",
                 description=str(
                     primitive.get("description") or primitive.get("semantic_summary") or ""

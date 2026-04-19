@@ -25,6 +25,31 @@ def _default_model_name(*env_names: str, fallback: str) -> str:
     return str(fallback or "").strip()
 
 
+_ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def _default_reasoning_effort(*env_names: str, fallback: str) -> str:
+    """Resolve a supported reasoning effort from env vars, then fall back."""
+    token = _default_model_name(*env_names, fallback=fallback).strip().lower()
+    if token in _ALLOWED_REASONING_EFFORTS:
+        return token
+    return str(fallback or "").strip().lower()
+
+
+def _normalize_reasoning_effort_for_model(model_name: str, effort: str) -> str:
+    """Normalize repo defaults to the target model family's supported effort set.
+
+    GPT-5.4 family models currently reject ``minimal`` and accept ``none`` as the
+    lowest-effort option. Keep this mapping narrow so we do not silently rewrite
+    unrelated model families.
+    """
+    normalized_model = str(model_name or "").strip().lower()
+    normalized_effort = str(effort or "").strip().lower()
+    if normalized_model.startswith("gpt-5.4") and normalized_effort == "minimal":
+        return "none"
+    return normalized_effort
+
+
 class LlmAgent(Agent):
     """Mixin-style agent that wires logging, tool analysis, and LLM access into SPADE agents."""
 
@@ -54,7 +79,7 @@ class LlmAgent(Agent):
             "CAIS_SPADE_LLM_MODEL",
             "OPENAI_MODEL",
             "CASE3_RECOVERY_MODEL",
-            fallback="gpt-5",
+            fallback="gpt-5.4-mini",
         )
         selected_non_function_model = str(non_function_model or "").strip() or _default_model_name(
             "CAIS_SPADE_NON_FUNCTION_MODEL",
@@ -64,8 +89,28 @@ class LlmAgent(Agent):
             "CASE3_RECOVERY_MODEL",
             fallback=selected_model,
         )
+        selected_reasoning_effort = _default_reasoning_effort(
+            "CAIS_SPADE_REASONING_EFFORT",
+            "OPENAI_REASONING_EFFORT",
+            fallback="medium",
+        )
+        selected_non_function_reasoning_effort = _default_reasoning_effort(
+            "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT",
+            "OPENAI_NON_FUNCTION_REASONING_EFFORT",
+            "CAIS_SPADE_REASONING_EFFORT",
+            "OPENAI_REASONING_EFFORT",
+            fallback=selected_reasoning_effort,
+        )
         self.model = selected_model  # Main LLM that supports tool calling.
         self.non_function_model = selected_non_function_model  # Cheaper model for plain generations.
+        self.reasoning_effort = _normalize_reasoning_effort_for_model(
+            selected_model,
+            selected_reasoning_effort,
+        )
+        self.non_function_reasoning_effort = _normalize_reasoning_effort_for_model(
+            selected_non_function_model,
+            selected_non_function_reasoning_effort,
+        )
 
         # logging
         self.logger = logging.getLogger(f"agent:{self.agent_name}")
@@ -184,7 +229,13 @@ class LlmAgent(Agent):
     async def setup(self):
         """Log the configured LLM and functions so operators know the agent is ready."""
         self.logger.info(
-            f"[ready] {self.jid} (LLM={self.model}, tools={[t['function']['name'] for t in self.function_info]})"
+            "[ready] %s (LLM=%s effort=%s, non_function=%s effort=%s, tools=%s)",
+            self.jid,
+            self.model,
+            self.reasoning_effort,
+            self.non_function_model,
+            self.non_function_reasoning_effort,
+            [t["function"]["name"] for t in self.function_info],
         )
 
     # ------------------------------------------------------------------ #
@@ -250,14 +301,14 @@ class LlmAgent(Agent):
                             messages=msgs,
                             tools=tools,
                             tool_choice=("required" if force_tool else "auto"),
-                            reasoning_effort="low",
+                            reasoning_effort=self.reasoning_effort,
                             #temperature=temperature,
                         )
                     else:
                         r = _client.chat.completions.create(
                             model=self.non_function_model,
                             messages=msgs,
-                            reasoning_effort="minimal",
+                            reasoning_effort=self.non_function_reasoning_effort,
                             #temperature=temperature,
                         )
 
@@ -324,6 +375,7 @@ class LlmAgent(Agent):
                 kwargs: Dict[str, Any] = {
                     "model": self.model,
                     "messages": msgs,
+                    "reasoning_effort": self.reasoning_effort,
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": response_format,

@@ -304,10 +304,10 @@ def _map_event_to_aps(
     resource_jid = str(event.get("resource_jid") or "").strip()
     resource_short = _resource_short_name(resource_jid)
     part_name = str(event.get("part_name") or "").strip()
-    action_name = str(event.get("name") or "").strip()
+    function_name = str(event.get("name") or "").strip()
     function_candidates = {
         _norm_token(event.get("function_name")),
-        _norm_token(action_name),
+        _norm_token(function_name),
     }
     function_candidates.discard("")
 

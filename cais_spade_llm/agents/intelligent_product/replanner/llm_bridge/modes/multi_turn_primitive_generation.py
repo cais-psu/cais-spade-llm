@@ -450,9 +450,7 @@ def _suggested_capability_decomposition_names(
         if str(name).strip()
     }
     action = _primitive_action_token(outline_event)
-    event_name = str(
-        outline_event.get("event_name") or outline_event.get("action_name") or ""
-    ).strip().lower()
+    event_name = str(outline_event.get("event_name") or "").strip().lower()
     expected_start_resource_state = str(
         dict(outline_event.get("expected_start_state") or {}).get("resource_state")
         or ""
@@ -982,7 +980,6 @@ def _primitive_authoring_event_context(
         "outline_id": str(outline_event.get("outline_id") or "").strip(),
         "resource_jid": str(outline_event.get("resource_jid") or "").strip(),
         "event_name": str(outline_event.get("event_name") or "").strip() or None,
-        "action_name": str(outline_event.get("action_name") or "").strip() or None,
         "description": str(outline_event.get("description") or "").strip() or None,
         "action_type": str(outline_event.get("action_type") or "").strip() or None,
         "part_name": str(outline_event.get("part_name") or "").strip() or None,
@@ -1002,9 +999,7 @@ def _primitive_authoring_event_context(
 
 
 def _primitive_action_token(outline_event: dict[str, Any]) -> str:
-    raw = str(
-        outline_event.get("event_name") or outline_event.get("action_name") or ""
-    ).strip()
+    raw = str(outline_event.get("event_name") or "").strip()
     if not raw:
         return ""
     first = raw.split()[0].strip().lower()
@@ -1552,12 +1547,7 @@ def _accepted_program_row(
         "des_event_id": str(outline_event.get("outline_id") or "").strip(),
         "resource_jid": str(outline_event.get("resource_jid") or "").strip(),
         "part_name": str(outline_event.get("part_name") or "").strip() or None,
-        "event_name": str(
-            outline_event.get("event_name")
-            or outline_event.get("action_name")
-            or ""
-        ).strip(),
-        "action_name": str(outline_event.get("action_name") or "").strip(),
+        "event_name": str(outline_event.get("event_name") or "").strip(),
         "description": str(outline_event.get("description") or "").strip(),
         "primitive_steps": deepcopy(primitive_steps),
         "projected_snapshot": deepcopy(projected_snapshot),

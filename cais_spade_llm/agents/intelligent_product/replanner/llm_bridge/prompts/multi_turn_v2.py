@@ -62,12 +62,19 @@ _OUTLINE_CANDIDATE_ACTION_SCHEMA: dict[str, Any] = {
     "properties": {
         "resource_jid": {"type": "string"},
         "event_name": {"type": "string"},
-        "action_name": {"type": "string"},
         "part_name": {"type": "string"},
         "target_ref": {"type": "string"},
         "description": {"type": "string"},
+        "expected_start_state": {"type": "object"},
+        "expected_end_state": {"type": "object"},
     },
-    "required": ["resource_jid", "event_name", "description"],
+    "required": [
+        "resource_jid",
+        "event_name",
+        "description",
+        "expected_start_state",
+        "expected_end_state",
+    ],
 }
 
 
@@ -841,12 +848,12 @@ def _effective_task_part_holder(
 
 
 def _structured_task_action_summary(task: dict[str, Any]) -> str:
-    action_name = str(task.get("action_name") or "").strip()
+    event_name = str(task.get("event_name") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
     target_ref = str(task.get("target_ref") or "").strip()
-    if action_name:
-        summary = action_name
-        lower_summary = action_name.lower()
+    if event_name:
+        summary = event_name
+        lower_summary = event_name.lower()
         if part_name and part_name.lower() not in lower_summary:
             summary = f"{summary} {part_name}"
             lower_summary = summary.lower()
@@ -1717,13 +1724,13 @@ def _candidate_grounding_facts_summary(
             if str(token).strip()
         ]
         resource_row = dict(resources_by_jid.get(resource_jid) or {})
-        named_pose_text = ", ".join(named_poses) if named_poses else "-"
+        named_pose_text = ", ".join(named_poses) if named_poses else "null"
         reachable_text = (
             ", ".join(dict.fromkeys(reachable_refs))
             if reachable_refs
-            else "-"
+            else "null"
         )
-        held_part = str(resource_row.get("held_part") or "").strip() or "-"
+        held_part = str(resource_row.get("held_part") or "").strip() or "null"
         lines.append(
             f"- resource_jid={resource_jid} | named_poses={named_pose_text} | "
             f"grounded_target_refs={reachable_text} | held_part={held_part}"
@@ -1735,10 +1742,10 @@ def _candidate_grounding_facts_summary(
         part_name = str(part.get("part_name") or "").strip()
         if not part_name:
             continue
-        current_holder = str(part.get("current_holder_resource_jid") or "").strip() or "-"
-        current_location = str(part.get("current_location") or "").strip() or "-"
-        goal_location = str(part.get("goal_location") or "").strip() or "-"
-        source_ref = "observed_pose" if dict(part.get("observed_pose") or {}) else "-"
+        current_holder = str(part.get("current_holder_resource_jid") or "").strip() or "null"
+        current_location = str(part.get("current_location") or "").strip() or "null"
+        goal_location = str(part.get("goal_location") or "").strip() or "null"
+        source_ref = "observed_pose" if dict(part.get("observed_pose") or {}) else "null"
         lines.append(
             f"- part_name={part_name} | current_holder_resource_jid={current_holder} | "
             f"current_location={current_location} | goal_location={goal_location} | "
@@ -2661,9 +2668,23 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     {
       "resource_jid": "RESOURCE_JID",
       "event_name": "UNIQUE_DES_EVENT_LABEL",
-      "description": "STATE-BASED EVENT INTENT",
+      "description": "STATE-BASED EVENT INTENT (cite source-state predicates and target-state deltas)",
       "part_name": "OPTIONAL_PART_NAME",
-      "target_ref": "OPTIONAL_GROUNDED_TARGET_REF"
+      "target_ref": "OPTIONAL_GROUNDED_TARGET_REF",
+      "expected_start_state": {
+        "resource_state": "SOURCE_RESOURCE_STATE",
+        "held_part": "PART_NAME_OR_NULL",
+        "part_state": "SOURCE_PART_STATE_OR_NULL",
+        "part_location": "SOURCE_PART_LOCATION_OR_NULL",
+        "part_holder_resource_jid": "HOLDER_JID_OR_NULL"
+      },
+      "expected_end_state": {
+        "resource_state": "TARGET_RESOURCE_STATE",
+        "held_part": "PART_NAME_OR_NULL",
+        "part_state": "TARGET_PART_STATE_OR_NULL",
+        "part_location": "TARGET_PART_LOCATION_OR_NULL",
+        "part_holder_resource_jid": "HOLDER_JID_OR_NULL"
+      }
     }
   ]
 }
@@ -2693,7 +2714,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "- Return JSON with field `candidate_events`.",
             f"- `candidate_events` contains 1 to {candidate_bound} candidate events.",
             "- Each event is one physical action by one listed resource.",
-            "- Each event must include resource_jid, event_name, and description.",
+            "- Each event must include resource_jid, event_name, description, expected_start_state, and expected_end_state.",
             "- Use part_name and target_ref only when applicable.",
             "- Use only listed resources, parts, and grounded target refs.",
             f"- Returning fewer than {candidate_bound} rows is valid when fewer grounded candidates are worth proposing.",
@@ -2703,15 +2724,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "- Use only the listed resources.",
             "- Each transition is one physical action by one resource.",
         ])
-    if not is_candidate_mode:
-        constraints.extend([
-            "- expected_start_state is the source-state predicate snapshot; "
-            "expected_end_state is the target-state predicate snapshot.",
-            "- The description must include guard/feasibility reasoning: why the source state enables the event and what target predicates change.",
-            "- expected_start_state and expected_end_state may use only: "
-            "resource_state, held_part, part_state, part_location, part_holder_resource_jid.",
-            "- Use flat scalar values in state objects.",
-        ])
+    constraints.extend([
+        "- expected_start_state is the source-state predicate snapshot; "
+        "expected_end_state is the target-state predicate snapshot.",
+        "- The description must include guard/feasibility reasoning: why the source state enables the event and what target predicates change.",
+        "- expected_start_state and expected_end_state may use only: "
+        "resource_state, held_part, part_state, part_location, part_holder_resource_jid.",
+        "- Use flat scalar values in state objects.",
+        "- Use JSON null (not the string \"-\" or \"null\") for unset scalar state fields. "
+        "A `null` rendered in Grounded Event Facts maps to JSON null in your output.",
+    ])
 
     if is_single_pass:
         constraints.append(
