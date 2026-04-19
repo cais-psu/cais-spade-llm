@@ -1,4 +1,4 @@
-"""Compatibility exports for active v4 bridge prompt builders."""
+"""Re-export active v4 bridge prompt builders."""
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts import (
     _bridge_generalize_location_summary,

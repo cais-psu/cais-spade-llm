@@ -91,13 +91,6 @@ def _outline_incremental_response_schema() -> dict[str, Any]:
                     "type": "array",
                     "items": deepcopy(_OUTLINE_TASK_SCHEMA),
                 },
-                # Legacy compatibility: older multi-turn artifacts used task
-                # names for these DES transition fields.
-                "next_task": deepcopy(_OUTLINE_TASK_SCHEMA),
-                "lookahead_tasks": {
-                    "type": "array",
-                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
-                },
             },
             "required": ["thought", "next_transition"],
         },
@@ -122,19 +115,6 @@ def _outline_candidates_response_schema(
                     "maxItems": normalized_bound,
                     "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
                 },
-                # Compatibility aliases accepted by the runtime parser.
-                "candidate_transitions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": normalized_bound,
-                    "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
-                },
-                "candidate_tasks": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": normalized_bound,
-                    "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
-                },
             },
             "required": ["thought", "candidate_events"],
         },
@@ -150,12 +130,6 @@ def _outline_single_pass_response_schema() -> dict[str, Any]:
             "properties": {
                 "thought": {"type": "string"},
                 "transition_trace": {
-                    "type": "array",
-                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
-                },
-                # Legacy compatibility: older single-pass outputs used
-                # outline_tasks for the same ordered transition trace.
-                "outline_tasks": {
                     "type": "array",
                     "items": deepcopy(_OUTLINE_TASK_SCHEMA),
                 },
@@ -427,14 +401,12 @@ def _outline_rejection_history(session_state: dict[str, Any]) -> list[dict[str, 
         row: dict[str, Any] = {
             "turn_index": int(turn.get("turn_index") or 0),
             "decision": str(turn.get("decision") or "").strip() or None,
-            "proposed_next_transition": deepcopy(
-                dict(turn.get("next_transition") or turn.get("next_task") or {})
-            ),
+            "proposed_next_transition": deepcopy(dict(turn.get("next_transition") or {})),
             "validation_findings": findings,
         }
         transition_suffix = [
             deepcopy(item)
-            for item in (turn.get("transition_suffix") or turn.get("lookahead_tasks") or [])
+            for item in (turn.get("transition_suffix") or [])
             if isinstance(item, dict)
         ]
         if transition_suffix:
@@ -935,7 +907,7 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         if not isinstance(row, dict):
             continue
         turn_index = int(row.get("turn_index") or 0)
-        task = dict(row.get("proposed_next_transition") or row.get("proposed_next_task") or {})
+        task = dict(row.get("proposed_next_transition") or {})
         outline_id = str(task.get("outline_id") or "").strip()
         resource_jid = str(task.get("resource_jid") or "").strip()
         part_name = str(task.get("part_name") or "").strip()
@@ -967,9 +939,7 @@ def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str
             continue
         if (
             isinstance(turn.get("selected_transition"), dict)
-            or isinstance(turn.get("selected_next_task"), dict)
             or isinstance(turn.get("next_transition"), dict)
-            or isinstance(turn.get("next_task"), dict)
         ):
             history = []
             continue
@@ -1946,7 +1916,7 @@ def _history_derived_pruned_actions_summary(
         if not isinstance(row, dict):
             continue
         _add_row(
-            task=dict(row.get("proposed_next_transition") or row.get("proposed_next_task") or {}),
+            task=dict(row.get("proposed_next_transition") or {}),
             findings=[item for item in (row.get("validation_findings") or []) if isinstance(item, dict)],
         )
 

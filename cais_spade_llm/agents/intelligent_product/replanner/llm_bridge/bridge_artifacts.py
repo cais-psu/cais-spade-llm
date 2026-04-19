@@ -433,18 +433,9 @@ def _compact_multi_turn_response_artifact(response: Any) -> Any:
     if not isinstance(response, dict):
         return response
     compact = deepcopy(response)
-    compact.pop("candidate_transitions", None)
-    compact.pop("candidate_tasks", None)
-    compact.pop("candidate_recovery_events", None)
-    if "selected_transition" in compact:
-        compact.pop("selected_next_task", None)
-        compact.pop("selected_recovery_event", None)
-    if "accepted_transition_prefix" in compact:
+    if "transition_trace" in compact:
         compact.pop("des_event_sequence", None)
-        compact.pop("transition_trace", None)
-    if "outline_tasks" in compact:
         compact.pop("accepted_transition_prefix", None)
-        compact.pop("des_event_sequence", None)
     evaluations = compact.pop("candidate_evaluations", None)
     if isinstance(evaluations, list):
         compact["candidate_evaluation_summary"] = (
@@ -477,18 +468,9 @@ def _compact_multi_turn_session_transcript(session: dict[str, Any]) -> dict[str,
         compact_turn = deepcopy(turn)
         compact_turn.pop("prompt_text", None)
         compact_turn.pop("prompt_input", None)
-        compact_turn.pop("candidate_transitions", None)
-        compact_turn.pop("candidate_tasks", None)
-        compact_turn.pop("candidate_recovery_events", None)
-        if "accepted_transition_prefix" in compact_turn:
+        if "transition_trace" in compact_turn:
             compact_turn.pop("des_event_sequence", None)
-            compact_turn.pop("transition_trace", None)
-        if "outline_tasks" in compact_turn:
             compact_turn.pop("accepted_transition_prefix", None)
-            compact_turn.pop("des_event_sequence", None)
-        if "selected_transition" in compact_turn:
-            compact_turn.pop("selected_next_task", None)
-            compact_turn.pop("selected_recovery_event", None)
         evaluations = compact_turn.pop("candidate_evaluations", None)
         if isinstance(evaluations, list):
             compact_turn["candidate_evaluation_summary"] = (

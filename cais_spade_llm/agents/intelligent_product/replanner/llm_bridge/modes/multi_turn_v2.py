@@ -28,12 +28,12 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.hybrid
     _extract_safety_dfas,
     _extract_ap_descriptors,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-    _apply_outline_task_effects as _v1_apply_outline_task_effects,
-    _build_outline_task_type_lookup as _v1_build_outline_task_type_lookup,
-    _infer_outline_macro_signature as _v1_infer_outline_macro_signature,
-    _outline_task_depends_on as _v1_outline_task_depends_on,
-    _task_findings_block_projected_state as _v1_task_findings_block_projected_state,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_state import (
+    _apply_outline_task_effects,
+    _build_outline_task_type_lookup,
+    _infer_outline_macro_signature,
+    _outline_task_depends_on,
+    _task_findings_block_projected_state,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
     extract_step_output,
@@ -197,7 +197,6 @@ def build_multi_turn_session_seed(
             symbolic_parts[name] = deepcopy(row)
 
     return {
-        "multi_turn_engine": "v2",
         "current_phase": "grounding",
         "turn_index": 0,
         "max_turns": max_turns,
@@ -1409,15 +1408,15 @@ def _validate_outline_task_cca(
     llm_input: dict[str, Any],
     prior_findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    outline_tasks = [deepcopy(task)]
+    validation_trace = [deepcopy(task)]
     task_id = str(task.get("outline_id") or "").strip() or "task_0"
-    task_types_by_id = _v1_build_outline_task_type_lookup(
-        outline_tasks,
+    task_types_by_id = _build_outline_task_type_lookup(
+        validation_trace,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=llm_input,
     )
-    signature = _v1_infer_outline_macro_signature(
+    signature = _infer_outline_macro_signature(
         task,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
@@ -1425,9 +1424,9 @@ def _validate_outline_task_cca(
 
     projected_resources = deepcopy(resources_by_jid)
     projected_parts = deepcopy(parts_by_name)
-    if not _v1_task_findings_block_projected_state(list(prior_findings or [])):
+    if not _task_findings_block_projected_state(list(prior_findings or [])):
         task_type = str(task_types_by_id.get(task_id) or "").strip()
-        _v1_apply_outline_task_effects(
+        _apply_outline_task_effects(
             task,
             resources_by_jid=projected_resources,
             parts_by_name=projected_parts,
@@ -1444,10 +1443,10 @@ def _validate_outline_task_cca(
         projected_resources=projected_resources,
         projected_parts=projected_parts,
         llm_input=deepcopy(llm_input),
-        outline_tasks=outline_tasks,
+        outline_tasks=validation_trace,
         task_types_by_id=deepcopy(task_types_by_id),
         task_index_by_id={task_id: 0},
-        dependency_map={task_id: _v1_outline_task_depends_on(task)},
+        dependency_map={task_id: _outline_task_depends_on(task)},
         previously_cleared_condition_ids=None,
     )
     return [
@@ -2942,12 +2941,9 @@ def _parsed_response_object(
     parsed_response: dict[str, Any],
     *,
     primary_key: str,
-    legacy_key: str,
 ) -> dict[str, Any]:
-    """Read one DES transition object, accepting the legacy task field."""
+    """Read one DES transition object from the canonical response key."""
     raw = parsed_response.get(primary_key)
-    if not isinstance(raw, dict):
-        raw = parsed_response.get(legacy_key)
     return dict(raw or {}) if isinstance(raw, dict) else {}
 
 
@@ -2955,26 +2951,10 @@ def _parsed_response_rows(
     parsed_response: dict[str, Any],
     *,
     primary_key: str,
-    legacy_key: str,
 ) -> list[dict[str, Any]]:
-    """Read DES transition rows, accepting the legacy task array field."""
+    """Read DES transition rows from the canonical response key."""
     raw = parsed_response.get(primary_key)
-    if not isinstance(raw, list):
-        raw = parsed_response.get(legacy_key)
     return [dict(row) for row in (raw or []) if isinstance(row, dict)]
-
-
-def _parsed_response_rows_any(
-    parsed_response: dict[str, Any],
-    *,
-    keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """Read DES event/transition rows from the first populated response key."""
-    for key in keys:
-        raw = parsed_response.get(key)
-        if isinstance(raw, list):
-            return [dict(row) for row in raw if isinstance(row, dict)]
-    return []
 
 
 async def _handle_outline_single_pass(
@@ -2985,27 +2965,23 @@ async def _handle_outline_single_pass(
     """Single-pass: LLM proposes all tasks at once, accept without validation."""
     turn_entry: dict[str, Any] = {}
 
-    outline_tasks = _parsed_response_rows(
+    transition_trace = _parsed_response_rows(
         parsed_response,
         primary_key="transition_trace",
-        legacy_key="outline_tasks",
     )
-    turn_entry["transition_trace"] = deepcopy(outline_tasks)
-    turn_entry["outline_tasks"] = deepcopy(outline_tasks)
+    turn_entry["transition_trace"] = deepcopy(transition_trace)
 
-    if not outline_tasks:
-        turn_entry["error"] = (
-            "outline response missing transition_trace (legacy outline_tasks)"
-        )
+    if not transition_trace:
+        turn_entry["error"] = "outline response missing transition_trace"
         _logger.warning("[MultiTurnV2] outline single_pass: no transition_trace")
         return "need_revision", turn_entry
 
-    session_state["accepted_outline_prefix"] = deepcopy(outline_tasks)
+    session_state["accepted_outline_prefix"] = deepcopy(transition_trace)
     _sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     _logger.info(
         "[MultiTurnV2] outline single_pass: accepted %d recovery events",
-        len(outline_tasks),
+        len(transition_trace),
     )
 
     session_state["status"] = "paused_after_outline_turn"
@@ -3020,48 +2996,40 @@ async def _handle_outline_incremental(
     """Incremental: one task at a time, no validation."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = _parsed_response_object(
+    next_transition = _parsed_response_object(
         parsed_response,
         primary_key="next_transition",
-        legacy_key="next_task",
     )
-    lookahead_tasks = _parsed_response_rows(
+    transition_suffix = _parsed_response_rows(
         parsed_response,
         primary_key="transition_suffix",
-        legacy_key="lookahead_tasks",
     )
 
-    turn_entry["next_transition"] = deepcopy(next_task)
-    turn_entry["next_task"] = deepcopy(next_task)
-    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
-    if lookahead_tasks:
-        turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
+    turn_entry["next_transition"] = deepcopy(next_transition)
+    turn_entry["transition_suffix"] = deepcopy(transition_suffix)
 
-    if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = (
-            "outline response missing next_transition with outline_id "
-            "(legacy next_task)"
-        )
+    if not next_transition or not str(next_transition.get("outline_id") or "").strip():
+        turn_entry["error"] = "outline response missing next_transition with outline_id"
         _logger.warning("[MultiTurnV2] outline incremental: no next_transition")
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(next_task))
+    accepted_prefix.append(deepcopy(next_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
-    session_state["outline_lookahead"] = deepcopy(lookahead_tasks)
+    session_state["outline_lookahead"] = deepcopy(transition_suffix)
     _sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     # Track symbolic state even in non-validated mode
-    _apply_task_effects_to_symbolic_state(next_task, session_state)
+    _apply_task_effects_to_symbolic_state(next_transition, session_state)
 
     # Detect outline completion: if no lookahead remaining, the LLM
     # considers this the final recovery task → outline is ready.
-    outline_complete = not lookahead_tasks
+    outline_complete = not transition_suffix
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
         "[MultiTurnV2] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
-        str(next_task.get("outline_id") or "").strip(),
+        str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
     )
@@ -3080,35 +3048,27 @@ async def _handle_outline_incremental_validated(
     """Incremental with validation: one task at a time, validate before accepting."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = _parsed_response_object(
+    next_transition = _parsed_response_object(
         parsed_response,
         primary_key="next_transition",
-        legacy_key="next_task",
     )
-    lookahead_tasks = _parsed_response_rows(
+    transition_suffix = _parsed_response_rows(
         parsed_response,
         primary_key="transition_suffix",
-        legacy_key="lookahead_tasks",
     )
 
-    turn_entry["next_transition"] = deepcopy(next_task)
-    turn_entry["next_task"] = deepcopy(next_task)
-    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
-    if lookahead_tasks:
-        turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
+    turn_entry["next_transition"] = deepcopy(next_transition)
+    turn_entry["transition_suffix"] = deepcopy(transition_suffix)
 
-    if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = (
-            "outline response missing next_transition with outline_id "
-            "(legacy next_task)"
-        )
+    if not next_transition or not str(next_transition.get("outline_id") or "").strip():
+        turn_entry["error"] = "outline response missing next_transition with outline_id"
         _logger.warning("[MultiTurnV2] outline incremental_validated: no next_transition")
         return "need_revision", turn_entry
 
     # Validate before accepting
     findings, grounded_action = _validate_single_outline_task(
         planner=planner,
-        task=next_task,
+        task=next_transition,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
     )
@@ -3130,7 +3090,7 @@ async def _handle_outline_incremental_validated(
         )
         _logger.info(
             "[MultiTurnV2] outline incremental_validated: rejected event %s (%d findings)",
-            str(next_task.get("outline_id") or "").strip(),
+            str(next_transition.get("outline_id") or "").strip(),
             len(findings),
         )
         # Pause so the operator can inspect the validation feedback before
@@ -3140,12 +3100,12 @@ async def _handle_outline_incremental_validated(
 
     # Validation passed — accept into prefix
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(next_task))
+    accepted_prefix.append(deepcopy(next_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
-    session_state["outline_lookahead"] = deepcopy(lookahead_tasks)
+    session_state["outline_lookahead"] = deepcopy(transition_suffix)
 
     # Apply task effects to symbolic state for future validations
-    _apply_task_effects_to_symbolic_state(next_task, session_state)
+    _apply_task_effects_to_symbolic_state(next_transition, session_state)
     session_state["outline_validation_findings"] = _prune_resolved_outline_validation_findings(
         list(session_state.get("outline_validation_findings") or []),
         session_state=session_state,
@@ -3157,13 +3117,13 @@ async def _handle_outline_incremental_validated(
         transition_validation={"status": "passed", "findings": []},
     )
 
-    outline_complete = not lookahead_tasks
+    outline_complete = not transition_suffix
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
         "[MultiTurnV2] outline incremental_validated: accepted event %s "
         "(prefix now %d events, complete=%s)",
-        str(next_task.get("outline_id") or "").strip(),
+        str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
     )
@@ -3188,43 +3148,41 @@ async def _handle_outline_incremental_candidates_validated(
         prepared_bridge_request,
     )
 
-    candidate_response_rows = _parsed_response_rows_any(
-        parsed_response,
-        keys=("candidate_events", "candidate_transitions", "candidate_tasks"),
-    )
-    candidate_tasks = [
+    candidate_events = [
         _normalize_candidate_task(
             task=dict(row),
             sequence_index=sequence_index,
             candidate_index=candidate_index,
         )
-        for candidate_index, row in enumerate(candidate_response_rows)
+        for candidate_index, row in enumerate(
+            _parsed_response_rows(
+                parsed_response,
+                primary_key="candidate_events",
+            )
+        )
     ]
-    turn_entry["candidate_events"] = deepcopy(candidate_tasks)
-    turn_entry["candidate_transitions"] = deepcopy(candidate_tasks)
-    turn_entry["candidate_tasks"] = deepcopy(candidate_tasks)
+    turn_entry["candidate_events"] = deepcopy(candidate_events)
 
     candidate_bound = int(
         session_state.get("des_candidate_bound")
         or session_state.get("candidate_bound")
         or _DEFAULT_CANDIDATE_BOUND
     )
-    if not (1 <= len(candidate_tasks) <= candidate_bound):
+    if not (1 <= len(candidate_events) <= candidate_bound):
         turn_entry["error"] = (
             "outline response must include 1 to "
-            f"{candidate_bound} candidate_events "
-            "(compatibility candidate_transitions/candidate_tasks)"
+            f"{candidate_bound} candidate_events"
         )
         _logger.warning(
             "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
             candidate_bound,
-            len(candidate_tasks),
+            len(candidate_events),
         )
         return "need_revision", turn_entry
 
     candidate_evaluations: list[dict[str, Any]] = []
     valid_candidates: list[dict[str, Any]] = []
-    for candidate_index, task in enumerate(candidate_tasks):
+    for candidate_index, task in enumerate(candidate_events):
         surface_task = deepcopy(task)
         working_task = deepcopy(task)
         evaluation: dict[str, Any] = {
@@ -3321,7 +3279,7 @@ async def _handle_outline_incremental_candidates_validated(
         ).strip()
         _logger.info(
             "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
-            len(candidate_tasks),
+            len(candidate_events),
         )
         # Keep a stagnation counter for diagnostics, but do not terminate the
         # LLM feedback loop here. Repeated validator feedback is part of the
@@ -3381,23 +3339,21 @@ async def _handle_outline_incremental_candidates_validated(
     selected_candidate_index = int(selected.get("candidate_index") or 0)
     selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
     selected_normalized_task = deepcopy(dict(selected.get("normalized_task") or {}))
-    selected_next_task = _commit_selected_candidate_task(
+    selected_transition = _commit_selected_candidate_task(
         task=selected_normalized_task,
         sequence_index=sequence_index,
     )
     selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
 
     turn_entry["selected_candidate_index"] = selected_candidate_index
-    turn_entry["selected_transition"] = deepcopy(selected_next_task)
+    turn_entry["selected_transition"] = deepcopy(selected_transition)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
-    turn_entry["selected_next_task"] = deepcopy(selected_next_task)
-    turn_entry["next_transition"] = deepcopy(selected_next_task)
-    turn_entry["next_task"] = deepcopy(selected_next_task)
+    turn_entry["next_transition"] = deepcopy(selected_transition)
     if selected_grounded_action:
         turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(selected_next_task))
+    accepted_prefix.append(deepcopy(selected_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
@@ -3416,7 +3372,7 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("symbolic_resources") or {},
         session_state.get("symbolic_parts") or {},
     )
-    _apply_task_effects_to_symbolic_state(selected_next_task, session_state)
+    _apply_task_effects_to_symbolic_state(selected_transition, session_state)
     session_state["pruned_actions"] = _active_v2_pruned_actions(
         session_state,
         prepared_bridge_request,
@@ -3428,17 +3384,17 @@ async def _handle_outline_incremental_candidates_validated(
 
     # Extend the incremental DES plant with this accepted event.
     event_name = str(
-        selected_next_task.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
+        selected_transition.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
     ).strip()
     _extend_plant_with_event(
         session_state.get("des_plant") or {},
         event_name=event_name,
         event_dict={
-            "name": str(selected_next_task.get("event_name") or "").strip(),
-            "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-            "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
-            "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
-            "description": str(selected_next_task.get("description") or "").strip(),
+            "name": str(selected_transition.get("event_name") or "").strip(),
+            "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
+            "part_name": str(selected_transition.get("part_name") or "").strip() or None,
+            "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
+            "description": str(selected_transition.get("description") or "").strip(),
         },
         from_state=pre_state,
         to_state=post_state,
@@ -3451,10 +3407,10 @@ async def _handle_outline_incremental_candidates_validated(
     if safety_dfas:
         _violates, new_q, _violated_ids = _advance_des_safety_state(
             candidate_event={
-                "name": str(selected_next_task.get("event_name") or "").strip(),
-                "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-                "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
-                "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
+                "name": str(selected_transition.get("event_name") or "").strip(),
+                "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
+                "part_name": str(selected_transition.get("part_name") or "").strip() or None,
+                "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
             },
             current_safety_q=tuple(session_state.get("des_safety_dfa_vector") or ()),
             safety_dfas=safety_dfas,
@@ -3515,7 +3471,7 @@ async def _handle_outline_incremental_candidates_validated(
         "[MultiTurnV2] outline incremental_candidates_validated: selected candidate %d (%s) "
         "(progress=%d, prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
-        str(selected_next_task.get("outline_id") or "").strip(),
+        str(selected_transition.get("outline_id") or "").strip(),
         int(selected.get("progress_score") or 0),
         len(accepted_prefix),
         outline_complete,
@@ -4326,13 +4282,13 @@ def _compact_final_output_artifact_payload(payload: dict[str, Any]) -> dict[str,
     ):
         if payload.get(key) not in (None, "", [], {}):
             compact[key] = deepcopy(payload.get(key))
-    outline_tasks = payload.get("outline_tasks")
-    if not isinstance(outline_tasks, list) or not outline_tasks:
-        outline_tasks = payload.get("accepted_transition_prefix")
-    if isinstance(outline_tasks, list) and outline_tasks:
-        compact["outline_tasks"] = [
+    transition_trace = payload.get("transition_trace")
+    if not isinstance(transition_trace, list) or not transition_trace:
+        transition_trace = payload.get("accepted_transition_prefix")
+    if isinstance(transition_trace, list) and transition_trace:
+        compact["transition_trace"] = [
             _compact_artifact_task(row)
-            for row in outline_tasks
+            for row in transition_trace
             if isinstance(row, dict)
         ]
     accepted_program = payload.get("accepted_primitive_program")
@@ -4364,15 +4320,10 @@ def _normalized_response_artifact_payload(
         if isinstance(row, dict)
     ]
     if accepted_prefix:
-        normalized.setdefault("accepted_transition_prefix", deepcopy(accepted_prefix))
-        normalized.setdefault("des_event_sequence", deepcopy(accepted_prefix))
         normalized.setdefault("transition_trace", deepcopy(accepted_prefix))
     next_transition = turn_entry.get("next_transition")
-    if not isinstance(next_transition, dict):
-        next_transition = turn_entry.get("next_task")
     if isinstance(next_transition, dict):
         normalized.setdefault("next_transition", deepcopy(next_transition))
-        normalized.setdefault("next_recovery_event", deepcopy(next_transition))
     if isinstance(turn_entry.get("transition_suffix"), list):
         normalized.setdefault(
             "transition_suffix",
@@ -4396,12 +4347,7 @@ def _normalized_response_artifact_payload(
         payload["decision"] = str(turn_entry.get("decision") or "").strip()
     payload["candidate_events"] = [
         _compact_artifact_task(row)
-        for row in (
-            turn_entry.get("candidate_events")
-            or turn_entry.get("candidate_transitions")
-            or turn_entry.get("candidate_tasks")
-            or []
-        )
+        for row in (turn_entry.get("candidate_events") or [])
         if isinstance(row, dict)
     ]
     if isinstance(turn_entry.get("candidate_evaluations"), list):
@@ -4414,9 +4360,9 @@ def _normalized_response_artifact_payload(
         payload["selected_candidate_index"] = int(
             turn_entry.get("selected_candidate_index") or 0
         )
-    if isinstance(turn_entry.get("selected_next_task"), dict):
+    if isinstance(turn_entry.get("selected_transition"), dict):
         payload["selected_transition"] = _compact_artifact_task(
-            turn_entry.get("selected_transition") or turn_entry.get("selected_next_task")
+            turn_entry.get("selected_transition")
         )
     if isinstance(turn_entry.get("selected_candidate_task"), dict):
         payload["selected_candidate_task"] = _compact_artifact_task(
@@ -4427,7 +4373,7 @@ def _normalized_response_artifact_payload(
             turn_entry.get("candidate_rejection_feedback") or []
         )
     if accepted_prefix:
-        payload["accepted_transition_prefix"] = deepcopy(accepted_prefix)
+        payload["transition_trace"] = deepcopy(accepted_prefix)
     if isinstance(turn_entry.get("transition_validation"), dict):
         payload["transition_validation"] = _compact_artifact_transition_validation(
             turn_entry.get("transition_validation") or {}
@@ -4484,9 +4430,7 @@ def _build_final_output_payload(
         "status": str(session_state.get("status") or "").strip(),
         "current_phase": str(session_state.get("current_phase") or "").strip(),
         "accepted_trace_length": len(accepted_prefix),
-        "accepted_transition_prefix": deepcopy(accepted_prefix),
-        "des_event_sequence": deepcopy(accepted_prefix),
-        "outline_tasks": deepcopy(accepted_prefix),
+        "transition_trace": deepcopy(accepted_prefix),
         "accepted_primitive_program": deepcopy(accepted_program),
         "executable_recovery_trace": executable_trace,
         "primitive_program_complete": bool(accepted_prefix)

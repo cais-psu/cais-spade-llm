@@ -117,27 +117,23 @@ async def _handle_outline_single_pass(
     """Single-pass: LLM proposes all tasks at once, accept without validation."""
     turn_entry: dict[str, Any] = {}
 
-    outline_tasks = _shared._parsed_response_rows(
+    transition_trace = _shared._parsed_response_rows(
         parsed_response,
         primary_key="transition_trace",
-        legacy_key="outline_tasks",
     )
-    turn_entry["transition_trace"] = deepcopy(outline_tasks)
-    turn_entry["outline_tasks"] = deepcopy(outline_tasks)
+    turn_entry["transition_trace"] = deepcopy(transition_trace)
 
-    if not outline_tasks:
-        turn_entry["error"] = (
-            "outline response missing transition_trace (legacy outline_tasks)"
-        )
+    if not transition_trace:
+        turn_entry["error"] = "outline response missing transition_trace"
         _logger.warning("[MultiTurnV2] outline single_pass: no transition_trace")
         return "need_revision", turn_entry
 
-    session_state["accepted_outline_prefix"] = deepcopy(outline_tasks)
+    session_state["accepted_outline_prefix"] = deepcopy(transition_trace)
     _shared._sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     _logger.info(
         "[MultiTurnV2] outline single_pass: accepted %d recovery events",
-        len(outline_tasks),
+        len(transition_trace),
     )
 
     session_state["status"] = "paused_after_outline_turn"
@@ -152,45 +148,37 @@ async def _handle_outline_incremental(
     """Incremental: one task at a time, no validation."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = _shared._parsed_response_object(
+    next_transition = _shared._parsed_response_object(
         parsed_response,
         primary_key="next_transition",
-        legacy_key="next_task",
     )
-    lookahead_tasks = _shared._parsed_response_rows(
+    transition_suffix = _shared._parsed_response_rows(
         parsed_response,
         primary_key="transition_suffix",
-        legacy_key="lookahead_tasks",
     )
 
-    turn_entry["next_transition"] = deepcopy(next_task)
-    turn_entry["next_task"] = deepcopy(next_task)
-    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
-    if lookahead_tasks:
-        turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
+    turn_entry["next_transition"] = deepcopy(next_transition)
+    turn_entry["transition_suffix"] = deepcopy(transition_suffix)
 
-    if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = (
-            "outline response missing next_transition with outline_id "
-            "(legacy next_task)"
-        )
+    if not next_transition or not str(next_transition.get("outline_id") or "").strip():
+        turn_entry["error"] = "outline response missing next_transition with outline_id"
         _logger.warning("[MultiTurnV2] outline incremental: no next_transition")
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(next_task))
+    accepted_prefix.append(deepcopy(next_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
-    session_state["outline_lookahead"] = deepcopy(lookahead_tasks)
+    session_state["outline_lookahead"] = deepcopy(transition_suffix)
     _shared._sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
-    _shared._apply_task_effects_to_symbolic_state(next_task, session_state)
+    _shared._apply_task_effects_to_symbolic_state(next_transition, session_state)
 
-    outline_complete = not lookahead_tasks
+    outline_complete = not transition_suffix
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
         "[MultiTurnV2] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
-        str(next_task.get("outline_id") or "").strip(),
+        str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
     )
@@ -209,34 +197,26 @@ async def _handle_outline_incremental_validated(
     """Incremental with validation: one task at a time, validate before accepting."""
     turn_entry: dict[str, Any] = {}
 
-    next_task = _shared._parsed_response_object(
+    next_transition = _shared._parsed_response_object(
         parsed_response,
         primary_key="next_transition",
-        legacy_key="next_task",
     )
-    lookahead_tasks = _shared._parsed_response_rows(
+    transition_suffix = _shared._parsed_response_rows(
         parsed_response,
         primary_key="transition_suffix",
-        legacy_key="lookahead_tasks",
     )
 
-    turn_entry["next_transition"] = deepcopy(next_task)
-    turn_entry["next_task"] = deepcopy(next_task)
-    turn_entry["transition_suffix"] = deepcopy(lookahead_tasks)
-    if lookahead_tasks:
-        turn_entry["lookahead_tasks"] = deepcopy(lookahead_tasks)
+    turn_entry["next_transition"] = deepcopy(next_transition)
+    turn_entry["transition_suffix"] = deepcopy(transition_suffix)
 
-    if not next_task or not str(next_task.get("outline_id") or "").strip():
-        turn_entry["error"] = (
-            "outline response missing next_transition with outline_id "
-            "(legacy next_task)"
-        )
+    if not next_transition or not str(next_transition.get("outline_id") or "").strip():
+        turn_entry["error"] = "outline response missing next_transition with outline_id"
         _logger.warning("[MultiTurnV2] outline incremental_validated: no next_transition")
         return "need_revision", turn_entry
 
     findings, grounded_action = _shared._validate_single_outline_task(
         planner=planner,
-        task=next_task,
+        task=next_transition,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
     )
@@ -258,18 +238,18 @@ async def _handle_outline_incremental_validated(
         )
         _logger.info(
             "[MultiTurnV2] outline incremental_validated: rejected event %s (%d findings)",
-            str(next_task.get("outline_id") or "").strip(),
+            str(next_transition.get("outline_id") or "").strip(),
             len(findings),
         )
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(next_task))
+    accepted_prefix.append(deepcopy(next_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
-    session_state["outline_lookahead"] = deepcopy(lookahead_tasks)
+    session_state["outline_lookahead"] = deepcopy(transition_suffix)
 
-    _shared._apply_task_effects_to_symbolic_state(next_task, session_state)
+    _shared._apply_task_effects_to_symbolic_state(next_transition, session_state)
     session_state["outline_validation_findings"] = _shared._prune_resolved_outline_validation_findings(
         list(session_state.get("outline_validation_findings") or []),
         session_state=session_state,
@@ -281,13 +261,13 @@ async def _handle_outline_incremental_validated(
         transition_validation={"status": "passed", "findings": []},
     )
 
-    outline_complete = not lookahead_tasks
+    outline_complete = not transition_suffix
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
         "[MultiTurnV2] outline incremental_validated: accepted event %s "
         "(prefix now %d events, complete=%s)",
-        str(next_task.get("outline_id") or "").strip(),
+        str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
     )
@@ -312,43 +292,41 @@ async def _handle_outline_incremental_candidates_validated(
         prepared_bridge_request,
     )
 
-    candidate_response_rows = _shared._parsed_response_rows_any(
-        parsed_response,
-        keys=("candidate_events", "candidate_transitions", "candidate_tasks"),
-    )
-    candidate_tasks = [
+    candidate_events = [
         _shared._normalize_candidate_task(
             task=dict(row),
             sequence_index=sequence_index,
             candidate_index=candidate_index,
         )
-        for candidate_index, row in enumerate(candidate_response_rows)
+        for candidate_index, row in enumerate(
+            _shared._parsed_response_rows(
+                parsed_response,
+                primary_key="candidate_events",
+            )
+        )
     ]
-    turn_entry["candidate_events"] = deepcopy(candidate_tasks)
-    turn_entry["candidate_transitions"] = deepcopy(candidate_tasks)
-    turn_entry["candidate_tasks"] = deepcopy(candidate_tasks)
+    turn_entry["candidate_events"] = deepcopy(candidate_events)
 
     candidate_bound = int(
         session_state.get("des_candidate_bound")
         or session_state.get("candidate_bound")
         or _shared._DEFAULT_CANDIDATE_BOUND
     )
-    if not (1 <= len(candidate_tasks) <= candidate_bound):
+    if not (1 <= len(candidate_events) <= candidate_bound):
         turn_entry["error"] = (
             "outline response must include 1 to "
-            f"{candidate_bound} candidate_events "
-            "(compatibility candidate_transitions/candidate_tasks)"
+            f"{candidate_bound} candidate_events"
         )
         _logger.warning(
             "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
             candidate_bound,
-            len(candidate_tasks),
+            len(candidate_events),
         )
         return "need_revision", turn_entry
 
     candidate_evaluations: list[dict[str, Any]] = []
     valid_candidates: list[dict[str, Any]] = []
-    for candidate_index, task in enumerate(candidate_tasks):
+    for candidate_index, task in enumerate(candidate_events):
         surface_task = deepcopy(task)
         working_task = deepcopy(task)
         evaluation: dict[str, Any] = {
@@ -444,7 +422,7 @@ async def _handle_outline_incremental_candidates_validated(
         ).strip()
         _logger.info(
             "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
-            len(candidate_tasks),
+            len(candidate_events),
         )
         stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
         session_state["outline_stagnation_count"] = stagnation
@@ -500,23 +478,21 @@ async def _handle_outline_incremental_candidates_validated(
     selected_candidate_index = int(selected.get("candidate_index") or 0)
     selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
     selected_normalized_task = deepcopy(dict(selected.get("normalized_task") or {}))
-    selected_next_task = _shared._commit_selected_candidate_task(
+    selected_transition = _shared._commit_selected_candidate_task(
         task=selected_normalized_task,
         sequence_index=sequence_index,
     )
     selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
 
     turn_entry["selected_candidate_index"] = selected_candidate_index
-    turn_entry["selected_transition"] = deepcopy(selected_next_task)
+    turn_entry["selected_transition"] = deepcopy(selected_transition)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
-    turn_entry["selected_next_task"] = deepcopy(selected_next_task)
-    turn_entry["next_transition"] = deepcopy(selected_next_task)
-    turn_entry["next_task"] = deepcopy(selected_next_task)
+    turn_entry["next_transition"] = deepcopy(selected_transition)
     if selected_grounded_action:
         turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(selected_next_task))
+    accepted_prefix.append(deepcopy(selected_transition))
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
@@ -534,7 +510,7 @@ async def _handle_outline_incremental_candidates_validated(
         session_state.get("symbolic_resources") or {},
         session_state.get("symbolic_parts") or {},
     )
-    _shared._apply_task_effects_to_symbolic_state(selected_next_task, session_state)
+    _shared._apply_task_effects_to_symbolic_state(selected_transition, session_state)
     session_state["pruned_actions"] = _shared._active_v2_pruned_actions(
         session_state,
         prepared_bridge_request,
@@ -545,17 +521,17 @@ async def _handle_outline_incremental_candidates_validated(
     )
 
     event_name = str(
-        selected_next_task.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
+        selected_transition.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
     ).strip()
     _shared._extend_plant_with_event(
         session_state.get("des_plant") or {},
         event_name=event_name,
         event_dict={
-            "name": str(selected_next_task.get("event_name") or "").strip(),
-            "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-            "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
-            "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
-            "description": str(selected_next_task.get("description") or "").strip(),
+            "name": str(selected_transition.get("event_name") or "").strip(),
+            "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
+            "part_name": str(selected_transition.get("part_name") or "").strip() or None,
+            "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
+            "description": str(selected_transition.get("description") or "").strip(),
         },
         from_state=pre_state,
         to_state=post_state,
@@ -567,10 +543,10 @@ async def _handle_outline_incremental_candidates_validated(
     if safety_dfas:
         _violates, new_q, _violated_ids = _shared._advance_des_safety_state(
             candidate_event={
-                "name": str(selected_next_task.get("event_name") or "").strip(),
-                "resource_jid": str(selected_next_task.get("resource_jid") or "").strip(),
-                "part_name": str(selected_next_task.get("part_name") or "").strip() or None,
-                "target_ref": str(selected_next_task.get("target_ref") or "").strip() or None,
+                "name": str(selected_transition.get("event_name") or "").strip(),
+                "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
+                "part_name": str(selected_transition.get("part_name") or "").strip() or None,
+                "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
             },
             current_safety_q=tuple(session_state.get("des_safety_dfa_vector") or ()),
             safety_dfas=safety_dfas,
@@ -627,7 +603,7 @@ async def _handle_outline_incremental_candidates_validated(
         "[MultiTurnV2] outline incremental_candidates_validated: selected candidate %d (%s) "
         "(progress=%d, prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
-        str(selected_next_task.get("outline_id") or "").strip(),
+        str(selected_transition.get("outline_id") or "").strip(),
         int(selected.get("progress_score") or 0),
         len(accepted_prefix),
         outline_complete,

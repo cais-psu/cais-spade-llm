@@ -1600,10 +1600,8 @@ def _configure_live_bridge_session(
     bridge_session["repair_mode"] = "recover"
     bridge_session["observation_backend"] = "mock_detect_parts_harness"
     if normalized_mode == "multi_turn":
-        bridge_session["multi_turn_engine"] = "v2"
         bridge_session["outline_mode"] = "incremental_candidates_validated"
     else:
-        bridge_session.pop("multi_turn_engine", None)
         bridge_session.pop("outline_mode", None)
     prepared_bridge_request["bridge_session"] = bridge_session
 
@@ -2547,7 +2545,7 @@ def test_v2_candidate_prompt_resets_rejected_history_after_acceptance() -> None:
             {
                 "phase": "outline",
                 "turn_index": 11,
-                "selected_next_task": {
+                "selected_transition": {
                     "outline_id": "RECOVERY_SEQ3",
                     "resource_jid": "ur5e@localhost",
                     "event_name": "acquire LG",
@@ -2612,7 +2610,7 @@ def test_v2_candidate_validator_rejects_unlisted_target_ref() -> None:
                 session_state=session_state,
                 parsed_response={
                     "thought": "Invent an unlisted target ref.",
-                    "candidate_tasks": [
+                    "candidate_events": [
                         {
                             "resource_jid": "ur5e@localhost",
                             "event_name": "move LG to invented anchor",
@@ -2669,7 +2667,7 @@ def test_v2_candidate_validator_rejects_legacy_event_label_field() -> None:
                 session_state=session_state,
                 parsed_response={
                     "thought": "Try the removed alias field.",
-                    "candidate_tasks": [
+                    "candidate_events": [
                         {
                             "resource_jid": "ur5e@localhost",
                             legacy_field: "recover grounded LG",
@@ -2769,7 +2767,7 @@ def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
                 session_state=session_state,
                 parsed_response={
                     "thought": "Use an open vocabulary acquisition candidate.",
-                    "candidate_tasks": [
+                    "candidate_events": [
                         {
                             "resource_jid": "ur5e@localhost",
                             "event_name": "recover grounded LG",
@@ -2798,7 +2796,7 @@ def test_v2_candidate_selection_accepts_ur5e_lg_acquire_as_progress() -> None:
         )
 
         assert decision == "need_next_task"
-        selected = dict(turn_entry.get("selected_next_task") or {})
+        selected = dict(turn_entry.get("selected_transition") or {})
         assert selected.get("resource_jid") == "ur5e@localhost"
         assert selected.get("part_name") == "LG"
         assert selected.get("event_name") == "recover grounded LG"
@@ -2837,7 +2835,7 @@ def test_v2_candidate_stagnation_does_not_deadlock_outline_loop() -> None:
                 session_state=session_state,
                 parsed_response={
                     "thought": "Still trying an invalid candidate.",
-                    "candidate_tasks": [
+                    "candidate_events": [
                         {
                             "resource_jid": "xarm6@localhost",
                             "event_name": "try LG again",
@@ -2889,6 +2887,60 @@ def test_v2_split_modules_are_wired_into_phase_handlers() -> None:
         multi_turn_v2_mode._PHASE_HANDLERS["primitive_generation"]
         is primitive_mode._handle_primitive_generation_phase
     )
+
+
+def test_multi_turn_mode_exports_v2_only_helpers() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import (
+        bridge_prompts,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+        build_multi_turn_session_seed as routed_build_seed,
+        execute_multi_turn_bridge as routed_execute_bridge,
+        transition_multi_turn_phase as routed_transition_phase,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts import (
+        build_multi_turn_phase_prompt_input,
+        multi_turn_phase_response_schema,
+        render_multi_turn_phase_prompt,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts import (
+        multi_turn_v2 as multi_turn_v2_prompts,
+    )
+
+    assert routed_build_seed is multi_turn_v2_mode.build_multi_turn_session_seed
+    assert routed_execute_bridge is multi_turn_v2_mode.execute_multi_turn_bridge
+    assert routed_transition_phase is multi_turn_v2_mode.transition_multi_turn_phase
+    assert (
+        build_multi_turn_phase_prompt_input
+        is multi_turn_v2_prompts.build_multi_turn_v2_phase_prompt_input
+    )
+    assert (
+        multi_turn_phase_response_schema
+        is multi_turn_v2_prompts.multi_turn_v2_phase_response_schema
+    )
+    assert (
+        render_multi_turn_phase_prompt
+        is multi_turn_v2_prompts.render_multi_turn_v2_phase_prompt
+    )
+    assert (
+        bridge_prompts.build_multi_turn_phase_prompt_input
+        is multi_turn_v2_prompts.build_multi_turn_v2_phase_prompt_input
+    )
+
+
+def test_multi_turn_seed_omits_engine_marker() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            build_multi_turn_session_seed as routed_build_seed,
+        )
+
+        seed = routed_build_seed(prepared_bridge_request)
+
+        assert seed.get("current_phase") == "grounding"
+        assert "multi_turn_engine" not in seed
+
+    asyncio.run(_run())
 
 
 
@@ -3227,7 +3279,6 @@ def test_case3_dryrun_focus_primitive_generation_starts_from_known_outline() -> 
         prepared_bridge_request = {
             "bridge_session": {
                 "reasoning_mode": "multi_turn",
-                "multi_turn_engine": "v2",
                 "outline_mode": "incremental_candidates_validated",
                 "max_turns": 20,
             },
@@ -3480,14 +3531,14 @@ def test_v2_outline_validation_findings_persist_until_resolved() -> None:
         decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
             session_state=session_state,
             parsed_response={
-                "next_task": {
+                "next_transition": {
                     "outline_id": "FIX_XARM6",
                     "resource_jid": "xarm6@localhost",
                     "description": "Diagnose and recover xarm6 from failed to idle.",
                     "expected_start_state": {"resource_state": "failed"},
                     "expected_end_state": {"resource_state": "idle"},
                 },
-                "lookahead_tasks": [],
+                "transition_suffix": [],
             },
             prepared_bridge_request=prepared_bridge_request,
             planner=planner,
@@ -3528,7 +3579,7 @@ def test_v2_outline_validation_findings_clear_once_resolved() -> None:
         decision, _turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
             session_state=session_state,
             parsed_response={
-                "next_task": {
+                "next_transition": {
                     "outline_id": "PICK_LG",
                     "resource_jid": "xarm6@localhost",
                     "description": "Acquire LG so later part-changing actions are feasible.",
@@ -3542,7 +3593,7 @@ def test_v2_outline_validation_findings_clear_once_resolved() -> None:
                         "part_holder_resource_jid": "xarm6@localhost",
                     },
                 },
-                "lookahead_tasks": [],
+                "transition_suffix": [],
             },
             prepared_bridge_request=prepared_bridge_request,
             planner=planner,
@@ -3550,6 +3601,112 @@ def test_v2_outline_validation_findings_clear_once_resolved() -> None:
 
         assert decision == "outline_ready"
         assert session_state.get("outline_validation_findings") == []
+
+    asyncio.run(_run())
+
+
+def test_v2_single_pass_outline_rejects_alias_only_outline_tasks_response() -> None:
+    async def _run() -> None:
+        _, _, _planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "single_pass"
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_outline_single_pass(
+            session_state=session_state,
+            parsed_response={
+                "thought": "Alias-only payload should fail.",
+                "outline_tasks": [
+                    {
+                        "outline_id": "RECOVERY_SEQ1",
+                        "resource_jid": "xarm6@localhost",
+                        "description": "Recover xarm6 to idle.",
+                        "expected_start_state": {"resource_state": "failed"},
+                        "expected_end_state": {"resource_state": "idle"},
+                    }
+                ],
+            },
+        )
+
+        assert decision == "need_revision"
+        assert turn_entry.get("error") == "outline response missing transition_trace"
+
+    asyncio.run(_run())
+
+
+def test_v2_incremental_outline_rejects_alias_only_next_task_response() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_validated"
+
+        decision, turn_entry = await multi_turn_v2_mode._handle_outline_incremental_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "Alias-only payload should fail.",
+                "next_task": {
+                    "outline_id": "RECOVERY_SEQ1",
+                    "resource_jid": "xarm6@localhost",
+                    "description": "Recover xarm6 to idle.",
+                    "expected_start_state": {"resource_state": "failed"},
+                    "expected_end_state": {"resource_state": "idle"},
+                },
+                "lookahead_tasks": [],
+            },
+            prepared_bridge_request=prepared_bridge_request,
+            planner=planner,
+        )
+
+        assert decision == "need_revision"
+        assert (
+            turn_entry.get("error")
+            == "outline response missing next_transition with outline_id"
+        )
+
+    asyncio.run(_run())
+
+
+def test_v2_candidate_outline_rejects_alias_only_candidate_tasks_response() -> None:
+    async def _run() -> None:
+        _, _, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness()
+        session_state = multi_turn_v2_mode.build_multi_turn_session_seed(
+            prepared_bridge_request
+        )
+        session_state["outline_mode"] = "incremental_candidates_validated"
+        _seed_case3_post_mcp_release_state(session_state)
+
+        decision, turn_entry = await (
+            multi_turn_v2_mode._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "Alias-only payload should fail.",
+                    "candidate_tasks": [
+                        {
+                            "resource_jid": "ur5e@localhost",
+                            "event_name": "recover grounded LG",
+                            "description": "Acquire LG from the observed pose.",
+                            "part_name": "LG",
+                            "expected_start_state": {"resource_state": "idle"},
+                            "expected_end_state": {
+                                "resource_state": "picked",
+                                "held_part": "LG",
+                                "part_state": "in_gripper",
+                                "part_location": "ur5e@localhost_gripper",
+                                "part_holder_resource_jid": "ur5e@localhost",
+                            },
+                        }
+                    ],
+                },
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_revision"
+        assert turn_entry.get("error") == "outline response must include 1 to 5 candidate_events"
 
     asyncio.run(_run())
 
@@ -3579,7 +3736,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             },
             {
                 "thought": "Accept reset.",
-                "candidate_tasks": [
+                "candidate_events": [
                     {
                         "outline_id": "BAD_3A",
                         "resource_jid": "xarm6@localhost",
@@ -3613,7 +3770,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             },
             {
                 "thought": "Rejected turn 4.",
-                "candidate_tasks": [
+                "candidate_events": [
                     {
                         "outline_id": "BAD_4A",
                         "resource_jid": "xarm6@localhost",
@@ -3655,7 +3812,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             },
             {
                 "thought": "Rejected turn 5.",
-                "candidate_tasks": [
+                "candidate_events": [
                     {
                         "outline_id": "BAD_5A",
                         "resource_jid": "xarm6@localhost",
@@ -3697,7 +3854,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             },
             {
                 "thought": "Rejected turn 6.",
-                "candidate_tasks": [
+                "candidate_events": [
                     {
                         "outline_id": "BAD_6A",
                         "resource_jid": "xarm6@localhost",
@@ -3739,7 +3896,7 @@ def test_v2_dryrun_allows_turn_7_after_first_validation_rejection() -> None:
             },
             {
                 "thought": "Turn 7 arrives before stop.",
-                "candidate_tasks": [
+                "candidate_events": [
                     {
                         "outline_id": "BAD_7A",
                         "resource_jid": "xarm6@localhost",
