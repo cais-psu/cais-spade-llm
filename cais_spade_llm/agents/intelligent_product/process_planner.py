@@ -35,6 +35,15 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self.global_fsa: Optional[Dict[str, Any]] = None
         self.last_bridge_debug: Dict[str, Any] = {}
 
+    @staticmethod
+    def _primitive_bridge_macro_tasks(proposal: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_tasks = proposal.get("macro_tasks")
+        if isinstance(raw_tasks, list) and raw_tasks:
+            return [dict(task) for task in raw_tasks if isinstance(task, dict)]
+        if proposal.get("primitive_steps"):
+            return [dict(proposal)]
+        return []
+
     # ------------------------------------------------------------------ #
     # 1. NL → High-level requirements
     # ------------------------------------------------------------------ #
@@ -1573,15 +1582,15 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 )
             bridge_debug = self.get_last_bridge_debug()
             bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
-            if bridge_status in {"ready_for_llm", "llm_output_recorded"}:
+            if bridge_status == "ready_for_llm":
                 message = (
-                    "DES found no modeled continuation. The single-shot bridge prompt ran and "
-                    "captured raw LLM output, but no validated bridge proposal is available yet."
+                    "DES found no modeled continuation. The bridge request is ready for "
+                    "LLM review, but no validated bridge proposal is available yet."
                 )
                 self.logger.info("[Planner] %s", message)
                 return self._build_des_replan_result(
                     plan_changed=False,
-                    used_llm_bridge=(bridge_status == "llm_output_recorded"),
+                    used_llm_bridge=False,
                     human_required=False,
                     awaiting_bridge_generation=True,
                     message=message,
@@ -1600,6 +1609,52 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     used_llm_bridge=True,
                     human_required=False,
                     awaiting_bridge_generation=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
+            if bridge_status == "paused_after_outline_turn":
+                message = (
+                    "DES found no modeled continuation. Multi-turn bridge accepted an outline "
+                    "and is ready to continue primitive generation."
+                )
+                self.logger.info("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    plan_changed=False,
+                    used_llm_bridge=True,
+                    human_required=False,
+                    awaiting_bridge_generation=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
+            if bridge_status == "paused_after_primitive_turn":
+                message = (
+                    "DES found no modeled continuation. Multi-turn bridge requested another "
+                    "primitive-generation retry from the prepared session."
+                )
+                self.logger.info("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    plan_changed=False,
+                    used_llm_bridge=True,
+                    human_required=False,
+                    awaiting_bridge_generation=True,
+                    message=message,
+                    bridge_summary=bridge_summary,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                )
+            if bridge_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
+                message = (
+                    "DES found no modeled continuation. Multi-turn bridge stalled during "
+                    "primitive generation and requires operator review."
+                )
+                self.logger.warning("[Planner] %s", message)
+                return self._build_des_replan_result(
+                    human_required=True,
+                    used_llm_bridge=True,
                     message=message,
                     bridge_summary=bridge_summary,
                     bridge_debug=bridge_debug,

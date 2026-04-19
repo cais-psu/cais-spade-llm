@@ -1,4 +1,4 @@
-"""Prompt builders for multi-turn v2 DES-style recovery event planning."""
+"""Prompt builders for the active multi-turn bridge mode."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ _OUTLINE_CANDIDATE_ACTION_SCHEMA: dict[str, Any] = {
 
 def _outline_incremental_response_schema() -> dict[str, Any]:
     return {
-        "name": "multi_turn_v2_outline_response",
+        "name": "multi_turn_outline_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -103,7 +103,7 @@ def _outline_candidates_response_schema(
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
     return {
-        "name": "multi_turn_v2_outline_candidates_response",
+        "name": "multi_turn_outline_candidates_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -123,7 +123,7 @@ def _outline_candidates_response_schema(
 
 def _outline_single_pass_response_schema() -> dict[str, Any]:
     return {
-        "name": "multi_turn_v2_outline_single_pass_response",
+        "name": "multi_turn_outline_single_pass_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -141,7 +141,7 @@ def _outline_single_pass_response_schema() -> dict[str, Any]:
 
 def _grounding_response_schema() -> dict[str, Any]:
     return {
-        "name": "multi_turn_v2_grounding_response",
+        "name": "multi_turn_grounding_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -181,7 +181,7 @@ def _grounding_response_schema() -> dict[str, Any]:
 
 def _primitive_generation_response_schema() -> dict[str, Any]:
     return {
-        "name": "multi_turn_v2_primitive_generation_response",
+        "name": "multi_turn_primitive_generation_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -231,7 +231,7 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
 
 def _finalize_response_schema() -> dict[str, Any]:
     return {
-        "name": "multi_turn_v2_finalize_response",
+        "name": "multi_turn_finalize_response",
         "strict": False,
         "schema": {
             "type": "object",
@@ -244,7 +244,7 @@ def _finalize_response_schema() -> dict[str, Any]:
     }
 
 
-def multi_turn_v2_phase_response_schema(
+def multi_turn_phase_response_schema(
     phase: str,
     *,
     outline_mode: str = "incremental",
@@ -274,7 +274,7 @@ def multi_turn_v2_phase_response_schema(
 # ---------------------------------------------------------------------------
 
 
-def build_multi_turn_v2_phase_prompt_input(
+def build_multi_turn_phase_prompt_input(
     *,
     phase: str,
     llm_input: dict[str, Any],
@@ -2469,23 +2469,22 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 
     if is_single_pass:
         role_text = (
-            "You are the active replanner for a DES fallback recovery session.\n"
+            "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Synthesis (single pass).\n"
             "Propose ALL recovery events as an ordered transition trace, "
             "serialized in JSON field `transition_trace`.\n"
-            "Each row must be one DES transition: one concrete physical action "
+            "Each row must be one recovery transition: one concrete physical action "
             "for one resource, with source-state and target-state predicates."
         )
     elif is_candidate_mode:
         candidate_bound = int(
-            session_state.get("des_candidate_bound")
-            or session_state.get("candidate_bound")
+            session_state.get("candidate_bound")
             or _DEFAULT_CANDIDATE_BOUND
         )
         role_text = (
-            "You are the active replanner for a DES fallback recovery session.\n"
+            "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Candidate Selection.\n"
-            "Choose controllable events enabled by the current DES state.\n"
+            "Choose grounded recovery events enabled by the current symbolic state.\n"
             "Accepted events extend the recovery trace toward marked-state conditions.\n"
             "The runtime supervisor may validate and commit at most one event."
         )
@@ -2724,7 +2723,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_multi_turn_v2_phase_prompt(prompt_input: dict[str, Any]) -> str:
+def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
     """Render a human-readable prompt string for the current phase."""
     payload = deepcopy(prompt_input or {})
     phase = str(payload.get("phase") or "").strip().lower()
@@ -2742,7 +2741,7 @@ def render_multi_turn_v2_phase_prompt(prompt_input: dict[str, Any]) -> str:
 
 
 __all__ = [
-    "build_multi_turn_v2_phase_prompt_input",
-    "multi_turn_v2_phase_response_schema",
-    "render_multi_turn_v2_phase_prompt",
+    "build_multi_turn_phase_prompt_input",
+    "multi_turn_phase_response_schema",
+    "render_multi_turn_phase_prompt",
 ]

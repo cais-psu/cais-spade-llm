@@ -1,8 +1,7 @@
-"""Multi-turn bridge execution engine v2 — one-task-at-a-time outline."""
+"""Multi-turn bridge execution engine — one-task-at-a-time outline."""
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 import logging
@@ -15,18 +14,11 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_solver import (
-    compose_and_solve,
-    solver_diagnostic_summary,
-    _map_event_to_aps,
-    _delta,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
     compile_grounded_outline_task,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.hybrid_des_v1 import (
-    _extract_safety_dfas,
-    _extract_ap_descriptors,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_proposal_normalization import (
+    normalize_primitive_bridge_proposal,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_state import (
     _apply_outline_task_effects,
@@ -57,7 +49,7 @@ _DEFAULT_MAX_OBSERVE_BATCH = 3
 _DEFAULT_CANDIDATE_BOUND = 5
 _DEFAULT_CANDIDATE_BOUND_CAP = 8
 _CANDIDATE_PRUNE_REPEAT_THRESHOLD = 2
-_V2_OUTLINE_CONTRACT = {
+_MULTI_TURN_OUTLINE_CONTRACT = {
     "allowed_state_fields": [
         "resource_state",
         "held_part",
@@ -74,7 +66,7 @@ _V2_OUTLINE_CONTRACT = {
 
 _PHASE_SEQUENCE = ("grounding", "outline", "primitive_generation", "finalize")
 
-_V2_DURABLE_PRUNED_CONSTRAINT_CODES = {
+_DURABLE_PRUNED_CONSTRAINT_CODES = {
     "workspace_unreachable",
     "holder_conflict",
     "required_part_not_held",
@@ -124,7 +116,7 @@ def transition_multi_turn_phase(current_phase: str, decision: str) -> str:
     next_phase = phase_map.get(token)
     if next_phase is None:
         _logger.warning(
-            "[MultiTurnV2] No transition for phase=%s decision=%s; staying in %s",
+            "[MultiTurn] No transition for phase=%s decision=%s; staying in %s",
             phase, token, phase,
         )
         return phase
@@ -139,7 +131,7 @@ def transition_multi_turn_phase(current_phase: str, decision: str) -> str:
 def build_multi_turn_session_seed(
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the initial session state for a multi-turn v2 bridge run."""
+    """Build the initial session state for a multi-turn bridge run."""
     bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
     max_turns = int(bridge_session.get("max_turns") or _DEFAULT_MAX_TURNS)
     max_observations = int(
@@ -174,7 +166,6 @@ def build_multi_turn_session_seed(
         1,
         int(
             bridge_session.get("candidate_bound")
-            or bridge_session.get("des_candidate_bound")
             or _DEFAULT_CANDIDATE_BOUND
         ),
     )
@@ -240,25 +231,11 @@ def build_multi_turn_session_seed(
         # Symbolic state for validation
         "symbolic_resources": symbolic_resources,
         "symbolic_parts": symbolic_parts,
-        # DES plant (built incrementally as candidates are accepted)
-        "des_plant": {
-            "states": [],
-            "initial": "",
-            "marked": [],
-            "events": {},
-            "transitions": {},
-        },
-        "des_current_state": "",
-        "des_trace": [],
-        "des_safety_dfa_vector": (),
-        "des_safety_dfas": {},
-        "des_ap_descriptors": [],
-        "des_visited_states": [],
     }
 
 
 # ---------------------------------------------------------------------------
-# DES plant helpers
+# Bridge trace helpers
 # ---------------------------------------------------------------------------
 
 
@@ -297,121 +274,6 @@ def _sync_des_recovery_aliases(
         turn_entry["unresolved_target_predicates"] = deepcopy(
             unresolved_target_predicates
         )
-
-
-def _symbolic_state_fingerprint(
-    symbolic_resources: dict[str, dict[str, Any]],
-    symbolic_parts: dict[str, dict[str, Any]],
-) -> str:
-    """Content-addressed hash of projected symbolic state → deterministic state name."""
-    def _canonical(d: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in sorted(d.items()) if v is not None}
-
-    payload = json.dumps(
-        {
-            "r": {k: _canonical(v) for k, v in sorted(symbolic_resources.items())},
-            "p": {k: _canonical(v) for k, v in sorted(symbolic_parts.items())},
-        },
-        sort_keys=True,
-        default=str,
-    )
-    return "S_" + hashlib.sha256(payload.encode()).hexdigest()[:12]
-
-
-def _extend_plant_with_event(
-    plant: dict[str, Any],
-    event_name: str,
-    event_dict: dict[str, Any],
-    from_state: str,
-    to_state: str,
-) -> None:
-    """Append a transition to the running DES plant."""
-    states = plant["states"]
-    if from_state not in states:
-        states.append(from_state)
-    if to_state not in states:
-        states.append(to_state)
-    plant["events"][event_name] = {
-        **event_dict,
-        "from": from_state,
-        "to": to_state,
-    }
-    plant["transitions"].setdefault(from_state, []).append((event_name, to_state))
-
-
-def _init_des_state(
-    session_state: dict[str, Any],
-    planner: Any,
-    prepared_bridge_request: dict[str, Any],
-) -> None:
-    """Initialize incremental DES plant at the grounding→outline transition."""
-    initial = _symbolic_state_fingerprint(
-        session_state["symbolic_resources"],
-        session_state["symbolic_parts"],
-    )
-    plant = session_state["des_plant"]
-    plant["initial"] = initial
-    plant["states"] = [initial]
-
-    # Derive marked states from continuation conditions (goal = all parts at
-    # goal_location).  We use a single abstract marked state "S_goal" since the
-    # exact goal fingerprint is not yet known — the solver treats any plant
-    # marked state as accepting.
-    plant["marked"] = ["S_goal"]
-
-    session_state["des_current_state"] = initial
-    session_state["des_trace"] = []
-    session_state["des_visited_states"] = [initial]
-
-    # Cache safety DFAs and AP descriptors for the session lifetime.
-    session_state["des_safety_dfas"] = _extract_safety_dfas(
-        planner, prepared_bridge_request,
-    )
-    session_state["des_ap_descriptors"] = _extract_ap_descriptors(
-        planner, prepared_bridge_request,
-    )
-
-    # Initialize safety DFA state vector — all DFAs at their initial state.
-    dfas = session_state["des_safety_dfas"]
-    session_state["des_safety_dfa_vector"] = tuple(
-        str(dfa.get("initial") or "q0")
-        for dfa in dfas.values()
-    )
-
-    _logger.info(
-        "[DES] Initialized incremental plant: initial=%s, safety_dfas=%d, aps=%d",
-        initial,
-        len(dfas),
-        len(session_state["des_ap_descriptors"]),
-    )
-
-
-def _advance_des_safety_state(
-    candidate_event: dict[str, Any],
-    current_safety_q: tuple[str, ...],
-    safety_dfas: dict[str, dict[str, Any]],
-    ap_descriptors: list[dict[str, Any]],
-) -> tuple[bool, tuple[str, ...], list[str]]:
-    """Advance cached DES safety DFA state for an already-accepted event.
-
-    Validation happens before acceptance via the CCA validator; this state
-    update is turn/session bookkeeping.
-    """
-    if not safety_dfas:
-        return False, current_safety_q, []
-
-    sigma = _map_event_to_aps(candidate_event, ap_descriptors)
-    new_q_list: list[str] = []
-    violated: list[str] = []
-
-    for (rule_id, dfa), q_current in zip(safety_dfas.items(), current_safety_q):
-        q_next = _delta(dfa, q_current, sigma)
-        new_q_list.append(q_next)
-        violation_state = str(dfa.get("violation_state") or "").strip()
-        if violation_state and q_next == violation_state:
-            violated.append(rule_id)
-
-    return bool(violated), tuple(new_q_list), violated
 
 
 # ---------------------------------------------------------------------------
@@ -1095,7 +957,7 @@ async def _handle_grounding_phase(
             )
             _seed_grounded_part_pose_observations(prepared_bridge_request, session_state)
             _logger.info(
-                "[MultiTurnV2] Grounding override → grounded (%s)",
+                "[MultiTurn] Grounding override → grounded (%s)",
                 turn_entry["grounding_override_reason"],
             )
             return decision, turn_entry
@@ -1122,7 +984,7 @@ async def _handle_grounding_phase(
         )
 
         if observe_error is not None:
-            _logger.warning("[MultiTurnV2] observe failed: %s", observe_error)
+            _logger.warning("[MultiTurn] observe failed: %s", observe_error)
             turn_entry["error"] = observe_error
             session_state["phase_feedback"].append({
                 "phase": "grounding", "issue": "observe_error", "detail": observe_error,
@@ -1156,13 +1018,13 @@ async def _handle_grounding_phase(
         )
         turn_entry["observation_results"] = deepcopy(observation_results)
         _logger.info(
-            "[MultiTurnV2] Observed %d facts", len(observation_results),
+            "[MultiTurn] Observed %d facts", len(observation_results),
         )
 
     else:
         # decision == "grounded"
         _seed_grounded_part_pose_observations(prepared_bridge_request, session_state)
-        _logger.info("[MultiTurnV2] Grounding complete")
+        _logger.info("[MultiTurn] Grounding complete")
 
     return decision, turn_entry
 
@@ -1471,7 +1333,7 @@ def _validate_single_outline_task(
         task,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
-        outline_contract=deepcopy(_V2_OUTLINE_CONTRACT),
+        outline_contract=deepcopy(_MULTI_TURN_OUTLINE_CONTRACT),
         location_validation_mode="strict",
     )
     finding = grounding_result.get("finding")
@@ -1509,7 +1371,7 @@ def _validate_single_outline_task(
 def _outline_validation_finding_key(
     finding: dict[str, Any],
 ) -> tuple[str, str, str, str, str]:
-    """Small stable key for de-duping v2 validation findings."""
+    """Small stable key for de-duping validation findings."""
     evidence = dict(finding.get("evidence") or {})
     return (
         str(finding.get("constraint_owner") or "").strip().lower(),
@@ -2095,7 +1957,7 @@ def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
 
 def _is_durable_candidate_finding(finding: dict[str, Any]) -> bool:
     constraint_code = str(finding.get("constraint_code") or "").strip().lower()
-    return constraint_code in _V2_DURABLE_PRUNED_CONSTRAINT_CODES
+    return constraint_code in _DURABLE_PRUNED_CONSTRAINT_CODES
 
 
 def _current_candidate_state_signature(
@@ -2187,7 +2049,6 @@ def _current_candidate_state_signature(
                 for row in active_blockers
                 if isinstance(row, dict) and str(row.get("summary") or "").strip()
             ],
-            "des_safety_dfa_vector": list(session_state.get("des_safety_dfa_vector") or ()),
         })
     else:
         payload.update({
@@ -2220,7 +2081,7 @@ def _build_durable_pruned_action_row(
     }
 
 
-def _active_v2_pruned_actions(
+def _active_pruned_actions(
     session_state: dict[str, Any],
     prepared_bridge_request: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -2256,14 +2117,14 @@ def _active_v2_pruned_actions(
     return active_rows
 
 
-def _matching_active_v2_pruned_action(
+def _matching_active_pruned_action(
     *,
     task: dict[str, Any],
     session_state: dict[str, Any],
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any] | None:
     task_key = _candidate_pruned_task_match_key(task)
-    for row in _active_v2_pruned_actions(session_state, prepared_bridge_request):
+    for row in _active_pruned_actions(session_state, prepared_bridge_request):
         row_task = dict(row.get("task") or row.get("action") or {})
         if _candidate_pruned_task_match_key(row_task) != task_key:
             continue
@@ -2295,7 +2156,7 @@ def _promote_durable_candidate_rejections(
     candidate_evaluations: list[dict[str, Any]],
 ) -> None:
     prune_history = dict(session_state.get("candidate_prune_history") or {})
-    active_rows = _active_v2_pruned_actions(session_state, prepared_bridge_request)
+    active_rows = _active_pruned_actions(session_state, prepared_bridge_request)
     seen_active = {
         (
             _candidate_pruned_task_match_key(dict(row.get("task") or row.get("action") or {})),
@@ -2973,14 +2834,14 @@ async def _handle_outline_single_pass(
 
     if not transition_trace:
         turn_entry["error"] = "outline response missing transition_trace"
-        _logger.warning("[MultiTurnV2] outline single_pass: no transition_trace")
+        _logger.warning("[MultiTurn] outline single_pass: no transition_trace")
         return "need_revision", turn_entry
 
     session_state["accepted_outline_prefix"] = deepcopy(transition_trace)
     _sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     _logger.info(
-        "[MultiTurnV2] outline single_pass: accepted %d recovery events",
+        "[MultiTurn] outline single_pass: accepted %d recovery events",
         len(transition_trace),
     )
 
@@ -3010,7 +2871,7 @@ async def _handle_outline_incremental(
 
     if not next_transition or not str(next_transition.get("outline_id") or "").strip():
         turn_entry["error"] = "outline response missing next_transition with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental: no next_transition")
+        _logger.warning("[MultiTurn] outline incremental: no next_transition")
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
@@ -3028,7 +2889,7 @@ async def _handle_outline_incremental(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
+        "[MultiTurn] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
         str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
@@ -3062,7 +2923,7 @@ async def _handle_outline_incremental_validated(
 
     if not next_transition or not str(next_transition.get("outline_id") or "").strip():
         turn_entry["error"] = "outline response missing next_transition with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental_validated: no next_transition")
+        _logger.warning("[MultiTurn] outline incremental_validated: no next_transition")
         return "need_revision", turn_entry
 
     # Validate before accepting
@@ -3089,7 +2950,7 @@ async def _handle_outline_incremental_validated(
             turn_entry["transition_validation"]
         )
         _logger.info(
-            "[MultiTurnV2] outline incremental_validated: rejected event %s (%d findings)",
+            "[MultiTurn] outline incremental_validated: rejected event %s (%d findings)",
             str(next_transition.get("outline_id") or "").strip(),
             len(findings),
         )
@@ -3121,7 +2982,7 @@ async def _handle_outline_incremental_validated(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental_validated: accepted event %s "
+        "[MultiTurn] outline incremental_validated: accepted event %s "
         "(prefix now %d events, complete=%s)",
         str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
@@ -3143,7 +3004,7 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry: dict[str, Any] = {}
     sequence_index = _next_recovery_sequence_index(session_state)
     session_state["outline_validation_findings"] = []
-    session_state["pruned_actions"] = _active_v2_pruned_actions(
+    session_state["pruned_actions"] = _active_pruned_actions(
         session_state,
         prepared_bridge_request,
     )
@@ -3164,8 +3025,7 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry["candidate_events"] = deepcopy(candidate_events)
 
     candidate_bound = int(
-        session_state.get("des_candidate_bound")
-        or session_state.get("candidate_bound")
+        session_state.get("candidate_bound")
         or _DEFAULT_CANDIDATE_BOUND
     )
     if not (1 <= len(candidate_events) <= candidate_bound):
@@ -3174,7 +3034,7 @@ async def _handle_outline_incremental_candidates_validated(
             f"{candidate_bound} candidate_events"
         )
         _logger.warning(
-            "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
+            "[MultiTurn] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
             candidate_bound,
             len(candidate_events),
         )
@@ -3191,7 +3051,7 @@ async def _handle_outline_incremental_candidates_validated(
             "task": deepcopy(working_task),
         }
 
-        pruned_row = _matching_active_v2_pruned_action(
+        pruned_row = _matching_active_pruned_action(
             task=working_task,
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
@@ -3278,7 +3138,7 @@ async def _handle_outline_incremental_candidates_validated(
             parsed_response.get("thought") or ""
         ).strip()
         _logger.info(
-            "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
+            "[MultiTurn] outline incremental_candidates_validated: rejected all %d candidates",
             len(candidate_events),
         )
         # Keep a stagnation counter for diagnostics, but do not terminate the
@@ -3311,11 +3171,11 @@ async def _handle_outline_incremental_candidates_validated(
             if isinstance(f, dict)
         ]
         _logger.info(
-            "[DES] Stagnation %d — status_counts: %s",
+            "[MultiTurn] Stagnation %d — status_counts: %s",
             stagnation, status_summary,
         )
         _logger.debug(
-            "[DES] Stagnation %d — rejection codes: %s",
+            "[MultiTurn] Stagnation %d — rejection codes: %s",
             stagnation, rejection_codes,
         )
         session_state["status"] = "paused_after_outline_turn"
@@ -3367,68 +3227,10 @@ async def _handle_outline_incremental_candidates_validated(
         },
     )
 
-    # Record pre-transition DES state, apply effects, record post-transition.
-    pre_state = _symbolic_state_fingerprint(
-        session_state.get("symbolic_resources") or {},
-        session_state.get("symbolic_parts") or {},
-    )
     _apply_task_effects_to_symbolic_state(selected_transition, session_state)
-    session_state["pruned_actions"] = _active_v2_pruned_actions(
+    session_state["pruned_actions"] = _active_pruned_actions(
         session_state,
         prepared_bridge_request,
-    )
-    post_state = _symbolic_state_fingerprint(
-        session_state.get("symbolic_resources") or {},
-        session_state.get("symbolic_parts") or {},
-    )
-
-    # Extend the incremental DES plant with this accepted event.
-    event_name = str(
-        selected_transition.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
-    ).strip()
-    _extend_plant_with_event(
-        session_state.get("des_plant") or {},
-        event_name=event_name,
-        event_dict={
-            "name": str(selected_transition.get("event_name") or "").strip(),
-            "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
-            "part_name": str(selected_transition.get("part_name") or "").strip() or None,
-            "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
-            "description": str(selected_transition.get("description") or "").strip(),
-        },
-        from_state=pre_state,
-        to_state=post_state,
-    )
-    session_state["des_current_state"] = post_state
-    session_state.setdefault("des_trace", []).append(event_name)
-
-    # Advance safety DFA state vector for the accepted event.
-    safety_dfas = session_state.get("des_safety_dfas") or {}
-    if safety_dfas:
-        _violates, new_q, _violated_ids = _advance_des_safety_state(
-            candidate_event={
-                "name": str(selected_transition.get("event_name") or "").strip(),
-                "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
-                "part_name": str(selected_transition.get("part_name") or "").strip() or None,
-                "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
-            },
-            current_safety_q=tuple(session_state.get("des_safety_dfa_vector") or ()),
-            safety_dfas=safety_dfas,
-            ap_descriptors=session_state.get("des_ap_descriptors") or [],
-        )
-        session_state["des_safety_dfa_vector"] = new_q
-
-    # Cycle detection: check if the post-state was already visited.
-    visited = session_state.setdefault("des_visited_states", [])
-    if post_state in visited:
-        _logger.warning("[DES] Cycle detected: state %s already visited", post_state)
-        session_state["status"] = "des_cycle_detected"
-    else:
-        visited.append(post_state)
-
-    _logger.info(
-        "[DES] Plant extended: %s -[%s]-> %s (trace len=%d)",
-        pre_state, event_name, post_state, len(session_state.get("des_trace") or []),
     )
 
     remaining_findings, remaining_conditions = _remaining_blocked_issue_counts(
@@ -3437,38 +3239,10 @@ async def _handle_outline_incremental_candidates_validated(
     )
     outline_complete = remaining_findings == 0 and remaining_conditions == 0
 
-    # DES composition gate: when outline is nominally complete, verify the
-    # full incremental plant composes safely with safety DFAs.
-    if outline_complete and (session_state.get("des_safety_dfas") or {}):
-        plant = session_state.get("des_plant") or {}
-        # Mark the final state as a goal state for the solver.
-        final_state = session_state.get("des_current_state") or ""
-        if final_state and final_state not in (plant.get("marked") or []):
-            plant.setdefault("marked", []).append(final_state)
-        solver_result = compose_and_solve(
-            plant=plant,
-            safety_dfas=session_state.get("des_safety_dfas") or {},
-            ap_descriptors=session_state.get("des_ap_descriptors") or [],
-        )
-        solver_status = str(solver_result.get("status") or "").strip()
-        if solver_status != "solved":
-            diagnostic = solver_diagnostic_summary(solver_result)
-            _logger.warning(
-                "[DES] Composition gate FAILED (%s): %s", solver_status, diagnostic,
-            )
-            session_state.setdefault("phase_feedback", []).append({
-                "phase": "outline",
-                "issue": "des_safety_composition_failed",
-                "diagnostic": diagnostic,
-            })
-            outline_complete = False
-        else:
-            _logger.info("[DES] Composition gate PASSED — outline is safety-verified.")
-
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental_candidates_validated: selected candidate %d (%s) "
+        "[MultiTurn] outline incremental_candidates_validated: selected candidate %d (%s) "
         "(progress=%d, prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
         str(selected_transition.get("outline_id") or "").strip(),
@@ -4051,9 +3825,9 @@ def _build_phase_prompt(
     session_state: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
     """Build prompt input and rendered prompt text for the current phase."""
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        build_multi_turn_v2_phase_prompt_input,
-        render_multi_turn_v2_phase_prompt,
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_prompts import (
+        build_multi_turn_phase_prompt_input,
+        render_multi_turn_phase_prompt,
     )
 
     phase = str(session_state.get("current_phase") or "grounding").strip().lower()
@@ -4066,7 +3840,7 @@ def _build_phase_prompt(
 
     current_recovery_blockers: list[dict[str, Any]] | None = None
     if phase == "outline" and outline_mode == "incremental_candidates_validated":
-        session_state["pruned_actions"] = _active_v2_pruned_actions(
+        session_state["pruned_actions"] = _active_pruned_actions(
             session_state,
             prepared_bridge_request,
         )
@@ -4078,9 +3852,9 @@ def _build_phase_prompt(
         candidate_bound = _compute_enabled_candidate_bound(
             session_state, prepared_bridge_request,
         )
-        session_state["des_candidate_bound"] = candidate_bound
+        session_state["candidate_bound"] = candidate_bound
 
-    prompt_input = build_multi_turn_v2_phase_prompt_input(
+    prompt_input = build_multi_turn_phase_prompt_input(
         phase=phase,
         llm_input=llm_input,
         session_state=session_state,
@@ -4095,14 +3869,14 @@ def _build_phase_prompt(
                 prepared_bridge_request=prepared_bridge_request,
             )
         )
-    prompt_text = render_multi_turn_v2_phase_prompt(prompt_input)
+    prompt_text = render_multi_turn_phase_prompt(prompt_input)
     return prompt_input, prompt_text
 
 
 def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.multi_turn_v2 import (
-        multi_turn_v2_phase_response_schema,
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_prompts import (
+        multi_turn_phase_response_schema,
     )
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     candidate_bound = None
@@ -4110,12 +3884,11 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         candidate_bound = max(
             1,
             int(
-                session_state.get("des_candidate_bound")
-                or session_state.get("candidate_bound")
+                session_state.get("candidate_bound")
                 or _DEFAULT_CANDIDATE_BOUND
             ),
         )
-    return multi_turn_v2_phase_response_schema(
+    return multi_turn_phase_response_schema(
         phase,
         outline_mode=outline_mode,
         candidate_bound=candidate_bound,
@@ -4381,6 +4154,364 @@ def _normalized_response_artifact_payload(
     return payload
 
 
+def _final_output_transition_trace(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    transition_trace: Any = payload.get("transition_trace")
+    if not isinstance(transition_trace, list) or not transition_trace:
+        transition_trace = payload.get("accepted_transition_prefix")
+    if not isinstance(transition_trace, list) or not transition_trace:
+        transition_trace = payload.get("executable_recovery_trace")
+    if not isinstance(transition_trace, list) or not transition_trace:
+        transition_trace = payload.get("outline_tasks")
+    if not isinstance(transition_trace, list):
+        transition_trace = []
+    return [
+        deepcopy(row)
+        for row in transition_trace
+        if isinstance(row, dict)
+    ]
+
+
+def _resolve_multi_turn_primary_obligation(
+    *,
+    prepared_bridge_request: dict[str, Any],
+    resource_jids: list[str],
+) -> tuple[dict[str, Any] | None, str]:
+    obligation_targets = [
+        deepcopy(row)
+        for row in (prepared_bridge_request.get("obligation_targets") or [])
+        if isinstance(row, dict)
+    ]
+    if not obligation_targets:
+        return None, ""
+    if len(obligation_targets) == 1:
+        return obligation_targets[0], ""
+
+    distinct_resources = {
+        str(resource_jid or "").strip()
+        for resource_jid in resource_jids
+        if str(resource_jid or "").strip()
+    }
+    if len(distinct_resources) == 1:
+        resource_jid = next(iter(distinct_resources))
+        matches = [
+            target
+            for target in obligation_targets
+            if str(target.get("resource_jid") or "").strip() == resource_jid
+        ]
+        if len(matches) == 1:
+            return matches[0], ""
+        if len(matches) > 1:
+            return None, (
+                f"multiple obligation_targets matched resource_jid {resource_jid!r}; "
+                "cannot infer primary_obligation"
+            )
+
+    return None, (
+        "multiple active obligation_targets are present; cannot infer primary_obligation "
+        "from multi-turn final output"
+    )
+
+
+def _target_location_for_part(
+    *,
+    part_name: str,
+    prepared_bridge_request: dict[str, Any],
+) -> str:
+    grounding_context = dict(prepared_bridge_request.get("grounding_context") or {})
+    parts = dict(grounding_context.get("parts") or {})
+    part_entry = dict(parts.get(part_name) or {})
+    target = dict(part_entry.get("target") or {})
+    return str(target.get("location") or "").strip()
+
+
+def _multi_turn_bridge_task_context(
+    *,
+    transition_event: dict[str, Any],
+    primitive_row: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected_start = dict(transition_event.get("expected_start_state") or {})
+    expected_end = dict(transition_event.get("expected_end_state") or {})
+    action_target = dict(transition_event.get("action_target") or {})
+    part_name = str(
+        primitive_row.get("part_name")
+        or transition_event.get("part_name")
+        or ""
+    ).strip()
+    target_location = str(
+        transition_event.get("target_ref")
+        or action_target.get("target_location")
+        or expected_end.get("part_location")
+        or ""
+    ).strip()
+    origin_location = str(
+        action_target.get("source_location")
+        or expected_start.get("part_location")
+        or ""
+    ).strip()
+
+    task_params: dict[str, Any] = {}
+    if target_location:
+        task_params["destination_location"] = target_location
+    if origin_location and not origin_location.endswith("_gripper"):
+        task_params["origin_resource_location"] = origin_location
+
+    task_metadata: dict[str, Any] = {
+        "in_state": str(expected_start.get("resource_state") or "").strip(),
+        "out_state": str(expected_end.get("resource_state") or "").strip(),
+        "required_context_keys": [],
+        "context_mapping": {},
+        "part_transition": None,
+    }
+
+    if not part_name:
+        return task_params, task_metadata
+
+    transition: dict[str, Any] = {}
+    end_held = str(expected_end.get("held_part") or "").strip()
+    end_part_state = str(expected_end.get("part_state") or "").strip()
+    product_target_location = _target_location_for_part(
+        part_name=part_name,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+
+    if end_held and end_held == part_name:
+        transition = {
+            "state": end_part_state or "in_gripper",
+            "location_template": "{resource_jid}_gripper",
+        }
+    elif target_location:
+        task_metadata["required_context_keys"] = ["destination_location"]
+        task_metadata["context_mapping"] = {
+            "location_param": "destination_location",
+        }
+        transition_state = end_part_state or "ready"
+        if product_target_location and target_location == product_target_location:
+            transition_state = "assembled"
+        transition = {
+            "state": transition_state,
+            "location_param": "destination_location",
+        }
+    elif str(expected_end.get("part_location") or "").strip():
+        task_metadata["required_context_keys"] = ["destination_location"]
+        task_metadata["context_mapping"] = {
+            "location_param": "destination_location",
+        }
+        task_params.setdefault(
+            "destination_location",
+            str(expected_end.get("part_location") or "").strip(),
+        )
+        transition = {
+            "state": end_part_state or "ready",
+            "location_param": "destination_location",
+        }
+
+    if transition:
+        task_metadata["part_transition"] = {"completed": transition}
+
+    return task_params, task_metadata
+
+
+def _primitive_catalog_for_bridge_normalizer(
+    raw_catalog: Any,
+) -> list[dict[str, Any]]:
+    normalized_catalog: list[dict[str, Any]] = []
+    for raw_entry in raw_catalog or []:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = deepcopy(raw_entry)
+        parameters = entry.get("parameters")
+        if not isinstance(parameters, dict):
+            properties = {}
+            for raw_name, raw_schema in dict(entry.get("params") or {}).items():
+                param_name = str(raw_name or "").strip()
+                if not param_name:
+                    continue
+                if isinstance(raw_schema, dict):
+                    properties[param_name] = deepcopy(raw_schema)
+                else:
+                    properties[param_name] = {"type": "string"}
+            entry["parameters"] = {
+                "type": "object",
+                "properties": properties,
+                "required": [
+                    str(name).strip()
+                    for name in (entry.get("required_params") or [])
+                    if str(name).strip()
+                ],
+            }
+        normalized_catalog.append(entry)
+    return normalized_catalog
+
+
+def _bridge_resources_for_bridge_normalizer(
+    raw_resources: Any,
+) -> dict[str, dict[str, Any]]:
+    normalized_resources: dict[str, dict[str, Any]] = {}
+    for raw_jid, raw_entry in dict(raw_resources or {}).items():
+        if not isinstance(raw_entry, dict):
+            continue
+        resource_jid = str(raw_jid or raw_entry.get("resource_jid") or "").strip()
+        if not resource_jid:
+            continue
+        entry = deepcopy(raw_entry)
+        entry["primitive_catalog"] = _primitive_catalog_for_bridge_normalizer(
+            entry.get("primitive_catalog") or []
+        )
+        entry["execution_primitive_catalog"] = _primitive_catalog_for_bridge_normalizer(
+            entry.get("execution_primitive_catalog")
+            or entry.get("primitive_catalog")
+            or []
+        )
+        normalized_resources[resource_jid] = entry
+    return normalized_resources
+
+
+def normalize_multi_turn_final_output_to_bridge_proposal(
+    *,
+    final_output_payload: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert multi-turn final output into an executable primitive bridge proposal."""
+    result: dict[str, Any] = {
+        "accepted": False,
+        "reason": "",
+        "raw_proposal": None,
+        "normalized_proposal": None,
+        "final_output_stage": str(final_output_payload.get("final_output_stage") or "").strip(),
+    }
+    if not isinstance(final_output_payload, dict) or not final_output_payload:
+        result["reason"] = "final_output_payload is missing"
+        return result
+    if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
+        result["reason"] = "prepared_bridge_request is missing"
+        return result
+
+    transition_trace = _final_output_transition_trace(final_output_payload)
+    accepted_program = [
+        deepcopy(row)
+        for row in (final_output_payload.get("accepted_primitive_program") or [])
+        if isinstance(row, dict)
+    ]
+    if not transition_trace:
+        result["reason"] = "final output did not include a transition trace"
+        return result
+    if not accepted_program:
+        result["reason"] = "final output did not include accepted_primitive_program"
+        return result
+
+    primitives_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): deepcopy(row)
+        for row in accepted_program
+        if str(row.get("outline_id") or "").strip()
+    }
+    macro_tasks: list[dict[str, Any]] = []
+    resource_jids: list[str] = []
+    for transition_event in transition_trace:
+        outline_id = str(transition_event.get("outline_id") or "").strip()
+        primitive_row = dict(primitives_by_outline_id.get(outline_id) or {})
+        if not primitive_row:
+            result["reason"] = (
+                f"accepted_primitive_program is missing an entry for outline_id {outline_id!r}"
+            )
+            return result
+        primitive_steps = [
+            deepcopy(step)
+            for step in (primitive_row.get("primitive_steps") or [])
+            if isinstance(step, dict)
+        ]
+        if not primitive_steps:
+            result["reason"] = (
+                f"accepted_primitive_program[{outline_id}] has no primitive_steps"
+            )
+            return result
+
+        resource_jid = str(
+            primitive_row.get("resource_jid")
+            or transition_event.get("resource_jid")
+            or ""
+        ).strip()
+        if not resource_jid:
+            result["reason"] = (
+                f"transition trace entry {outline_id!r} is missing resource_jid"
+            )
+            return result
+        resource_jids.append(resource_jid)
+
+        task_params, task_metadata = _multi_turn_bridge_task_context(
+            transition_event=transition_event,
+            primitive_row=primitive_row,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        macro_tasks.append(
+            {
+                "resource_jid": resource_jid,
+                "macro_name": str(
+                    primitive_row.get("event_name")
+                    or transition_event.get("action_name")
+                    or transition_event.get("event_name")
+                    or outline_id
+                ).strip(),
+                "description": str(
+                    primitive_row.get("description")
+                    or transition_event.get("description")
+                    or ""
+                ).strip(),
+                "expected_start_state": str(
+                    dict(transition_event.get("expected_start_state") or {}).get("resource_state")
+                    or ""
+                ).strip(),
+                "part_name": str(
+                    primitive_row.get("part_name")
+                    or transition_event.get("part_name")
+                    or ""
+                ).strip(),
+                "task_params": task_params,
+                "task_metadata": task_metadata,
+                "primitive_steps": primitive_steps,
+            }
+        )
+
+    primary_obligation, obligation_error = _resolve_multi_turn_primary_obligation(
+        prepared_bridge_request=prepared_bridge_request,
+        resource_jids=resource_jids,
+    )
+    if obligation_error:
+        result["reason"] = obligation_error
+        return result
+
+    raw_proposal: dict[str, Any] = {
+        "description": "Executable bridge proposal derived from multi-turn final_output.",
+        "macro_tasks": macro_tasks,
+    }
+    if primary_obligation:
+        raw_proposal["primary_obligation"] = deepcopy(primary_obligation)
+    result["raw_proposal"] = deepcopy(raw_proposal)
+
+    normalized = normalize_primitive_bridge_proposal(
+        raw=json.dumps(raw_proposal, default=str),
+        ra_jid=str(prepared_bridge_request.get("ra_jid", "") or "").strip(),
+        primitive_catalog=_primitive_catalog_for_bridge_normalizer(
+            list(prepared_bridge_request.get("primitive_catalog") or [])
+        ),
+        bridge_snapshot=deepcopy(prepared_bridge_request.get("bridge_snapshot") or {}),
+        grounding_context=deepcopy(prepared_bridge_request.get("grounding_context") or {}),
+        bridge_resources=_bridge_resources_for_bridge_normalizer(
+            prepared_bridge_request.get("bridge_resources") or {}
+        ),
+        obligation_targets=deepcopy(
+            list(prepared_bridge_request.get("obligation_targets") or [])
+        ),
+    )
+    if not isinstance(normalized, dict):
+        result["reason"] = "primitive normalizer rejected the derived final_output proposal"
+        return result
+
+    result["accepted"] = True
+    result["normalized_proposal"] = deepcopy(normalized)
+    return result
+
+
 def _build_final_output_payload(
     session_state: dict[str, Any],
     *,
@@ -4424,7 +4555,7 @@ def _build_final_output_payload(
         })
 
     return {
-        "engine": "multi_turn_v2",
+        "engine": "multi_turn",
         "decision": "final_output_ready",
         "final_output_stage": str(stage or "").strip() or "unknown",
         "status": str(session_state.get("status") or "").strip(),
@@ -4455,6 +4586,15 @@ def _append_final_output_turn(
         return None
 
     final_output = _build_final_output_payload(session_state, stage=stage)
+    adapter_result = normalize_multi_turn_final_output_to_bridge_proposal(
+        final_output_payload=final_output,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    normalized_proposal = (
+        deepcopy(adapter_result.get("normalized_proposal"))
+        if isinstance(adapter_result.get("normalized_proposal"), dict)
+        else None
+    )
     final_turn_index = int(session_state.get("turn_index") or 0) + 1
     turn_entry: dict[str, Any] = {
         "turn_index": final_turn_index,
@@ -4466,14 +4606,22 @@ def _append_final_output_turn(
         "raw_response": _compact_final_output_artifact_payload(final_output),
         "phase_result": deepcopy(final_output),
     }
+    if normalized_proposal is not None:
+        turn_entry["normalized_proposal"] = deepcopy(normalized_proposal)
+    if isinstance(adapter_result, dict):
+        turn_entry["adapter_result"] = deepcopy(adapter_result)
     session_state["turn_index"] = final_turn_index
-    session_state["proposal"] = deepcopy(final_output)
+    session_state["proposal"] = deepcopy(normalized_proposal) if normalized_proposal else None
     session_state["final_output"] = deepcopy(final_output)
+    session_state["final_output_adapter"] = deepcopy(adapter_result)
     session_state.setdefault("turns", []).append(deepcopy(turn_entry))
 
     bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
     bridge_debug["multi_turn_session"] = deepcopy(session_state)
     bridge_debug["status"] = str(session_state.get("status") or "")
+    bridge_debug["normalized_proposal"] = deepcopy(normalized_proposal)
+    bridge_debug["final_output_adapter"] = deepcopy(adapter_result)
+    bridge_debug["final_output"] = deepcopy(final_output)
     prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
     if hasattr(planner, "_set_last_bridge_debug"):
         planner._set_last_bridge_debug(bridge_debug)
@@ -4513,7 +4661,7 @@ def _write_per_turn_artifact(
             write_latest=False,
         )
     except Exception as exc:
-        _logger.warning("[MultiTurnV2] Failed to write per-turn artifact: %s", exc)
+        _logger.warning("[MultiTurn] Failed to write per-turn artifact: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -4527,7 +4675,7 @@ async def execute_multi_turn_bridge(
     *,
     session_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Run the multi-turn v2 bridge loop.
+    """Run the multi-turn bridge loop.
 
     Iterates through phases (grounding → outline → primitive_generation → finalize),
     calling the LLM each turn and dispatching to the appropriate phase handler.
@@ -4565,7 +4713,7 @@ async def execute_multi_turn_bridge(
         max_turns = int(session_state.get("max_turns") or 0)
 
         _logger.info(
-            "[MultiTurnV2] Turn %d/%d | phase=%s",
+            "[MultiTurn] Turn %d/%d | phase=%s",
             turn_idx, max_turns, current_phase,
         )
 
@@ -4585,7 +4733,7 @@ async def execute_multi_turn_bridge(
         # 3. Dispatch to phase handler
         handler = _PHASE_HANDLERS.get(current_phase)
         if handler is None:
-            _logger.error("[MultiTurnV2] No handler for phase=%s", current_phase)
+            _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
             session_state["status"] = "error"
             break
 
@@ -4613,11 +4761,6 @@ async def execute_multi_turn_bridge(
         # 5. Transition
         next_phase = transition_multi_turn_phase(current_phase, decision)
         session_state["current_phase"] = next_phase
-
-        # 5a. Initialize DES plant at grounding→outline transition
-        if current_phase == "grounding" and next_phase == "outline":
-            if not session_state.get("des_plant", {}).get("initial"):
-                _init_des_state(session_state, planner, prepared_bridge_request)
 
         # 6. Check terminal conditions
         if current_phase == "finalize" and decision == "accepted":
@@ -4678,7 +4821,7 @@ async def execute_multi_turn_bridge(
         if hasattr(planner, "_set_last_bridge_debug"):
             planner._set_last_bridge_debug(bridge_debug)
         _logger.warning(
-            "[MultiTurnV2] Turn budget exhausted (%d turns) in phase=%s",
+            "[MultiTurn] Turn budget exhausted (%d turns) in phase=%s",
             int(session_state.get("max_turns") or 0),
             str(session_state.get("current_phase") or ""),
         )

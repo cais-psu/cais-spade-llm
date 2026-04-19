@@ -298,6 +298,27 @@ def resolve_param_refs(
     return deepcopy(value)
 
 
+def resolve_step_param_refs(
+    steps: list[dict[str, Any]],
+    grounding_context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Resolve planner-known context refs while preserving step-output refs."""
+    resolved_steps: list[dict[str, Any]] = []
+    for index, step in enumerate(steps, start=1):
+        try:
+            normalized = dict(step)
+            normalized["params"] = resolve_param_refs(
+                step.get("params") or {},
+                grounding_context,
+                preserve_step_output_refs=True,
+            )
+            resolved_steps.append(normalized)
+        except Exception as exc:
+            primitive = str(step.get("primitive", "")).strip()
+            return [], f"step {index} {primitive}: {exc}"
+    return resolved_steps, None
+
+
 def _collect_context_refs(value: Any) -> list[str]:
     refs: list[str] = []
     if isinstance(value, dict):
@@ -1043,6 +1064,19 @@ def validate_and_project_steps(
     )
 
 
+def expected_snapshot_from_bridge_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    resource_type: str = "resource",
+) -> dict[str, Any]:
+    """Keep stable resource-profile fields for start-state validation."""
+    profile = get_resource_profile(resource_type)
+    return {
+        field: resource_snapshot_field_value(snapshot, field, profile=profile)
+        for field in profile.snapshot_fields
+    }
+
+
 def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, str | None]:
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
@@ -1108,10 +1142,12 @@ __all__ = [
     "build_primitive_reference_card",
     "build_synthesis_primitive_catalog",
     "expand_composite_steps",
+    "expected_snapshot_from_bridge_snapshot",
     "extract_step_output",
     "filter_synthesis_primitive_catalog",
     "get_resource_bridge_snapshot",
     "resolve_param_refs",
+    "resolve_step_param_refs",
     "snapshot_matches_expected",
     "sync_agent_from_bridge_snapshot",
     "validate_and_project_steps",

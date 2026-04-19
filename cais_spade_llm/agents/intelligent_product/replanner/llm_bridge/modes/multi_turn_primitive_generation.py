@@ -1,4 +1,4 @@
-"""Primitive-generation helpers for the multi-turn v2 bridge.
+"""Primitive-generation helpers for the multi-turn bridge.
 
 LLM-authored plan flow:
 

@@ -98,45 +98,9 @@ def _multi_turn_artifact_context(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _des_artifact_context(payload: dict[str, Any], *, session_key: str) -> dict[str, Any]:
-    bridge_debug = _bridge_debug_payload(payload)
-    session = dict(bridge_debug.get(session_key) or {})
-    turns = list(session.get("turns") or [])
-    latest_turn = dict(turns[-1] or {}) if turns else {}
-    turn_index = int(
-        latest_turn.get("turn_index")
-        or session.get("turn_index")
-        or 0
-    )
-    phase = _artifact_token(
-        latest_turn.get("phase") or session.get("current_phase"),
-        fallback="grounding",
-    )
-    session_id = _artifact_token(
-        session.get("session_id") or session.get("des_engine"),
-        fallback="session",
-    )
-    return {
-        "turn_index": max(turn_index, 0),
-        "phase": phase,
-        "session_id": session_id,
-    }
-
-
 def _extract_prompt_text(payload: dict[str, Any]) -> str:
-    prompt_text = payload.get("single_shot_prompt_text")
-    if str(prompt_text or "").strip():
-        return str(prompt_text)
-
     bridge_debug = payload.get("bridge_debug")
     if isinstance(bridge_debug, dict):
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                if str(latest_turn.get("prompt_text") or "").strip():
-                    return str(latest_turn.get("prompt_text") or "")
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -146,17 +110,7 @@ def _extract_prompt_text(payload: dict[str, Any]) -> str:
 
     prepared_bridge_request = payload.get("prepared_bridge_request")
     if isinstance(prepared_bridge_request, dict):
-        prompt_text = prepared_bridge_request.get("single_shot_prompt_text")
-        if str(prompt_text or "").strip():
-            return str(prompt_text)
         bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                if str(latest_turn.get("prompt_text") or "").strip():
-                    return str(latest_turn.get("prompt_text") or "")
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -169,13 +123,6 @@ def _extract_prompt_text(payload: dict[str, Any]) -> str:
 def _extract_report_text(payload: dict[str, Any]) -> str:
     bridge_debug = payload.get("bridge_debug")
     if isinstance(bridge_debug, dict):
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                if str(latest_turn.get("report_text") or "").strip():
-                    return str(latest_turn.get("report_text") or "")
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -186,13 +133,6 @@ def _extract_report_text(payload: dict[str, Any]) -> str:
     prepared_bridge_request = payload.get("prepared_bridge_request")
     if isinstance(prepared_bridge_request, dict):
         bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                if str(latest_turn.get("report_text") or "").strip():
-                    return str(latest_turn.get("report_text") or "")
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -211,24 +151,6 @@ def _extract_raw_response(payload: dict[str, Any]) -> str:
 
     bridge_debug = payload.get("bridge_debug")
     if isinstance(bridge_debug, dict):
-        single_shot_turn = dict(bridge_debug.get("single_shot_turn") or {})
-        if str(single_shot_turn.get("raw_response") or "").strip():
-            return str(single_shot_turn.get("raw_response") or "")
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                latest_response = latest_turn.get("raw_response")
-                if latest_response not in (None, "", [], {}):
-                    if isinstance(latest_response, str):
-                        return latest_response
-                    return json.dumps(
-                        latest_response,
-                        indent=2,
-                        default=str,
-                        ensure_ascii=True,
-                    )
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -248,24 +170,6 @@ def _extract_raw_response(payload: dict[str, Any]) -> str:
     prepared_bridge_request = payload.get("prepared_bridge_request")
     if isinstance(prepared_bridge_request, dict):
         bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
-        single_shot_turn = dict(bridge_debug.get("single_shot_turn") or {})
-        if str(single_shot_turn.get("raw_response") or "").strip():
-            return str(single_shot_turn.get("raw_response") or "")
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                latest_response = latest_turn.get("raw_response")
-                if latest_response not in (None, "", [], {}):
-                    if isinstance(latest_response, str):
-                        return latest_response
-                    return json.dumps(
-                        latest_response,
-                        indent=2,
-                        default=str,
-                        ensure_ascii=True,
-                    )
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -287,16 +191,6 @@ def _extract_raw_response(payload: dict[str, Any]) -> str:
 def _extract_phase_result(payload: dict[str, Any]) -> str:
     bridge_debug = payload.get("bridge_debug")
     if isinstance(bridge_debug, dict):
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                result = latest_turn.get("phase_result")
-                if result not in (None, "", [], {}):
-                    if isinstance(result, str):
-                        return result
-                    return json.dumps(result, indent=2, default=str, ensure_ascii=True)
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -310,16 +204,6 @@ def _extract_phase_result(payload: dict[str, Any]) -> str:
     prepared_bridge_request = payload.get("prepared_bridge_request")
     if isinstance(prepared_bridge_request, dict):
         bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
-        for session_key in ("hybrid_session", "procedural_session"):
-            session = dict(bridge_debug.get(session_key) or {})
-            turns = list(session.get("turns") or [])
-            if turns:
-                latest_turn = dict(turns[-1] or {})
-                result = latest_turn.get("phase_result")
-                if result not in (None, "", [], {}):
-                    if isinstance(result, str):
-                        return result
-                    return json.dumps(result, indent=2, default=str, ensure_ascii=True)
         multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
         turns = list(multi_turn_session.get("turns") or [])
         if turns:
@@ -507,12 +391,9 @@ def _extract_session_transcript(payload: dict[str, Any]) -> str:
         else:
             bridge_debug = {}
 
-    for session_key in ("hybrid_session", "procedural_session", "multi_turn_session"):
-        session = dict(bridge_debug.get(session_key) or {})
-        if not session or not list(session.get("turns") or []):
-            continue
-        if session_key == "multi_turn_session":
-            session = _compact_multi_turn_session_transcript(session)
+    session = dict(bridge_debug.get("multi_turn_session") or {})
+    if session and list(session.get("turns") or []):
+        session = _compact_multi_turn_session_transcript(session)
         accepted_prefix = [
             deepcopy(row)
             for row in (session.get("accepted_outline_prefix") or [])
@@ -541,7 +422,7 @@ def _resolve_reasoning_mode(payload: dict[str, Any]) -> str:
         session_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
         if session_mode:
             return session_mode
-    return "hybrid"
+    return "multi_turn"
 
 
 def write_bridge_artifacts(
@@ -588,50 +469,6 @@ def write_bridge_artifacts(
         latest_session_transcript_artifact_name = (
             f"multi_turn_session_{multi_turn_ctx['session_id']}_latest.txt"
         )
-    elif reasoning_mode == "hybrid":
-        hybrid_ctx = _des_artifact_context(normalized_payload, session_key="hybrid_session")
-        prompt_artifact_name = (
-            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
-            f"{hybrid_ctx['phase']}_prompt_{timestamp}.txt"
-        )
-        response_artifact_name = (
-            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
-            f"{hybrid_ctx['phase']}_response_{timestamp}.txt"
-        )
-        latest_prompt_artifact_name = (
-            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
-            f"{hybrid_ctx['phase']}_prompt_latest.txt"
-        )
-        latest_response_artifact_name = (
-            f"hybrid_attempt{int(hybrid_ctx['turn_index']):02d}_"
-            f"{hybrid_ctx['phase']}_response_latest.txt"
-        )
-        session_transcript_artifact_name = (
-            f"hybrid_session_{timestamp}.txt"
-        )
-        latest_session_transcript_artifact_name = (
-            f"hybrid_session_latest.txt"
-        )
-    elif reasoning_mode in {"procedural", "procedural_des_v1"}:
-        des_ctx = _des_artifact_context(normalized_payload, session_key="procedural_session")
-        prompt_artifact_name = (
-            f"procedural_attempt{int(des_ctx['turn_index']):02d}_"
-            f"{des_ctx['phase']}_prompt_{timestamp}.txt"
-        )
-        response_artifact_name = (
-            f"procedural_attempt{int(des_ctx['turn_index']):02d}_"
-            f"{des_ctx['phase']}_response_{timestamp}.txt"
-        )
-        latest_prompt_artifact_name = (
-            f"procedural_attempt{int(des_ctx['turn_index']):02d}_"
-            f"{des_ctx['phase']}_prompt_latest.txt"
-        )
-        latest_response_artifact_name = (
-            f"procedural_attempt{int(des_ctx['turn_index']):02d}_"
-            f"{des_ctx['phase']}_response_latest.txt"
-        )
-        session_transcript_artifact_name = f"procedural_session_{timestamp}.txt"
-        latest_session_transcript_artifact_name = "procedural_session_latest.txt"
     else:
         prompt_artifact_name = f"{reasoning_mode}_prompt_{timestamp}.txt"
         response_artifact_name = f"{reasoning_mode}_response_{timestamp}.txt"

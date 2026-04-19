@@ -1307,15 +1307,3 @@ RESOURCE_AGENTS (workspace boundaries and staging areas):
 {safety_section}
 {state_section}
 """)
-
-# ----------------------------------------------------------------------
-# Bridge prompt compatibility exports
-# ----------------------------------------------------------------------
-# Bridge prompt bodies live under llm_bridge/prompts.  Keep these imports so
-# older callers of cais_spade_llm.prompts continue to work while bridge code
-# imports from the bridge prompt package directly.
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.prompts.bridge_react import (
-    _bridge_generalize_location_summary,
-    build_bridge_turn_prompt,
-    build_state_exploration_prompt,
-)

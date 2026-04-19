@@ -1,4 +1,4 @@
-"""Outline-phase helpers for the multi-turn v2 bridge."""
+"""Outline-phase helpers for the multi-turn bridge."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-    multi_turn_v2 as _shared,
+    multi_turn as _shared,
 )
 
 _logger = logging.getLogger(__name__)
@@ -125,14 +125,14 @@ async def _handle_outline_single_pass(
 
     if not transition_trace:
         turn_entry["error"] = "outline response missing transition_trace"
-        _logger.warning("[MultiTurnV2] outline single_pass: no transition_trace")
+        _logger.warning("[MultiTurn] outline single_pass: no transition_trace")
         return "need_revision", turn_entry
 
     session_state["accepted_outline_prefix"] = deepcopy(transition_trace)
     _shared._sync_des_recovery_aliases(session_state, turn_entry=turn_entry)
 
     _logger.info(
-        "[MultiTurnV2] outline single_pass: accepted %d recovery events",
+        "[MultiTurn] outline single_pass: accepted %d recovery events",
         len(transition_trace),
     )
 
@@ -162,7 +162,7 @@ async def _handle_outline_incremental(
 
     if not next_transition or not str(next_transition.get("outline_id") or "").strip():
         turn_entry["error"] = "outline response missing next_transition with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental: no next_transition")
+        _logger.warning("[MultiTurn] outline incremental: no next_transition")
         return "need_revision", turn_entry
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
@@ -177,7 +177,7 @@ async def _handle_outline_incremental(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
+        "[MultiTurn] outline incremental: accepted event %s (prefix now %d events, complete=%s)",
         str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
         outline_complete,
@@ -211,7 +211,7 @@ async def _handle_outline_incremental_validated(
 
     if not next_transition or not str(next_transition.get("outline_id") or "").strip():
         turn_entry["error"] = "outline response missing next_transition with outline_id"
-        _logger.warning("[MultiTurnV2] outline incremental_validated: no next_transition")
+        _logger.warning("[MultiTurn] outline incremental_validated: no next_transition")
         return "need_revision", turn_entry
 
     findings, grounded_action = _shared._validate_single_outline_task(
@@ -237,7 +237,7 @@ async def _handle_outline_incremental_validated(
             turn_entry["transition_validation"]
         )
         _logger.info(
-            "[MultiTurnV2] outline incremental_validated: rejected event %s (%d findings)",
+            "[MultiTurn] outline incremental_validated: rejected event %s (%d findings)",
             str(next_transition.get("outline_id") or "").strip(),
             len(findings),
         )
@@ -265,7 +265,7 @@ async def _handle_outline_incremental_validated(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental_validated: accepted event %s "
+        "[MultiTurn] outline incremental_validated: accepted event %s "
         "(prefix now %d events, complete=%s)",
         str(next_transition.get("outline_id") or "").strip(),
         len(accepted_prefix),
@@ -287,7 +287,7 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry: dict[str, Any] = {}
     sequence_index = _shared._next_recovery_sequence_index(session_state)
     session_state["outline_validation_findings"] = []
-    session_state["pruned_actions"] = _shared._active_v2_pruned_actions(
+    session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_bridge_request,
     )
@@ -308,8 +308,7 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry["candidate_events"] = deepcopy(candidate_events)
 
     candidate_bound = int(
-        session_state.get("des_candidate_bound")
-        or session_state.get("candidate_bound")
+        session_state.get("candidate_bound")
         or _shared._DEFAULT_CANDIDATE_BOUND
     )
     if not (1 <= len(candidate_events) <= candidate_bound):
@@ -318,7 +317,7 @@ async def _handle_outline_incremental_candidates_validated(
             f"{candidate_bound} candidate_events"
         )
         _logger.warning(
-            "[MultiTurnV2] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
+            "[MultiTurn] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
             candidate_bound,
             len(candidate_events),
         )
@@ -335,7 +334,7 @@ async def _handle_outline_incremental_candidates_validated(
             "task": deepcopy(working_task),
         }
 
-        pruned_row = _shared._matching_active_v2_pruned_action(
+        pruned_row = _shared._matching_active_pruned_action(
             task=working_task,
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
@@ -421,7 +420,7 @@ async def _handle_outline_incremental_candidates_validated(
             parsed_response.get("thought") or ""
         ).strip()
         _logger.info(
-            "[MultiTurnV2] outline incremental_candidates_validated: rejected all %d candidates",
+            "[MultiTurn] outline incremental_candidates_validated: rejected all %d candidates",
             len(candidate_events),
         )
         stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
@@ -451,11 +450,11 @@ async def _handle_outline_incremental_candidates_validated(
             if isinstance(f, dict)
         ]
         _logger.info(
-            "[DES] Stagnation %d — status_counts: %s",
+            "[MultiTurn] Stagnation %d — status_counts: %s",
             stagnation, status_summary,
         )
         _logger.debug(
-            "[DES] Stagnation %d — rejection codes: %s",
+            "[MultiTurn] Stagnation %d — rejection codes: %s",
             stagnation, rejection_codes,
         )
         session_state["status"] = "paused_after_outline_turn"
@@ -506,64 +505,10 @@ async def _handle_outline_incremental_candidates_validated(
         },
     )
 
-    pre_state = _shared._symbolic_state_fingerprint(
-        session_state.get("symbolic_resources") or {},
-        session_state.get("symbolic_parts") or {},
-    )
     _shared._apply_task_effects_to_symbolic_state(selected_transition, session_state)
-    session_state["pruned_actions"] = _shared._active_v2_pruned_actions(
+    session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_bridge_request,
-    )
-    post_state = _shared._symbolic_state_fingerprint(
-        session_state.get("symbolic_resources") or {},
-        session_state.get("symbolic_parts") or {},
-    )
-
-    event_name = str(
-        selected_transition.get("outline_id") or f"e_{len(session_state.get('des_trace') or [])}"
-    ).strip()
-    _shared._extend_plant_with_event(
-        session_state.get("des_plant") or {},
-        event_name=event_name,
-        event_dict={
-            "name": str(selected_transition.get("event_name") or "").strip(),
-            "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
-            "part_name": str(selected_transition.get("part_name") or "").strip() or None,
-            "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
-            "description": str(selected_transition.get("description") or "").strip(),
-        },
-        from_state=pre_state,
-        to_state=post_state,
-    )
-    session_state["des_current_state"] = post_state
-    session_state.setdefault("des_trace", []).append(event_name)
-
-    safety_dfas = session_state.get("des_safety_dfas") or {}
-    if safety_dfas:
-        _violates, new_q, _violated_ids = _shared._advance_des_safety_state(
-            candidate_event={
-                "name": str(selected_transition.get("event_name") or "").strip(),
-                "resource_jid": str(selected_transition.get("resource_jid") or "").strip(),
-                "part_name": str(selected_transition.get("part_name") or "").strip() or None,
-                "target_ref": str(selected_transition.get("target_ref") or "").strip() or None,
-            },
-            current_safety_q=tuple(session_state.get("des_safety_dfa_vector") or ()),
-            safety_dfas=safety_dfas,
-            ap_descriptors=session_state.get("des_ap_descriptors") or [],
-        )
-        session_state["des_safety_dfa_vector"] = new_q
-
-    visited = session_state.setdefault("des_visited_states", [])
-    if post_state in visited:
-        _logger.warning("[DES] Cycle detected: state %s already visited", post_state)
-        session_state["status"] = "des_cycle_detected"
-    else:
-        visited.append(post_state)
-
-    _logger.info(
-        "[DES] Plant extended: %s -[%s]-> %s (trace len=%d)",
-        pre_state, event_name, post_state, len(session_state.get("des_trace") or []),
     )
 
     remaining_findings, remaining_conditions = _shared._remaining_blocked_issue_counts(
@@ -572,35 +517,10 @@ async def _handle_outline_incremental_candidates_validated(
     )
     outline_complete = remaining_findings == 0 and remaining_conditions == 0
 
-    if outline_complete and (session_state.get("des_safety_dfas") or {}):
-        plant = session_state.get("des_plant") or {}
-        final_state = session_state.get("des_current_state") or ""
-        if final_state and final_state not in (plant.get("marked") or []):
-            plant.setdefault("marked", []).append(final_state)
-        solver_result = _shared.compose_and_solve(
-            plant=plant,
-            safety_dfas=session_state.get("des_safety_dfas") or {},
-            ap_descriptors=session_state.get("des_ap_descriptors") or [],
-        )
-        solver_status = str(solver_result.get("status") or "").strip()
-        if solver_status != "solved":
-            diagnostic = _shared.solver_diagnostic_summary(solver_result)
-            _logger.warning(
-                "[DES] Composition gate FAILED (%s): %s", solver_status, diagnostic,
-            )
-            session_state.setdefault("phase_feedback", []).append({
-                "phase": "outline",
-                "issue": "des_safety_composition_failed",
-                "diagnostic": diagnostic,
-            })
-            outline_complete = False
-        else:
-            _logger.info("[DES] Composition gate PASSED — outline is safety-verified.")
-
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurnV2] outline incremental_candidates_validated: selected candidate %d (%s) "
+        "[MultiTurn] outline incremental_candidates_validated: selected candidate %d (%s) "
         "(progress=%d, prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
         str(selected_transition.get("outline_id") or "").strip(),

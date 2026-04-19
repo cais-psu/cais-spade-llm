@@ -1,4 +1,4 @@
-"""Shared outline-state helpers used by the multi-turn v2 bridge."""
+"""Shared outline-state helpers used by the multi-turn bridge."""
 
 from __future__ import annotations
 

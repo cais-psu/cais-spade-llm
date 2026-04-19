@@ -35,6 +35,16 @@ from cais_spade_llm.resources.sensor.camera_module import CameraModule
 _UNSET = object()
 _CASE3_PREPROGRAMMED_SCENARIO_ID = "case3_llm_bridge"
 _CASE3_PREPROGRAMMED_REQUIREMENT_FILES = frozenset({"case3_two_arm_llm_bridge.txt"})
+_LEGACY_PROCEDURAL_DES_BRIDGE_MODE = "procedural" + "_des_v1"
+
+
+def _env_flag_enabled(*names: str, default: bool = False) -> bool:
+    for name in names:
+        token = str(os.environ.get(name) or "").strip().lower()
+        if not token:
+            continue
+        return token in {"1", "true", "yes", "on"}
+    return bool(default)
 
 
 class ProductAgent(LlmAgent):
@@ -123,7 +133,12 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
         self._bridge_generation_mode = "auto"
-        self._bridge_reasoning_mode = "single_shot"
+        self._bridge_reasoning_mode = "multi_turn"
+        self._generated_bridge_gazebo_verification_enabled = _env_flag_enabled(
+            "CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO",
+            "CAIS_GENERATED_BRIDGE_GAZEBO_VERIFICATION",
+            default=False,
+        )
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
         self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
@@ -161,11 +176,21 @@ class ProductAgent(LlmAgent):
             if self._bridge_generation_mode not in {"auto", "manual"}:
                 self._bridge_generation_mode = "auto"
             self._bridge_reasoning_mode = str(
-                precomputed_policy.get("bridge_reasoning_mode", "single_shot")
-                or "single_shot"
+                precomputed_policy.get("bridge_reasoning_mode", "multi_turn")
+                or "multi_turn"
             ).strip().lower()
-            if self._bridge_reasoning_mode not in {"single_shot", "multi_turn"}:
-                self._bridge_reasoning_mode = "single_shot"
+            if self._bridge_reasoning_mode in {
+                "hybrid",
+                "procedural",
+                _LEGACY_PROCEDURAL_DES_BRIDGE_MODE,
+            }:
+                self._bridge_reasoning_mode = "multi_turn"
+            if self._bridge_reasoning_mode != "multi_turn":
+                self._bridge_reasoning_mode = "multi_turn"
+            if "generated_bridge_gazebo_verification" in precomputed_policy:
+                self._generated_bridge_gazebo_verification_enabled = bool(
+                    precomputed_policy.get("generated_bridge_gazebo_verification")
+                )
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -411,6 +436,8 @@ class ProductAgent(LlmAgent):
             "bridge_approval_state": "none",
             "active_bridge_sequence": None,
             "bridge_feedback_history": [],
+            "fixture_replay": None,
+            "generated_code_verification": None,
             "history": [],
             "updated_at_utc": self._utc_now_iso(),
         }
@@ -424,7 +451,7 @@ class ProductAgent(LlmAgent):
             self.runtime_repair_state = "paused_after_failure"
         elif status in {"des_search", "llm_bridge", "validating"}:
             self.runtime_repair_state = "repairing"
-        elif status in {"bridge_ready", "human_required"}:
+        elif status in {"bridge_ready", "human_required", "generated_bridge_verified"}:
             self.runtime_repair_state = "paused_after_failure"
         else:
             self.runtime_repair_state = "idle"
@@ -448,6 +475,8 @@ class ProductAgent(LlmAgent):
         bridge_approval_state: str | None = None,
         active_bridge_sequence: dict[str, Any] | None | object = _UNSET,
         bridge_feedback_history: list[str] | object = _UNSET,
+        fixture_replay: dict[str, Any] | None | object = _UNSET,
+        generated_code_verification: dict[str, Any] | None | object = _UNSET,
         violations: list[dict[str, Any]] | None = None,
         append_history: bool = False,
         history_message: str | None = None,
@@ -499,6 +528,18 @@ class ProductAgent(LlmAgent):
                 for item in (bridge_feedback_history or [])
                 if str(item).strip()
             ]
+        if fixture_replay is not _UNSET:
+            current["fixture_replay"] = (
+                deepcopy(fixture_replay)
+                if isinstance(fixture_replay, dict)
+                else None
+            )
+        if generated_code_verification is not _UNSET:
+            current["generated_code_verification"] = (
+                deepcopy(generated_code_verification)
+                if isinstance(generated_code_verification, dict)
+                else None
+            )
         if violations is not None:
             violated_rules, witness_count = self._violation_summary(violations)
             current["violated_rules"] = violated_rules
@@ -1271,6 +1312,217 @@ class ProductAgent(LlmAgent):
     ) -> bool:
         return bool(self._bridge_execution_policy(active_bridge_sequence).get("complete_full_tail"))
 
+    def _bridge_is_verification_only(
+        self,
+        active_bridge_sequence: dict[str, Any] | None,
+    ) -> bool:
+        return bool(self._bridge_execution_policy(active_bridge_sequence).get("verification_only"))
+
+    @staticmethod
+    def _runtime_is_gazebo_simulation() -> bool:
+        exec_mode = str(os.environ.get("EXECUTION_MODE", "dry_run") or "").strip().lower()
+        robot_env = str(os.environ.get("ROBOT_ENV", "gazebo") or "").strip().lower()
+        return exec_mode == "simulation" and robot_env == "gazebo"
+
+    def _should_enable_generated_bridge_verification(
+        self,
+        *,
+        bridge_debug: dict[str, Any] | None = None,
+    ) -> bool:
+        verification_flag_enabled = bool(
+            self._generated_bridge_gazebo_verification_enabled
+            or _env_flag_enabled(
+                "CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO",
+                "CAIS_GENERATED_BRIDGE_GAZEBO_VERIFICATION",
+                default=False,
+            )
+        )
+        if not verification_flag_enabled:
+            return False
+        if not self._runtime_is_gazebo_simulation():
+            return False
+        payload = dict(bridge_debug or {})
+        reasoning_mode = str(payload.get("reasoning_mode") or "").strip().lower()
+        return reasoning_mode == "multi_turn"
+
+    def _build_generated_code_verification(
+        self,
+        *,
+        enabled: bool,
+        bridge_debug: dict[str, Any] | None = None,
+        prepared_bridge_request: dict[str, Any] | None = None,
+        normalized_proposal: dict[str, Any] | None = None,
+        status: str = "disabled",
+        reason: str = "",
+        verification_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        bridge_debug = dict(bridge_debug or {})
+        prepared_bridge_request = dict(prepared_bridge_request or {})
+        final_output = dict(bridge_debug.get("final_output") or {})
+        artifacts = dict(bridge_debug.get("artifacts") or {})
+        fixture_replay = dict(bridge_debug.get("fixture_replay") or {})
+        session = dict(bridge_debug.get("multi_turn_session") or {})
+        verification_payload: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "status": str(status or "disabled").strip() or "disabled",
+            "reason": str(reason or "").strip(),
+            "verdict": "pending" if enabled else "disabled",
+            "source_reasoning_mode": str(bridge_debug.get("reasoning_mode") or "").strip(),
+            "source_final_output_stage": str(final_output.get("final_output_stage") or "").strip(),
+            "source_artifact_path": (
+                str(fixture_replay.get("source_path") or "").strip()
+                or str(dict(artifacts.get("prepare") or {}).get("response_artifact_path") or "").strip()
+            ),
+            "source_turn_index": int(session.get("turn_index") or 0),
+            "normalized_proposal_available": isinstance(normalized_proposal, dict),
+            "executed_macro_ids": [],
+            "snapshot_match_details": [],
+            "updated_at_utc": self._utc_now_iso(),
+        }
+        if isinstance(verification_result, dict) and verification_result:
+            verification_payload["result"] = deepcopy(verification_result)
+            verdict = str(verification_result.get("verdict") or "").strip()
+            if verdict:
+                verification_payload["verdict"] = verdict
+        if enabled and isinstance(final_output, dict) and final_output:
+            verification_payload["source_final_output"] = {
+                "final_output_stage": str(final_output.get("final_output_stage") or "").strip(),
+                "accepted_trace_length": int(final_output.get("accepted_trace_length") or 0),
+            }
+        if isinstance(prepared_bridge_request, dict) and prepared_bridge_request:
+            verification_payload["prepared_request_reasoning_mode"] = str(
+                dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode") or ""
+            ).strip()
+        return verification_payload
+
+    @staticmethod
+    def _runtime_bridge_fixture_final_output_path() -> str:
+        return str(
+            os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or ""
+        ).strip()
+
+    def _runtime_bridge_fixture_final_output_source_path(self) -> str:
+        fixture_path = self._runtime_bridge_fixture_final_output_path()
+        if not fixture_path:
+            return ""
+        resolved_path = Path(fixture_path).expanduser()
+        try:
+            resolved_path = resolved_path.resolve()
+        except Exception:
+            pass
+        return str(resolved_path)
+
+    def _runtime_bridge_fixture_replay_enabled(self) -> bool:
+        return bool(self._runtime_bridge_fixture_final_output_path())
+
+    @staticmethod
+    def _compact_fixture_replay_status(
+        fixture_replay: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        payload = dict(fixture_replay or {})
+        if not payload:
+            return None
+        return {
+            "enabled": bool(payload.get("enabled")),
+            "source_path": str(payload.get("source_path") or "").strip(),
+            "load_status": str(payload.get("load_status") or "").strip(),
+            "normalization_status": str(
+                payload.get("normalization_status") or ""
+            ).strip(),
+            "reason": str(payload.get("reason") or "").strip(),
+        }
+
+    def _load_runtime_bridge_fixture_replay(
+        self,
+        prepared_bridge_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        fixture_path = self._runtime_bridge_fixture_final_output_path()
+        result: dict[str, Any] = {
+            "enabled": bool(fixture_path),
+            "source_path": "",
+            "load_status": "disabled",
+            "normalization_status": "disabled",
+            "reason": "",
+            "final_output": None,
+            "adapter_result": None,
+            "proposal": None,
+        }
+        if not fixture_path:
+            return result
+
+        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        reasoning_mode = str(
+            bridge_session.get("reasoning_mode") or ""
+        ).strip().lower()
+        resolved_path = Path(fixture_path).expanduser()
+        try:
+            resolved_path = resolved_path.resolve()
+        except Exception:
+            pass
+        result["source_path"] = str(resolved_path)
+
+        if reasoning_mode != "multi_turn":
+            result["load_status"] = "skipped"
+            result["normalization_status"] = "skipped"
+            result["reason"] = (
+                "runtime bridge fixture replay requires reasoning_mode=multi_turn"
+            )
+            return result
+
+        if not resolved_path.exists():
+            result["load_status"] = "missing"
+            result["normalization_status"] = "skipped"
+            result["reason"] = (
+                f"fixture final_output artifact does not exist: {resolved_path}"
+            )
+            return result
+
+        try:
+            final_output_payload = json.loads(
+                resolved_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            result["load_status"] = "invalid_json"
+            result["normalization_status"] = "skipped"
+            result["reason"] = (
+                f"failed to parse fixture final_output artifact: {exc}"
+            )
+            return result
+
+        if not isinstance(final_output_payload, dict) or not final_output_payload:
+            result["load_status"] = "loaded"
+            result["normalization_status"] = "rejected"
+            result["reason"] = (
+                "fixture final_output artifact did not contain a JSON object"
+            )
+            return result
+
+        result["final_output"] = deepcopy(final_output_payload)
+        result["load_status"] = "loaded"
+
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
+            normalize_multi_turn_final_output_to_bridge_proposal,
+        )
+
+        adapter_result = normalize_multi_turn_final_output_to_bridge_proposal(
+            final_output_payload=final_output_payload,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        result["adapter_result"] = deepcopy(adapter_result)
+        if isinstance(adapter_result, dict) and adapter_result.get("accepted") is True:
+            result["normalization_status"] = "accepted"
+            result["proposal"] = deepcopy(
+                adapter_result.get("normalized_proposal") or {}
+            )
+            return result
+
+        result["normalization_status"] = "rejected"
+        result["reason"] = str(
+            dict(adapter_result or {}).get("reason")
+            or "fixture final_output normalization failed"
+        ).strip()
+        return result
+
     def _bridge_task_debug_rows(self, task_ids: list[str] | None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         lookup = {
@@ -1545,6 +1797,26 @@ class ProductAgent(LlmAgent):
         trigger = str(sequence.get("trigger", "")).strip()
         failed_task_id = str(sequence.get("failed_task_id", "")).strip()
         used_llm_bridge = self._bridge_used_llm(sequence, self.runtime_recovery)
+        generated_code_verification = deepcopy(
+            self.runtime_recovery.get("generated_code_verification") or {}
+        )
+        if generated_code_verification:
+            generated_code_verification["status"] = "failed"
+            generated_code_verification["verdict"] = "failed"
+            generated_code_verification["updated_at_utc"] = self._utc_now_iso()
+            generated_code_verification["result"] = {
+                "verdict": "failed",
+                "message": str(message or "").strip(),
+                "failed_task_id": str(task_node.get("id", "")).strip(),
+                "runtime_status": str(status or "").strip(),
+                "observations": deepcopy(observations or {}),
+            }
+            if isinstance(self.runtime_recovery.get("bridge_debug"), dict):
+                bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+                bridge_debug["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
+                self.runtime_recovery["bridge_debug"] = bridge_debug
         self._runtime_recovery_context = {}
         self._set_runtime_recovery(
             status="human_required",
@@ -1559,6 +1831,7 @@ class ProductAgent(LlmAgent):
             bridge_approval_state="approved",
             active_bridge_sequence=sequence,
             bridge_feedback_history=self.runtime_recovery.get("bridge_feedback_history") or [],
+            generated_code_verification=generated_code_verification or None,
             violations=violations,
             append_history=True,
             history_message=message,
@@ -1603,6 +1876,7 @@ class ProductAgent(LlmAgent):
         violations = deepcopy(list(active_bridge_sequence.get("violations") or []))
         feedback_history = self.runtime_recovery.get("bridge_feedback_history") or []
         used_llm_bridge = self._bridge_used_llm(active_bridge_sequence, self.runtime_recovery)
+        verification_only = self._bridge_is_verification_only(active_bridge_sequence)
 
         if isinstance(status, str) and status.startswith("failed"):
             detail = str(content or "").strip()
@@ -1688,6 +1962,128 @@ class ProductAgent(LlmAgent):
             bridge_snapshot=actual_snapshot,
         )
         plan_rewrite = dict(active_bridge_sequence.get("plan_rewrite") or {})
+        generated_code_verification = deepcopy(
+            self.runtime_recovery.get("generated_code_verification")
+            or active_bridge_sequence.get("generated_code_verification")
+            or {}
+        )
+        if generated_code_verification:
+            executed_macro_ids = list(generated_code_verification.get("executed_macro_ids") or [])
+            task_id = str(task_node.get("id", "")).strip()
+            if task_id and task_id not in executed_macro_ids:
+                executed_macro_ids.append(task_id)
+            generated_code_verification["executed_macro_ids"] = executed_macro_ids
+            snapshot_match_details = list(
+                generated_code_verification.get("snapshot_match_details") or []
+            )
+            snapshot_match_details.append(
+                {
+                    "task_id": task_id,
+                    "macro_name": macro_name,
+                    "resource_jid": resource_jid,
+                    "matched": True,
+                    "actual_snapshot": deepcopy(actual_snapshot),
+                    "projected_snapshot": deepcopy(projected_snapshot),
+                    "part_name": part_name or None,
+                    "projected_part_entry": deepcopy(projected_part_entry),
+                }
+            )
+            generated_code_verification["snapshot_match_details"] = snapshot_match_details
+            generated_code_verification["updated_at_utc"] = self._utc_now_iso()
+        if verification_only:
+            next_sequence = deepcopy(active_bridge_sequence)
+            next_sequence["last_task_id"] = str(task_node.get("id", "")).strip()
+            next_sequence["last_completed_macro_name"] = macro_name
+            next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
+            if generated_code_verification:
+                next_sequence["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
+            bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+            if generated_code_verification:
+                bridge_debug["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
+            if tail_task_ids:
+                next_sequence["state"] = "executing"
+                continue_message = (
+                    f"Bridge macro '{macro_name}' matched projection; continuing generated-code verification tail."
+                )
+                self._set_runtime_recovery(
+                    status="resolved",
+                    resolution_class="generated_bridge_verification",
+                    trigger=trigger,
+                    failed_task_id=failed_task_id,
+                    message=continue_message,
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=used_llm_bridge,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="approved",
+                    active_bridge_sequence=next_sequence,
+                    generated_code_verification=generated_code_verification or None,
+                    bridge_feedback_history=feedback_history,
+                    violations=[],
+                    append_history=True,
+                    history_message=continue_message,
+                )
+                await asyncio.to_thread(self._persist_product_state)
+                return True
+
+            next_sequence["state"] = "verified"
+            if generated_code_verification:
+                generated_code_verification["status"] = "verified"
+                generated_code_verification["verdict"] = "passed"
+                generated_code_verification["updated_at_utc"] = self._utc_now_iso()
+                generated_code_verification["result"] = {
+                    "verdict": "passed",
+                    "executed_macro_ids": deepcopy(
+                        generated_code_verification.get("executed_macro_ids") or []
+                    ),
+                    "snapshot_match_details": deepcopy(
+                        generated_code_verification.get("snapshot_match_details") or []
+                    ),
+                    "message": (
+                        "Generated bridge macro sequence executed in Gazebo and matched the projected post-state."
+                    ),
+                }
+                next_sequence["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
+                bridge_debug["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
+            verified_message = (
+                f"Generated bridge verification completed after macro '{macro_name}'; "
+                "execution paused for review."
+            )
+            self._runtime_recovery_context = {}
+            self._set_runtime_recovery(
+                status="generated_bridge_verified",
+                resolution_class="generated_bridge_verified",
+                trigger=trigger,
+                failed_task_id=failed_task_id,
+                message=verified_message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=used_llm_bridge,
+                bridge_proposal=None,
+                bridge_debug=bridge_debug if bridge_debug else None,
+                bridge_approval_state="approved",
+                active_bridge_sequence=next_sequence,
+                generated_code_verification=generated_code_verification or None,
+                bridge_feedback_history=feedback_history,
+                violations=[],
+                append_history=True,
+                history_message=verified_message,
+            )
+            self._clear_plan_safety_alert()
+            await asyncio.to_thread(self._persist_plan_snapshot)
+            await asyncio.to_thread(self._persist_product_state)
+            await asyncio.to_thread(self._persist_resource_state)
+            return True
+
         if tail_task_ids and self._bridge_requires_complete_full_tail(active_bridge_sequence):
             next_sequence = deepcopy(active_bridge_sequence)
             next_sequence["state"] = "executing"
@@ -1976,11 +2372,19 @@ class ProductAgent(LlmAgent):
         scenario_hint = canonical_preprogrammed_bridge_scenario_id(
             self._auto_runtime_preprogrammed_scenario_id()
         )
+        fixture_replay_enabled = self._runtime_bridge_fixture_replay_enabled()
+        fixture_source_path = self._runtime_bridge_fixture_final_output_source_path()
+        self.logger.info(
+            "[Product] Runtime bridge fixture replay gate: fixture_replay=%s source_path=%s env_var=CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT",
+            fixture_replay_enabled,
+            fixture_source_path or "<unset>",
+        )
         bridge_generation_mode = str(self._bridge_generation_mode or "auto").strip().lower()
-        if scenario_hint and bridge_generation_mode != "manual":
+        if (scenario_hint or fixture_replay_enabled) and bridge_generation_mode != "manual":
             self.logger.info(
-                "[Product] Forcing manual bridge handoff for preprogrammed scenario: scenario_id=%s mode=%s->manual",
+                "[Product] Forcing manual bridge handoff for runtime bridge replay: scenario_id=%s fixture_replay=%s mode=%s->manual",
                 scenario_hint,
+                fixture_replay_enabled,
                 bridge_generation_mode or "auto",
             )
             bridge_generation_mode = "manual"
@@ -2020,7 +2424,7 @@ class ProductAgent(LlmAgent):
                 bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
                 active_bridge_phase = str(bridge_session.get("phase") or "").strip().lower()
                 allow_preprogrammed_autoload = active_bridge_phase not in {"prepare_trace"}
-                if scenario_hint and allow_preprogrammed_autoload:
+                if scenario_hint and allow_preprogrammed_autoload and not fixture_replay_enabled:
                     self.logger.info(
                         "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
                         scenario_hint,
@@ -2070,6 +2474,11 @@ class ProductAgent(LlmAgent):
                             "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
                             scenario_hint,
                         )
+                elif scenario_hint and allow_preprogrammed_autoload and fixture_replay_enabled:
+                    self.logger.info(
+                        "[Product] Skipping preprogrammed recovery auto-load because fixture replay is enabled: scenario_id=%s",
+                        scenario_hint,
+                    )
                 elif scenario_hint and not allow_preprogrammed_autoload:
                     self.logger.info(
                         "[Product] Active bridge mode left runtime recovery at prepare-trace checkpoint; "
@@ -2107,6 +2516,27 @@ class ProductAgent(LlmAgent):
                 recovery = deepcopy(self.runtime_recovery)
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
+                verification_ready = self._should_enable_generated_bridge_verification(
+                    bridge_debug=bridge_debug if isinstance(bridge_debug, dict) else None,
+                )
+                if fixture_replay_enabled or (not scenario_hint and verification_ready):
+                    if fixture_replay_enabled:
+                        self.logger.info(
+                            "[Product] Auto-starting runtime bridge fixture replay from prepared request: source_path=%s verification_ready=%s",
+                            self._runtime_bridge_fixture_final_output_path(),
+                            verification_ready,
+                        )
+                    else:
+                        self.logger.info(
+                            "[Product] Auto-starting multi-turn bridge generation for Gazebo verification."
+                        )
+                    self._runtime_repair_inflight = False
+                    return await self.generate_runtime_bridge_proposal()
+                if not fixture_replay_enabled:
+                    self.logger.info(
+                        "[Product] Runtime bridge fixture replay disabled at prepare-trace checkpoint: "
+                        "CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT is not set; staying at bridge_ready."
+                    )
                 return recovery
             if awaiting_bridge_approval and isinstance(bridge_proposal, dict):
                 bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
@@ -2247,7 +2677,14 @@ class ProductAgent(LlmAgent):
         system_coordination_state: dict | None = None,
     ) -> dict[str, Any]:
         current_status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if current_status in {"des_search", "bridge_ready", "llm_bridge", "validating", "human_required"}:
+        if current_status in {
+            "des_search",
+            "bridge_ready",
+            "llm_bridge",
+            "validating",
+            "human_required",
+            "generated_bridge_verified",
+        }:
             self.logger.warning(
                 "[Product] Runtime recovery already active for %s; ignoring duplicate replan request.",
                 self.runtime_recovery.get("failed_task_id") or failed_task_id,
@@ -2292,15 +2729,20 @@ class ProductAgent(LlmAgent):
 
         if ok:
             active_bridge_sequence = self._active_bridge_sequence()
+            verification_only = self._bridge_is_verification_only(active_bridge_sequence)
             resolution_class = (
-                "des_with_llm_bridge"
+                "generated_bridge_verification"
+                if verification_only
+                else "des_with_llm_bridge"
                 if bool(self.runtime_recovery.get("used_llm_bridge", False))
                 else "des_only"
             )
             attempts_used = self._runtime_repair_fail_streak
             self._runtime_repair_fail_streak = 0
             success_message = (
-                "Plan validation passed; approved bridge sequence is executing."
+                "Plan validation passed; generated bridge verification is executing."
+                if active_bridge_sequence and verification_only
+                else "Plan validation passed; approved bridge sequence is executing."
                 if active_bridge_sequence
                 else "Plan validation passed; runtime recovery resolved."
             )
@@ -2322,6 +2764,7 @@ class ProductAgent(LlmAgent):
                     else "none"
                 ),
                 active_bridge_sequence=active_bridge_sequence,
+                generated_code_verification=self.runtime_recovery.get("generated_code_verification"),
                 violations=[],
                 append_history=True,
                 history_message=success_message,
@@ -2455,6 +2898,82 @@ class ProductAgent(LlmAgent):
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
+    async def _execute_runtime_bridge_generation(
+        self,
+        prepared_bridge_request: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        fixture_replay = self._load_runtime_bridge_fixture_replay(prepared_bridge_request)
+        if bool(fixture_replay.get("enabled")):
+            bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+            bridge_debug["fixture_replay"] = (
+                self._compact_fixture_replay_status(fixture_replay) or {}
+            )
+            if isinstance(fixture_replay.get("final_output"), dict):
+                bridge_debug["final_output"] = deepcopy(
+                    fixture_replay.get("final_output") or {}
+                )
+            if isinstance(fixture_replay.get("adapter_result"), dict):
+                bridge_debug["final_output_adapter"] = deepcopy(
+                    fixture_replay.get("adapter_result") or {}
+                )
+            if isinstance(fixture_replay.get("proposal"), dict):
+                bridge_debug["normalized_proposal"] = deepcopy(
+                    fixture_replay.get("proposal") or {}
+                )
+                bridge_debug["status"] = "fixture_replay_ready"
+                bridge_debug["message"] = (
+                    "Loaded runtime bridge proposal from archived final_output fixture."
+                )
+            else:
+                bridge_debug["status"] = "fixture_replay_failed"
+                bridge_debug["message"] = str(
+                    fixture_replay.get("reason")
+                    or "Runtime bridge fixture replay failed."
+                ).strip()
+            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+            if hasattr(self.process_planner, "_set_last_bridge_debug"):
+                self.process_planner._set_last_bridge_debug(bridge_debug)
+            proposal = fixture_replay.get("proposal")
+            return deepcopy(proposal) if isinstance(proposal, dict) else None
+
+        proposal = await self.process_planner.execute_prepared_bridge_request(
+            prepared_bridge_request
+        )
+        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        reasoning_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
+        if reasoning_mode != "multi_turn":
+            return proposal
+
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_multi_turn_bridge as _resume_multi_turn_bridge,
+        )
+
+        max_resume = max(
+            10,
+            int(
+                bridge_session.get("max_turns")
+                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+                or 0
+            ),
+        )
+        for resume_idx in range(max_resume):
+            session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
+            pause_status = str(session_state.get("status") or "").strip().lower()
+            if pause_status not in {"paused_after_outline_turn", "paused_after_primitive_turn"}:
+                break
+            self.logger.info(
+                "[Product] Resuming multi-turn bridge session: status=%s round=%d/%d",
+                pause_status,
+                resume_idx + 1,
+                max_resume,
+            )
+            proposal = await _resume_multi_turn_bridge(
+                self.process_planner,
+                prepared_bridge_request,
+                session_state=session_state,
+            )
+        return proposal
+
     async def generate_runtime_bridge_proposal(self) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
@@ -2475,7 +2994,7 @@ class ProductAgent(LlmAgent):
             scenario_hint = canonical_preprogrammed_bridge_scenario_id(
                 self._auto_runtime_preprogrammed_scenario_id()
             )
-            if scenario_hint:
+            if scenario_hint and not self._runtime_bridge_fixture_replay_enabled():
                 self.logger.info(
                     "[Product] Auto-routing runtime bridge generation to preprogrammed scenario: scenario_id=%s",
                     scenario_hint,
@@ -2489,6 +3008,9 @@ class ProductAgent(LlmAgent):
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
         bridge_debug = deepcopy(
             (prepared_bridge_request.get("bridge_debug") or self.runtime_recovery.get("bridge_debug") or {})
+        )
+        fixture_replay_payload = self._compact_fixture_replay_status(
+            bridge_debug.get("fixture_replay")
         )
 
         self._set_runtime_recovery(
@@ -2505,6 +3027,7 @@ class ProductAgent(LlmAgent):
             bridge_approval_state="generating",
             active_bridge_sequence=None,
             bridge_feedback_history=list(self._runtime_recovery_context.get("bridge_feedback_history") or []),
+            fixture_replay=fixture_replay_payload,
             violations=violations,
             append_history=True,
             history_message="Operator started LLM bridge exploration from the prepared request.",
@@ -2513,23 +3036,55 @@ class ProductAgent(LlmAgent):
 
         self._runtime_repair_inflight = True
         try:
-            proposal = await self.process_planner.execute_prepared_bridge_request(
+            proposal = await self._execute_runtime_bridge_generation(
                 prepared_bridge_request
             )
-            bridge_debug = self.process_planner.get_last_bridge_debug()
+            bridge_debug = deepcopy(
+                prepared_bridge_request.get("bridge_debug")
+                or self.process_planner.get_last_bridge_debug()
+                or {}
+            )
+            fixture_replay_payload = self._compact_fixture_replay_status(
+                bridge_debug.get("fixture_replay")
+            )
+            verification_enabled = self._should_enable_generated_bridge_verification(
+                bridge_debug=bridge_debug,
+            )
+            verification_payload: dict[str, Any] | None = None
+            if str(bridge_debug.get("reasoning_mode") or "").strip().lower() == "multi_turn":
+                verification_payload = self._build_generated_code_verification(
+                    enabled=verification_enabled,
+                    bridge_debug=bridge_debug,
+                    prepared_bridge_request=prepared_bridge_request,
+                    normalized_proposal=proposal if isinstance(proposal, dict) else None,
+                    status="ready" if isinstance(proposal, dict) else "generating",
+                    reason=(
+                        ""
+                        if verification_enabled
+                        else "Gazebo generated-code verification is disabled."
+                    ),
+                )
+                bridge_debug["generated_code_verification"] = deepcopy(
+                    verification_payload
+                )
+                if isinstance(proposal, dict) and verification_enabled:
+                    bridge_debug["execution_policy"] = {
+                        "complete_full_tail": False,
+                        "verification_only": True,
+                        "pause_after_verification": True,
+                    }
+            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
             self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                 prepared_bridge_request
             )
             self._record_runtime_bridge_artifacts(
-                phase="single_shot",
+                phase="multi_turn",
                 prepared_bridge_request=prepared_bridge_request,
             )
             self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                 prepared_bridge_request
             )
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
-            )
+            bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or bridge_debug or {})
             if isinstance(proposal, dict):
                 bridge_summary = self.process_planner._bridge_summary(proposal)
                 bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
@@ -2538,7 +3093,11 @@ class ProductAgent(LlmAgent):
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Validated LLM bridge proposal is ready for final approval.",
+                    message=(
+                        "Validated replayed bridge proposal is ready for final approval."
+                        if fixture_replay_payload
+                        else "Validated LLM bridge proposal is ready for final approval."
+                    ),
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
                     used_llm_bridge=True,
@@ -2546,14 +3105,64 @@ class ProductAgent(LlmAgent):
                     bridge_debug=bridge_debug if bridge_debug else None,
                     bridge_approval_state="pending",
                     active_bridge_sequence=None,
+                    fixture_replay=fixture_replay_payload,
+                    generated_code_verification=verification_payload,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message=f"LLM bridge proposed {bridge_text}.",
+                    history_message=(
+                        f"Fixture replay loaded {bridge_text} from archived final output."
+                        if fixture_replay_payload
+                        else f"LLM bridge proposed {bridge_text}."
+                    ),
                 )
                 self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                if verification_enabled:
+                    self.logger.info(
+                        "[Product] Auto-approving multi-turn bridge proposal for Gazebo verification."
+                    )
+                    self._runtime_repair_inflight = False
+                    return self.approve_runtime_bridge_proposal_sync()
+                return recovery
+
+            if fixture_replay_payload:
+                message = str(
+                    fixture_replay_payload.get("reason")
+                    or "Runtime bridge fixture replay failed before producing a validated proposal."
+                ).strip()
+                recovery = self._set_runtime_recovery(
+                    status="human_required",
+                    resolution_class="human_required",
+                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                    failed_task_id=failed_task_id,
+                    message=message,
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="none",
+                    active_bridge_sequence=None,
+                    fixture_replay=fixture_replay_payload,
+                    generated_code_verification=verification_payload,
+                    bridge_feedback_history=list(
+                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    ),
+                    violations=violations,
+                    append_history=True,
+                    history_message=message,
+                )
+                self._set_plan_safety_alert(
+                    stage="runtime",
+                    message=message,
+                    retries_used=self._runtime_repair_fail_streak,
+                    retries_max=self._runtime_repair_max_attempts,
+                    violations=violations,
+                    paused=True,
+                )
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
@@ -2575,6 +3184,8 @@ class ProductAgent(LlmAgent):
                     bridge_debug=bridge_debug if bridge_debug else None,
                     bridge_approval_state="generating",
                     active_bridge_sequence=None,
+                    fixture_replay=fixture_replay_payload,
+                    generated_code_verification=verification_payload,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
@@ -2583,6 +3194,71 @@ class ProductAgent(LlmAgent):
                     history_message=message,
                 )
                 self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
+            if bridge_status in {"paused_after_outline_turn", "paused_after_primitive_turn"}:
+                message = (
+                    "LLM bridge paused for another bounded multi-turn reasoning step."
+                )
+                recovery = self._set_runtime_recovery(
+                    status="llm_bridge",
+                    resolution_class="none",
+                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                    failed_task_id=failed_task_id,
+                    message=message,
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="generating",
+                    active_bridge_sequence=None,
+                    fixture_replay=fixture_replay_payload,
+                    generated_code_verification=verification_payload,
+                    bridge_feedback_history=list(
+                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    ),
+                    violations=violations,
+                    append_history=True,
+                    history_message=message,
+                )
+                self._clear_plan_safety_alert()
+                await asyncio.to_thread(self._persist_product_state)
+                return recovery
+            if bridge_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
+                message = (
+                    "LLM bridge primitive generation stalled before producing a validated final plan."
+                )
+                recovery = self._set_runtime_recovery(
+                    status="human_required",
+                    resolution_class="human_required",
+                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                    failed_task_id=failed_task_id,
+                    message=message,
+                    attempts_used=self._runtime_repair_fail_streak,
+                    attempts_max=self._runtime_repair_max_attempts,
+                    used_llm_bridge=True,
+                    bridge_proposal=None,
+                    bridge_debug=bridge_debug if bridge_debug else None,
+                    bridge_approval_state="none",
+                    active_bridge_sequence=None,
+                    fixture_replay=fixture_replay_payload,
+                    generated_code_verification=verification_payload,
+                    bridge_feedback_history=list(
+                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    ),
+                    violations=violations,
+                    append_history=True,
+                    history_message=message,
+                )
+                self._set_plan_safety_alert(
+                    stage="runtime",
+                    message=message,
+                    retries_used=self._runtime_repair_fail_streak,
+                    retries_max=self._runtime_repair_max_attempts,
+                    violations=violations,
+                    paused=True,
+                )
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
@@ -2602,6 +3278,8 @@ class ProductAgent(LlmAgent):
                 bridge_debug=bridge_debug if bridge_debug else None,
                 bridge_approval_state="none",
                 active_bridge_sequence=None,
+                fixture_replay=fixture_replay_payload,
+                generated_code_verification=verification_payload,
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
                 ),
@@ -2636,6 +3314,8 @@ class ProductAgent(LlmAgent):
                 bridge_debug=bridge_debug if bridge_debug else None,
                 bridge_approval_state="none",
                 active_bridge_sequence=None,
+                fixture_replay=self.runtime_recovery.get("fixture_replay"),
+                generated_code_verification=self.runtime_recovery.get("generated_code_verification"),
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
                 ),
@@ -2901,6 +3581,9 @@ class ProductAgent(LlmAgent):
             if isinstance(bridge_debug, dict)
             else {}
         )
+        generated_code_verification = deepcopy(
+            self.runtime_recovery.get("generated_code_verification") or {}
+        )
 
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
@@ -3034,6 +3717,7 @@ class ProductAgent(LlmAgent):
                 bridge_approval_state="none",
                 bridge_debug=bridge_debug if bridge_debug else None,
                 active_bridge_sequence=None,
+                generated_code_verification=generated_code_verification or None,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -3084,6 +3768,10 @@ class ProductAgent(LlmAgent):
                 scenario_id = str(bridge_debug.get("scenario_id", "")).strip()
                 if scenario_id:
                     active_bridge_sequence["scenario_id"] = scenario_id
+                if generated_code_verification:
+                    active_bridge_sequence["generated_code_verification"] = deepcopy(
+                        generated_code_verification
+                    )
         if bridge_debug:
             bridge_debug["approval"] = {
                 "approved_at_utc": self._utc_now_iso(),
@@ -3101,6 +3789,12 @@ class ProductAgent(LlmAgent):
                     else []
                 ),
             }
+            if generated_code_verification:
+                generated_code_verification["status"] = "executing"
+                generated_code_verification["updated_at_utc"] = self._utc_now_iso()
+                bridge_debug["generated_code_verification"] = deepcopy(
+                    generated_code_verification
+                )
 
         validation_message = (
             f"Approved bridge proposal '{proposal.get('macro_name') or proposal.get('function_name') or 'bridge_recovery'}' compiled to "
@@ -3119,6 +3813,7 @@ class ProductAgent(LlmAgent):
             bridge_debug=bridge_debug if bridge_debug else None,
             bridge_approval_state="approved",
             active_bridge_sequence=active_bridge_sequence,
+            generated_code_verification=generated_code_verification or None,
             violations=violations,
             append_history=True,
             history_message=validation_message,
@@ -3180,6 +3875,7 @@ class ProductAgent(LlmAgent):
                 bridge_approval_state="approved",
                 bridge_debug=bridge_debug if bridge_debug else None,
                 active_bridge_sequence=None,
+                generated_code_verification=generated_code_verification or None,
                 violations=violations,
                 append_history=True,
                 history_message=message,

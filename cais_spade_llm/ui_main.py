@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import logging
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -31,6 +32,15 @@ install_xmpp_runtime_patches()
 _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
+
+_F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT = (
+    Path(__file__).resolve().parent
+    / "monitor"
+    / "debug"
+    / "worked"
+    / "1"
+    / "multi_turn_turn24_final_output_response_20260416T160606.txt"
+)
 
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
@@ -191,7 +201,7 @@ def _run_ui() -> None:
     create_app()
 
 
-def main() -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CAIS-SPADE-LLM: multi-agent manufacturing system",
     )
@@ -200,7 +210,88 @@ def main() -> None:
         action="store_true",
         help="Run without the web UI (agents only, Ctrl+C to stop)",
     )
+    parser.add_argument(
+        "--bridge-fixture-final-output",
+        "--runtime-bridge-fixture-final-output",
+        dest="bridge_fixture_final_output",
+        default="",
+        metavar="PATH",
+        help=(
+            "Test-only: exact archived multi-turn final_output artifact to replay "
+            "for runtime bridge generation."
+        ),
+    )
+    parser.add_argument(
+        "--verify-generated-bridge-in-gazebo",
+        action="store_true",
+        help=(
+            "Test-only: enable auto-execution of generated bridge proposals when "
+            "the UI/system is in simulation+gazebo mode."
+        ),
+    )
+    return parser
+
+
+def _apply_runtime_bridge_test_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> None:
+    fixture_arg = str(getattr(args, "bridge_fixture_final_output", "") or "").strip()
+    using_f5_debug_fixture = False
+    if (
+        not fixture_arg
+        and not os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT")
+        and not bool(getattr(args, "headless", False))
+        and sys.gettrace() is not None
+        and _F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT.exists()
+    ):
+        fixture_arg = str(_F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT)
+        using_f5_debug_fixture = True
+
+    if fixture_arg:
+        fixture_path = Path(fixture_arg).expanduser()
+        try:
+            fixture_path = fixture_path.resolve()
+        except Exception:
+            pass
+        if not fixture_path.exists():
+            parser.error(
+                "--bridge-fixture-final-output must point to an existing final_output file"
+            )
+        if fixture_path.is_dir():
+            parser.error(
+                "--bridge-fixture-final-output must point to the exact final_output file, not a directory"
+            )
+        os.environ["CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"] = str(fixture_path)
+        if using_f5_debug_fixture:
+            print(f"F5 debug runtime bridge fixture final_output: {fixture_path}", flush=True)
+        else:
+            print(f"Runtime bridge fixture final_output: {fixture_path}", flush=True)
+    elif os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"):
+        print(
+            "Runtime bridge fixture final_output: "
+            f"{os.environ['CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT']}",
+            flush=True,
+        )
+
+    if bool(getattr(args, "verify_generated_bridge_in_gazebo", False)) or using_f5_debug_fixture:
+        os.environ["CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"] = "1"
+        if using_f5_debug_fixture:
+            print("F5 debug generated bridge Gazebo verification: enabled", flush=True)
+        else:
+            print("Generated bridge Gazebo verification: enabled", flush=True)
+    elif os.environ.get("CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"):
+        print(
+            "Generated bridge Gazebo verification: "
+            f"{os.environ['CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO']}",
+            flush=True,
+        )
+
+
+def main() -> None:
+    parser = _build_arg_parser()
     args = parser.parse_args()
+    _apply_runtime_bridge_test_args(args, parser)
 
     if args.headless:
         _run_headless()
