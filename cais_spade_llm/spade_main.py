@@ -9,8 +9,8 @@ _repo_root = os.path.dirname(os.path.dirname(__file__))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from cais_spade_llm.logging_setup import install_startup_logging_filters
-from cais_spade_llm.xmpp_runtime import install_xmpp_runtime_patches
+from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
+from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
 
 install_startup_logging_filters()
 install_xmpp_runtime_patches()

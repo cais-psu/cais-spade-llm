@@ -89,6 +89,8 @@
         },
         "motion": {
           "approach_height_m": 0.2,
+          "recovery_observed_pick_approach_height_m": 0.06,
+          "recovery_observed_pick_surface_clearance_m": 0.005,
           "pick_tcp_z_bias_max_m": 0.02,
           "pick_tcp_z_bias_min_m": 0.003,
           "min_pick_tcp_z_m": 1.07,

@@ -72,6 +72,8 @@ class ResourceAgent(LlmAgent):
         self.tool_timeout_s = int(tool_timeout_s)
 
         self._safety_decisions: dict[str, str] = {}
+        self._bridge_execution_primitive_catalog_cache: list[dict[str, Any]] | None = None
+        self._bridge_synthesis_primitive_catalog_cache: list[dict[str, Any]] | None = None
 
         # Register bridge recovery executor for all resource types.
         # RobotAgent overrides the method but no longer needs to re-register.
@@ -113,11 +115,42 @@ class ResourceAgent(LlmAgent):
 
     def get_bridge_snapshot(self) -> Dict[str, Any]:
         """Return the current descriptor-driven bridge snapshot for this resource."""
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
         )
 
         return get_resource_bridge_snapshot(self)
+
+    def bridge_execution_primitive_catalog(self) -> list[dict[str, Any]]:
+        """Return the resource-owned execution primitive catalog."""
+        if self._bridge_execution_primitive_catalog_cache is None:
+            from cais_spade_llm.resources.resource_primitives import (
+                build_execution_primitive_catalog,
+            )
+
+            self._bridge_execution_primitive_catalog_cache = (
+                build_execution_primitive_catalog(self)
+            )
+        return deepcopy(self._bridge_execution_primitive_catalog_cache)
+
+    def bridge_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
+        """Return the resource-owned LLM-facing primitive catalog."""
+        if self._bridge_synthesis_primitive_catalog_cache is None:
+            from cais_spade_llm.resources.resource_primitives import (
+                build_synthesis_primitive_catalog,
+            )
+
+            self._bridge_synthesis_primitive_catalog_cache = (
+                build_synthesis_primitive_catalog(
+                    primitive_catalog=self.bridge_execution_primitive_catalog()
+                )
+            )
+        return deepcopy(self._bridge_synthesis_primitive_catalog_cache)
+
+    def invalidate_bridge_primitive_catalog(self) -> None:
+        """Clear cached primitive catalogs after resource primitive changes."""
+        self._bridge_execution_primitive_catalog_cache = None
+        self._bridge_synthesis_primitive_catalog_cache = None
 
     def bridge_feasibility_oracle(
         self,
@@ -159,17 +192,18 @@ class ResourceAgent(LlmAgent):
             get_resource_profile_for_agent,
             resource_snapshot_set_field,
         )
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             apply_effects_to_snapshot,
-            build_execution_primitive_catalog,
             event_fact_key_for_primitive,
             expand_composite_steps,
             extract_step_output,
-            get_resource_bridge_snapshot,
             resolve_param_refs,
             snapshot_matches_expected,
-            sync_agent_from_bridge_snapshot,
             validate_and_project_steps,
+        )
+        from cais_spade_llm.resources.resource_primitives import (
+            get_resource_bridge_snapshot,
+            sync_agent_from_bridge_snapshot,
         )
 
         steps = list(primitive_steps or [])
@@ -216,7 +250,7 @@ class ResourceAgent(LlmAgent):
                 "content": f"Recovery macro '{macro_name}' has no primitive steps",
             }
 
-        primitive_catalog = build_execution_primitive_catalog(self)
+        primitive_catalog = self.bridge_execution_primitive_catalog()
         try:
             steps = expand_composite_steps(steps, primitive_catalog)
         except Exception as exc:

@@ -1018,9 +1018,12 @@ class BridgeSessionMixin:
         if focused_resource is None:
             return None, None, {}
 
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.resources.resource_primitives import (
             build_execution_primitive_catalog,
             build_synthesis_primitive_catalog,
+        )
+        from cais_spade_llm.resources.robot.robot_primitives import (
+            build_robot_synthesis_primitive_catalog,
         )
 
         focused_primitive_catalog: list[dict[str, Any]] | None = None
@@ -1062,10 +1065,41 @@ class BridgeSessionMixin:
                     snapshot=raw_bridge_snapshot,
                     modeled_state=modeled_state,
                 )
-                execution_primitive_catalog = build_execution_primitive_catalog(resource) or []
-                primitive_catalog = build_synthesis_primitive_catalog(
-                    primitive_catalog=execution_primitive_catalog,
-                ) or []
+                execution_catalog_method = getattr(
+                    resource,
+                    "bridge_execution_primitive_catalog",
+                    None,
+                )
+                if callable(execution_catalog_method):
+                    execution_catalog_value = await asyncio.to_thread(
+                        execution_catalog_method
+                    )
+                    execution_primitive_catalog = list(
+                        execution_catalog_value or []
+                    )
+                else:
+                    execution_primitive_catalog = (
+                        build_execution_primitive_catalog(resource_agent=resource) or []
+                    )
+
+                synthesis_catalog_method = getattr(
+                    resource,
+                    "bridge_synthesis_primitive_catalog",
+                    None,
+                )
+                if callable(synthesis_catalog_method):
+                    synthesis_catalog_value = await asyncio.to_thread(
+                        synthesis_catalog_method
+                    )
+                    primitive_catalog = list(synthesis_catalog_value or [])
+                elif resource_type == "robot":
+                    primitive_catalog = build_robot_synthesis_primitive_catalog(
+                        primitive_catalog=execution_primitive_catalog,
+                    ) or []
+                else:
+                    primitive_catalog = build_synthesis_primitive_catalog(
+                        primitive_catalog=execution_primitive_catalog,
+                    ) or []
                 adapter_capabilities = bridge_resource_capabilities(
                     resource_type,
                     primitive_catalog=execution_primitive_catalog,

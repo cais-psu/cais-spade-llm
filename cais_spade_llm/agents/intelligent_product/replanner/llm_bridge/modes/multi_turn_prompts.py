@@ -7,7 +7,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
 )
 from cais_spade_llm.resources.resource_profile import get_resource_profile

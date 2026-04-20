@@ -11,6 +11,7 @@ from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
 
 from cais_spade_llm.ui.bridge import SystemBridge
+from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -212,12 +213,15 @@ def create_app() -> None:
             except Exception:
                 log.exception("App shutdown: stop_system failed")
 
-        # 1b) Stop tracked ROS2 launch processes so Gazebo/MoveIt/RViz do not
-        # survive the UI and carry stale sim-time TF buffers into the next run.
-        try:
-            bridge.ros2_stop_all()
-        except Exception:
-            log.debug("App shutdown: ROS2 process cleanup skipped")
+        # 1b) Stop tracked ROS2 launch processes unless the operator is
+        # preserving Gazebo for a debug session.
+        if keep_gazebo_on_exit():
+            log.info("App shutdown: CAIS_KEEP_GAZEBO_ON_EXIT=1; preserving Gazebo/MoveIt processes.")
+        else:
+            try:
+                bridge.ros2_stop_all(reason="app_shutdown")
+            except Exception:
+                log.debug("App shutdown: ROS2 process cleanup skipped")
 
         # 2) Stop XMPP server.
         try:

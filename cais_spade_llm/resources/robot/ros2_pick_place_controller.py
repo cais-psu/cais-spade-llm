@@ -18,11 +18,11 @@ import threading
 import time
 from typing import Any
 
-from cais_spade_llm.resources.robot.place_geometry_resolution import (
-    destination_token_from_place_inputs,
-    has_place_geometry_fields,
-    resolve_place_geometry,
-)
+from cais_spade_llm.product.profile import ProductProfile
+
+destination_token_from_place_inputs = ProductProfile.destination_token_from_place_inputs
+has_place_geometry_fields = ProductProfile.has_place_geometry_fields
+resolve_place_geometry = ProductProfile.resolve_place_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -913,6 +913,7 @@ class Ros2PickPlaceController:
                 return {
                     "success": True,
                     "message": f"assumed detached {target_model or 'held part'} after gripper opened",
+                    "release_mode": "assumed_open_after_detach_timeout",
                 }
             return {"success": False, "message": f"failed to detach {model_name or 'held part'}"}
         return {"success": True, "message": f"detached {model_name or 'held part'}"}
@@ -1039,7 +1040,7 @@ class Ros2PickPlaceController:
         )
         if detached.get("success"):
             time.sleep(self.release_postdetach_settle_sec)
-            return {
+            result = {
                 "success": True,
                 "message": (
                     f"released {target_part or target_model or 'part'}"
@@ -1047,6 +1048,9 @@ class Ros2PickPlaceController:
                     else "released part"
                 ),
             }
+            if detached.get("release_mode"):
+                result["release_mode"] = detached.get("release_mode")
+            return result
 
         rollback_ok = self.close_gripper()
         rollback_message = (
@@ -1155,9 +1159,14 @@ class Ros2PickPlaceController:
         part_name: str = "",
         product_geometry: dict[str, Any] | None = None,
         target_pose: dict[str, Any] | None = None,
+        target_pose_source: str = "",
+        prefer_live_detection: bool = False,
         approach_height_override_m: float | None = None,
         ignore_current_height_for_travel_z: bool = False,
         min_pick_tcp_z_override_m: float | None = None,
+        use_global_min_pick_tcp_z: bool = True,
+        surface_clearance_override_m: float | None = None,
+        apply_pick_z_adjustments: bool = True,
     ) -> dict[str, Any]:
         """
         ---
@@ -1166,9 +1175,14 @@ class Ros2PickPlaceController:
           part_name: {type: string, description: "Name of the detected part to pick"}
           product_geometry: {type: object, description: "Optional geometry override dict"}
           target_pose: {type: object, description: "Optional known target pose with x/y/z; skips perception when provided"}
+          target_pose_source: {type: string, description: "Optional source label for target_pose, e.g. observed_pose"}
+          prefer_live_detection: {type: boolean, description: "When true, try perception first and use target_pose only as fallback"}
           approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
           ignore_current_height_for_travel_z: {type: boolean}
           min_pick_tcp_z_override_m: {type: number}
+          use_global_min_pick_tcp_z: {type: boolean, description: "When false, do not clamp pick TCP Z to controller.motion.min_pick_tcp_z_m"}
+          surface_clearance_override_m: {type: number, description: "Optional target-surface clearance added to the raw pick TCP Z"}
+          apply_pick_z_adjustments: {type: boolean, description: "When false, skip per-part pick Z adjustments"}
         preconditions: {}
         effects: {}
         ---
@@ -1182,6 +1196,8 @@ class Ros2PickPlaceController:
             return {"success": False, "message": self._unavailable_message("services not ready")}
 
         target = None
+        parts = None
+        detection_attempted = False
         normalized_target_pose = None
         if isinstance(target_pose, dict) and {"x", "y", "z"} <= set(target_pose.keys()):
             try:
@@ -1193,8 +1209,21 @@ class Ros2PickPlaceController:
             except (TypeError, ValueError):
                 normalized_target_pose = None
 
-        if normalized_target_pose is None:
+        if bool(prefer_live_detection) and str(part_name or "").strip():
+            detection_attempted = True
             parts = self.detect_parts()
+            if parts:
+                target = next((p for p in parts if p.get("part_name") == part_name), None)
+
+        if target is not None:
+            tx = _as_float(target.get("x"), 0.0)
+            ty = _as_float(target.get("y"), 0.0)
+            tz = _as_float(target.get("z"), 0.0)
+            target_part_name = str(target.get("part_name") or part_name or "")
+            target_pose_source_used = "live_detection"
+        elif normalized_target_pose is None:
+            if parts is None and not detection_attempted:
+                parts = self.detect_parts()
             if not parts:
                 return {"success": False, "message": "no parts detected"}
 
@@ -1214,11 +1243,13 @@ class Ros2PickPlaceController:
             ty = _as_float(target.get("y"), 0.0)
             tz = _as_float(target.get("z"), 0.0)
             target_part_name = str(target.get("part_name") or part_name or "")
+            target_pose_source_used = "live_detection"
         else:
             tx = float(normalized_target_pose["x"])
             ty = float(normalized_target_pose["y"])
             tz = float(normalized_target_pose["z"])
             target_part_name = str(part_name or target_pose.get("part_name") or "")
+            target_pose_source_used = str(target_pose_source or "")
 
         geo = product_geometry or {}
         board_center = geo.get("board_center", {}) if isinstance(geo, dict) else {}
@@ -1248,15 +1279,24 @@ class Ros2PickPlaceController:
             self.pick_tcp_z_bias_min_m,
             min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
         )
-        pick_tcp_z_raw = tz + pick_bias
-        effective_min_tcp_z = (
-            min_pick_tcp_z_override_m
-            if min_pick_tcp_z_override_m is not None
-            else self.min_pick_tcp_z_m
+        surface_clearance_m = max(0.0, _as_float(surface_clearance_override_m, 0.0))
+        pick_tcp_z_raw = tz + pick_bias + surface_clearance_m
+        if min_pick_tcp_z_override_m is not None:
+            effective_min_tcp_z = float(min_pick_tcp_z_override_m)
+            pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
+        elif bool(use_global_min_pick_tcp_z):
+            effective_min_tcp_z = self.min_pick_tcp_z_m
+            pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
+        else:
+            effective_min_tcp_z = None
+            pick_tcp_z = pick_tcp_z_raw
+        pick_z_adjustment_m = (
+            self.pick_z_adjustments_m.get(target_part_name.upper(), 0.0)
+            if bool(apply_pick_z_adjustments)
+            else 0.0
         )
-        pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
         pick_z = pick_tcp_z - ee_tcp_offset_z
-        pick_z += self.pick_z_adjustments_m.get(target_part_name.upper(), 0.0)
+        pick_z += pick_z_adjustment_m
 
         approach_height = _as_float(approach_height_override_m, self.approach_height_m)
         travel_candidates = [
@@ -1273,6 +1313,9 @@ class Ros2PickPlaceController:
             f"part={target_part_name} "
             f"current=({ee.position.x:.3f}, {ee.position.y:.3f}, {ee.position.z:.3f}) "
             f"target=({tx:.3f}, {ty:.3f}, {tz:.3f}) "
+            f"source={target_pose_source_used or 'perception'} "
+            f"surface_clearance={surface_clearance_m:.3f} "
+            f"pick_tcp_z={pick_tcp_z:.3f} "
             f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
         )
 
@@ -1288,6 +1331,14 @@ class Ros2PickPlaceController:
             "part_height": target_height,
             "tcp_offset_z": ee_tcp_offset_z,
             "pick_tcp_z": pick_tcp_z,
+            "pick_tcp_z_raw": pick_tcp_z_raw,
+            "surface_clearance_m": surface_clearance_m,
+            "pick_z_adjustment_m": pick_z_adjustment_m,
+            "apply_pick_z_adjustments": bool(apply_pick_z_adjustments),
+            "effective_min_pick_tcp_z": effective_min_tcp_z,
+            "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z),
+            "target_pose_source": target_pose_source_used,
+            "prefer_live_detection": bool(prefer_live_detection),
             "start_x": ee.position.x,
             "start_y": ee.position.y,
             "start_z": ee.position.z,
@@ -1355,6 +1406,8 @@ class Ros2PickPlaceController:
             _as_float(board_center.get("z"), 1.025),
         )
         target_height = _as_float(geo.get("part_height_m"), pick_ctx.get("part_height", 0.08))
+        target_reference = dict(geo.get("target_reference") or {})
+        target_origin_pose = dict(geo.get("target_origin_pose") or {})
 
         if pick_ctx:
             grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
@@ -1368,8 +1421,42 @@ class Ros2PickPlaceController:
                 min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
             )
             tcp_offset_z = self._get_ee_tcp_world_z_offset()
-        place_gap = self.place_surface_gap_m - self.insertion_depth_m
-        place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
+
+        target_point = str(target_reference.get("target_point") or "").strip()
+        reference_z = target_origin_pose.get("z")
+        place_part_origin_z_source = "slot_geometry"
+        origin_pose = pick_ctx.get("origin_pose") if isinstance(pick_ctx.get("origin_pose"), dict) else {}
+        pick_origin_location = str(pick_ctx.get("origin_resource_location") or "").strip()
+        requested_destination = str(destination_location or "").strip()
+        use_measured_origin_pose = (
+            target_point == "part_origin"
+            and bool(origin_pose)
+            and (not requested_destination or requested_destination == pick_origin_location)
+            and {"x", "y", "z"} <= set(origin_pose.keys())
+        )
+        if use_measured_origin_pose:
+            bx = _as_float(origin_pose.get("x"), bx)
+            by = _as_float(origin_pose.get("y"), by)
+            reference_z = origin_pose.get("z")
+            target_origin_pose = {
+                "x": bx,
+                "y": by,
+                "z": _as_float(reference_z, board_top_z + (target_height * 0.5)),
+                "source": "pick_ctx.origin_pose",
+            }
+            place_part_origin_z_source = "pick_ctx.origin_pose"
+        if target_point == "part_origin":
+            place_part_origin_z = _as_float(reference_z, board_top_z + (target_height * 0.5))
+            if place_part_origin_z_source != "pick_ctx.origin_pose":
+                reference_z_value = _as_float(reference_z, math.nan)
+                place_part_origin_z_source = (
+                    "target_origin_pose"
+                    if math.isfinite(reference_z_value)
+                    else "support_geometry_fallback"
+                )
+        else:
+            place_gap = self.place_surface_gap_m - self.insertion_depth_m
+            place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
         place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
 
@@ -1381,9 +1468,15 @@ class Ros2PickPlaceController:
             "board_top_z": board_top_z,
             "place_z": place_z,
             "place_tcp_z": place_tcp_z,
+            "place_part_origin_z": place_part_origin_z,
+            "place_part_origin_z_source": place_part_origin_z_source,
+            "approach_pose": {"x": bx, "y": by, "z": place_z + 0.05},
+            "target_pose": {"x": bx, "y": by, "z": place_z},
             "part_height": target_height,
             "tcp_offset_z": tcp_offset_z,
             "grasp_tcp_to_part_origin_z": grasp_tcp_to_part_origin_z,
+            "target_reference": target_reference,
+            "target_origin_pose": target_origin_pose,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
 
@@ -1400,11 +1493,19 @@ class Ros2PickPlaceController:
         slot_y: float,
         part_height: float,
         board_top_z: float,
+        part_origin_z: float | None = None,
     ) -> bool:
         """Teleport a Gazebo model to its exact slot pose (post-placement correction)."""
         if not self.wait_for_services():
             return False
-        return self._snap_part_to_slot(model_name, slot_x, slot_y, part_height, board_top_z)
+        return self._snap_part_to_slot(
+            model_name,
+            slot_x,
+            slot_y,
+            part_height,
+            board_top_z,
+            part_origin_z=part_origin_z,
+        )
 
     def detect_parts(self, part_name: str | None = None) -> list[dict[str, Any]]:
         """
@@ -2059,7 +2160,13 @@ class Ros2PickPlaceController:
         return False
 
     def _snap_part_to_slot(
-        self, model_name: str, slot_x: float, slot_y: float, part_height: float, board_top_z: float
+        self,
+        model_name: str,
+        slot_x: float,
+        slot_y: float,
+        part_height: float,
+        board_top_z: float,
+        part_origin_z: float | None = None,
     ) -> bool:
         if not self._set_state_client.wait_for_service(timeout_sec=2.0):
             return False
@@ -2070,7 +2177,10 @@ class Ros2PickPlaceController:
         state.name = model_name
         state.pose.position.x = slot_x
         state.pose.position.y = slot_y
-        state.pose.position.z = board_top_z + (part_height * 0.5)
+        state.pose.position.z = _as_float(
+            part_origin_z,
+            board_top_z + (part_height * 0.5),
+        )
         state.pose.orientation.w = 1.0
         state.reference_frame = "world"
 

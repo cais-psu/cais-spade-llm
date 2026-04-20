@@ -43,6 +43,11 @@
         "MCP": 0.08,
         "LCP": 0.1
       }
+    },
+    "target_reference": {
+      "source": "slot_geometry",
+      "target_point": "inserted_part_origin",
+      "surface_role": "assembly_slot"
     }
   },
   "real": {
@@ -89,6 +94,11 @@
         "MCP": 0.08,
         "LCP": 0.1
       }
+    },
+    "target_reference": {
+      "source": "slot_geometry",
+      "target_point": "inserted_part_origin",
+      "surface_role": "assembly_slot"
     }
   }
 }

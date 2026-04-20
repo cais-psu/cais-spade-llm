@@ -18,10 +18,12 @@ from collections import Counter
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
-    filter_synthesis_primitive_catalog,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
     resolve_param_refs,
     validate_and_project_steps_with_trace,
+)
+from cais_spade_llm.resources.resource_primitives import (
+    filter_synthesis_primitive_catalog,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,

@@ -1,30 +1,19 @@
-"""Active v4 bridge primitive semantics.
+"""Bridge primitive-program validation and projection helpers.
 
-This module is the active bridge/runtime semantic layer. It builds primitive
-catalogs directly from live resource methods, projects bridge snapshots using
-resource profiles, and validates primitive step sequences for the current v4
-bridge path.
+Resource and robot primitive catalogs are owned by ``cais_spade_llm.resources``.
+This module only handles bridge-authored primitive programs: context reference
+resolution, semantic projection, event facts, output extraction, and validation.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
-import inspect
 import re
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
-    bridge_resource_capabilities,
-    normalize_bridge_resource,
-    resolve_bridge_resource_type,
-)
-from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
-    get_resource_profile_for_agent,
-    resource_event_fact_contract,
     resource_event_fact_key,
-    resource_snapshot_availability,
     resource_snapshot_field_value,
     resource_snapshot_set_field,
 )
@@ -90,101 +79,6 @@ def _is_event_fact_ref(ref: str, grounding_context: dict[str, Any] | None = None
         if str(key).strip()
     }
     return first not in roots and first not in _KNOWN_CONTEXT_ROOTS and len(tokens) > 1
-
-
-def _build_catalog_owner(resource_agent: Any) -> tuple[Any, Any]:
-    profile = get_resource_profile_for_agent(resource_agent)
-    owner = resource_agent
-    if profile.primitive_owner_resolver is not None:
-        try:
-            owner = profile.primitive_owner_resolver(resource_agent) or resource_agent
-        except Exception:
-            owner = resource_agent
-    return owner, profile
-
-
-def _raw_bridge_primitive_names(resource_agent: Any) -> list[str]:
-    raw = getattr(resource_agent, "_BRIDGE_PRIMITIVES", ()) or ()
-    if isinstance(raw, (list, tuple)):
-        names = [str(name or "").strip() for name in raw if str(name or "").strip()]
-    else:
-        names = sorted({str(name or "").strip() for name in raw if str(name or "").strip()})
-    return [name for name in names if name]
-
-
-def _callable_for_primitive(resource_agent: Any, owner: Any, primitive_name: str) -> Any:
-    fn = getattr(resource_agent, primitive_name, None)
-    if callable(fn):
-        return fn
-    fn = getattr(owner, primitive_name, None)
-    if callable(fn):
-        return fn
-    return None
-
-
-def _schema_properties_for_function(fn: Any) -> tuple[dict[str, Any], list[str], str]:
-    analyzer = FunctionAnalyzer()
-    analyzed = analyzer.analyze_function(fn)
-    parameters = dict(analyzed.get("parameters") or {})
-    properties = deepcopy(parameters.get("properties") or {})
-    signature = inspect.signature(fn)
-    required: list[str] = []
-    for param_name, parameter in signature.parameters.items():
-        if str(param_name) == "self":
-            continue
-        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            continue
-        if parameter.default is inspect._empty:
-            required.append(str(param_name))
-    description = str(analyzed.get("description") or "").strip()
-    return properties, required, description
-
-
-def _primitive_summary(
-    *,
-    description: str,
-    preconditions: dict[str, Any],
-    effects: dict[str, Any],
-) -> str:
-    base = description or "Bridge primitive"
-    pre_keys = ", ".join(sorted(str(key) for key in preconditions.keys())) if preconditions else ""
-    effect_keys = ", ".join(sorted(str(key) for key in effects.keys())) if effects else ""
-    detail_parts: list[str] = []
-    if pre_keys:
-        detail_parts.append(f"pre: {pre_keys}")
-    if effect_keys:
-        detail_parts.append(f"effects: {effect_keys}")
-    if not detail_parts:
-        return base
-    return f"{base} ({'; '.join(detail_parts)})"
-
-
-def _effective_catalog_required_params(
-    required: list[str],
-    *,
-    profile: Any,
-    primitive_name: str,
-) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    contract = resource_event_fact_contract(profile, primitive_name)
-    for raw_name in list(required or []) + list(contract.get("required_params") or []):
-        token = str(raw_name or "").strip()
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        merged.append(token)
-    return merged
-
-
-def _resource_type_for_agent(resource_agent: Any, *, snapshot: dict[str, Any] | None = None) -> str:
-    static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
-    return resolve_bridge_resource_type(
-        resource=resource_agent,
-        snapshot=snapshot or {},
-        modeled_state={},
-        static_capabilities=static_capabilities,
-    )
 
 
 def resolve_context_ref(
@@ -361,314 +255,6 @@ def event_fact_key_for_primitive(
 ) -> tuple[str | None, str | None]:
     profile = get_resource_profile(resource_type or _infer_resource_type_for_primitive(primitive))
     return resource_event_fact_key(profile, primitive, params)
-
-
-def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Build the execution primitive catalog from the live bridge surface."""
-    if resource_agent is None:
-        return []
-    owner, profile = _build_catalog_owner(resource_agent)
-    resource_type = _resource_type_for_agent(resource_agent)
-    entries: list[dict[str, Any]] = []
-    for primitive_name in _raw_bridge_primitive_names(resource_agent):
-        fn = _callable_for_primitive(resource_agent, owner, primitive_name)
-        if not callable(fn):
-            continue
-        properties, required, description = _schema_properties_for_function(fn)
-        required = _effective_catalog_required_params(
-            required,
-            profile=profile,
-            primitive_name=primitive_name,
-        )
-        frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
-        preconditions = deepcopy(frontmatter.get("preconditions") or {})
-        effects = deepcopy(frontmatter.get("effects") or {})
-        observation_schema = deepcopy(
-            dict(profile.observation_output_schema_map or {}).get(primitive_name) or {}
-        )
-        entry = {
-            "name": primitive_name,
-            "resource_type": resource_type,
-            "description": str(frontmatter.get("description") or description or "").strip(),
-            "params": properties,
-            "required_params": required,
-            "preconditions": preconditions,
-            "effects": effects,
-            "primitive_kind": str(
-                dict(profile.primitive_kind_map or {}).get(primitive_name) or ""
-            ).strip(),
-            "output_schema": observation_schema,
-            "synthesis_hidden": bool(frontmatter.get("synthesis_hidden", False)),
-        }
-        entry["semantic_summary"] = _primitive_summary(
-            description=str(entry.get("description") or ""),
-            preconditions=preconditions,
-            effects=effects,
-        )
-        entries.append(entry)
-    return entries
-
-
-def _composite_parameter_schema(
-    *,
-    properties: dict[str, Any],
-    required: list[str] | None = None,
-) -> tuple[dict[str, Any], list[str]]:
-    return deepcopy(properties or {}), list(required or [])
-
-
-def _robot_prompt_composites(
-    primitive_catalog: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    primitive_names = {
-        str(entry.get("name") or "").strip()
-        for entry in (primitive_catalog or [])
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
-    }
-    required_robot_primitives = {
-        "open_gripper",
-        "close_gripper",
-        "attach_part",
-        "detach_part",
-    }
-    if not required_robot_primitives <= primitive_names:
-        return []
-
-    composites: list[dict[str, Any]] = []
-
-    grasp_params, grasp_required = _composite_parameter_schema(
-        properties={
-            "model_name": {
-                "type": "string",
-                "description": "Controller model name to attach after grasp.",
-            },
-            "part_name": {
-                "type": "string",
-                "description": "Canonical part name for held-part tracking.",
-            },
-            "position": {
-                "type": "number",
-                "description": "Optional gripper closing position.",
-            },
-        },
-        required=["model_name"],
-    )
-    grasp_entry = {
-        "name": "grasp_part",
-        "resource_type": "robot",
-        "description": (
-            "Bridge-only composite primitive that closes the gripper and attaches "
-            "the targeted part to the robot."
-        ),
-        "params": grasp_params,
-        "required_params": grasp_required,
-        "preconditions": {"held_part": {"equals": None}},
-        "effects": {
-            "current_state": {"set": "picked"},
-            "gripper_state": {"set": "closed"},
-            "held_part": {"set_from_param_any_of": ["part_name", "model_name"]},
-        },
-        "primitive_kind": "pick",
-        "output_schema": {},
-        "composite_expansion": [
-            {"primitive": "close_gripper", "params_from_parent": ["position"]},
-            {"primitive": "attach_part", "params_from_parent": ["model_name", "part_name"]},
-        ],
-    }
-    grasp_entry["semantic_summary"] = _primitive_summary(
-        description=str(grasp_entry.get("description") or ""),
-        preconditions=dict(grasp_entry.get("preconditions") or {}),
-        effects=dict(grasp_entry.get("effects") or {}),
-    )
-    composites.append(grasp_entry)
-
-    release_params, release_required = _composite_parameter_schema(
-        properties={
-            "part_name": {
-                "type": "string",
-                "description": "Canonical bridge part name for release trace validation.",
-            },
-            "model_name": {
-                "type": "string",
-                "description": "Optional controller model name to detach.",
-            },
-            "assume_released_if_open": {
-                "type": "boolean",
-                "description": (
-                    "Treat an already-open gripper as an idempotent release when true."
-                ),
-            },
-        },
-        required=[],
-    )
-    release_entry = {
-        "name": "release_part",
-        "resource_type": "robot",
-        "description": (
-            "Bridge-only composite primitive that opens the gripper and detaches "
-            "the currently held part."
-        ),
-        "params": release_params,
-        "required_params": release_required,
-        "preconditions": {"held_part": {"exists": True}},
-        "effects": {
-            "current_state": {"set": "idle"},
-            "gripper_state": {"set": "open"},
-            "held_part": {"set": None},
-        },
-        "primitive_kind": "release",
-        "output_schema": {},
-        "composite_expansion": [
-            {"primitive": "open_gripper", "params_from_parent": []},
-            {
-                "primitive": "detach_part",
-                "params_from_parent": ["model_name", "assume_released_if_open"],
-            },
-        ],
-    }
-    release_entry["semantic_summary"] = _primitive_summary(
-        description=str(release_entry.get("description") or ""),
-        preconditions=dict(release_entry.get("preconditions") or {}),
-        effects=dict(release_entry.get("effects") or {}),
-    )
-    composites.append(release_entry)
-
-    return composites
-
-
-def _prompt_hidden_primitive_names(resource_type: str) -> set[str]:
-    if resource_type == "robot":
-        return {
-            "open_gripper",
-            "close_gripper",
-            "attach_part",
-            "detach_part",
-            "move_pose",
-            "get_current_pose",
-        }
-    return set()
-
-
-def filter_synthesis_primitive_catalog(
-    primitive_catalog: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Filter the LLM-facing primitive surface using explicit visibility only."""
-    resource_type = ""
-    for raw_entry in primitive_catalog or []:
-        if not isinstance(raw_entry, dict):
-            continue
-        resource_type = str(raw_entry.get("resource_type") or "").strip()
-        if resource_type:
-            break
-    hidden_names = _prompt_hidden_primitive_names(resource_type)
-    filtered: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_entry in primitive_catalog or []:
-        if not isinstance(raw_entry, dict):
-            continue
-        name = str(raw_entry.get("name") or "").strip()
-        if not name or name in seen:
-            continue
-        if name in hidden_names:
-            continue
-        if bool(raw_entry.get("synthesis_hidden")):
-            continue
-        entry = deepcopy(raw_entry)
-        entry.pop("synthesis_hidden", None)
-        filtered.append(entry)
-        seen.add(name)
-
-    for composite in _robot_prompt_composites(primitive_catalog or []):
-        name = str(composite.get("name") or "").strip()
-        if not name or name in seen:
-            continue
-        filtered.append(deepcopy(composite))
-        seen.add(name)
-    return filtered
-
-
-def build_synthesis_primitive_catalog(
-    resource_agent: Any | None = None,
-    *,
-    primitive_catalog: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Build the LLM-facing synthesis catalog directly from execution primitives."""
-    source_catalog = primitive_catalog
-    if source_catalog is None and isinstance(resource_agent, list):
-        source_catalog = resource_agent
-        resource_agent = None
-    if source_catalog is None:
-        source_catalog = build_execution_primitive_catalog(resource_agent)
-    return filter_synthesis_primitive_catalog(source_catalog or [])
-
-
-def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Compatibility alias for callers expecting the older name."""
-    return build_execution_primitive_catalog(resource_agent)
-
-
-def build_primitive_reference_card(primitive_catalog: list[dict[str, Any]] | None) -> str:
-    """Render a compact human-readable reference card for prompt builders."""
-    lines: list[str] = []
-    for entry in filter_synthesis_primitive_catalog(primitive_catalog or []):
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            continue
-        description = str(entry.get("description") or entry.get("semantic_summary") or "").strip()
-        params = dict(entry.get("params") or {})
-        required = {
-            str(item).strip() for item in (entry.get("required_params") or []) if str(item).strip()
-        }
-        param_tokens: list[str] = []
-        for param_name, schema in params.items():
-            if not isinstance(schema, dict):
-                continue
-            type_name = str(schema.get("type") or "string").strip()
-            suffix = " required" if param_name in required else ""
-            param_tokens.append(f"{param_name}:{type_name}{suffix}")
-        param_text = ", ".join(param_tokens) if param_tokens else "(no params)"
-        lines.append(f"- {name}: {description}")
-        lines.append(f"  params: {param_text}")
-    return "\n".join(lines).strip()
-
-
-def _snapshot_builder_payload(resource_agent: Any, profile: Any) -> dict[str, Any]:
-    if profile.snapshot_builder is not None:
-        built = profile.snapshot_builder(resource_agent)
-        if isinstance(built, dict):
-            return deepcopy(built)
-    if hasattr(resource_agent, "_snapshot_state"):
-        try:
-            built = resource_agent._snapshot_state()
-        except Exception:
-            built = None
-        if isinstance(built, dict):
-            return deepcopy(built)
-    return {}
-
-
-def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
-    """Build the canonical bridge snapshot for a resource without recursion."""
-    if resource_agent is None:
-        return {}
-    profile = get_resource_profile_for_agent(resource_agent)
-    raw_snapshot = _snapshot_builder_payload(resource_agent, profile)
-    resource_jid = str(
-        getattr(resource_agent, "jid", "") or getattr(resource_agent, "agent_name", "") or ""
-    ).strip()
-    resource_type = _resource_type_for_agent(resource_agent, snapshot=raw_snapshot)
-    normalized_resource = normalize_bridge_resource(
-        resource_jid=resource_jid,
-        resource_type=resource_type,
-        snapshot=raw_snapshot,
-        modeled_state={},
-    )
-    execution_catalog = build_execution_primitive_catalog(resource_agent)
-    normalized_resource["bridge_adapter"] = bridge_resource_capabilities(
-        resource_type,
-        primitive_catalog=execution_catalog,
-    )
-    return normalized_resource
 
 
 def expand_composite_steps(
@@ -945,6 +531,37 @@ def validate_and_project_steps_with_trace(
             }
         step_result["resolved_params"] = deepcopy(resolved_params)
 
+        allowed_params = {
+            str(param_name).strip()
+            for param_name in dict(primitive_meta.get("params") or {})
+            if str(param_name).strip()
+        }
+        unexpected_params = sorted(
+            str(param_name).strip()
+            for param_name in resolved_params.keys()
+            if str(param_name).strip() and str(param_name).strip() not in allowed_params
+        )
+        if unexpected_params:
+            allowed_description = (
+                f"allowed params={sorted(allowed_params)}"
+                if allowed_params
+                else "primitive accepts no params"
+            )
+            validation_error = (
+                f"unexpected params {unexpected_params} at step {step_index} "
+                f"({primitive}); {allowed_description}"
+            )
+            step_result["validation_error"] = validation_error
+            step_results.append(step_result)
+            return {
+                "valid": False,
+                "projected_snapshot": projected,
+                "validation_error": validation_error,
+                "normalized_steps": deepcopy(normalized_steps),
+                "step_results": step_results,
+                "event_facts": deepcopy(event_facts),
+            }
+
         for required_param in primitive_meta.get("required_params") or []:
             param_name = str(required_param or "").strip()
             if not param_name:
@@ -1109,47 +726,14 @@ def snapshot_matches_expected(actual: dict[str, Any], expected: dict[str, Any]) 
     return _compare_subset(actual, expected)
 
 
-def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:
-    """Apply canonical snapshot fields back onto the live resource agent."""
-    if resource_agent is None:
-        return
-    profile = get_resource_profile_for_agent(resource_agent)
-
-    current_state = resource_snapshot_field_value(snapshot, "current_state", profile=profile)
-    setattr(resource_agent, "_current_state", current_state)
-
-    current_location = resource_snapshot_field_value(snapshot, "current_location", profile=profile)
-    if hasattr(resource_agent, "_current_location") or current_location is not None:
-        setattr(resource_agent, "_current_location", current_location)
-
-    availability = resource_snapshot_availability(snapshot, profile=profile)
-    if hasattr(resource_agent, "_availability") or availability:
-        setattr(resource_agent, "_availability", availability)
-
-    for field, target in dict(profile.sync_map or {}).items():
-        value = resource_snapshot_field_value(snapshot, str(field), profile=profile)
-        if callable(target):
-            target(resource_agent, deepcopy(value))
-            continue
-        attr_name = str(target or "").strip()
-        if attr_name:
-            setattr(resource_agent, attr_name, deepcopy(value))
-
-
 __all__ = [
     "apply_effects_to_snapshot",
-    "build_execution_primitive_catalog",
-    "build_primitive_reference_card",
-    "build_synthesis_primitive_catalog",
     "expand_composite_steps",
     "expected_snapshot_from_bridge_snapshot",
     "extract_step_output",
-    "filter_synthesis_primitive_catalog",
-    "get_resource_bridge_snapshot",
     "resolve_param_refs",
     "resolve_step_param_refs",
     "snapshot_matches_expected",
-    "sync_agent_from_bridge_snapshot",
     "validate_and_project_steps",
     "validate_and_project_steps_with_trace",
 ]

@@ -826,6 +826,61 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             for node in self.nodes
         )
 
+    def _bridge_sequence_nodes(self, bridge_sequence_id: str) -> list[dict[str, Any]]:
+        """Return bridge macro tasks for a compiled bridge sequence in execution order."""
+        sequence_id = str(bridge_sequence_id or "").strip()
+        if not sequence_id:
+            return []
+        nodes = [
+            node
+            for node in self.nodes
+            if isinstance(node, dict)
+            and str(node.get("bridge_sequence_id") or "").strip() == sequence_id
+        ]
+        return sorted(
+            nodes,
+            key=lambda node: (
+                int(node.get("bridge_sequence_index") or 0),
+                int(node.get("sequence_index") or 0),
+                str(node.get("id") or ""),
+            ),
+        )
+
+    def remove_bridge_sequence_tail(
+        self,
+        *,
+        bridge_sequence_id: str,
+        completed_task_id: str,
+    ) -> list[dict[str, Any]]:
+        """Delete unexecuted bridge macro tasks after the given sequence task."""
+        completed_task_id = str(completed_task_id or "").strip()
+        current_node = self._find_node(completed_task_id)
+        cutoff_index = int(current_node.get("bridge_sequence_index") or 0) if current_node else 0
+        deletions: list[dict[str, Any]] = []
+        for node in self._bridge_sequence_nodes(bridge_sequence_id):
+            node_id = str(node.get("id") or "").strip()
+            if not node_id or node_id == completed_task_id:
+                continue
+            sequence_index = int(node.get("bridge_sequence_index") or 0)
+            if cutoff_index and sequence_index <= cutoff_index:
+                continue
+            status = str(node.get("status") or "").strip().lower()
+            if status in {"running", "dispatched", "completed"}:
+                continue
+            deletions.append(
+                {
+                    "id": node_id,
+                    "delete": True,
+                    "change_reason": (
+                        "Removed unexecuted bridge sequence tail after "
+                        f"{completed_task_id or 'bridge failure'}"
+                    ),
+                }
+            )
+        if deletions:
+            self._apply_replan_patch(deletions)
+        return deletions
+
     def _path_to_recovery_tasks(
         self,
         path: list[dict[str, Any]],
@@ -2197,6 +2252,11 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def next_ready_task(self) -> Optional[Dict[str, Any]]:
         """Select the next task whose predecessors are all satisfied."""
+        ready_nodes = self.graph_ready_task_nodes()
+        return ready_nodes[0] if ready_nodes else None
+
+    def graph_ready_task_nodes(self) -> list[Dict[str, Any]]:
+        """Return pending task nodes whose DAG predecessors are completed."""
         def _pred_satisfied(status: Any) -> bool:
             s = str(status) if status else ""
             return s == "completed"
@@ -2207,6 +2267,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 return False
             return _pred_satisfied(pred.get("status"))
 
+        ready_nodes: list[Dict[str, Any]] = []
         for node in self.nodes:
             if node.get("type") != "task":
                 continue
@@ -2215,12 +2276,13 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
             preds = node.get("predecessors", [])
             if not preds:
-                return node
+                ready_nodes.append(node)
+                continue
 
             if all(_pred_ready(pid) for pid in preds):
-                return node
+                ready_nodes.append(node)
 
-        return None
+        return ready_nodes
 
     # ------------------------------------------------------------------ #
     # Persistence

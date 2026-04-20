@@ -11,12 +11,14 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resou
     normalize_bridge_event,
     normalize_bridge_resource,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
     expected_snapshot_from_bridge_snapshot,
-    filter_synthesis_primitive_catalog,
     resolve_param_refs,
     resolve_step_param_refs,
     validate_and_project_steps,
+)
+from cais_spade_llm.resources.resource_primitives import (
+    filter_synthesis_primitive_catalog,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,

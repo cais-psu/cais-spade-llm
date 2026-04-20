@@ -90,7 +90,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+from cais_spade_llm.resources.resource_primitives import (
     get_resource_bridge_snapshot,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
@@ -729,9 +729,14 @@ class FakeBridgeRobot:
         part_name: str = "",
         product_geometry: dict[str, Any] | None = None,
         target_pose: dict[str, Any] | None = None,
+        target_pose_source: str = "",
+        prefer_live_detection: bool = False,
         approach_height_override_m: float | None = None,
         ignore_current_height_for_travel_z: bool = False,
         min_pick_tcp_z_override_m: float | None = None,
+        use_global_min_pick_tcp_z: bool = True,
+        surface_clearance_override_m: float | None = None,
+        apply_pick_z_adjustments: bool = True,
     ) -> dict[str, Any]:
         """
         ---
@@ -740,9 +745,14 @@ class FakeBridgeRobot:
           part_name: {type: string, description: "Name of the detected part to pick"}
           product_geometry: {type: object, description: "Optional geometry override dict"}
           target_pose: {type: object, description: "Optional known target pose"}
+          target_pose_source: {type: string}
+          prefer_live_detection: {type: boolean}
           approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
           ignore_current_height_for_travel_z: {type: boolean}
           min_pick_tcp_z_override_m: {type: number}
+          use_global_min_pick_tcp_z: {type: boolean}
+          surface_clearance_override_m: {type: number}
+          apply_pick_z_adjustments: {type: boolean}
         preconditions: {}
         effects: {}
         ---
@@ -753,6 +763,7 @@ class FakeBridgeRobot:
             "y": float(target.get("y", 0.0) or 0.0),
             "z": float(target.get("z", 1.0) or 1.0),
         }
+        surface_clearance = float(surface_clearance_override_m or 0.0)
         return {
             "success": True,
             "part_name": str(part_name or target.get("part_name") or ""),
@@ -760,13 +771,19 @@ class FakeBridgeRobot:
             "tx": pose["x"],
             "ty": pose["y"],
             "tz": pose["z"],
-            "pick_z": pose["z"] + 0.02,
+            "pick_z": pose["z"] + 0.02 + surface_clearance,
             "travel_z": pose["z"] + float(approach_height_override_m or 0.2),
             "approach_pose": {"x": pose["x"], "y": pose["y"], "z": pose["z"] + 0.2},
-            "target_pose": {"x": pose["x"], "y": pose["y"], "z": pose["z"] + 0.02},
+            "target_pose": {"x": pose["x"], "y": pose["y"], "z": pose["z"] + 0.02 + surface_clearance},
             "part_height": 0.08,
             "tcp_offset_z": -0.17,
-            "pick_tcp_z": pose["z"] + 0.19,
+            "pick_tcp_z": pose["z"] + 0.19 + surface_clearance,
+            "surface_clearance_m": surface_clearance,
+            "pick_z_adjustment_m": 0.0,
+            "apply_pick_z_adjustments": bool(apply_pick_z_adjustments),
+            "target_pose_source": target_pose_source,
+            "prefer_live_detection": bool(prefer_live_detection),
+            "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z),
             "start_x": float(self._position.get("x", 0.0)),
             "start_y": float(self._position.get("y", 0.0)),
             "start_z": float(self._position.get("z", 0.0)),
@@ -850,7 +867,7 @@ class FakeBridgeRobot:
 
     def _cached_primitive_catalog(self) -> list[dict[str, Any]]:
         if self._primitive_catalog_cache is None:
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+            from cais_spade_llm.resources.resource_primitives import (
                 build_execution_primitive_catalog,
             )
 

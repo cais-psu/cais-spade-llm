@@ -888,6 +888,8 @@ class RobotAgent(ResourceAgent):
                 "pick_z": 0.0, "travel_z": 1.2,
                 "part_height": 0.08, "tcp_offset_z": -0.17,
                 "pick_tcp_z": 0.0,
+                "origin_resource_location": origin_resource_location,
+                "origin_pose": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "start_x": 0.0, "start_y": 0.0, "start_z": 0.0,
             }
             self._current_state = "at_pick"
@@ -989,6 +991,12 @@ class RobotAgent(ResourceAgent):
             "part_height": targets["part_height"],
             "tcp_offset_z": targets["tcp_offset_z"],
             "pick_tcp_z": targets["pick_tcp_z"],
+            "origin_resource_location": origin_resource_location,
+            "origin_pose": {
+                "x": targets["tx"],
+                "y": targets["ty"],
+                "z": targets["tz"],
+            },
             "start_x": targets["start_x"],
             "start_y": targets["start_y"],
             "start_z": targets["start_z"],
@@ -1332,6 +1340,7 @@ class RobotAgent(ResourceAgent):
             "slot_y": place["slot_y"],
             "board_top_z": place["board_top_z"],
             "place_z": place["place_z"],
+            "place_part_origin_z": place.get("place_part_origin_z"),
             "part_height": place["part_height"],
             "destination_location": destination_location,
         })
@@ -1455,6 +1464,7 @@ class RobotAgent(ResourceAgent):
         slot_y = self._task_ctx.get("slot_y", 0.0)
         board_top_z = self._task_ctx.get("board_top_z", 1.025)
         part_height = self._task_ctx.get("part_height", 0.08)
+        part_origin_z = self._task_ctx.get("place_part_origin_z")
         place_z = self._task_ctx.get("place_z", board_top_z + part_height)
         travel_z = self._task_ctx.get("travel_z", 1.2)
         self._log_step(
@@ -1490,6 +1500,7 @@ class RobotAgent(ResourceAgent):
                     "slot_y": slot_y,
                     "part_height": part_height,
                     "board_top_z": board_top_z,
+                    "part_origin_z": part_origin_z,
                 },
             )
             if not snap.get("success"):
@@ -1688,7 +1699,7 @@ class RobotAgent(ResourceAgent):
         params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Execute one planner-approved observation/generation primitive."""
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             extract_step_output,
         )
 
@@ -1740,6 +1751,249 @@ class RobotAgent(ResourceAgent):
             "snapshot": snapshot,
         }
 
+    def _inject_current_pick_ctx_for_place_targets(
+        self,
+        primitive: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Thread the current held-part pick context into generated place-target steps."""
+        normalized = dict(params or {})
+        if str(primitive or "").strip() != "compute_place_targets":
+            return normalized
+        if "pick_ctx" in normalized:
+            return normalized
+
+        part_name = str(normalized.get("part_name") or "").strip()
+        held_part = str(self._held_part or "").strip()
+        if not part_name or not held_part or part_name != held_part:
+            return normalized
+        if not isinstance(self._task_ctx, dict) or not self._task_ctx:
+            return normalized
+        ctx_part = str(self._task_ctx.get("part_name") or "").strip()
+        if ctx_part and ctx_part != part_name:
+            return normalized
+
+        normalized["pick_ctx"] = deepcopy(self._task_ctx)
+        return normalized
+
+    @staticmethod
+    def _normalized_xyz_pose(value: Any) -> Dict[str, float] | None:
+        if not isinstance(value, dict) or not {"x", "y", "z"} <= set(value.keys()):
+            return None
+        try:
+            return {
+                "x": float(value["x"]),
+                "y": float(value["y"]),
+                "z": float(value["z"]),
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def _inject_observed_pose_for_pick_targets(
+        self,
+        primitive: str,
+        params: Dict[str, Any],
+        macro_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Thread product-provided observed pose into generated recovery pick-target steps."""
+        normalized = dict(params or {})
+        if str(primitive or "").strip() != "compute_pick_targets":
+            return normalized
+        if isinstance(normalized.get("target_pose"), dict):
+            return normalized
+
+        source_location = str(
+            macro_context.get("origin_resource_location")
+            or macro_context.get("source_location")
+            or ""
+        ).strip()
+        if source_location != "observed_pose" and not source_location.endswith("_observed_pose"):
+            return normalized
+
+        part_name = str(normalized.get("part_name") or "").strip()
+        context_part = str(macro_context.get("part_name") or "").strip()
+        if context_part and part_name and context_part != part_name:
+            return normalized
+
+        observed_pose = self._normalized_xyz_pose(macro_context.get("observed_pose"))
+        if observed_pose is None:
+            observed_pose = self._normalized_xyz_pose(macro_context.get("target_pose"))
+        if observed_pose is None:
+            return normalized
+
+        normalized["target_pose"] = observed_pose
+        normalized["target_pose_source"] = "observed_pose"
+        normalized["prefer_live_detection"] = True
+        normalized["use_global_min_pick_tcp_z"] = False
+        normalized["apply_pick_z_adjustments"] = False
+        normalized.setdefault("ignore_current_height_for_travel_z", True)
+
+        part_geometry = macro_context.get("part_geometry")
+        if isinstance(part_geometry, dict) and "product_geometry" not in normalized:
+            normalized["product_geometry"] = deepcopy(part_geometry)
+
+        if "approach_height_override_m" not in normalized:
+            motion_config = getattr(self, "motion_config", {}) or {}
+            try:
+                recovery_approach_height = float(
+                    motion_config.get("recovery_observed_pick_approach_height_m")
+                )
+            except (TypeError, ValueError):
+                recovery_approach_height = None
+            if recovery_approach_height is not None and recovery_approach_height > 0.0:
+                normalized["approach_height_override_m"] = recovery_approach_height
+
+        if "surface_clearance_override_m" not in normalized:
+            motion_config = getattr(self, "motion_config", {}) or {}
+            try:
+                surface_clearance = float(
+                    motion_config.get("recovery_observed_pick_surface_clearance_m", 0.005)
+                )
+            except (TypeError, ValueError):
+                surface_clearance = 0.005
+            if surface_clearance > 0.0:
+                normalized["surface_clearance_override_m"] = surface_clearance
+
+        return normalized
+
+    def _inject_recovery_release_assume_if_open(
+        self,
+        primitive: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Make generated Gazebo recovery releases idempotent after the gripper opens."""
+        normalized = dict(params or {})
+        if str(primitive or "").strip() != "release_part":
+            return normalized
+        if "assume_released_if_open" in normalized:
+            return normalized
+        if str(getattr(self, "execution_mode", "") or "").strip().lower() != "simulation":
+            return normalized
+        normalized["assume_released_if_open"] = True
+        return normalized
+
+    def _remember_pick_targets_from_macro_step(
+        self,
+        primitive: str,
+        params: Dict[str, Any],
+        step_result: Dict[str, Any],
+        macro_context: Dict[str, Any],
+    ) -> None:
+        """Keep generated macro pick context current for subsequent place targets."""
+        if str(primitive or "").strip() != "compute_pick_targets":
+            return
+        if not step_result.get("success"):
+            return
+
+        def _float_or_none(value: Any) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        part_name = str(
+            step_result.get("part_name") or params.get("part_name") or ""
+        ).strip()
+        if not part_name:
+            return
+
+        context: Dict[str, Any] = {"part_name": part_name}
+        for key in (
+            "model_name",
+            "tx",
+            "ty",
+            "tz",
+            "pick_z",
+            "travel_z",
+            "part_height",
+            "tcp_offset_z",
+            "pick_tcp_z",
+            "start_x",
+            "start_y",
+            "start_z",
+            "target_pose_source",
+            "surface_clearance_m",
+            "pick_z_adjustment_m",
+            "apply_pick_z_adjustments",
+        ):
+            if key in step_result:
+                context[key] = deepcopy(step_result[key])
+
+        origin_resource_location = str(
+            macro_context.get("origin_resource_location")
+            or macro_context.get("source_location")
+            or params.get("origin_resource_location")
+            or params.get("source_location")
+            or ""
+        ).strip()
+        if origin_resource_location:
+            context["origin_resource_location"] = origin_resource_location
+
+        tx = _float_or_none(step_result.get("tx"))
+        ty = _float_or_none(step_result.get("ty"))
+        tz = _float_or_none(step_result.get("tz"))
+        if tx is not None and ty is not None and tz is not None:
+            context["origin_pose"] = {"x": tx, "y": ty, "z": tz}
+
+        self._task_ctx = context
+
+    async def _stabilize_recovery_release_if_needed(
+        self,
+        primitive: str,
+        params: Dict[str, Any],
+        event_facts: Dict[str, Any],
+    ) -> None:
+        """Snap direct bridge releases into assembly slot depth when geometry says inserted."""
+        if str(primitive or "").strip() != "release_part":
+            return
+        if self.execution_mode != "simulation":
+            return
+
+        part_name = str(
+            params.get("part_name")
+            or params.get("model_name")
+            or self._held_part
+            or ""
+        ).strip()
+        if not part_name:
+            return
+
+        place_targets = dict(event_facts.get("place_targets") or {})
+        place_target = place_targets.get(part_name)
+        if not isinstance(place_target, dict):
+            return
+
+        target_reference = dict(place_target.get("target_reference") or {})
+        if str(target_reference.get("target_point") or "").strip() != "inserted_part_origin":
+            return
+
+        model_name = str(
+            params.get("model_name")
+            or place_target.get("model_name")
+            or dict(getattr(self, "_task_ctx", {}) or {}).get("model_name")
+            or ""
+        ).strip()
+        if not model_name:
+            return
+
+        snap = await self._execute_controller_helper(
+            "snap_part_to_slot",
+            {
+                "model_name": model_name,
+                "slot_x": place_target.get("slot_x", 0.0),
+                "slot_y": place_target.get("slot_y", 0.0),
+                "part_height": place_target.get("part_height", 0.08),
+                "board_top_z": place_target.get("board_top_z", 1.025),
+                "part_origin_z": place_target.get("place_part_origin_z"),
+            },
+        )
+        if not snap.get("success"):
+            self.logger.warning(
+                "[Robot] recovery release snap_part_to_slot failed for %s: %s",
+                model_name,
+                snap.get("message"),
+            )
+
     async def execute_recovery_macro(
         self,
         macro_name: str,
@@ -1763,16 +2017,18 @@ class RobotAgent(ResourceAgent):
             get_resource_profile_for_agent,
             resource_snapshot_set_field,
         )
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
             expand_composite_steps,
             extract_step_output,
-            get_resource_bridge_snapshot,
             resolve_param_refs,
             snapshot_matches_expected,
-            sync_agent_from_bridge_snapshot,
             validate_and_project_steps,
+        )
+        from cais_spade_llm.resources.resource_primitives import (
+            get_resource_bridge_snapshot,
+            sync_agent_from_bridge_snapshot,
         )
 
         self.logger.info(
@@ -1929,6 +2185,10 @@ class RobotAgent(ResourceAgent):
                     },
                 }
 
+            params = self._inject_observed_pose_for_pick_targets(primitive, params, context)
+            params = self._inject_current_pick_ctx_for_place_targets(primitive, params)
+            params = self._inject_recovery_release_assume_if_open(primitive, params)
+
             # Dispatch to controller primitive.
             step_result = await self._execute_primitive(primitive, params)
 
@@ -1978,6 +2238,18 @@ class RobotAgent(ResourceAgent):
                         "total_steps": len(primitive_steps),
                     },
                 }
+
+            self._remember_pick_targets_from_macro_step(
+                primitive,
+                params,
+                step_result,
+                context,
+            )
+            await self._stabilize_recovery_release_if_needed(
+                primitive,
+                params,
+                event_facts,
+            )
 
             primitive_meta = primitive_meta_by_name.get(primitive)
             if primitive_meta is not None:
@@ -2065,18 +2337,27 @@ class RobotAgent(ResourceAgent):
                 "macro_name": macro_name,
                 "completed_steps": len(results),
                 "total_steps": len(primitive_steps),
+                "event_facts": deepcopy(event_facts),
             },
         }
 
-    def _cached_primitive_catalog(self) -> list:
-        """Return the cached primitive catalog, building it on first access."""
-        if self._primitive_catalog_cache is None:
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
-                build_execution_primitive_catalog,
+    def bridge_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
+        """Return the robot-owned LLM-facing primitive catalog."""
+        if self._bridge_synthesis_primitive_catalog_cache is None:
+            from cais_spade_llm.resources.robot.robot_primitives import (
+                build_robot_synthesis_primitive_catalog,
             )
 
-            self._primitive_catalog_cache = build_execution_primitive_catalog(self)
-        return self._primitive_catalog_cache
+            self._bridge_synthesis_primitive_catalog_cache = (
+                build_robot_synthesis_primitive_catalog(
+                    primitive_catalog=self.bridge_execution_primitive_catalog()
+                )
+            )
+        return deepcopy(self._bridge_synthesis_primitive_catalog_cache)
+
+    def _cached_primitive_catalog(self) -> list:
+        """Return the cached primitive catalog, building it on first access."""
+        return self.bridge_execution_primitive_catalog()
 
     async def _execute_primitive(
         self, primitive: str, params: Dict[str, Any]
@@ -2141,7 +2422,7 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     def get_bridge_snapshot(self) -> Dict[str, Any]:
         """Return the current primitive-level bridge snapshot for this robot."""
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.primitive_semantics import (
+        from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
         )
 

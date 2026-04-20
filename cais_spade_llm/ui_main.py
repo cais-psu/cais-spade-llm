@@ -21,8 +21,9 @@ import signal
 import subprocess
 import sys
 
-from cais_spade_llm.logging_setup import install_startup_logging_filters
-from cais_spade_llm.xmpp_runtime import install_xmpp_runtime_patches
+from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
+from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
+from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
 
 install_startup_logging_filters()
 install_xmpp_runtime_patches()
@@ -119,7 +120,7 @@ _KILL_CMDS: list[str] = [
 ]
 
 
-def _kill_stale_ros2_processes(*, quiet: bool = False) -> None:
+def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") -> None:
     """Kill orphan Gazebo/ROS2/MoveIt processes.
 
     Called both at startup (to clear leftovers from a previous bad exit)
@@ -127,6 +128,7 @@ def _kill_stale_ros2_processes(*, quiet: bool = False) -> None:
     survive across sessions.
     """
     log = logging.getLogger("ui_main")
+    log.info("ROS2/Gazebo hard cleanup requested reason=%s", reason)
     killed_any = False
     for cmd in _KILL_CMDS:
         try:
@@ -142,7 +144,10 @@ def _kill_stale_ros2_processes(*, quiet: bool = False) -> None:
         import time
         time.sleep(3)
         if not quiet:
-            log.info("Startup cleanup: killed stale ROS2/Gazebo processes from previous session.")
+            log.info(
+                "ROS2/Gazebo cleanup complete: killed stale processes reason=%s.",
+                reason,
+            )
 
 
 def _cleanup_ros2_shm() -> None:
@@ -177,10 +182,16 @@ def _cleanup_ros2_shm() -> None:
 
 def _install_exit_cleanup() -> None:
     """Register atexit + SIGTERM handler to guarantee process cleanup."""
-    atexit.register(_kill_stale_ros2_processes, quiet=True)
+    if keep_gazebo_on_exit():
+        logging.getLogger("ui_main").info(
+            "CAIS_KEEP_GAZEBO_ON_EXIT=1; skipping UI exit Gazebo hard-kill hooks."
+        )
+        return
+
+    atexit.register(_kill_stale_ros2_processes, quiet=True, reason="app_shutdown")
 
     def _signal_handler(signum: int, _frame: object) -> None:
-        _kill_stale_ros2_processes(quiet=True)
+        _kill_stale_ros2_processes(quiet=True, reason="app_shutdown")
         sys.exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -189,7 +200,7 @@ def _install_exit_cleanup() -> None:
 def _run_ui() -> None:
     """Run the NiceGUI operator console (default mode)."""
     # Clean slate: kill any leftover processes from a previous session.
-    _kill_stale_ros2_processes()
+    _kill_stale_ros2_processes(reason="startup")
     _cleanup_ros2_shm()
     # Register cleanup for when this session exits.
     _install_exit_cleanup()
@@ -276,6 +287,18 @@ def _apply_runtime_bridge_test_args(
 
     if bool(getattr(args, "verify_generated_bridge_in_gazebo", False)) or using_f5_debug_fixture:
         os.environ["CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"] = "1"
+        if not str(os.environ.get("CAIS_KEEP_GAZEBO_ON_EXIT") or "").strip():
+            os.environ["CAIS_KEEP_GAZEBO_ON_EXIT"] = "1"
+            if using_f5_debug_fixture:
+                print(
+                    "F5 debug Gazebo preservation on exit: enabled",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Generated bridge Gazebo preservation on exit: enabled",
+                    flush=True,
+                )
         if using_f5_debug_fixture:
             print("F5 debug generated bridge Gazebo verification: enabled", flush=True)
         else:

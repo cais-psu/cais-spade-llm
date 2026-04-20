@@ -34,7 +34,7 @@ At the low level, however, the robot also exposes controller primitives in
 - `compute_place_targets`
 
 These primitives are paired with generic primitive `preconditions` and
-`effects`, extracted and validated in `primitive_semantics.py`. That primitive
+`effects`, extracted and validated in `bridge_primitives.py`. That primitive
 layer is expressive enough to describe many recovery actions that were not
 anticipated when the five task-level functions were authored.
 
@@ -97,7 +97,7 @@ available at the task level.
 
 ### Primitive semantics support validation, not full search
 
-`primitive_semantics.py` provides the pieces needed to normalize, resolve, and
+`bridge_primitives.py` provides the pieces needed to normalize, resolve, and
 project primitive sequences:
 
 - `build_primitive_catalog(...)`
@@ -178,7 +178,7 @@ That is exactly where a multi-shot ReAct loop is useful:
 
 The LLM is not the source of safety or truth in this design.
 
-`primitive_semantics.py` still provides deterministic semantic checks.
+`bridge_primitives.py` still provides deterministic semantic checks.
 `robot_agent.py` still owns task-level and runtime execution semantics.
 DES still defines the discrete continuation target.
 The proposed safety shield still decides whether a candidate bridge action is

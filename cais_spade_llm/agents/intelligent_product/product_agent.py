@@ -22,6 +22,7 @@ from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
     canonical_preprogrammed_bridge_scenario_id,
@@ -86,17 +87,27 @@ class ProductAgent(LlmAgent):
         # Resource agents are the downstream executors; keep them in order and avoid mutating caller lists.
         self.resource_jids = list(resource_jids or [])
         self._resource_agent_refs = list(resource_agents or [])
-        self.product_specification_file = product_specification_file
-        self.product_geometry_file = product_geometry_file
-        self.product_geometry: Dict[str, Any] = self._load_product_geometry(product_geometry_file)
-        self.safety_file = safety_file
+        self.product_profile = ProductProfile(
+            name=name,
+            product_specification_file=product_specification_file,
+            product_geometry_file=product_geometry_file,
+            safety_file=safety_file,
+            instruction_override=instruction_override,
+            precomputed_bundle=dict(precomputed_bundle or {}),
+            logger=self.logger,
+        )
+        self.product_specification_file = self.product_profile.product_specification_file
+        self.product_geometry_file = self.product_profile.product_geometry_file
+        self.product_geometry: Dict[str, Any] = dict(self.product_profile.product_geometry)
+        self.safety_file = self.product_profile.safety_file
+        self.robot_env = self.product_profile.robot_env
         # Manual instruction text provided at runtime overrides any file read.
-        self.instruction_override = instruction_override
+        self.instruction_override = self.product_profile.instruction_override
 
         # Cache safety text for use during replanning
         self.safety_text: str = ""
 
-        self.precomputed_bundle: dict[str, Any] = dict(precomputed_bundle or {})
+        self.precomputed_bundle: dict[str, Any] = dict(self.product_profile.precomputed_bundle or {})
 
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/monitor/plan")
@@ -567,6 +578,155 @@ class ProductAgent(LlmAgent):
         self._runtime_recovery_context = {}
         self._sync_runtime_repair_state()
 
+    @staticmethod
+    def _normalized_xyz_pose(value: Any) -> dict[str, float] | None:
+        if not isinstance(value, dict) or not {"x", "y", "z"} <= set(value.keys()):
+            return None
+        try:
+            return {
+                "x": float(value["x"]),
+                "y": float(value["y"]),
+                "z": float(value["z"]),
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def _observed_pose_for_part(self, part_name: str) -> dict[str, float] | None:
+        part_key = str(part_name or "").strip()
+        if not part_key:
+            return None
+
+        tracker_entry = dict((getattr(self, "part_tracker", {}) or {}).get(part_key) or {})
+        for key in ("observed_pose", "pose", "position", "dropped_location"):
+            pose = self._normalized_xyz_pose(tracker_entry.get(key))
+            if pose is not None:
+                return pose
+
+        derived_observations = (
+            dict(self._derive_preprogrammed_part_observations() or {})
+            if hasattr(self, "_runtime_recovery_context")
+            else {}
+        )
+        pose = self._normalized_xyz_pose(derived_observations.get(part_key))
+        if pose is not None:
+            return pose
+
+        prepared_request = dict(
+            (getattr(self, "_runtime_recovery_context", {}) or {}).get("prepared_bridge_request")
+            or {}
+        )
+        prepared_parts = dict(prepared_request.get("part_tracker") or {})
+        prepared_entry = dict(prepared_parts.get(part_key) or {})
+        for key in ("observed_pose", "pose", "position", "dropped_location"):
+            pose = self._normalized_xyz_pose(prepared_entry.get(key))
+            if pose is not None:
+                return pose
+        return None
+
+    def _tracked_pose_for_part_at_location(
+        self,
+        *,
+        part_name: str,
+        source_location: str,
+    ) -> dict[str, float] | None:
+        part_key = str(part_name or "").strip()
+        normalized_source = str(source_location or "").strip()
+        if not part_key or not normalized_source:
+            return None
+
+        tracker_entry = dict((getattr(self, "part_tracker", {}) or {}).get(part_key) or {})
+        tracked_location = str(tracker_entry.get("location") or "").strip()
+        if tracked_location != normalized_source:
+            return None
+
+        for key in ("position", "pose", "observed_pose", "dropped_location"):
+            pose = self._normalized_xyz_pose(tracker_entry.get(key))
+            if pose is not None:
+                return pose
+        return None
+
+    def _support_surface_place_pose_from_observations(
+        self,
+        *,
+        part_name: str,
+        params: dict[str, Any],
+        observations: dict[str, Any] | None,
+    ) -> tuple[dict[str, float] | None, str]:
+        if not isinstance(observations, dict):
+            return None, ""
+
+        destination_location = str(params.get("destination_location") or "").strip()
+        if not destination_location:
+            return None, ""
+
+        event_facts = dict(observations.get("event_facts") or {})
+        place_targets = dict(event_facts.get("place_targets") or {})
+        place_target = dict(place_targets.get(str(part_name or "").strip()) or {})
+        if not place_target:
+            return None, ""
+
+        target_reference = dict(place_target.get("target_reference") or {})
+        target_point = str(target_reference.get("target_point") or "").strip()
+        surface_role = str(target_reference.get("surface_role") or "").strip()
+        if target_point != "part_origin" and surface_role != "support_surface":
+            return None, ""
+
+        target_origin_pose = dict(place_target.get("target_origin_pose") or {})
+        normalized_target_origin_pose = self._normalized_xyz_pose(target_origin_pose)
+        if normalized_target_origin_pose is not None:
+            pose_source = str(target_origin_pose.get("source") or "").strip() or "target_origin_pose"
+            return normalized_target_origin_pose, pose_source
+
+        try:
+            return {
+                "x": float(place_target["slot_x"]),
+                "y": float(place_target["slot_y"]),
+                "z": float(place_target["place_part_origin_z"]),
+            }, "place_targets.derived_part_origin"
+        except (KeyError, TypeError, ValueError):
+            return None, ""
+
+    def _part_geometry_for_pick_context(self, part_name: str) -> dict[str, Any]:
+        geometry = self._geometry_for_part(part_name)
+        if not isinstance(geometry, dict):
+            return {}
+        part_geometry: dict[str, Any] = {}
+        for key in ("part_height_m", "model_name"):
+            if key in geometry:
+                part_geometry[key] = deepcopy(geometry[key])
+        return part_geometry
+
+    def _enrich_observed_pose_recovery_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(params or {})
+        source_location = str(enriched.get("origin_resource_location") or "").strip()
+        if source_location != "observed_pose" and not source_location.endswith("_observed_pose"):
+            return enriched
+        part_name = str(enriched.get("part_name") or "").strip()
+        if not part_name:
+            return enriched
+        if not isinstance(enriched.get("observed_pose"), dict):
+            observed_pose = self._observed_pose_for_part(part_name)
+            if observed_pose is not None:
+                enriched["observed_pose"] = observed_pose
+        if "part_geometry" not in enriched:
+            part_geometry = self._part_geometry_for_pick_context(part_name)
+            if part_geometry:
+                enriched["part_geometry"] = part_geometry
+        return enriched
+
+    def _dispatch_params_for_task_node(self, task_node: dict[str, Any]) -> dict[str, Any]:
+        """Build task params for dispatch without overriding recovery primitive intent."""
+        params = dict(task_node.get("params", {}))
+        part_name = params.get("part_name")
+        function_name = str(task_node.get("function_name") or "").strip()
+        if function_name == "execute_recovery_macro":
+            return self._enrich_observed_pose_recovery_params(params)
+        if part_name and function_name != "execute_recovery_macro":
+            geo = self._geometry_for_part(part_name)
+            if geo:
+                params["product_geometry"] = geo
+        return params
+
     def _runtime_recovery_blocks_execution(self) -> bool:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         return status not in {"", "idle", "resolved"}
@@ -890,12 +1050,33 @@ class ProductAgent(LlmAgent):
         if status == "completed":
             entry["last_successful_task"] = task_id
 
+        support_surface_pose, support_surface_pose_source = (
+            self._support_surface_place_pose_from_observations(
+                part_name=part_name,
+                params=params,
+                observations=observations,
+            )
+            if status == "completed"
+            else (None, "")
+        )
+        if support_surface_pose is not None:
+            entry["position"] = deepcopy(support_surface_pose)
+            entry["pose_source"] = support_surface_pose_source
+            destination_location = str(
+                params.get("destination_location") or entry.get("location") or ""
+            ).strip()
+            if destination_location:
+                entry["location"] = destination_location
+
         # Preserve origin info when a part transitions to in_gripper so
         # recovery planners know where to return it.
         if transition.get("state") == "in_gripper":
             origin = str(params.get("origin_resource_location") or "").strip()
             if origin:
                 entry["origin_resource_location"] = origin
+            model_name = self._model_name_from_mapping(params, part_name)
+            if model_name:
+                entry["model_name"] = model_name
             obs = observations or {}
             origin_pose = obs.get("origin_pose")
             if isinstance(origin_pose, dict) and {"x", "y", "z"} <= set(origin_pose):
@@ -995,90 +1176,31 @@ class ProductAgent(LlmAgent):
     # Internal helpers
     # --------------------------------------------------------------------- #
     def _read_safety_text(self) -> str:
-        """
-        Read the NL safety file if provided. Returns empty string if missing.
-        """
-        if not self.safety_file:
-            return ""
-        
-        try:
-            p = Path(self.safety_file)
-            if p.exists():
-                txt = p.read_text(encoding="utf-8").strip()
-                self.logger.info(f"[Product] Loaded safety constraints from {p}")
-                return txt
-            else:
-                self.logger.warning(f"[Product] Safety file path provided but not found: {p}")
-        except Exception as e:
-            self.logger.exception(f"[Product] Failed to read safety file: {e}")
-        
-        return ""
+        """Compatibility wrapper for ProductProfile safety text loading."""
+        return ProductProfile.read_safety_file(self.safety_file, logger=self.logger)
     
     def _read_spec_text(self) -> Optional[str]:
-        """Return the instruction text: prefer override, else read file, else None."""
-        if self.instruction_override:
-            # Honour explicit overrides so tests and manual runs can inject free-form prompts.
-            txt = self.instruction_override.strip()
-            if txt:
-                return txt
-
-        if self.product_specification_file:
-            try:
-                cwd = os.getcwd()
-                self.logger.debug(f"[Product] Current working directory: {cwd}")
-                p = Path(self.product_specification_file)
-                self.logger.debug(f"[Product] Attempting to open: {p.resolve()}")
-                txt = p.read_text(encoding="utf-8").strip()
-                if txt:
-                    return txt
-                self.logger.warning(f"[Product] Spec file is empty: {p}")
-            except Exception as e:
-                self.logger.exception(f"[Product] Failed to read spec: {e}")
-
-        return None
+        """Compatibility wrapper for ProductProfile spec text loading."""
+        return ProductProfile.read_spec_file(
+            self.product_specification_file,
+            instruction_override=self.instruction_override,
+            logger=self.logger,
+        )
 
     def _load_product_geometry(self, geometry_file: Optional[str]) -> Dict[str, Any]:
-        """Load product geometry JSON, selecting the environment block (gazebo/real)."""
-        if not geometry_file:
-            return {}
-        env = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
-        try:
-            p = Path(geometry_file)
-            if not p.exists():
-                self.logger.warning("[Product] Geometry file not found: %s", p)
-                return {}
-            raw = json.loads(p.read_text(encoding="utf-8"))
-            geo = raw.get(env, {})
-            if geo:
-                self.logger.info(
-                    "[Product] Loaded geometry for env='%s' from %s", env, p,
-                )
-                return geo
-
-            self.logger.warning(
-                "[Product] Geometry file %s has no usable '%s' block.", p, env
-            )
-            return {}
-        except Exception:
-            self.logger.exception("[Product] Failed to load geometry from %s", geometry_file)
-            return {}
+        """Compatibility wrapper for ProductProfile geometry loading."""
+        return ProductProfile.load_product_geometry(
+            geometry_file,
+            robot_env=getattr(self, "robot_env", None),
+            logger=self.logger,
+        )
 
     def _geometry_for_part(self, part_name: str) -> Dict[str, Any]:
-        """Extract placement geometry for a single part from loaded product geometry."""
-        if not self.product_geometry:
-            return {}
-        board = self.product_geometry.get("assembly_board", {})
-        parts = self.product_geometry.get("parts", {})
-        slot_xy = board.get("slots", {}).get(part_name)
-        if slot_xy is None:
-            return {}
-        return {
-            "slot_xy": slot_xy,
-            "part_height_m": parts.get("heights_m", {}).get(part_name),
-            "model_name": parts.get("model_map", {}).get(part_name),
-            "slot_floor_z_m": board.get("slot_floor_z_m"),
-            "board_center": board.get("center", {}),
-        }
+        """Compatibility wrapper for ProductProfile per-part geometry lookup."""
+        profile = getattr(self, "product_profile", None)
+        if isinstance(profile, ProductProfile):
+            return profile.geometry_for_part(part_name, product_geometry=self.product_geometry)
+        return ProductProfile.geometry_for_part_from_geometry(part_name, self.product_geometry)
 
     def _compose_task_msg(
         self,
@@ -1176,27 +1298,11 @@ class ProductAgent(LlmAgent):
         }
 
     def _extract_requirement_text(self) -> Optional[str]:
-        """
-        Load requirement snippets from either an override path or the default
-        specification/products/requirements/<product>.txt file.
-        """
-        candidates = [Path(self.product_specification_file)]
-        for req_path in candidates:
-            try:
-                if not req_path.exists():
-                    continue
-                txt = req_path.read_text(encoding="utf-8").strip()
-                if txt:
-                    self.logger.info(f"[Product] Using requirement file: {req_path.resolve()}")
-                    return txt
-                self.logger.warning(f"[Product] Requirement file empty: {req_path}")
-            except Exception as exc:
-                self.logger.exception(
-                    "[Product] Failed to read requirements from %s: %s",
-                    req_path,
-                    exc,
-                )
-        return None
+        """Compatibility wrapper for ProductProfile requirement text loading."""
+        return ProductProfile.extract_requirement_file(
+            self.product_specification_file,
+            logger=self.logger,
+        )
 
     def _ensure_plan_result_inbox(self) -> None:
         """Register runtime plan_safety_result inbox exactly once."""
@@ -1317,6 +1423,1363 @@ class ProductAgent(LlmAgent):
         active_bridge_sequence: dict[str, Any] | None,
     ) -> bool:
         return bool(self._bridge_execution_policy(active_bridge_sequence).get("verification_only"))
+
+    def _active_bridge_blocks_nominal_dispatch(self) -> bool:
+        active_bridge_sequence = self._active_bridge_sequence()
+        if not active_bridge_sequence:
+            return False
+        state = str(active_bridge_sequence.get("state") or "").strip().lower()
+        return state in {
+            "approved",
+            "executing",
+            "continuation_blocked",
+            "human_required",
+            "failed",
+        }
+
+    def _next_dispatchable_task_node(self) -> dict[str, Any] | None:
+        return self._select_runtime_event()
+
+    def _active_bridge_next_ready_task(self) -> dict[str, Any] | None:
+        """Return the next pending active bridge task, prioritizing recovery over nominal work."""
+        active_bridge_sequence = self._active_bridge_sequence()
+        if not active_bridge_sequence:
+            return None
+        sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
+        if not sequence_id:
+            return None
+        bridge_task_ids = [
+            str(task_id or "").strip()
+            for task_id in (active_bridge_sequence.get("bridge_task_ids") or [])
+            if str(task_id or "").strip()
+        ]
+        if not bridge_task_ids:
+            bridge_task_ids = [
+                str(node.get("id") or "").strip()
+                for node in self.process_planner._bridge_sequence_nodes(sequence_id)
+                if str(node.get("id") or "").strip()
+            ]
+        bridge_task_id_set = set(bridge_task_ids)
+        failed_task_id = str(
+            active_bridge_sequence.get("failed_task_id")
+            or self.runtime_recovery.get("failed_task_id")
+            or ""
+        ).strip()
+
+        for task_id in bridge_task_ids:
+            node = self.process_planner._find_node(task_id)
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("bridge_sequence_id") or "").strip() != sequence_id:
+                continue
+            if str(node.get("status") or "").strip() != "pending":
+                continue
+            if self._bridge_task_predecessors_ready(
+                node,
+                bridge_task_ids=bridge_task_id_set,
+                failed_task_id=failed_task_id,
+            ):
+                return node
+            return None
+        return None
+
+    def _bridge_task_predecessors_ready(
+        self,
+        task_node: dict[str, Any],
+        *,
+        bridge_task_ids: set[str],
+        failed_task_id: str = "",
+    ) -> bool:
+        for pred_id in [
+            str(pred or "").strip()
+            for pred in (task_node.get("predecessors") or [])
+            if str(pred or "").strip()
+        ]:
+            pred_node = self.process_planner._find_node(pred_id)
+            if not isinstance(pred_node, dict):
+                return False
+            pred_status = str(pred_node.get("status") or "").strip().lower()
+            if pred_status == "completed":
+                continue
+            if pred_id in bridge_task_ids:
+                return False
+            if pred_id == failed_task_id and pred_status.startswith("failed"):
+                continue
+            return False
+        return True
+
+    def _select_runtime_event(self) -> dict[str, Any] | None:
+        """Select the next DES-style runtime event: bridge first, then guarded nominal."""
+        bridge_task = self._active_bridge_next_ready_task()
+        if bridge_task:
+            return bridge_task
+        if self._active_bridge_blocks_nominal_dispatch():
+            return None
+
+        graph_ready = self._graph_ready_task_nodes()
+        if not graph_ready:
+            return None
+
+        plant_state = self._build_runtime_plant_state(
+            resource_jids=[
+                str(node.get("resource_jid") or "").strip()
+                for node in graph_ready
+                if str(node.get("resource_jid") or "").strip()
+            ]
+        )
+        plant_enabled: list[dict[str, Any]] = []
+        disabled_frontier: list[dict[str, Any]] = []
+        for node in graph_ready:
+            violations = self._event_guard_violations(
+                node,
+                plant_state=plant_state,
+                enforce_unknown=False,
+            )
+            if violations:
+                disabled_frontier.append(
+                    {
+                        "task_id": str(node.get("id") or "").strip(),
+                        "function_name": str(node.get("function_name") or "").strip(),
+                        "resource_jid": str(node.get("resource_jid") or "").strip(),
+                        "part_name": self._tracked_part_name_for_task(node),
+                        "guard_violations": violations,
+                    }
+                )
+            else:
+                plant_enabled.append(node)
+
+        self._record_runtime_des_trace(
+            graph_ready_event_ids=[
+                str(node.get("id") or "").strip()
+                for node in graph_ready
+                if str(node.get("id") or "").strip()
+            ],
+            plant_enabled_event_ids=[
+                str(node.get("id") or "").strip()
+                for node in plant_enabled
+                if str(node.get("id") or "").strip()
+            ],
+            disabled_frontier=disabled_frontier,
+        )
+
+        if plant_enabled:
+            return plant_enabled[0]
+
+        repair_node = self._try_compile_controllable_repair(
+            disabled_frontier=disabled_frontier,
+            trigger="runtime_disabled_frontier",
+        )
+        if repair_node:
+            return repair_node
+
+        if disabled_frontier:
+            self._mark_runtime_des_human_required(
+                disabled_frontier=disabled_frontier,
+                message=(
+                    "Runtime DES supervisor found graph-ready event(s), but their "
+                    "plant guards are disabled and no deterministic repair event "
+                    "was applicable."
+                ),
+            )
+        return None
+
+    def _graph_ready_task_nodes(self) -> list[dict[str, Any]]:
+        if hasattr(self.process_planner, "graph_ready_task_nodes"):
+            nodes = self.process_planner.graph_ready_task_nodes()
+            return [node for node in nodes if isinstance(node, dict)]
+        node = self.process_planner.next_ready_task()
+        return [node] if isinstance(node, dict) else []
+
+    def _tool_row_for_task_node(self, task_node: dict[str, Any]) -> dict[str, Any]:
+        function_name = str(task_node.get("function_name") or "").strip()
+        resource_jid = str(task_node.get("resource_jid") or "").strip()
+        if not function_name:
+            return {}
+        if hasattr(self.process_planner, "_tool_row_for_task"):
+            try:
+                row = self.process_planner._tool_row_for_task(
+                    resource_jid=resource_jid,
+                    function_name=function_name,
+                    tools_catalog=list(getattr(self, "tools_catalog", []) or []),
+                )
+                if isinstance(row, dict):
+                    return dict(row)
+            except Exception:
+                self.logger.debug(
+                    "[Product] Runtime DES tool lookup fell back for task=%s",
+                    task_node.get("id"),
+                    exc_info=True,
+                )
+        self.__class__._load_shared_tools_catalogue()
+        return dict((LlmAgent._TOOLS_BY_FUNC or {}).get(function_name) or {})
+
+    def _event_contract_for_task_node(self, task_node: dict[str, Any]) -> dict[str, Any]:
+        row = self._tool_row_for_task_node(task_node)
+        contract = {
+            "task_id": str(task_node.get("id") or "").strip(),
+            "function_name": str(task_node.get("function_name") or "").strip(),
+            "resource_jid": str(task_node.get("resource_jid") or "").strip(),
+            "part_name": self._tracked_part_name_for_task(task_node),
+            "in_state": str(row.get("in_state") or "").strip(),
+            "out_state": str(row.get("out_state") or "").strip(),
+            "part_in_state": str(row.get("part_in_state") or "").strip(),
+            "context_mapping": dict(row.get("context_mapping") or {}),
+            "part_transition": dict(row.get("part_transition") or {}),
+        }
+        for key in ("in_state", "out_state", "part_in_state", "context_mapping", "part_transition"):
+            if key in task_node and task_node.get(key):
+                contract[key] = deepcopy(task_node[key])
+        return contract
+
+    def _build_runtime_plant_state(
+        self,
+        *,
+        resource_jids: Iterable[str] | None = None,
+        base_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active_bridge_sequence = self._active_bridge_sequence()
+        system_state = deepcopy(
+            base_state
+            if isinstance(base_state, dict)
+            else (active_bridge_sequence or {}).get("system_coordination_state") or {}
+        )
+        if not isinstance(system_state, dict):
+            system_state = {}
+        system_state.setdefault("resource_states", {})
+        for resource_jid in {
+            str(item or "").strip()
+            for item in (resource_jids or [])
+            if str(item or "").strip()
+        }:
+            snapshot = self._refresh_bridge_snapshot(resource_jid)
+            if isinstance(snapshot, dict):
+                system_state = self._system_coordination_state_with_bridge_snapshot(
+                    base_state=system_state,
+                    resource_jid=resource_jid,
+                    bridge_snapshot=snapshot,
+                )
+        return {
+            "resources": dict(
+                self.process_planner._extract_resource_states(system_state)
+            ),
+            "parts": deepcopy(dict(getattr(self, "part_tracker", {}) or {})),
+            "system_coordination_state": system_state,
+        }
+
+    @staticmethod
+    def _plant_resource_field(
+        plant_state: dict[str, Any],
+        resource_jid: str,
+        field: str,
+    ) -> Any:
+        resource_entry = dict(
+            dict(plant_state.get("resources") or {}).get(str(resource_jid or "").strip()) or {}
+        )
+        if field in resource_entry:
+            return resource_entry.get(field)
+        facets = dict(resource_entry.get("resource_facets") or {})
+        manipulator = dict(facets.get("manipulator") or {})
+        if field in manipulator:
+            return manipulator.get(field)
+        core = dict(resource_entry.get("resource_core") or {})
+        if field in core:
+            return core.get(field)
+        return None
+
+    @staticmethod
+    def _plant_part_field(
+        plant_state: dict[str, Any],
+        part_name: str,
+        field: str,
+    ) -> Any:
+        part_entry = dict(
+            dict(plant_state.get("parts") or {}).get(str(part_name or "").strip()) or {}
+        )
+        return part_entry.get(field)
+
+    @staticmethod
+    def _unknown_runtime_value(value: Any) -> bool:
+        return value in (None, "", [], {}, "unknown")
+
+    def _event_guard_violations(
+        self,
+        task_node: dict[str, Any],
+        *,
+        plant_state: dict[str, Any] | None = None,
+        enforce_unknown: bool = False,
+    ) -> list[dict[str, Any]]:
+        contract = self._event_contract_for_task_node(task_node)
+        resource_jid = str(contract.get("resource_jid") or "").strip()
+        part_name = str(contract.get("part_name") or "").strip()
+        plant = plant_state or self._build_runtime_plant_state(
+            resource_jids=[resource_jid] if resource_jid else []
+        )
+        violations: list[dict[str, Any]] = []
+
+        def add_violation(
+            *,
+            entity_kind: str,
+            entity: str,
+            field: str,
+            expected: Any,
+            actual: Any,
+            kind: str,
+        ) -> None:
+            if (
+                field != "held_part"
+                and self._unknown_runtime_value(actual)
+                and not enforce_unknown
+            ):
+                return
+            if actual == expected:
+                return
+            violations.append(
+                {
+                    "kind": kind,
+                    "entity_kind": entity_kind,
+                    "entity": entity,
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                    "source_task_id": contract.get("task_id"),
+                    "source_function_name": contract.get("function_name"),
+                }
+            )
+
+        in_state = str(contract.get("in_state") or "").strip()
+        if resource_jid and in_state and in_state.lower() != "any":
+            add_violation(
+                entity_kind="resource",
+                entity=resource_jid,
+                field="current_state",
+                expected=in_state,
+                actual=self._plant_resource_field(plant, resource_jid, "current_state"),
+                kind="event_guard_resource_state",
+            )
+
+        part_in_state = str(contract.get("part_in_state") or "").strip()
+        if part_name and part_in_state:
+            add_violation(
+                entity_kind="part",
+                entity=part_name,
+                field="state",
+                expected=part_in_state,
+                actual=self._plant_part_field(plant, part_name, "state"),
+                kind="event_guard_part_state",
+            )
+            if part_in_state == "in_gripper" and resource_jid:
+                add_violation(
+                    entity_kind="resource",
+                    entity=resource_jid,
+                    field="held_part",
+                    expected=part_name,
+                    actual=self._plant_resource_field(plant, resource_jid, "held_part"),
+                    kind="event_guard_carried_entity",
+                )
+
+        ctx_map = dict(contract.get("context_mapping") or {})
+        location_param = str(ctx_map.get("location_param") or "").strip()
+        location_type = str(ctx_map.get("location_type") or "").strip()
+        location_value = (
+            dict(task_node.get("params") or {}).get(location_param)
+            if location_param
+            else None
+        )
+        if part_name and location_type == "part_location" and location_value not in (None, ""):
+            add_violation(
+                entity_kind="part",
+                entity=part_name,
+                field="location",
+                expected=location_value,
+                actual=self._plant_part_field(plant, part_name, "location"),
+                kind="event_guard_part_location",
+            )
+        return violations
+
+    def _record_runtime_des_trace(
+        self,
+        *,
+        graph_ready_event_ids: list[str],
+        plant_enabled_event_ids: list[str],
+        disabled_frontier: list[dict[str, Any]],
+        selected_repair_operator: str = "",
+        projected_repair_effects: dict[str, Any] | None = None,
+    ) -> None:
+        trace = {
+            "graph_ready_event_ids": [
+                str(item).strip() for item in graph_ready_event_ids if str(item).strip()
+            ],
+            "plant_enabled_event_ids": [
+                str(item).strip() for item in plant_enabled_event_ids if str(item).strip()
+            ],
+            "disabled_frontier": deepcopy(disabled_frontier),
+            "selected_repair_operator": str(selected_repair_operator or "").strip(),
+            "projected_repair_effects": deepcopy(projected_repair_effects or {}),
+            "updated_at_utc": self._utc_now_iso(),
+        }
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        if isinstance(bridge_debug, dict):
+            bridge_debug["runtime_des_supervisor"] = trace
+            self.runtime_recovery["bridge_debug"] = bridge_debug
+
+    def _resource_can_reach_location(self, resource_jid: str, location: str) -> bool:
+        location_key = str(location or "").strip()
+        if not location_key:
+            return False
+        resource = self.process_planner._resource_by_jid(resource_jid)
+        caps = getattr(resource, "static_capabilities", {}) if resource is not None else {}
+        if not isinstance(caps, dict) or not caps:
+            return True
+        reachability = caps.get("reachability")
+        if isinstance(reachability, list) and reachability:
+            normalized = {str(item).strip() for item in reachability if str(item).strip()}
+            if location_key in normalized:
+                return True
+        staging_areas = caps.get("staging_areas")
+        if isinstance(staging_areas, dict) and location_key in staging_areas:
+            return True
+        if isinstance(staging_areas, list):
+            normalized = {str(item).strip() for item in staging_areas if str(item).strip()}
+            if location_key in normalized:
+                return True
+        return not reachability
+
+    @staticmethod
+    def _model_name_from_mapping(value: Any, part_name: str) -> str:
+        if not isinstance(value, dict):
+            return ""
+        for key in ("model_name", "gazebo_model_name"):
+            token = str(value.get(key) or "").strip()
+            if token:
+                return token
+
+        parts = value.get("parts")
+        if isinstance(parts, dict):
+            model_map = parts.get("model_map")
+            if isinstance(model_map, dict):
+                token = str(model_map.get(part_name) or "").strip()
+                if token:
+                    return token
+
+        for key in (
+            "part_geometry",
+            "product_geometry",
+            "geometry",
+            "target",
+            "part_target",
+        ):
+            token = ProductAgent._model_name_from_mapping(value.get(key), part_name)
+            if token:
+                return token
+
+        grounding_context = value.get("grounding_context")
+        if isinstance(grounding_context, dict):
+            parts = grounding_context.get("parts")
+            if isinstance(parts, dict):
+                token = ProductAgent._model_name_from_mapping(parts.get(part_name), part_name)
+                if token:
+                    return token
+
+        return ""
+
+    def _part_model_name_for_repair(
+        self,
+        part_name: str,
+        *,
+        disabled_event: dict[str, Any] | None = None,
+        active_bridge_sequence: dict[str, Any] | None = None,
+    ) -> str:
+        part_key = str(part_name or "").strip()
+        if not part_key:
+            return ""
+
+        candidates: list[Any] = [
+            dict((getattr(self, "part_tracker", {}) or {}).get(part_key) or {}),
+            disabled_event or {},
+            dict((disabled_event or {}).get("params") or {}),
+            active_bridge_sequence or {},
+            dict(getattr(self, "product_geometry", {}) or {}),
+        ]
+        try:
+            candidates.append(self._part_geometry_for_pick_context(part_key))
+        except Exception:
+            self.logger.debug(
+                "[Product] Could not resolve product geometry for DES repair part=%s",
+                part_key,
+                exc_info=True,
+            )
+
+        runtime_context = getattr(self, "_runtime_recovery_context", {}) or {}
+        prepared_request = dict(runtime_context.get("prepared_bridge_request") or {})
+        candidates.append(prepared_request)
+        candidates.append(dict((prepared_request.get("part_tracker") or {}).get(part_key) or {}))
+
+        for node in list(getattr(getattr(self, "process_planner", None), "nodes", []) or []):
+            if not isinstance(node, dict):
+                continue
+            if self._tracked_part_name_for_task(node) != part_key:
+                continue
+            candidates.append(node)
+            candidates.append(dict(node.get("params") or {}))
+
+        for candidate in candidates:
+            token = self._model_name_from_mapping(candidate, part_key)
+            if token:
+                return token
+        return ""
+
+    def _part_geometry_for_repair(self, part_name: str, model_name: str = "") -> dict[str, Any]:
+        geometry: dict[str, Any] = {}
+        try:
+            geometry.update(self._part_geometry_for_pick_context(part_name))
+        except Exception:
+            self.logger.debug(
+                "[Product] Could not build DES repair pick geometry for part=%s",
+                part_name,
+                exc_info=True,
+            )
+        if model_name and not geometry.get("model_name"):
+            geometry["model_name"] = model_name
+        return {key: deepcopy(value) for key, value in geometry.items() if value is not None}
+
+    def _repair_execution_mode_for_resource(self, resource_jid: str) -> str:
+        resource = self.process_planner._resource_by_jid(resource_jid)
+        execution_mode = str(getattr(resource, "execution_mode", "") or "").strip().lower()
+        return execution_mode or "simulation"
+
+    def _resolve_acquire_entity_pick_source(
+        self,
+        *,
+        resource_jid: str,
+        part_name: str,
+        source_location: str,
+        part_geometry: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], str]:
+        normalized_source = str(source_location or "").strip()
+        pick_params: dict[str, Any] = {"part_name": part_name}
+        if part_geometry:
+            pick_params["product_geometry"] = deepcopy(part_geometry)
+
+        if not normalized_source:
+            return (
+                "unsupported",
+                pick_params,
+                (
+                    "Cannot compile acquire_entity repair: missing source location "
+                    f"for part '{part_name}'."
+                ),
+            )
+
+        if normalized_source == "observed_pose" or normalized_source.endswith("_observed_pose"):
+            return "observed_pose", pick_params, ""
+
+        tracked_pose = self._tracked_pose_for_part_at_location(
+            part_name=part_name,
+            source_location=normalized_source,
+        )
+        if tracked_pose is not None:
+            pick_params["target_pose"] = deepcopy(tracked_pose)
+            pick_params["target_pose_source"] = f"tracked_current_pose:{normalized_source}"
+            return "tracked_location", pick_params, ""
+
+        tracker_entry = dict((getattr(self, "part_tracker", {}) or {}).get(part_name) or {})
+        origin_location = str(tracker_entry.get("origin_resource_location") or "").strip()
+        if origin_location == normalized_source:
+            origin_pose = self._normalized_xyz_pose(tracker_entry.get("origin_pose"))
+            if origin_pose is not None:
+                pick_params["target_pose"] = deepcopy(origin_pose)
+                pick_params["target_pose_source"] = (
+                    f"tracked_origin_pose:{normalized_source}"
+                )
+                return "tracked_origin", pick_params, ""
+
+        execution_mode = self._repair_execution_mode_for_resource(resource_jid)
+        resolved_geometry = ProductProfile.resolve_place_geometry(
+            part_name=part_name,
+            destination_location=normalized_source,
+            product_geometry=part_geometry,
+            execution_mode=execution_mode,
+        )
+        target_pose = self._normalized_xyz_pose(
+            dict(resolved_geometry.get("target_origin_pose") or {})
+        )
+        if target_pose is None:
+            return (
+                "unsupported",
+                pick_params,
+                (
+                    "Cannot compile acquire_entity repair: source_location "
+                    f"'{normalized_source}' has no deterministic target_origin_pose "
+                    f"for part '{part_name}'."
+                ),
+            )
+
+        pick_params["product_geometry"] = deepcopy(resolved_geometry)
+        pick_params["target_pose"] = deepcopy(target_pose)
+        pick_params["target_pose_source"] = normalized_source
+        return "modeled_location", pick_params, ""
+
+    def _repair_primitive_catalog_for_resource(self, resource_jid: str) -> list[dict[str, Any]]:
+        resource = self.process_planner._resource_by_jid(resource_jid)
+        if resource is None:
+            return []
+        method = getattr(resource, "bridge_execution_primitive_catalog", None)
+        if callable(method):
+            try:
+                catalog = method()
+                if isinstance(catalog, list):
+                    return [dict(item) for item in catalog if isinstance(item, dict)]
+            except Exception:
+                self.logger.debug(
+                    "[Product] Could not load primitive catalog for DES repair resource=%s",
+                    resource_jid,
+                    exc_info=True,
+                )
+        return []
+
+    def _validate_repair_primitive_program(
+        self,
+        *,
+        resource_jid: str,
+        primitive_steps: list[dict[str, Any]],
+    ) -> str:
+        catalog = self._repair_primitive_catalog_for_resource(resource_jid)
+        catalog_by_name = {
+            str(entry.get("name") or "").strip(): dict(entry)
+            for entry in catalog
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        }
+        fallback_required_params = {
+            "compute_pick_targets": ["part_name"],
+            "move_cartesian": ["x", "y", "z"],
+            "grasp_part": ["model_name"],
+        }
+        for index, step in enumerate(primitive_steps or []):
+            if not isinstance(step, dict):
+                return f"primitive step {index} must be an object"
+            primitive = str(step.get("primitive") or "").strip()
+            if not primitive:
+                return f"primitive step {index} is missing 'primitive'"
+            if catalog_by_name and primitive not in catalog_by_name:
+                return f"unknown primitive '{primitive}' at step {index}"
+            params = dict(step.get("params") or {})
+            required = (
+                list(catalog_by_name.get(primitive, {}).get("required_params") or [])
+                if catalog_by_name
+                else list(fallback_required_params.get(primitive) or [])
+            )
+            if primitive in catalog_by_name:
+                allowed_params = {
+                    str(param_name).strip()
+                    for param_name in dict(catalog_by_name.get(primitive, {}).get("params") or {})
+                    if str(param_name).strip()
+                }
+                unexpected_params = sorted(
+                    str(param_name).strip()
+                    for param_name in params.keys()
+                    if str(param_name).strip()
+                    and str(param_name).strip() not in allowed_params
+                )
+                if unexpected_params:
+                    allowed_description = (
+                        f"allowed params={sorted(allowed_params)}"
+                        if allowed_params
+                        else "primitive accepts no params"
+                    )
+                    return (
+                        f"unexpected params {unexpected_params} at step {index} "
+                        f"({primitive}); {allowed_description}"
+                    )
+            for required_param in required:
+                param_name = str(required_param or "").strip()
+                if not param_name:
+                    continue
+                value = params.get(param_name)
+                if value in (None, ""):
+                    return (
+                        f"missing required param '{param_name}' at step {index} "
+                        f"({primitive})"
+                    )
+        return ""
+
+    def _record_repair_compile_error(
+        self,
+        *,
+        disabled_event: dict[str, Any],
+        operator: str,
+        message: str,
+    ) -> None:
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        bridge_debug.setdefault("runtime_des_supervisor", {})
+        bridge_debug["runtime_des_supervisor"].update(
+            {
+                "selected_repair_operator": str(operator or "").strip(),
+                "repair_compile_error": str(message or "").strip(),
+                "disabled_event": deepcopy(disabled_event),
+            }
+        )
+        self.runtime_recovery["bridge_debug"] = bridge_debug
+
+    @staticmethod
+    def _failed_release_primitive_observation(observations: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(observations, dict):
+            return {}
+        primitive = str(observations.get("primitive") or "").strip()
+        if primitive != "release_part":
+            return {}
+        return deepcopy(observations)
+
+    def _try_compile_release_retry_event(
+        self,
+        *,
+        task_node: dict[str, Any],
+        active_bridge_sequence: dict[str, Any],
+        observations: dict[str, Any] | None,
+        trigger: str,
+        used_llm_bridge: bool,
+        feedback_history: list[Any],
+    ) -> dict[str, Any] | None:
+        release_observation = self._failed_release_primitive_observation(observations)
+        if not release_observation:
+            return None
+        retry_attempts = int(active_bridge_sequence.get("release_retry_attempts") or 0)
+        if retry_attempts >= 1:
+            return None
+
+        params = dict(task_node.get("params") or {})
+        part_name = str(params.get("part_name") or self._tracked_part_name_for_task(task_node) or "").strip()
+        if not part_name:
+            return None
+        model_name = str(params.get("model_name") or "").strip()
+        if not model_name:
+            model_name = self._part_model_name_for_repair(
+                part_name,
+                disabled_event=task_node,
+                active_bridge_sequence=active_bridge_sequence,
+            )
+        if not model_name:
+            self._record_repair_compile_error(
+                disabled_event={
+                    "task_id": str(task_node.get("id") or "").strip(),
+                    "function_name": str(task_node.get("function_name") or "").strip(),
+                    "resource_jid": str(task_node.get("resource_jid") or "").strip(),
+                    "part_name": part_name,
+                },
+                operator="retry_event",
+                message=(
+                    "Cannot compile release retry event: missing required "
+                    f"model_name for part '{part_name}'."
+                ),
+            )
+            return None
+
+        state_after = dict(release_observation.get("state_after") or {})
+        if state_after:
+            held_after = state_after.get("held_part")
+            current_after = str(state_after.get("current_state") or "").strip()
+            if held_after not in (part_name, model_name) or current_after not in {"", "picked"}:
+                return None
+
+        retry_task_id = f"REPAIR_EVENT_{uuid.uuid4().hex[:6].upper()}"
+        sequence_id = f"DESRETRY_{uuid.uuid4().hex[:8].upper()}"
+        resource_jid = str(task_node.get("resource_jid") or "").strip()
+        original_task_id = str(task_node.get("id") or "").strip()
+        release_params = {
+            "part_name": part_name,
+            "model_name": model_name,
+            "assume_released_if_open": True,
+        }
+        primitive_steps = [{"primitive": "release_part", "params": release_params}]
+        validation_error = self._validate_repair_primitive_program(
+            resource_jid=resource_jid,
+            primitive_steps=primitive_steps,
+        )
+        if validation_error:
+            self._record_repair_compile_error(
+                disabled_event={
+                    "task_id": original_task_id,
+                    "function_name": "execute_recovery_macro",
+                    "resource_jid": resource_jid,
+                    "part_name": part_name,
+                },
+                operator="retry_event",
+                message=validation_error,
+            )
+            return None
+
+        expected_snapshot: dict[str, Any] | None = None
+        if state_after:
+            expected_snapshot = {
+                "current_state": state_after.get("current_state"),
+                "held_part": state_after.get("held_part"),
+                "gripper_state": state_after.get("gripper_state"),
+            }
+            expected_snapshot = {
+                key: value for key, value in expected_snapshot.items() if value is not None
+            }
+        projected_snapshot = deepcopy(task_node.get("projected_snapshot") or {})
+        if not projected_snapshot:
+            projected_snapshot = {
+                "resource_type": "robot",
+                "resource_jid": resource_jid,
+                "current_state": "idle",
+                "held_part": None,
+                "gripper_state": "open",
+                "resource_core": {
+                    "resource_jid": resource_jid,
+                    "resource_type": "robot",
+                    "current_state": "idle",
+                },
+                "resource_facets": {
+                    "manipulator": {"held_part": None, "gripper_state": "open"}
+                },
+            }
+        projected_part_entry = deepcopy(task_node.get("projected_part_entry") or {})
+        if not projected_part_entry:
+            destination = str(params.get("destination_location") or "").strip()
+            projected_part_entry = {
+                "state": "assembled" if destination else "ready",
+                "location": destination or None,
+                "model_name": model_name,
+            }
+        else:
+            projected_part_entry.setdefault("model_name", model_name)
+
+        retry_node = {
+            "id": retry_task_id,
+            "type": "task",
+            "status": "pending",
+            "function_name": "execute_recovery_macro",
+            "resource_jid": resource_jid,
+            "params": {
+                "macro_name": f"retry_release_for_{original_task_id or 'bridge_macro'}",
+                "primitive_steps": primitive_steps,
+                "expected_start_state": str(state_after.get("current_state") or "picked"),
+                "product_jid": str(self.jid),
+                "task_id": retry_task_id,
+                "part_name": part_name,
+                "destination_location": params.get("destination_location"),
+                "out_state": "idle",
+            },
+            "predecessors": [],
+            "successors": [],
+            "bridge_sequence_id": sequence_id,
+            "bridge_sequence_index": 1,
+            "bridge_sequence_length": 1,
+            "in_state": "picked",
+            "out_state": "idle",
+            "part_transition": deepcopy(task_node.get("part_transition") or {}),
+            "part_name": part_name,
+            "projected_snapshot": projected_snapshot,
+            "projected_part_entry": projected_part_entry,
+            "repair_operator": "retry_event",
+            "repair_intent": "release_retry",
+            "retry_of_task_id": original_task_id,
+            "change_reason": (
+                "INSERTION: Runtime DES retry event for failed bridge release "
+                f"{original_task_id or '-'}"
+            ),
+        }
+        if expected_snapshot:
+            retry_node["params"]["expected_snapshot"] = expected_snapshot
+        self.process_planner.nodes.append(retry_node)
+
+        next_sequence = deepcopy(active_bridge_sequence)
+        next_sequence.update(
+            {
+                "bridge_sequence_id": sequence_id,
+                "bridge_task_ids": [retry_task_id],
+                "bridge_sequence_length": 1,
+                "state": "executing",
+                "trigger": str(trigger or "").strip() or next_sequence.get("trigger", ""),
+                "used_llm_bridge": bool(used_llm_bridge),
+                "release_retry_attempts": retry_attempts + 1,
+                "repair_operator": "retry_event",
+                "repair_intent": "release_retry",
+                "retry_source_task_id": original_task_id,
+            }
+        )
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        bridge_debug.setdefault("runtime_des_supervisor", {})
+        bridge_debug["runtime_des_supervisor"].update(
+            {
+                "selected_repair_operator": "retry_event",
+                "repair_intent": "release_retry",
+                "repair_task_id": retry_task_id,
+                "retry_source_task_id": original_task_id,
+                "release_observation": deepcopy(release_observation),
+            }
+        )
+        self._set_runtime_recovery(
+            status="resolved",
+            resolution_class="runtime_des_repair",
+            trigger=str(trigger or "").strip() or self.runtime_recovery.get("trigger", ""),
+            failed_task_id=str(
+                next_sequence.get("failed_task_id")
+                or self.runtime_recovery.get("failed_task_id")
+                or ""
+            ),
+            message=(
+                "Runtime DES supervisor inserted retry_event for failed bridge release."
+            ),
+            attempts_used=self._runtime_repair_fail_streak,
+            attempts_max=self._runtime_repair_max_attempts,
+            used_llm_bridge=bool(used_llm_bridge),
+            bridge_debug=bridge_debug,
+            bridge_approval_state="approved",
+            active_bridge_sequence=next_sequence,
+            bridge_feedback_history=feedback_history,
+            violations=[],
+            append_history=True,
+            history_message=(
+                f"Runtime DES release retry event {retry_task_id} inserted for "
+                f"{original_task_id or 'bridge macro'}."
+            ),
+        )
+        return retry_node
+
+    def _try_compile_controllable_repair(
+        self,
+        *,
+        disabled_frontier: list[dict[str, Any]],
+        trigger: str,
+        active_bridge_sequence: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Compile a generic repair event when guard/effect matching proves it safe."""
+        active = deepcopy(active_bridge_sequence or self._active_bridge_sequence() or {})
+        repair_attempts = int(active.get("continuation_repair_attempts") or 0) if active else 0
+        if repair_attempts >= 1:
+            return None
+
+        for disabled_event in disabled_frontier or []:
+            violations = [
+                dict(item)
+                for item in (disabled_event.get("guard_violations") or [])
+                if isinstance(item, dict)
+            ]
+            carried_violation = next(
+                (
+                    item
+                    for item in violations
+                    if str(item.get("field") or "").strip() == "held_part"
+                    and str(item.get("expected") or "").strip()
+                ),
+                None,
+            )
+            if not carried_violation:
+                continue
+
+            resource_jid = str(
+                carried_violation.get("entity")
+                or disabled_event.get("resource_jid")
+                or ""
+            ).strip()
+            part_name = str(carried_violation.get("expected") or "").strip()
+            if not resource_jid or not part_name:
+                continue
+
+            plant_state = self._build_runtime_plant_state(resource_jids=[resource_jid])
+            current_state = self._plant_resource_field(plant_state, resource_jid, "current_state")
+            held_part = self._plant_resource_field(plant_state, resource_jid, "held_part")
+            if str(current_state or "").strip() not in {"", "idle"}:
+                continue
+            if held_part not in (None, "", "unknown"):
+                continue
+            part_entry = dict((plant_state.get("parts") or {}).get(part_name) or {})
+            source_location = str(part_entry.get("location") or "").strip()
+            if (
+                not source_location
+                or source_location == f"{resource_jid}_gripper"
+                or source_location.endswith("_gripper")
+            ):
+                continue
+            if not self._resource_can_reach_location(resource_jid, source_location):
+                continue
+
+            repair_node = self._append_acquire_entity_repair_event(
+                resource_jid=resource_jid,
+                part_name=part_name,
+                source_location=source_location,
+                disabled_event=disabled_event,
+                active_bridge_sequence=active,
+                trigger=trigger,
+            )
+            if repair_node:
+                return repair_node
+        return None
+
+    def _append_acquire_entity_repair_event(
+        self,
+        *,
+        resource_jid: str,
+        part_name: str,
+        source_location: str,
+        disabled_event: dict[str, Any],
+        active_bridge_sequence: dict[str, Any] | None,
+        trigger: str,
+    ) -> dict[str, Any] | None:
+        sequence_id = f"DESREPAIR_{uuid.uuid4().hex[:8].upper()}"
+        task_id = f"REPAIR_EVENT_{uuid.uuid4().hex[:6].upper()}"
+        event_fact_part = str(part_name)
+        model_name = self._part_model_name_for_repair(
+            part_name,
+            disabled_event=disabled_event,
+            active_bridge_sequence=active_bridge_sequence,
+        )
+        if not model_name:
+            self._record_repair_compile_error(
+                disabled_event=disabled_event,
+                operator="acquire_entity",
+                message=(
+                    "Cannot compile acquire_entity repair: missing required "
+                    f"model_name for part '{part_name}'."
+                ),
+            )
+            self.logger.warning(
+                "[Product] Runtime DES repair compile failed: missing model_name for part=%s",
+                part_name,
+            )
+            return None
+        part_geometry = self._part_geometry_for_repair(part_name, model_name=model_name)
+        _source_mode, pick_params, source_error = self._resolve_acquire_entity_pick_source(
+            resource_jid=resource_jid,
+            part_name=part_name,
+            source_location=source_location,
+            part_geometry=part_geometry,
+        )
+        if source_error:
+            self._record_repair_compile_error(
+                disabled_event=disabled_event,
+                operator="acquire_entity",
+                message=source_error,
+            )
+            self.logger.warning(
+                "[Product] Runtime DES repair compile failed: %s",
+                source_error,
+            )
+            return None
+        predecessor = str(
+            (active_bridge_sequence or {}).get("last_task_id")
+            or (active_bridge_sequence or {}).get("failed_task_id")
+            or self.runtime_recovery.get("failed_task_id")
+            or ""
+        ).strip()
+        primitive_steps = [
+            {
+                "primitive": "compute_pick_targets",
+                "params": pick_params,
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.x"
+                        )
+                    },
+                    "y": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.y"
+                        )
+                    },
+                    "z": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.z"
+                        )
+                    },
+                },
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.target_pose.x"
+                        )
+                    },
+                    "y": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.target_pose.y"
+                        )
+                    },
+                    "z": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.target_pose.z"
+                        )
+                    },
+                },
+            },
+            {
+                "primitive": "grasp_part",
+                "params": {"part_name": part_name, "model_name": model_name},
+            },
+            {
+                "primitive": "move_cartesian",
+                "params": {
+                    "x": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.x"
+                        )
+                    },
+                    "y": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.y"
+                        )
+                    },
+                    "z": {
+                        "context_ref": (
+                            f"event_facts.pick_targets.{event_fact_part}.approach_pose.z"
+                        )
+                    },
+                },
+            },
+        ]
+        validation_error = self._validate_repair_primitive_program(
+            resource_jid=resource_jid,
+            primitive_steps=primitive_steps,
+        )
+        if validation_error:
+            self._record_repair_compile_error(
+                disabled_event=disabled_event,
+                operator="acquire_entity",
+                message=validation_error,
+            )
+            self.logger.warning(
+                "[Product] Runtime DES repair compile failed: %s",
+                validation_error,
+            )
+            return None
+        node: dict[str, Any] = {
+            "id": task_id,
+            "type": "task",
+            "status": "pending",
+            "function_name": "execute_recovery_macro",
+            "resource_jid": resource_jid,
+            "params": {
+                "macro_name": (
+                    "restore_guard_for_"
+                    f"{disabled_event.get('task_id') or 'disabled_event'}_acquire_entity"
+                ),
+                "primitive_steps": primitive_steps,
+                "expected_start_state": "idle",
+                "product_jid": str(self.jid),
+                "task_id": task_id,
+                "part_name": part_name,
+                "origin_resource_location": source_location,
+                "part_geometry": deepcopy(part_geometry),
+                "out_state": "picked",
+            },
+            "predecessors": [predecessor] if predecessor else [],
+            "successors": [],
+            "bridge_sequence_id": sequence_id,
+            "bridge_sequence_index": 1,
+            "bridge_sequence_length": 1,
+            "in_state": "idle",
+            "out_state": "picked",
+            "part_transition": {
+                "completed": {
+                    "state": "in_gripper",
+                    "location_template": "{resource_jid}_gripper",
+                }
+            },
+            "part_name": part_name,
+            "projected_snapshot": {
+                "resource_type": "robot",
+                "resource_jid": resource_jid,
+                "current_state": "picked",
+                "held_part": part_name,
+                "gripper_state": "closed",
+                "resource_core": {
+                    "resource_jid": resource_jid,
+                    "resource_type": "robot",
+                    "current_state": "picked",
+                },
+                "resource_facets": {
+                    "manipulator": {
+                        "held_part": part_name,
+                        "gripper_state": "closed",
+                    }
+                },
+            },
+            "projected_part_entry": {
+                "state": "in_gripper",
+                "location": f"{resource_jid}_gripper",
+                "model_name": model_name,
+            },
+            "repair_operator": "acquire_entity",
+            "repair_intent": "restore_event_guard",
+            "restores_event_id": str(disabled_event.get("task_id") or "").strip(),
+            "guard_violations": deepcopy(disabled_event.get("guard_violations") or []),
+            "producer_semantics": ["pick_approach", "pick_grasp"],
+            "disabled_event": deepcopy(disabled_event),
+            "change_reason": (
+                "INSERTION: Runtime DES guard-restoration event 'acquire_entity' "
+                f"for disabled event {disabled_event.get('task_id') or '-'}"
+            ),
+        }
+        self.process_planner.nodes.append(node)
+
+        next_sequence = deepcopy(active_bridge_sequence or {})
+        next_sequence.update(
+            {
+                "bridge_sequence_id": sequence_id,
+                "bridge_task_ids": [task_id],
+                "bridge_sequence_length": 1,
+                "state": "executing",
+                "trigger": str(trigger or "").strip() or next_sequence.get("trigger", ""),
+                "used_llm_bridge": bool(next_sequence.get("used_llm_bridge", False)),
+                "continuation_repair_attempts": int(
+                    next_sequence.get("continuation_repair_attempts") or 0
+                )
+                + 1,
+                "repair_operator": "acquire_entity",
+                "repair_intent": "restore_event_guard",
+                "repair_target_task_id": str(disabled_event.get("task_id") or "").strip(),
+            }
+        )
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        bridge_debug.setdefault("runtime_des_supervisor", {})
+        bridge_debug["runtime_des_supervisor"].update(
+            {
+                "selected_repair_operator": "acquire_entity",
+                "projected_repair_effects": {
+                    "resource": {
+                        "entity": resource_jid,
+                        "current_state": "picked",
+                        "held_part": part_name,
+                    },
+                    "part": {
+                        "entity": part_name,
+                        "state": "in_gripper",
+                        "location": f"{resource_jid}_gripper",
+                        "model_name": model_name,
+                    },
+                },
+                "disabled_event": deepcopy(disabled_event),
+                "repair_task_id": task_id,
+                "repair_intent": "restore_event_guard",
+                "restores_event_id": str(disabled_event.get("task_id") or "").strip(),
+                "guard_violations": deepcopy(disabled_event.get("guard_violations") or []),
+                "producer_semantics": ["pick_approach", "pick_grasp"],
+            }
+        )
+        self._set_runtime_recovery(
+            status="resolved",
+            resolution_class="runtime_des_repair",
+            trigger=str(trigger or "").strip() or self.runtime_recovery.get("trigger", ""),
+            failed_task_id=str(
+                next_sequence.get("failed_task_id")
+                or self.runtime_recovery.get("failed_task_id")
+                or ""
+            ),
+            message=(
+                "Runtime DES supervisor inserted controllable repair event "
+                f"'acquire_entity' before resuming nominal execution."
+            ),
+            attempts_used=self._runtime_repair_fail_streak,
+            attempts_max=self._runtime_repair_max_attempts,
+            used_llm_bridge=bool(next_sequence.get("used_llm_bridge", False)),
+            bridge_debug=bridge_debug,
+            bridge_approval_state="approved",
+            active_bridge_sequence=next_sequence,
+            violations=[],
+            append_history=True,
+            history_message=(
+                f"Runtime DES repair event {task_id} inserted for disabled "
+                f"event {disabled_event.get('task_id') or '-'}."
+            ),
+        )
+        return node
+
+    def _mark_runtime_des_human_required(
+        self,
+        *,
+        disabled_frontier: list[dict[str, Any]],
+        message: str,
+    ) -> None:
+        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+        bridge_debug.setdefault("runtime_des_supervisor", {})
+        bridge_debug["runtime_des_supervisor"].update(
+            {
+                "disabled_frontier": deepcopy(disabled_frontier),
+                "selected_repair_operator": "",
+            }
+        )
+        self._set_runtime_recovery(
+            status="human_required",
+            resolution_class="human_required",
+            message=message,
+            attempts_used=self._runtime_repair_fail_streak,
+            attempts_max=self._runtime_repair_max_attempts,
+            bridge_debug=bridge_debug,
+            active_bridge_sequence=self._active_bridge_sequence(),
+            violations=[],
+            append_history=True,
+            history_message=message,
+        )
+
+    def _bridge_continuation_disabled_frontier(
+        self,
+        active_bridge_sequence: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        requirements = [
+            dict(item)
+            for item in (active_bridge_sequence.get("continuation_requirements") or [])
+            if isinstance(item, dict)
+        ]
+        if not requirements:
+            return []
+        plant_state = self._build_runtime_plant_state(
+            resource_jids=[
+                str(item.get("entity") or "").strip()
+                for item in requirements
+                if str(item.get("entity_kind") or "").strip() == "resource"
+            ],
+            base_state=active_bridge_sequence.get("system_coordination_state") or {},
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for requirement in requirements:
+            source_task_id = str(requirement.get("source_task_id") or "").strip()
+            if not source_task_id:
+                continue
+            entity_kind = str(requirement.get("entity_kind") or "").strip()
+            entity = str(requirement.get("entity") or "").strip()
+            field = str(requirement.get("field") or "").strip()
+            expected = requirement.get("expected")
+            if not entity_kind or not entity or not field:
+                continue
+            actual = (
+                self._plant_resource_field(plant_state, entity, field)
+                if entity_kind == "resource"
+                else self._plant_part_field(plant_state, entity, field)
+            )
+            if actual == expected:
+                continue
+            node = self.process_planner._find_node(source_task_id)
+            group = grouped.setdefault(
+                source_task_id,
+                {
+                    "task_id": source_task_id,
+                    "function_name": str(requirement.get("source_function_name") or "").strip(),
+                    "resource_jid": str(node.get("resource_jid") or entity if isinstance(node, dict) else entity),
+                    "part_name": self._tracked_part_name_for_task(node) if isinstance(node, dict) else "",
+                    "guard_violations": [],
+                },
+            )
+            group["guard_violations"].append(
+                {
+                    "kind": str(requirement.get("kind") or "continuation_guard"),
+                    "entity_kind": entity_kind,
+                    "entity": entity,
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                    "source_task_id": source_task_id,
+                    "source_function_name": requirement.get("source_function_name"),
+                    "condition_family": "continuation",
+                }
+            )
+        return list(grouped.values())
 
     @staticmethod
     def _runtime_is_gazebo_simulation() -> bool:
@@ -1879,6 +3342,19 @@ class ProductAgent(LlmAgent):
         verification_only = self._bridge_is_verification_only(active_bridge_sequence)
 
         if isinstance(status, str) and status.startswith("failed"):
+            retry_node = self._try_compile_release_retry_event(
+                task_node=task_node,
+                active_bridge_sequence=active_bridge_sequence,
+                observations=observations,
+                trigger=trigger,
+                used_llm_bridge=used_llm_bridge,
+                feedback_history=list(feedback_history),
+            )
+            if retry_node:
+                await asyncio.to_thread(self._persist_plan_snapshot)
+                await asyncio.to_thread(self._persist_product_state)
+                return True
+
             detail = str(content or "").strip()
             if not detail and isinstance(observations, dict):
                 detail = json.dumps(observations, sort_keys=True, default=str)
@@ -2031,6 +3507,45 @@ class ProductAgent(LlmAgent):
                 await asyncio.to_thread(self._persist_product_state)
                 return True
 
+            disabled_frontier = self._bridge_continuation_disabled_frontier(next_sequence)
+            if disabled_frontier:
+                self._record_runtime_des_trace(
+                    graph_ready_event_ids=list(
+                        next_sequence.get("pending_nominal_task_ids") or []
+                    ),
+                    plant_enabled_event_ids=[],
+                    disabled_frontier=disabled_frontier,
+                )
+                repair_node = self._try_compile_controllable_repair(
+                    disabled_frontier=disabled_frontier,
+                    trigger="bridge_continuation_guard",
+                    active_bridge_sequence=next_sequence,
+                )
+                if repair_node:
+                    bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or bridge_debug)
+                    if generated_code_verification:
+                        bridge_debug["generated_code_verification"] = deepcopy(
+                            generated_code_verification
+                        )
+                        self.runtime_recovery["generated_code_verification"] = deepcopy(
+                            generated_code_verification
+                        )
+                    await asyncio.to_thread(self._persist_plan_snapshot)
+                    await asyncio.to_thread(self._persist_product_state)
+                    return True
+
+                message = (
+                    "Generated bridge verification matched macro projections, but the "
+                    "runtime DES continuation guard is still disabled. Human "
+                    "intervention required."
+                )
+                self._mark_runtime_des_human_required(
+                    disabled_frontier=disabled_frontier,
+                    message=message,
+                )
+                await asyncio.to_thread(self._persist_product_state)
+                return True
+
             next_sequence["state"] = "verified"
             if generated_code_verification:
                 generated_code_verification["status"] = "verified"
@@ -2056,11 +3571,13 @@ class ProductAgent(LlmAgent):
                 )
             verified_message = (
                 f"Generated bridge verification completed after macro '{macro_name}'; "
-                "execution paused for review."
+                "resuming nominal execution."
             )
+            if next_sequence:
+                bridge_debug["verified_bridge_sequence"] = deepcopy(next_sequence)
             self._runtime_recovery_context = {}
             self._set_runtime_recovery(
-                status="generated_bridge_verified",
+                status="resolved",
                 resolution_class="generated_bridge_verified",
                 trigger=trigger,
                 failed_task_id=failed_task_id,
@@ -2071,7 +3588,7 @@ class ProductAgent(LlmAgent):
                 bridge_proposal=None,
                 bridge_debug=bridge_debug if bridge_debug else None,
                 bridge_approval_state="approved",
-                active_bridge_sequence=next_sequence,
+                active_bridge_sequence=None,
                 generated_code_verification=generated_code_verification or None,
                 bridge_feedback_history=feedback_history,
                 violations=[],
@@ -2677,6 +4194,21 @@ class ProductAgent(LlmAgent):
         system_coordination_state: dict | None = None,
     ) -> dict[str, Any]:
         current_status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
+        active_bridge_sequence = self._active_bridge_sequence()
+        active_bridge_state = str(
+            (active_bridge_sequence or {}).get("state") or ""
+        ).strip().lower()
+        if (
+            current_status == "resolved"
+            and active_bridge_sequence
+            and active_bridge_state in {"approved", "executing"}
+        ):
+            self.logger.warning(
+                "[Product] Runtime bridge sequence already executing for %s; ignoring duplicate replan request for %s.",
+                self.runtime_recovery.get("failed_task_id") or failed_task_id,
+                failed_task_id,
+            )
+            return self.get_runtime_recovery()
         if current_status in {
             "des_search",
             "bridge_ready",
@@ -3597,7 +5129,16 @@ class ProductAgent(LlmAgent):
         )
         planner_nodes_snapshot = deepcopy(self.process_planner.nodes)
         planner_global_fsa_snapshot = deepcopy(self.process_planner.global_fsa)
-        bridge_replaces_failed_branch = bool(plan_rewrite.get("replace_failed_branch"))
+        execution_policy = (
+            deepcopy(bridge_debug.get("execution_policy") or {})
+            if isinstance(bridge_debug, dict)
+            else {}
+        )
+        verification_only_approval = bool(execution_policy.get("verification_only"))
+        bridge_replaces_failed_branch = (
+            bool(plan_rewrite.get("replace_failed_branch"))
+            and not verification_only_approval
+        )
         anchor_task_id = failed_task_id
         if bridge_replaces_failed_branch and failed_task_id:
             direct_predecessors = self._direct_predecessors_from_nodes(
@@ -3616,7 +5157,7 @@ class ProductAgent(LlmAgent):
                 | {failed_task_id}
             )
         explicit_delete_task_ids: list[str] = []
-        if isinstance(plan_rewrite, dict):
+        if isinstance(plan_rewrite, dict) and not verification_only_approval:
             for task_id in plan_rewrite.get("delete_task_ids") or []:
                 candidate = str(task_id or "").strip()
                 if (
@@ -3630,7 +5171,7 @@ class ProductAgent(LlmAgent):
 
         resumable_task_ids = []
         resume_task_ids_explicit = False
-        if isinstance(plan_rewrite, dict):
+        if isinstance(plan_rewrite, dict) and not verification_only_approval:
             resume_task_ids_explicit = "resume_task_ids" in plan_rewrite
             for task_id in plan_rewrite.get("resume_task_ids") or []:
                 candidate = str(task_id or "").strip()
@@ -3640,7 +5181,11 @@ class ProductAgent(LlmAgent):
                     and candidate not in deleted_task_ids
                 ):
                     resumable_task_ids.append(candidate)
-        if not resumable_task_ids and not resume_task_ids_explicit:
+        if (
+            not verification_only_approval
+            and not resumable_task_ids
+            and not resume_task_ids_explicit
+        ):
             resumable_task_ids = [
                 str(node.get("id", "")).strip()
                 for node in planner_nodes_snapshot
@@ -3652,9 +5197,10 @@ class ProductAgent(LlmAgent):
                 and str(node.get("status", "")).strip().lower() in {"pending", "blocked"}
             ]
         self.logger.info(
-            "[Product] Bridge approval rewrite: anchor=%s replace_failed_branch=%s delete=%s resume=%s",
+            "[Product] Bridge approval rewrite: anchor=%s replace_failed_branch=%s verification_only=%s delete=%s resume=%s",
             anchor_task_id or "<none>",
             bridge_replaces_failed_branch,
+            verification_only_approval,
             deleted_task_ids,
             resumable_task_ids,
         )
@@ -3740,6 +5286,15 @@ class ProductAgent(LlmAgent):
         bridge_sequence_id = str(tasks[0].get("bridge_sequence_id", "")).strip() if tasks else ""
         active_bridge_sequence = None
         if bridge_sequence_id:
+            prepared_bridge_request = dict(
+                self._runtime_recovery_context.get("prepared_bridge_request") or {}
+            )
+            modeled_gap = dict(
+                dict(prepared_bridge_request.get("context_summary") or {}).get(
+                    "modeled_continuation_gap"
+                )
+                or {}
+            )
             active_bridge_sequence = {
                 "bridge_sequence_id": bridge_sequence_id,
                 "bridge_task_ids": [
@@ -3757,6 +5312,13 @@ class ProductAgent(LlmAgent):
                 ),
                 "state": "approved",
                 "plan_rewrite": deepcopy(plan_rewrite) if isinstance(plan_rewrite, dict) else {},
+                "continuation_requirements": deepcopy(
+                    modeled_gap.get("continuation_requirements") or []
+                ),
+                "pending_nominal_task_ids": deepcopy(
+                    modeled_gap.get("pending_nominal_task_ids") or []
+                ),
+                "continuation_repair_attempts": 0,
             }
             if isinstance(bridge_debug, dict):
                 execution_policy = bridge_debug.get("execution_policy")
@@ -3795,6 +5357,56 @@ class ProductAgent(LlmAgent):
                 bridge_debug["generated_code_verification"] = deepcopy(
                     generated_code_verification
                 )
+                if isinstance(active_bridge_sequence, dict):
+                    active_bridge_sequence["generated_code_verification"] = deepcopy(
+                        generated_code_verification
+                    )
+
+        if verification_only_approval and isinstance(active_bridge_sequence, dict):
+            active_bridge_sequence["state"] = "executing"
+            execution_message = (
+                f"Approved generated bridge verification proposal compiled to {len(tasks)} "
+                "task(s); executing bridge macros without full-plan suffix validation."
+            )
+            recovery = self._set_runtime_recovery(
+                status="resolved",
+                resolution_class="generated_bridge_verification",
+                trigger=str(self._runtime_recovery_context.get("trigger", "")),
+                failed_task_id=failed_task_id,
+                message=execution_message,
+                attempts_used=self._runtime_repair_fail_streak,
+                attempts_max=self._runtime_repair_max_attempts,
+                used_llm_bridge=used_llm_bridge,
+                bridge_proposal=None,
+                bridge_debug=bridge_debug if bridge_debug else None,
+                bridge_approval_state="approved",
+                active_bridge_sequence=active_bridge_sequence,
+                generated_code_verification=generated_code_verification or None,
+                violations=[],
+                append_history=True,
+                history_message=execution_message,
+            )
+            self._clear_plan_safety_alert()
+            self.logger.info(
+                "[Product] Approved generated bridge verification proposal compiled; "
+                "skipping CCA full-plan validation and executing bridge macros."
+            )
+            threading.Thread(
+                target=self._persist_plan_snapshot,
+                name=f"{self.agent_name}-persist-plan-snapshot",
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=self._persist_product_state,
+                name=f"{self.agent_name}-persist-product-state",
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=self._persist_resource_state,
+                name=f"{self.agent_name}-persist-resource-state",
+                daemon=True,
+            ).start()
+            return recovery
 
         validation_message = (
             f"Approved bridge proposal '{proposal.get('macro_name') or proposal.get('function_name') or 'bridge_recovery'}' compiled to "
@@ -4596,8 +6208,16 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
 
-            # Ask planner for one ready task
-            task_node = agent.process_planner.next_ready_task()
+            # Prioritize active bridge sequences over nominal DAG work. The first
+            # recovery macro may be anchored after the failed task, which is
+            # intentionally not "completed" during runtime recovery.
+            task_node = agent._next_dispatchable_task_node()
+            if not task_node and agent._active_bridge_blocks_nominal_dispatch():
+                agent.logger.debug(
+                    "[Product] Active bridge sequence is executing; suppressing nominal DAG dispatch."
+                )
+                await asyncio.sleep(0.05)
+                return
             if not task_node:
                 await asyncio.sleep(0.05)
                 return
@@ -4614,13 +6234,8 @@ class ProductAgent(LlmAgent):
                 )
 
             # Build the instruction for the RobotAgent from the DAG node.
-            # Enrich params with product geometry when a part_name is present.
-            params = dict(task_node.get("params", {}))
-            part_name = params.get("part_name")
-            if part_name:
-                geo = agent._geometry_for_part(part_name)
-                if geo:
-                    params["product_geometry"] = geo
+            # Recovery macro primitive steps own their destination intent.
+            params = agent._dispatch_params_for_task_node(task_node)
 
             instruction = {
                 "function_name": task_node.get("function_name"),

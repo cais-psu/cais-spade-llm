@@ -4702,7 +4702,7 @@ class SystemBridge:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
 
     @staticmethod
-    def _force_kill_gazebo_core() -> None:
+    def _force_kill_gazebo_core(reason: str = "unspecified") -> None:
         """Hard-kill gzserver/gzclient and clean DDS shared memory.
 
         Called after stopping a Gazebo simulation and before starting a new one
@@ -4710,6 +4710,7 @@ class SystemBridge:
         11345 or stale shared memory that would prevent the new simulation from
         spawning robots.
         """
+        log.info("ROS2/Gazebo hard cleanup requested reason=%s", reason)
         for cmd in [
             "killall -9 gzserver gzclient 2>/dev/null",
             "pkill -9 -f gazebo 2>/dev/null",
@@ -4770,7 +4771,7 @@ class SystemBridge:
             # robot to never appear in the new Gazebo window.
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
-            self._force_kill_gazebo_core()
+            self._force_kill_gazebo_core(reason="prelaunch_restart")
 
         cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
         try:
@@ -4789,7 +4790,7 @@ class SystemBridge:
         except Exception as exc:
             return str(exc)
 
-    def ros2_stop(self, name: str) -> str | None:
+    def ros2_stop(self, name: str, *, reason: str = "explicit_stop") -> str | None:
         """Stop a tracked ROS2 process. Returns error string or None on success."""
         proc = self._ros2_procs.get(name)
         if proc is None or proc.poll() is not None:
@@ -4812,22 +4813,23 @@ class SystemBridge:
         if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
-            self._force_kill_gazebo_core()
+            self._force_kill_gazebo_core(reason=reason)
         return None
 
-    def ros2_stop_all(self) -> None:
+    def ros2_stop_all(self, *, reason: str = "explicit_stop") -> None:
         """Stop all tracked ROS2 processes."""
         self._stop_teleop_server()
         for name in list(self._ros2_procs):
-            self.ros2_stop(name)
+            self.ros2_stop(name, reason=reason)
         self._shutdown_gazebo_prewarm_controllers()
         self._kill_stale_gazebo_helpers()
-        self._force_kill_gazebo_core()
+        self._force_kill_gazebo_core(reason=reason)
 
     def ros2_kill_gazebo(self) -> None:
         """Kill any orphan Gazebo / ROS2 processes (cleanup helper)."""
         self._stop_teleop_server()
         self._shutdown_gazebo_prewarm_controllers()
+        log.info("ROS2/Gazebo hard cleanup requested reason=explicit_cleanup")
         for cmd in [
             (
                 "killall -9 gzserver gzclient robot_state_publisher spawner spawn_entity.py "
@@ -4845,9 +4847,10 @@ class SystemBridge:
         self._stop_teleop_server()
         self._shutdown_gazebo_prewarm_controllers()
         for name in list(self._ros2_procs):
-            self.ros2_stop(name)
+            self.ros2_stop(name, reason="explicit_cleanup")
 
         # Kill common stale processes that often block hardware reconnection.
+        log.info("ROS2/Gazebo hard cleanup requested reason=explicit_cleanup")
         for cmd in [
             "killall -9 gzserver gzclient 2>/dev/null",
             "killall -9 move_group rviz2 robot_state_publisher joint_state_publisher static_transform_publisher ros2_control_node 2>/dev/null",
