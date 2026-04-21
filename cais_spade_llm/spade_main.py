@@ -57,7 +57,11 @@ async def spade_main():
     _archive_dir(Path("cais_spade_llm/monitor/history"), "*.jsonl", label="history")
     _archive_dir(Path("cais_spade_llm/monitor/plan"),    "*.json",  label="plan")
     _archive_dir(Path("cais_spade_llm/monitor/state"),   "*.json",  label="state")
-    _archive_dir(Path("cais_spade_llm/monitor/debug"),   "*.md",    label="debug")
+    bridge_runtime_dir = Path(
+        "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"
+    )
+    for pattern in ("*.txt", "*.json", "*.md"):
+        _archive_dir(bridge_runtime_dir, pattern, label="llm_bridge")
 
     # Collect initialization payloads describing products and hardware resources.
     prod_files = utils.get_init_files(PRODUCT_DIR)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -51,6 +52,7 @@ _DEFAULT_MAX_OBSERVE_BATCH = 3
 _DEFAULT_CANDIDATE_BOUND = 5
 _DEFAULT_CANDIDATE_BOUND_CAP = 8
 _CANDIDATE_PRUNE_REPEAT_THRESHOLD = 2
+_LLM_WAIT_LOG_INTERVAL_S = 10.0
 _MULTI_TURN_OUTLINE_CONTRACT = {
     "allowed_state_fields": [
         "resource_state",
@@ -4388,7 +4390,6 @@ def normalize_multi_turn_final_output_to_bridge_proposal(
     if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
         result["reason"] = "prepared_bridge_request is missing"
         return result
-
     transition_trace = _final_output_transition_trace(final_output_payload)
     accepted_program = [
         deepcopy(row)
@@ -4518,6 +4519,7 @@ def _build_final_output_payload(
     session_state: dict[str, Any],
     *,
     stage: str,
+    prepared_bridge_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the standalone final-output response shown in debug artifacts."""
     accepted_prefix = [
@@ -4556,7 +4558,7 @@ def _build_final_output_payload(
             "primitive_steps": deepcopy(primitive_row.get("primitive_steps") or []),
         })
 
-    return {
+    final_output_payload = {
         "engine": "multi_turn",
         "decision": "final_output_ready",
         "final_output_stage": str(stage or "").strip() or "unknown",
@@ -4569,6 +4571,7 @@ def _build_final_output_payload(
         "primitive_program_complete": bool(accepted_prefix)
         and len(accepted_program) >= len(accepted_prefix),
     }
+    return final_output_payload
 
 
 def _append_final_output_turn(
@@ -4587,7 +4590,11 @@ def _append_final_output_turn(
     ):
         return None
 
-    final_output = _build_final_output_payload(session_state, stage=stage)
+    final_output = _build_final_output_payload(
+        session_state,
+        stage=stage,
+        prepared_bridge_request=prepared_bridge_request,
+    )
     adapter_result = normalize_multi_turn_final_output_to_bridge_proposal(
         final_output_payload=final_output,
         prepared_bridge_request=prepared_bridge_request,
@@ -4691,6 +4698,64 @@ async def execute_multi_turn_bridge(
         raise RuntimeError(
             "product_agent.ask_llm_structured is required for multi-turn bridge execution"
         )
+    product_logger = getattr(product_agent, "logger", None)
+    progress_hook = getattr(product_agent, "report_runtime_bridge_turn_progress", None)
+
+    def _turn_token(turn_index: int, max_turns: int) -> str:
+        max_turns = max(0, int(max_turns or 0))
+        turn_index = max(0, int(turn_index or 0))
+        width = max(2, len(str(max_turns or turn_index or 0)))
+        return f"{turn_index:0{width}d}/{max_turns:0{width}d}"
+
+    async def _emit_progress(
+        *,
+        session_state: dict[str, Any],
+        current_phase: str,
+        status_label: str,
+        decision: str = "",
+        next_phase: str = "",
+        elapsed_s: float | None = None,
+    ) -> None:
+        turn_text = f"Turn {_turn_token(int(session_state.get('turn_index') or 0), int(session_state.get('max_turns') or 0))}"
+        phase_text = f"phase={current_phase}"
+        status_key = str(status_label or "running").strip().lower()
+        suffix = ""
+        if status_key == "waiting_for_llm":
+            suffix = " | waiting for LLM"
+        elif status_key == "still_waiting_for_llm":
+            elapsed_text = (
+                f"{max(0.0, float(elapsed_s)):.1f}s elapsed"
+                if elapsed_s is not None
+                else "waiting"
+            )
+            suffix = f" | still waiting for LLM ({elapsed_text})"
+        elif status_key == "response_received":
+            suffix = " | response received"
+        elif status_key == "decision":
+            decision_text = str(decision or "").strip()
+            next_phase_text = str(next_phase or "").strip()
+            if decision_text and next_phase_text:
+                suffix = f" | decision={decision_text} | next_phase={next_phase_text}"
+            elif decision_text:
+                suffix = f" | decision={decision_text}"
+            elif next_phase_text:
+                suffix = f" | next_phase={next_phase_text}"
+        line = f"{turn_text} | {phase_text}{suffix}"
+        if product_logger is not None and hasattr(product_logger, "info"):
+            product_logger.info("[Product] Live bridge %s", line)
+        else:
+            _logger.info("[MultiTurn] %s", line)
+        if callable(progress_hook):
+            result = progress_hook(
+                session_state=deepcopy(session_state),
+                current_phase=current_phase,
+                status_label=status_label,
+                decision=decision,
+                next_phase=next_phase,
+                elapsed_s=elapsed_s,
+            )
+            if inspect.isawaitable(result):
+                await result
 
     if session_state is not None:
         # Resume from a prior pause
@@ -4703,8 +4768,10 @@ async def execute_multi_turn_bridge(
     session_state["status"] = "running"
 
     bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+    bridge_debug["status"] = "running"
     bridge_debug["multi_turn_session"] = deepcopy(session_state)
     prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+    prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
     if hasattr(planner, "_set_last_bridge_debug"):
         planner._set_last_bridge_debug(bridge_debug)
 
@@ -4714,9 +4781,16 @@ async def execute_multi_turn_bridge(
         turn_idx = int(session_state.get("turn_index") or 0)
         max_turns = int(session_state.get("max_turns") or 0)
 
-        _logger.info(
-            "[MultiTurn] Turn %d/%d | phase=%s",
-            turn_idx, max_turns, current_phase,
+        bridge_debug["status"] = str(session_state.get("status") or "running")
+        bridge_debug["multi_turn_session"] = deepcopy(session_state)
+        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
+        if hasattr(planner, "_set_last_bridge_debug"):
+            planner._set_last_bridge_debug(bridge_debug)
+        await _emit_progress(
+            session_state=session_state,
+            current_phase=current_phase,
+            status_label="running",
         )
 
         # 1. Build prompt
@@ -4726,11 +4800,39 @@ async def execute_multi_turn_bridge(
 
         # 2. Call LLM
         response_schema = _get_response_schema(current_phase, session_state)
-        raw_response = await ask_llm_structured(
-            prompt=prompt_text,
-            response_format=response_schema,
+        await _emit_progress(
+            session_state=session_state,
+            current_phase=current_phase,
+            status_label="waiting_for_llm",
         )
+        llm_started_at = asyncio.get_running_loop().time()
+        response_task = asyncio.create_task(
+            ask_llm_structured(
+                prompt=prompt_text,
+                response_format=response_schema,
+            )
+        )
+        while True:
+            try:
+                raw_response = await asyncio.wait_for(
+                    asyncio.shield(response_task),
+                    timeout=_LLM_WAIT_LOG_INTERVAL_S,
+                )
+                break
+            except asyncio.TimeoutError:
+                elapsed_s = asyncio.get_running_loop().time() - llm_started_at
+                await _emit_progress(
+                    session_state=session_state,
+                    current_phase=current_phase,
+                    status_label="still_waiting_for_llm",
+                    elapsed_s=elapsed_s,
+                )
         parsed_response = deepcopy(raw_response if isinstance(raw_response, dict) else {})
+        await _emit_progress(
+            session_state=session_state,
+            current_phase=current_phase,
+            status_label="response_received",
+        )
 
         # 3. Dispatch to phase handler
         handler = _PHASE_HANDLERS.get(current_phase)
@@ -4763,6 +4865,13 @@ async def execute_multi_turn_bridge(
         # 5. Transition
         next_phase = transition_multi_turn_phase(current_phase, decision)
         session_state["current_phase"] = next_phase
+        await _emit_progress(
+            session_state=session_state,
+            current_phase=current_phase,
+            status_label="decision",
+            decision=str(decision or "").strip(),
+            next_phase=next_phase,
+        )
 
         # 6. Check terminal conditions
         if current_phase == "finalize" and decision == "accepted":

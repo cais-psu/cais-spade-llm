@@ -23,6 +23,15 @@ _MODE_MAP = {
     "Physical": "physical",
 }
 _MODE_LABELS = list(_MODE_MAP.keys())
+_BRIDGE_MODE_OPTIONS = {
+    "auto": "Auto",
+    "manual": "Manual",
+    "pre_ran": "Pre-ran",
+}
+_BRIDGE_VALIDATION_POLICY_OPTIONS = {
+    "validated": "Validated",
+    "no_validation": "No Validation",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +119,31 @@ def render(bridge: SystemBridge) -> None:
                     _MODE_LABELS,
                     value="Simulation",
                 ).props("inline")
+            runtime_bridge_settings = bridge.get_runtime_bridge_settings()
+            bridge_archive_options: dict[str, str] = {}
+            bridge_archive_entries: dict[str, dict[str, Any]] = {}
+            bridge_control_refreshing = {"value": False}
+            with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
+                bridge_mode_select = ui.select(
+                    _BRIDGE_MODE_OPTIONS,
+                    value=str(runtime_bridge_settings.get("mode") or "pre_ran").strip() or "pre_ran",
+                    label="Bridge Handoff Mode",
+                ).classes("w-48")
+                bridge_validation_select = ui.select(
+                    _BRIDGE_VALIDATION_POLICY_OPTIONS,
+                    value=(
+                        str(runtime_bridge_settings.get("validation_policy") or "validated").strip()
+                        or "validated"
+                    ),
+                    label="Pre-ran Validation",
+                ).classes("w-52")
+                bridge_archive_select = ui.select(
+                    {},
+                    label="Archived Bridge Run",
+                ).classes("w-[34rem]")
+            bridge_mode_status = ui.label("").classes("text-xs text-slate-600")
+            bridge_fixture_status = ui.label("").classes("text-xs text-amber-700")
+            bridge_archive_hint = ui.label("").classes("text-xs text-slate-600")
             bridge.execution_mode = _MODE_MAP.get(mode_select.value, "simulation")
             bridge.robot_env = "gazebo" if bridge.execution_mode in ("dry_run", "simulation") else "real"
 
@@ -169,6 +203,138 @@ def render(bridge: SystemBridge) -> None:
                         )
 
                     plan_set_select.set_enabled(str(startup_source_select.value) == "Use Verified Plan Set")
+
+                def _refresh_runtime_bridge_controls() -> None:
+                    bridge_control_refreshing["value"] = True
+                    try:
+                        settings = bridge.get_runtime_bridge_settings()
+                        selected_mode = str(settings.get("mode") or "pre_ran").strip() or "pre_ran"
+                        validation_policy = (
+                            str(settings.get("validation_policy") or "validated").strip()
+                            or "validated"
+                        )
+                        selected_path = str(
+                            settings.get("selected_archive_path") or ""
+                        ).strip()
+                        fixture_replay_path = str(
+                            settings.get("fixture_replay_path") or ""
+                        ).strip()
+                        if str(bridge_mode_select.value or "") != selected_mode:
+                            bridge_mode_select.value = selected_mode
+                        if str(bridge_validation_select.value or "") != validation_policy:
+                            bridge_validation_select.value = validation_policy
+
+                        bridge_archive_options.clear()
+                        bridge_archive_entries.clear()
+                        for entry in bridge.list_runtime_bridge_archives():
+                            if not isinstance(entry, dict):
+                                continue
+                            path = str(entry.get("path") or "").strip()
+                            label = str(entry.get("label") or path).strip()
+                            if not path:
+                                continue
+                            bridge_archive_entries[path] = dict(entry)
+                            bridge_archive_options[path] = label
+
+                        bridge_archive_select.options = dict(bridge_archive_options)
+                        bridge_archive_select.update()
+                        resolved_value = (
+                            selected_path if selected_path in bridge_archive_options else None
+                        )
+                        current_value = str(bridge_archive_select.value or "").strip()
+                        if current_value != str(resolved_value or ""):
+                            bridge_archive_select.value = resolved_value
+                        bridge_validation_select.set_enabled(selected_mode == "pre_ran")
+                        bridge_validation_select.style(
+                            "display:block;" if selected_mode == "pre_ran" else "display:none;"
+                        )
+                        bridge_archive_select.set_enabled(selected_mode == "pre_ran")
+                        bridge_mode_status.text = (
+                            f"Runtime bridge mode: {_BRIDGE_MODE_OPTIONS.get(selected_mode, selected_mode)}"
+                            + (
+                                f" ({_BRIDGE_VALIDATION_POLICY_OPTIONS.get(validation_policy, validation_policy.replace('_', ' '))})."
+                                if selected_mode == "pre_ran"
+                                else "."
+                            )
+                        )
+                        if fixture_replay_path:
+                            bridge_fixture_status.text = (
+                                "Fixture replay is active and overrides live auto bridge: "
+                                f"{fixture_replay_path}"
+                            )
+                        elif selected_mode == "pre_ran" and selected_path:
+                            bridge_fixture_status.text = (
+                                "Selected archived bridge path: "
+                                f"{selected_path}"
+                            )
+                        else:
+                            bridge_fixture_status.text = (
+                                "No fixture replay env var is active."
+                            )
+
+                        if selected_mode == "pre_ran":
+                            if resolved_value:
+                                selected_entry = bridge_archive_entries.get(resolved_value) or {}
+                                relative_path = str(
+                                    selected_entry.get("relative_path") or ""
+                                ).strip()
+                                label = str(selected_entry.get("label") or resolved_value).strip()
+                                extra = f" ({relative_path})" if relative_path else ""
+                                bridge_archive_hint.text = (
+                                    f"Selected archived bridge run: {label}{extra}. "
+                                    + (
+                                        "It will auto-load, validate, and then execute after a bridge-required failure."
+                                        if validation_policy == "validated"
+                                        else "It will auto-load and execute immediately after a bridge-required failure without runtime plan validation."
+                                    )
+                                )
+                            elif bridge_archive_options:
+                                bridge_archive_hint.text = (
+                                    f"{len(bridge_archive_options)} archived primitive-program bridge outputs are available. "
+                                    + (
+                                        "Choose one to enable validated pre-ran auto-start after a bridge-required failure."
+                                        if validation_policy == "validated"
+                                        else "Choose one to enable no-validation pre-ran auto-start after a bridge-required failure."
+                                    )
+                                )
+                            else:
+                                bridge_archive_hint.text = (
+                                    "No archived primitive-program bridge outputs were found in llm_bridge/runtime_data."
+                                )
+                        else:
+                            bridge_archive_hint.text = (
+                                "Archived Bridge Run is enabled only in Pre-ran mode."
+                            )
+                    finally:
+                        bridge_control_refreshing["value"] = False
+
+                def _handle_bridge_mode_change(e: Any) -> None:
+                    if bridge_control_refreshing["value"]:
+                        return
+                    bridge.set_runtime_bridge_mode(str(e.value or "pre_ran"))
+                    _refresh_runtime_bridge_controls()
+                    _refresh_runtime_recovery_panel()
+
+                def _handle_bridge_validation_policy_change(e: Any) -> None:
+                    if bridge_control_refreshing["value"]:
+                        return
+                    bridge.set_runtime_bridge_validation_policy(
+                        str(e.value or "validated")
+                    )
+                    _refresh_runtime_bridge_controls()
+                    _refresh_runtime_recovery_panel()
+
+                def _handle_bridge_archive_change(e: Any) -> None:
+                    if bridge_control_refreshing["value"]:
+                        return
+                    selected_path = str(e.value or "").strip()
+                    selected_entry = bridge_archive_entries.get(selected_path) or {}
+                    bridge.set_runtime_bridge_archive_selection(
+                        selected_path,
+                        str(selected_entry.get("label") or "").strip(),
+                    )
+                    _refresh_runtime_bridge_controls()
+                    _refresh_runtime_recovery_panel()
 
                 def _bundle_gate(*, strict: bool) -> tuple[bool, str]:
                     source = str(startup_source_select.value or "")
@@ -593,6 +759,7 @@ def render(bridge: SystemBridge) -> None:
             def _refresh_selection_and_controls() -> None:
                 _update_source_picker_visibility()
                 _refresh_plan_set_options()
+                _refresh_runtime_bridge_controls()
                 _update_controls()
                 refresh_dag_now()
 
@@ -602,8 +769,12 @@ def render(bridge: SystemBridge) -> None:
             startup_source_select.on_value_change(lambda e: _refresh_selection_and_controls())
             plan_set_select.on_value_change(lambda e: _refresh_selection_and_controls())
             mode_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            bridge_mode_select.on_value_change(_handle_bridge_mode_change)
+            bridge_validation_select.on_value_change(_handle_bridge_validation_policy_change)
+            bridge_archive_select.on_value_change(_handle_bridge_archive_change)
             reset_scope_select.on_value_change(lambda e: _refresh_selection_and_controls())
             _refresh_selection_and_controls()
+            _managed_timer(5.0, _refresh_runtime_bridge_controls)
 
         # ── Agent Overview Grid ──────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -863,6 +1034,32 @@ def render(bridge: SystemBridge) -> None:
                 _notify(f"{label} requested.", type="info")
                 asyncio.create_task(runner(jid))
 
+            def _apply_runtime_action_result(
+                product_jid: str,
+                result: Any,
+                *,
+                default_kind: str,
+                default_text: str,
+            ) -> None:
+                feedback = (
+                    dict(result.get("action_feedback") or {})
+                    if isinstance(result, dict)
+                    else {}
+                )
+                kind = str(feedback.get("kind") or default_kind or "info").strip().lower() or "info"
+                text = str(feedback.get("text") or default_text or "").strip()
+                if not text:
+                    return
+                _set_action_feedback(product_jid, kind, text)
+                notify_type = {
+                    "warning": "warning",
+                    "negative": "negative",
+                    "error": "negative",
+                    "positive": "positive",
+                    "success": "positive",
+                }.get(kind, "info")
+                _notify(text, type=notify_type)
+
             def _bridge_task_rows_for_display(
                 task_ids: list[str],
                 *,
@@ -1027,13 +1224,13 @@ def render(bridge: SystemBridge) -> None:
 
             async def _retry_runtime_des(product_jid: str) -> None:
                 try:
-                    await asyncio.to_thread(bridge.retry_runtime_recovery_des, product_jid)
-                    _set_action_feedback(
+                    result = await asyncio.to_thread(bridge.retry_runtime_recovery_des, product_jid)
+                    _apply_runtime_action_result(
                         product_jid,
-                        "positive",
-                        "Runtime DES recovery retry started.",
+                        result,
+                        default_kind="positive",
+                        default_text="Runtime DES recovery retry started.",
                     )
-                    _notify("Runtime DES recovery retry started.", type="positive")
                     client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
                     _set_action_feedback(
@@ -1051,24 +1248,29 @@ def render(bridge: SystemBridge) -> None:
                         bridge.generate_runtime_bridge_proposal,
                         product_jid,
                     )
-                    bridge_debug = (
-                        result.get("bridge_debug")
-                        if isinstance(result, dict) and isinstance(result.get("bridge_debug"), dict)
-                        else {}
-                    )
-                    bridge_source = str(bridge_debug.get("source", "") or "").strip().lower()
-                    if bridge_source == "preprogrammed_scenario":
-                        feedback_text = "Preprogrammed recovery scenario loaded and ready for approval."
-                        notify_text = "Preprogrammed recovery scenario loaded."
+                    approval_state = str(
+                        result.get("bridge_approval_state", "none")
+                        if isinstance(result, dict)
+                        else "none"
+                    ).strip().lower()
+                    if approval_state == "outline_pending":
+                        feedback_text = "Bridge outline is ready for approval."
+                        notify_text = "Bridge outline ready."
+                    elif approval_state == "primitive_pending":
+                        feedback_text = "Bridge primitives are ready for approval."
+                        notify_text = "Bridge primitives ready."
+                    elif approval_state == "pending":
+                        feedback_text = "Bridge proposal is ready for final approval."
+                    elif isinstance(result, dict) and isinstance(result.get("action_feedback"), dict):
+                        feedback_text = ""
                     else:
-                        feedback_text = "Bounded LLM bridge reasoning started from the prepared session."
-                        notify_text = "Bounded LLM bridge reasoning started."
-                    _set_action_feedback(
+                        feedback_text = "Live bridge reasoning ran from the prepared session."
+                    _apply_runtime_action_result(
                         product_jid,
-                        "positive",
-                        feedback_text,
+                        result,
+                        default_kind="positive",
+                        default_text=feedback_text,
                     )
-                    _notify(notify_text, type="positive")
                     client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
                     _set_action_feedback(
@@ -1080,15 +1282,239 @@ def render(bridge: SystemBridge) -> None:
                 finally:
                     _clear_pending_runtime_action(product_jid)
 
-            async def _approve_runtime_bridge(product_jid: str) -> None:
+            async def _load_runtime_bridge_archive(product_jid: str) -> None:
                 try:
-                    await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
+                    result = await asyncio.to_thread(
+                        bridge.load_runtime_bridge_archive_proposal,
+                        product_jid,
+                    )
+                    _apply_runtime_action_result(
+                        product_jid,
+                        result,
+                        default_kind="positive",
+                        default_text="Archived bridge proposal loaded. Final approval is still required before execution starts.",
+                    )
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to load archived bridge proposal: {exc}",
+                    )
+                    _notify(f"Failed to load archived bridge proposal: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _approve_runtime_bridge_outline(product_jid: str) -> None:
+                try:
+                    result = await asyncio.to_thread(
+                        bridge.approve_runtime_bridge_outline,
+                        product_jid,
+                    )
+                    approval_state = str(
+                        result.get("bridge_approval_state", "none")
+                        if isinstance(result, dict)
+                        else "none"
+                    ).strip().lower()
+                    if approval_state == "primitive_pending":
+                        feedback_text = "Outline approved. Bridge primitives are ready for review."
+                        notify_text = "Bridge primitives ready."
+                    elif approval_state == "pending":
+                        feedback_text = "Outline approved. Bridge proposal is ready for final approval."
+                    elif isinstance(result, dict) and isinstance(result.get("action_feedback"), dict):
+                        feedback_text = ""
+                    else:
+                        feedback_text = "Outline approved. Live bridge reasoning continued."
+                    _apply_runtime_action_result(
+                        product_jid,
+                        result,
+                        default_kind="positive",
+                        default_text=feedback_text,
+                    )
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to approve outline checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to approve outline checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _refine_runtime_bridge_outline(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Outline refinement guidance is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Outline refinement guidance is empty.", type="warning")
+                    return
+                try:
+                    result = await asyncio.to_thread(
+                        bridge.refine_runtime_bridge_outline,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
+                    approval_state = str(
+                        result.get("bridge_approval_state", "none")
+                        if isinstance(result, dict)
+                        else "none"
+                    ).strip().lower()
+                    if approval_state == "outline_pending":
+                        feedback_text = "Outline refinement applied. A regenerated outline is ready for review."
+                        notify_text = "Outline regenerated."
+                    else:
+                        feedback_text = "Outline refinement applied."
+                        notify_text = "Outline refinement applied."
+                    _set_action_feedback(product_jid, "positive", feedback_text)
+                    _notify(notify_text, type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to refine outline checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to refine outline checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _reject_runtime_bridge_outline(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Outline rejection feedback is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Outline rejection feedback is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.reject_runtime_bridge_outline,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
                     _set_action_feedback(
                         product_jid,
                         "positive",
-                        "Bridge proposal approved. Runtime plan validation started.",
+                        "Outline rejected. Runtime recovery is paused for manual intervention.",
                     )
-                    _notify("Bridge proposal approved.", type="positive")
+                    _notify("Outline rejected.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to reject outline checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to reject outline checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _approve_runtime_bridge_primitives(product_jid: str) -> None:
+                try:
+                    result = await asyncio.to_thread(
+                        bridge.approve_runtime_bridge_primitives,
+                        product_jid,
+                    )
+                    _apply_runtime_action_result(
+                        product_jid,
+                        result,
+                        default_kind="positive",
+                        default_text="Bridge primitives approved. Final proposal review is ready.",
+                    )
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to approve primitive checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to approve primitive checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _refine_runtime_bridge_primitives(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Primitive refinement guidance is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Primitive refinement guidance is empty.", type="warning")
+                    return
+                try:
+                    result = await asyncio.to_thread(
+                        bridge.refine_runtime_bridge_primitives,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
+                    approval_state = str(
+                        result.get("bridge_approval_state", "none")
+                        if isinstance(result, dict)
+                        else "none"
+                    ).strip().lower()
+                    if approval_state == "primitive_pending":
+                        feedback_text = "Primitive refinement applied. A regenerated primitive program is ready for review."
+                        notify_text = "Primitive program regenerated."
+                    elif approval_state == "pending":
+                        feedback_text = "Primitive refinement applied. Final proposal review is ready."
+                        notify_text = "Bridge proposal ready."
+                    else:
+                        feedback_text = "Primitive refinement applied."
+                        notify_text = "Primitive refinement applied."
+                    _set_action_feedback(product_jid, "positive", feedback_text)
+                    _notify(notify_text, type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to refine primitive checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to refine primitive checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _reject_runtime_bridge_primitives(product_jid: str) -> None:
+                feedback = str(bridge_feedback_buffers.get(product_jid, "") or "").strip()
+                if not feedback:
+                    _set_action_feedback(product_jid, "warning", "Primitive rejection feedback is empty.")
+                    _clear_pending_runtime_action(product_jid)
+                    _notify("Primitive rejection feedback is empty.", type="warning")
+                    return
+                try:
+                    await asyncio.to_thread(
+                        bridge.reject_runtime_bridge_primitives,
+                        product_jid,
+                        feedback,
+                    )
+                    bridge_feedback_buffers[product_jid] = ""
+                    _set_action_feedback(
+                        product_jid,
+                        "positive",
+                        "Primitive program rejected. Runtime recovery is paused for manual intervention.",
+                    )
+                    _notify("Primitive program rejected.", type="positive")
+                    client.safe_invoke(_refresh_runtime_recovery_panel)
+                except Exception as exc:
+                    _set_action_feedback(
+                        product_jid,
+                        "negative",
+                        f"Failed to reject primitive checkpoint: {exc}",
+                    )
+                    _notify(f"Failed to reject primitive checkpoint: {exc}", type="negative")
+                finally:
+                    _clear_pending_runtime_action(product_jid)
+
+            async def _approve_runtime_bridge(product_jid: str) -> None:
+                try:
+                    result = await asyncio.to_thread(bridge.approve_runtime_bridge_proposal, product_jid)
+                    _apply_runtime_action_result(
+                        product_jid,
+                        result,
+                        default_kind="positive",
+                        default_text="Bridge proposal approved. Runtime plan validation started.",
+                    )
                     client.safe_invoke(_refresh_runtime_recovery_panel)
                 except Exception as exc:
                     _set_action_feedback(
@@ -1163,6 +1589,96 @@ def render(bridge: SystemBridge) -> None:
                 finally:
                     _clear_pending_runtime_action(product_jid)
 
+            def _bridge_mode_label(value: str) -> str:
+                key = str(value or "").strip().lower()
+                return _BRIDGE_MODE_OPTIONS.get(key, key.replace("_", " ").title() or "Auto")
+
+            def _bridge_validation_policy_label(value: str) -> str:
+                key = str(value or "").strip().lower()
+                return _BRIDGE_VALIDATION_POLICY_OPTIONS.get(
+                    key,
+                    key.replace("_", " ").title() or "Validated",
+                )
+
+            def _bridge_outline_rows(bridge_debug: dict[str, Any] | None) -> list[dict[str, Any]]:
+                debug = bridge_debug if isinstance(bridge_debug, dict) else {}
+                final_output = debug.get("final_output")
+                if isinstance(final_output, dict):
+                    rows = final_output.get("transition_trace")
+                    if isinstance(rows, list) and rows:
+                        return [row for row in rows if isinstance(row, dict)]
+                session = debug.get("multi_turn_session")
+                if isinstance(session, dict):
+                    rows = session.get("accepted_outline_prefix")
+                    if isinstance(rows, list) and rows:
+                        return [row for row in rows if isinstance(row, dict)]
+                rows = debug.get("transition_trace")
+                if isinstance(rows, list) and rows:
+                    return [row for row in rows if isinstance(row, dict)]
+                return []
+
+            def _bridge_primitive_rows(bridge_debug: dict[str, Any] | None) -> list[dict[str, Any]]:
+                debug = bridge_debug if isinstance(bridge_debug, dict) else {}
+                final_output = debug.get("final_output")
+                if isinstance(final_output, dict):
+                    rows = final_output.get("accepted_primitive_program")
+                    if isinstance(rows, list) and rows:
+                        return [row for row in rows if isinstance(row, dict)]
+                session = debug.get("multi_turn_session")
+                if isinstance(session, dict):
+                    rows = session.get("accepted_primitive_program")
+                    if isinstance(rows, list) and rows:
+                        return [row for row in rows if isinstance(row, dict)]
+                return []
+
+            def _bridge_sequence_for_display(recovery: dict[str, Any]) -> dict[str, Any] | None:
+                active = recovery.get("active_bridge_sequence")
+                if isinstance(active, dict):
+                    return active
+                last_completed = recovery.get("last_completed_bridge_sequence")
+                if isinstance(last_completed, dict):
+                    return last_completed
+                return None
+
+            def _bridge_sequence_progress(sequence: dict[str, Any] | None) -> dict[str, Any]:
+                if not isinstance(sequence, dict):
+                    return {
+                        "compiled": 0,
+                        "dispatched": 0,
+                        "completed": 0,
+                        "state": "",
+                        "mode": "",
+                        "archive_path": "",
+                        "validation_policy": "",
+                    }
+                bridge_task_ids = [
+                    str(task_id or "").strip()
+                    for task_id in (sequence.get("bridge_task_ids") or [])
+                    if str(task_id or "").strip()
+                ]
+                dispatched_task_ids = [
+                    str(task_id or "").strip()
+                    for task_id in (sequence.get("dispatched_bridge_task_ids") or [])
+                    if str(task_id or "").strip()
+                ]
+                completed_task_ids = [
+                    str(task_id or "").strip()
+                    for task_id in (sequence.get("completed_bridge_task_ids") or [])
+                    if str(task_id or "").strip()
+                ]
+                state = str(sequence.get("state") or "").strip().lower()
+                return {
+                    "compiled": len(bridge_task_ids),
+                    "dispatched": len(dispatched_task_ids),
+                    "completed": len(completed_task_ids),
+                    "state": state,
+                    "mode": str(sequence.get("source_mode") or "").strip().lower(),
+                    "archive_path": str(sequence.get("source_archive_path") or "").strip(),
+                    "validation_policy": str(
+                        sequence.get("validation_policy") or ""
+                    ).strip().lower(),
+                }
+
             def _refresh_runtime_recovery_panel() -> None:
                 runtime_recovery_container.clear()
                 recoveries = bridge.get_runtime_recoveries()
@@ -1230,11 +1746,52 @@ def render(bridge: SystemBridge) -> None:
                         bridge_approval_state = str(
                             recovery.get("bridge_approval_state", "none") or "none"
                         ).strip()
+                        bridge_mode = str(
+                            recovery.get("bridge_mode", "pre_ran") or "pre_ran"
+                        ).strip().lower() or "pre_ran"
+                        validation_policy = str(
+                            recovery.get("validation_policy", "validated") or "validated"
+                        ).strip().lower() or "validated"
+                        bridge_stage = str(
+                            recovery.get("bridge_stage", "none") or "none"
+                        ).strip().lower() or "none"
+                        selected_archive_path = str(
+                            recovery.get("selected_archive_path", "") or ""
+                        ).strip()
+                        selected_archive_label = str(
+                            recovery.get("selected_archive_label", "") or ""
+                        ).strip()
+                        artifact_directory = str(
+                            recovery.get("artifact_directory")
+                            or (bridge_debug or {}).get("artifact_directory")
+                            or (bridge_debug or {}).get("per_turn_debug_dir")
+                            or ""
+                        ).strip()
+                        outline_rows = _bridge_outline_rows(bridge_debug)
+                        primitive_rows = _bridge_primitive_rows(bridge_debug)
                         active_bridge_sequence = (
                             recovery.get("active_bridge_sequence")
                             if isinstance(recovery.get("active_bridge_sequence"), dict)
                             else None
                         )
+                        last_completed_bridge_sequence = (
+                            recovery.get("last_completed_bridge_sequence")
+                            if isinstance(recovery.get("last_completed_bridge_sequence"), dict)
+                            else None
+                        )
+                        bridge_sequence_display = (
+                            active_bridge_sequence
+                            if isinstance(active_bridge_sequence, dict)
+                            else last_completed_bridge_sequence
+                        )
+                        bridge_sequence_progress = _bridge_sequence_progress(
+                            bridge_sequence_display
+                        )
+                        active_bridge_state = str(
+                            (active_bridge_sequence or {}).get("state") or ""
+                        ).strip().lower()
+                        bridge_reentry_locked = active_bridge_state in {"approved", "executing"}
+                        controls_locked = bool(pending_action_label)
 
                         with ui.card().classes("w-full bg-slate-50"):
                             with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
@@ -1244,6 +1801,17 @@ def render(bridge: SystemBridge) -> None:
                                     ui.badge(_resolution_label(resolution)).props(
                                         f"color={_resolution_color(resolution)}"
                                     )
+                                    ui.badge(
+                                        f"Mode {_bridge_mode_label(bridge_mode)}"
+                                    ).props("color=blue-grey")
+                                    if bridge_mode == "pre_ran":
+                                        ui.badge(
+                                            f"Validation {_bridge_validation_policy_label(validation_policy)}"
+                                        ).props("color=deep-orange")
+                                    if bridge_stage not in {"", "none"}:
+                                        ui.badge(
+                                            f"Stage {bridge_stage.replace('_', ' ')}"
+                                        ).props("color=purple")
                                     if bridge_approval_state not in {"", "none"}:
                                         ui.badge(
                                             f"Bridge {bridge_approval_state.replace('_', ' ')}"
@@ -1252,6 +1820,16 @@ def render(bridge: SystemBridge) -> None:
                             with ui.row().classes("items-center gap-2 flex-wrap text-xs text-slate-600"):
                                 ui.label(f"Trigger: {str(recovery.get('trigger', '') or 'n/a')}")
                                 ui.label(f"Failed task: {str(recovery.get('failed_task_id', '') or 'n/a')}")
+                                if bridge_mode == "pre_ran":
+                                    ui.label(
+                                        f"Validation: {_bridge_validation_policy_label(validation_policy)}"
+                                    )
+                                if selected_archive_label:
+                                    ui.label(f"Archived run: {selected_archive_label}")
+                                elif bridge_mode == "pre_ran" and selected_archive_path:
+                                    ui.label(f"Archived run: {selected_archive_path}")
+                                if artifact_directory:
+                                    ui.label(f"Artifacts: {artifact_directory}")
 
                             with ui.row().classes("items-center gap-2 flex-wrap mt-1"):
                                 for stage_label, stage_color in _stage_badges(recovery):
@@ -1263,6 +1841,42 @@ def render(bridge: SystemBridge) -> None:
                                 f"Witnesses: {witness_count} | "
                                 f"Violated rules: {', '.join(violated_rules) if violated_rules else 'none'}"
                             ).classes("text-xs text-slate-600")
+                            if bridge_sequence_display:
+                                sequence_label = (
+                                    "Bridge sequence"
+                                    if isinstance(active_bridge_sequence, dict)
+                                    else "Last bridge sequence"
+                                )
+                                source_mode_label = _bridge_mode_label(
+                                    bridge_sequence_progress.get("mode") or bridge_mode
+                                )
+                                status_line = (
+                                    f"{sequence_label}: "
+                                    f"{str(bridge_sequence_progress.get('state') or 'unknown').replace('_', ' ')} | "
+                                    f"Compiled: {int(bridge_sequence_progress.get('compiled') or 0)} | "
+                                    f"Dispatched: {int(bridge_sequence_progress.get('dispatched') or 0)} | "
+                                    f"Completed: {int(bridge_sequence_progress.get('completed') or 0)} | "
+                                    f"Mode: {source_mode_label}"
+                                )
+                                archive_path = str(
+                                    bridge_sequence_progress.get("archive_path") or ""
+                                ).strip()
+                                sequence_validation_policy = str(
+                                    bridge_sequence_progress.get("validation_policy")
+                                    or validation_policy
+                                ).strip()
+                                if archive_path:
+                                    status_line += f" | Archive source: {archive_path}"
+                                if bridge_mode == "pre_ran" and sequence_validation_policy:
+                                    status_line += (
+                                        " | Validation: "
+                                        f"{_bridge_validation_policy_label(sequence_validation_policy)}"
+                                    )
+                                ui.label(status_line).classes("text-xs text-slate-600 mt-1")
+                            if bridge_reentry_locked:
+                                ui.label(
+                                    "Bridge execution is already active. Bridge approval and DES retry controls are locked until it finishes."
+                                ).classes("text-xs text-orange-700 mt-1")
                             if action_feedback and str(action_feedback.get("text", "")).strip():
                                 tone = {
                                     "positive": "bg-green-50 text-green-700",
@@ -1282,19 +1896,244 @@ def render(bridge: SystemBridge) -> None:
                                 )
 
                             if status == "bridge_ready":
-                                ui.label(
-                                    "Bridge session is prepared. Run bounded bridge reasoning when you are ready."
-                                ).classes("text-xs text-orange-700 mt-2")
-                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
-                                    ui.button(
-                                        "Run bridge reasoning",
+                                if bridge_mode == "pre_ran":
+                                    ui.label(
+                                        (
+                                            "Pre-ran mode is selected. If a valid archived run is selected, it will auto-load, validate, and then execute after a bridge-required failure. Use the button below only to reload it manually while paused."
+                                            if validation_policy == "validated"
+                                            else "Pre-ran mode is selected with no runtime plan validation. If a valid archived run is selected, it will auto-load and execute immediately after a bridge-required failure. Use the button below only to reload it manually while paused."
+                                        )
+                                    ).classes("text-xs text-orange-700 mt-2")
+                                    if selected_archive_label:
+                                        ui.label(
+                                            f"Selected archived run: {selected_archive_label}"
+                                        ).classes("text-xs text-slate-600")
+                                    elif selected_archive_path:
+                                        ui.label(
+                                            f"Selected archived run: {selected_archive_path}"
+                                        ).classes("text-xs text-slate-600")
+                                    else:
+                                        ui.label(
+                                            "Choose an Archived Bridge Run from the System Control panel."
+                                        ).classes("text-xs text-slate-600")
+                                    load_archive_btn = ui.button(
+                                        "Load archived bridge",
                                         on_click=lambda jid=product_jid: _queue_runtime_action(
                                             jid,
-                                            action_label="Run bridge reasoning",
-                                            runner=_run_runtime_bridge,
+                                            action_label="Load archived bridge",
+                                            runner=_load_runtime_bridge_archive,
                                         ),
-                                        icon="smart_toy",
+                                        icon="history",
                                     ).props("color=indigo")
+                                    load_archive_btn.set_enabled(
+                                        bool(selected_archive_path)
+                                        and not bridge_reentry_locked
+                                        and not controls_locked
+                                    )
+                                else:
+                                    run_label = "Run live bridge"
+                                    helper_text = (
+                                        "Bridge session is prepared. Run live bridge reasoning to reach the next review stage."
+                                        if bridge_mode == "manual"
+                                        else "Auto mode normally starts live bridge reasoning immediately. Use this to run it again from the prepared session."
+                                    )
+                                    ui.label(helper_text).classes("text-xs text-orange-700 mt-2")
+                                    with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                        run_live_btn = ui.button(
+                                            run_label,
+                                            on_click=lambda jid=product_jid: _queue_runtime_action(
+                                                jid,
+                                                action_label=run_label,
+                                                runner=_run_runtime_bridge,
+                                            ),
+                                            icon="smart_toy",
+                                        ).props("color=indigo")
+                                        run_live_btn.set_enabled(
+                                            not bridge_reentry_locked and not controls_locked
+                                        )
+
+                            if status == "llm_bridge" and bridge_approval_state == "outline_pending":
+                                with ui.expansion(
+                                    "Outline checkpoint",
+                                    icon="route",
+                                    value=True,
+                                ).classes("w-full mt-2"):
+                                    if outline_rows:
+                                        for idx, row in enumerate(outline_rows, start=1):
+                                            if not isinstance(row, dict):
+                                                continue
+                                            summary = str(
+                                                row.get("description")
+                                                or row.get("event_name")
+                                                or row.get("action_name")
+                                                or row.get("outline_id")
+                                                or f"outline_{idx}"
+                                            ).strip()
+                                            resource_name = str(
+                                                row.get("resource_jid") or "n/a"
+                                            ).strip() or "n/a"
+                                            part_name = str(row.get("part_name") or "").strip()
+                                            outline_id = str(row.get("outline_id") or "").strip()
+                                            ui.label(f"{idx}. {summary}").classes(
+                                                "text-sm font-medium"
+                                            )
+                                            details = f"Resource: {resource_name}"
+                                            if part_name:
+                                                details += f" | Part: {part_name}"
+                                            if outline_id:
+                                                details += f" | Outline ID: {outline_id}"
+                                            ui.label(details).classes("text-xs text-slate-600")
+                                    else:
+                                        ui.label(
+                                            "No outline events were captured in the current bridge trace."
+                                        ).classes("text-xs text-slate-600")
+                                ui.label(
+                                    "Approve the outline to continue live primitive generation, refine it with operator guidance, or reject it."
+                                ).classes("text-xs text-indigo-700 mt-2")
+                                review_box = ui.textarea(
+                                    label="Outline refinement or rejection feedback",
+                                    value=bridge_feedback,
+                                ).props("outlined autogrow").classes("w-full mt-2")
+                                review_box.on_value_change(
+                                    lambda e, jid=product_jid: bridge_feedback_buffers.__setitem__(
+                                        jid,
+                                        str(e.value or ""),
+                                    )
+                                )
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    approve_outline_btn = ui.button(
+                                        "Approve outline",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Approve outline",
+                                            runner=_approve_runtime_bridge_outline,
+                                        ),
+                                        icon="check_circle",
+                                    ).props("color=green")
+                                    refine_outline_btn = ui.button(
+                                        "Refine outline",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Refine outline",
+                                            runner=_refine_runtime_bridge_outline,
+                                        ),
+                                        icon="tune",
+                                    ).props("color=amber")
+                                    reject_outline_btn = ui.button(
+                                        "Reject outline",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Reject outline",
+                                            runner=_reject_runtime_bridge_outline,
+                                        ),
+                                        icon="cancel",
+                                    ).props("color=red")
+                                    for button in (
+                                        approve_outline_btn,
+                                        refine_outline_btn,
+                                        reject_outline_btn,
+                                    ):
+                                        button.set_enabled(
+                                            not bridge_reentry_locked and not controls_locked
+                                        )
+
+                            if status == "llm_bridge" and bridge_approval_state == "primitive_pending":
+                                with ui.expansion(
+                                    "Primitive checkpoint",
+                                    icon="precision_manufacturing",
+                                    value=True,
+                                ).classes("w-full mt-2"):
+                                    if primitive_rows:
+                                        for idx, row in enumerate(primitive_rows, start=1):
+                                            if not isinstance(row, dict):
+                                                continue
+                                            summary = str(
+                                                row.get("description")
+                                                or row.get("event_name")
+                                                or row.get("outline_id")
+                                                or f"primitive_{idx}"
+                                            ).strip()
+                                            resource_name = str(
+                                                row.get("resource_jid") or "n/a"
+                                            ).strip() or "n/a"
+                                            ui.label(f"{idx}. {summary} -> {resource_name}").classes(
+                                                "text-sm font-medium"
+                                            )
+                                            primitive_steps = [
+                                                step
+                                                for step in (row.get("primitive_steps") or [])
+                                                if isinstance(step, dict)
+                                            ]
+                                            if not primitive_steps:
+                                                ui.label(
+                                                    "No primitive steps were captured for this outline event."
+                                                ).classes("text-xs text-slate-600")
+                                            for step_idx, step in enumerate(primitive_steps, start=1):
+                                                primitive_name = str(
+                                                    step.get("primitive")
+                                                    or step.get("function_name")
+                                                    or "primitive"
+                                                ).strip()
+                                                params_text = json.dumps(
+                                                    step.get("params") or {},
+                                                    default=str,
+                                                )
+                                                ui.label(
+                                                    f"  {step_idx}. {primitive_name}({params_text})"
+                                                ).classes("text-xs font-mono text-slate-700")
+                                    else:
+                                        ui.label(
+                                            "No primitive program rows were captured in the current bridge trace."
+                                        ).classes("text-xs text-slate-600")
+                                ui.label(
+                                    "Approve the primitive program to move to final proposal approval, refine it with operator guidance, or reject it."
+                                ).classes("text-xs text-indigo-700 mt-2")
+                                review_box = ui.textarea(
+                                    label="Primitive refinement or rejection feedback",
+                                    value=bridge_feedback,
+                                ).props("outlined autogrow").classes("w-full mt-2")
+                                review_box.on_value_change(
+                                    lambda e, jid=product_jid: bridge_feedback_buffers.__setitem__(
+                                        jid,
+                                        str(e.value or ""),
+                                    )
+                                )
+                                with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                                    approve_primitives_btn = ui.button(
+                                        "Approve primitives",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Approve primitives",
+                                            runner=_approve_runtime_bridge_primitives,
+                                        ),
+                                        icon="check_circle",
+                                    ).props("color=green")
+                                    refine_primitives_btn = ui.button(
+                                        "Refine primitives",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Refine primitives",
+                                            runner=_refine_runtime_bridge_primitives,
+                                        ),
+                                        icon="tune",
+                                    ).props("color=amber")
+                                    reject_primitives_btn = ui.button(
+                                        "Reject primitives",
+                                        on_click=lambda jid=product_jid: _queue_runtime_action(
+                                            jid,
+                                            action_label="Reject primitives",
+                                            runner=_reject_runtime_bridge_primitives,
+                                        ),
+                                        icon="cancel",
+                                    ).props("color=red")
+                                    for button in (
+                                        approve_primitives_btn,
+                                        refine_primitives_btn,
+                                        reject_primitives_btn,
+                                    ):
+                                        button.set_enabled(
+                                            not bridge_reentry_locked and not controls_locked
+                                        )
 
                             if status == "llm_bridge" and isinstance(bridge_proposal, dict):
                                 with ui.expansion("Bridge proposal", icon="alt_route", value=True).classes("w-full mt-2"):
@@ -1363,7 +2202,7 @@ def render(bridge: SystemBridge) -> None:
                                         )
                                     )
                                     with ui.row().classes("gap-2 mt-2 flex-wrap"):
-                                        ui.button(
+                                        approve_bridge_btn = ui.button(
                                             "Approve",
                                             on_click=lambda jid=product_jid: _queue_runtime_action(
                                                 jid,
@@ -1372,7 +2211,7 @@ def render(bridge: SystemBridge) -> None:
                                             ),
                                             icon="check_circle",
                                         ).props("color=green")
-                                        ui.button(
+                                        refine_bridge_btn = ui.button(
                                             "Refine",
                                             on_click=lambda jid=product_jid: _queue_runtime_action(
                                                 jid,
@@ -1381,7 +2220,7 @@ def render(bridge: SystemBridge) -> None:
                                             ),
                                             icon="tune",
                                         ).props("color=amber")
-                                        ui.button(
+                                        reject_bridge_btn = ui.button(
                                             "Reject",
                                             on_click=lambda jid=product_jid: _queue_runtime_action(
                                                 jid,
@@ -1390,6 +2229,14 @@ def render(bridge: SystemBridge) -> None:
                                             ),
                                             icon="cancel",
                                         ).props("color=red")
+                                        for button in (
+                                            approve_bridge_btn,
+                                            refine_bridge_btn,
+                                            reject_bridge_btn,
+                                        ):
+                                            button.set_enabled(
+                                                not bridge_reentry_locked and not controls_locked
+                                            )
 
                             if bridge_debug:
                                 debug_status = str(bridge_debug.get("status", "") or "n/a").strip()
@@ -1618,7 +2465,7 @@ def render(bridge: SystemBridge) -> None:
                                     )
                                 )
                                 with ui.row().classes("gap-2 mt-2 flex-wrap"):
-                                    ui.button(
+                                    retry_des_btn = ui.button(
                                         "Retry DES",
                                         on_click=lambda jid=product_jid: _queue_runtime_action(
                                             jid,
@@ -1627,7 +2474,7 @@ def render(bridge: SystemBridge) -> None:
                                         ),
                                         icon="restart_alt",
                                     ).props("color=blue")
-                                    ui.button(
+                                    submit_guidance_btn = ui.button(
                                         "Submit operator guidance",
                                         on_click=lambda jid=product_jid: _queue_runtime_action(
                                             jid,
@@ -1636,7 +2483,11 @@ def render(bridge: SystemBridge) -> None:
                                         ),
                                         icon="person",
                                     ).props("color=amber")
-                                    ui.button(
+                                    retry_des_btn.set_enabled(
+                                        not bridge_reentry_locked and not controls_locked
+                                    )
+                                    submit_guidance_btn.set_enabled(not controls_locked)
+                                    run_bridge_btn = ui.button(
                                         "Run bridge reasoning",
                                         on_click=lambda jid=product_jid: _queue_runtime_action(
                                             jid,
@@ -1645,6 +2496,9 @@ def render(bridge: SystemBridge) -> None:
                                         ),
                                         icon="smart_toy",
                                     ).props("color=indigo")
+                                    run_bridge_btn.set_enabled(
+                                        not bridge_reentry_locked and not controls_locked
+                                    )
 
             _refresh_runtime_recovery_panel()
             _managed_timer(5.0, _refresh_runtime_recovery_panel)

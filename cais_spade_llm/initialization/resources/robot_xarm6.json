@@ -71,7 +71,8 @@
           "execute_trajectory": "/execute_trajectory",
           "attach": "/ATTACHLINK",
           "detach": "/DETACHLINK",
-          "set_entity_state": "/set_entity_state"
+          "set_entity_state": "/set_entity_state",
+          "get_entity_state": "/get_entity_state"
         },
         "attach": {
           "robot_model_name": "dual_robot",
@@ -85,7 +86,7 @@
           "primary_attach_link": "xarm6_link6",
           "detach_timeout_sec": 2.0,
           "detach_max_link_attempts": 3,
-          "release_detach_timeout_sec": 5.0
+          "release_detach_timeout_sec": 8.0
         },
         "motion": {
           "approach_height_m": 0.2,
@@ -99,7 +100,7 @@
           "release_postopen_settle_sec": 0.6,
           "release_postdetach_settle_sec": 0.35,
           "release_descend_time_scale": 1.35,
-          "release_detach_retry_count": 2,
+          "release_detach_retry_count": 3,
           "release_detach_retry_delay_sec": 0.35,
           "release_retry_lift_m": 0.005,
           "xy_axis_step_m": 0.05,

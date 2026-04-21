@@ -1634,29 +1634,8 @@ class RobotAgent(ResourceAgent):
             if injected is not None:
                 return injected
             self._current_state = "idle"
-            message = str(r.get("message") or "")
-            if "remembered start pose" in message:
-                pose = await self._execute_primitive("get_current_pose", {})
-                pose_data = pose.get("pose") if isinstance(pose, dict) else None
-                if isinstance(pose_data, dict):
-                    self._position = {
-                        "x": float(pose_data.get("x", 0.0)),
-                        "y": float(pose_data.get("y", 0.0)),
-                        "z": float(pose_data.get("z", 0.0)),
-                    }
-                else:
-                    start_x = self._task_ctx.get("start_x")
-                    start_y = self._task_ctx.get("start_y")
-                    start_z = self._task_ctx.get("start_z")
-                    self._position = {
-                        "x": float(start_x or 0.0),
-                        "y": float(start_y or 0.0),
-                        "z": float(start_z or 0.0),
-                    }
-                self._bridge_pose_ref = None
-            else:
-                self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
-                self._bridge_pose_ref = "home"
+            self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
+            self._bridge_pose_ref = "home"
             self._task_ctx = {}
             return {"status": "completed", "content": "At home position."}
 
@@ -1823,7 +1802,9 @@ class RobotAgent(ResourceAgent):
 
         normalized["target_pose"] = observed_pose
         normalized["target_pose_source"] = "observed_pose"
-        normalized["prefer_live_detection"] = True
+        # When the bridge already carries a grounded observed pose, use it directly.
+        # Live perception remains available for cases that do not have target_pose.
+        normalized["prefer_live_detection"] = False
         normalized["use_global_min_pick_tcp_z"] = False
         normalized["apply_pick_z_adjustments"] = False
         normalized.setdefault("ignore_current_height_for_travel_z", True)
@@ -1856,12 +1837,12 @@ class RobotAgent(ResourceAgent):
 
         return normalized
 
-    def _inject_recovery_release_assume_if_open(
+    def _normalize_simulation_release_part_params(
         self,
         primitive: str,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Make generated Gazebo recovery releases idempotent after the gripper opens."""
+        """Make simulated Gazebo releases tolerate detach flakiness after the gripper opens."""
         normalized = dict(params or {})
         if str(primitive or "").strip() != "release_part":
             return normalized
@@ -2187,8 +2168,6 @@ class RobotAgent(ResourceAgent):
 
             params = self._inject_observed_pose_for_pick_targets(primitive, params, context)
             params = self._inject_current_pick_ctx_for_place_targets(primitive, params)
-            params = self._inject_recovery_release_assume_if_open(primitive, params)
-
             # Dispatch to controller primitive.
             step_result = await self._execute_primitive(primitive, params)
 
@@ -2380,8 +2359,10 @@ class RobotAgent(ResourceAgent):
                 "message": f"controller missing primitive '{primitive}'",
             }
 
+        normalized_params = self._normalize_simulation_release_part_params(primitive, params)
+
         try:
-            result = await asyncio.to_thread(method, **params)
+            result = await asyncio.to_thread(method, **normalized_params)
             last_failure = str(getattr(self._controller, "_last_failure_message", "") or "").strip()
             # Normalize: bool-returning primitives (open_gripper, close_gripper)
             if isinstance(result, bool):
@@ -2408,6 +2389,16 @@ class RobotAgent(ResourceAgent):
                     and last_failure
                 ):
                     normalized["message"] = last_failure
+                release_mode = str(normalized.get("release_mode") or "").strip()
+                if (
+                    str(primitive or "").strip() == "release_part"
+                    and normalized.get("success")
+                    and release_mode
+                ):
+                    self.logger.info(
+                        "[Robot] release_part completed using release_mode=%s",
+                        release_mode,
+                    )
                 return normalized
             return {"success": False, "message": f"{primitive} returned unexpected type"}
         except Exception as exc:

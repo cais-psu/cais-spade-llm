@@ -34,15 +34,6 @@ _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
-_F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT = (
-    Path(__file__).resolve().parent
-    / "monitor"
-    / "debug"
-    / "worked"
-    / "1"
-    / "multi_turn_turn24_final_output_response_20260416T160606.txt"
-)
-
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
     from spade import run as spade_run
@@ -248,16 +239,6 @@ def _apply_runtime_bridge_test_args(
     parser: argparse.ArgumentParser,
 ) -> None:
     fixture_arg = str(getattr(args, "bridge_fixture_final_output", "") or "").strip()
-    using_f5_debug_fixture = False
-    if (
-        not fixture_arg
-        and not os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT")
-        and not bool(getattr(args, "headless", False))
-        and sys.gettrace() is not None
-        and _F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT.exists()
-    ):
-        fixture_arg = str(_F5_DEBUG_BRIDGE_FIXTURE_FINAL_OUTPUT)
-        using_f5_debug_fixture = True
 
     if fixture_arg:
         fixture_path = Path(fixture_arg).expanduser()
@@ -274,35 +255,34 @@ def _apply_runtime_bridge_test_args(
                 "--bridge-fixture-final-output must point to the exact final_output file, not a directory"
             )
         os.environ["CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"] = str(fixture_path)
-        if using_f5_debug_fixture:
-            print(f"F5 debug runtime bridge fixture final_output: {fixture_path}", flush=True)
-        else:
-            print(f"Runtime bridge fixture final_output: {fixture_path}", flush=True)
-    elif os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"):
         print(
-            "Runtime bridge fixture final_output: "
-            f"{os.environ['CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT']}",
+            "WARNING: Runtime bridge fixture final_output replay is active; "
+            f"live auto bridge is overridden: {fixture_path}",
+            flush=True,
+        )
+    elif os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"):
+        fixture_path = Path(
+            str(os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or "").strip()
+        ).expanduser()
+        try:
+            fixture_path = fixture_path.resolve()
+        except Exception:
+            pass
+        print(
+            "WARNING: Runtime bridge fixture final_output replay is active; "
+            f"live auto bridge is overridden: {fixture_path}",
             flush=True,
         )
 
-    if bool(getattr(args, "verify_generated_bridge_in_gazebo", False)) or using_f5_debug_fixture:
+    if bool(getattr(args, "verify_generated_bridge_in_gazebo", False)):
         os.environ["CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"] = "1"
         if not str(os.environ.get("CAIS_KEEP_GAZEBO_ON_EXIT") or "").strip():
             os.environ["CAIS_KEEP_GAZEBO_ON_EXIT"] = "1"
-            if using_f5_debug_fixture:
-                print(
-                    "F5 debug Gazebo preservation on exit: enabled",
-                    flush=True,
-                )
-            else:
-                print(
-                    "Generated bridge Gazebo preservation on exit: enabled",
-                    flush=True,
-                )
-        if using_f5_debug_fixture:
-            print("F5 debug generated bridge Gazebo verification: enabled", flush=True)
-        else:
-            print("Generated bridge Gazebo verification: enabled", flush=True)
+            print(
+                "Generated bridge Gazebo preservation on exit: enabled",
+                flush=True,
+            )
+        print("Generated bridge Gazebo verification: enabled", flush=True)
     elif os.environ.get("CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"):
         print(
             "Generated bridge Gazebo verification: "

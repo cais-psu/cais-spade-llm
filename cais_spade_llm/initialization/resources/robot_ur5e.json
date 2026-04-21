@@ -71,7 +71,8 @@
           "execute_trajectory": "/execute_trajectory",
           "attach": "/ATTACHLINK",
           "detach": "/DETACHLINK",
-          "set_entity_state": "/set_entity_state"
+          "set_entity_state": "/set_entity_state",
+          "get_entity_state": "/get_entity_state"
         },
         "attach": {
           "robot_model_name": "dual_robot",
@@ -83,7 +84,7 @@
           "primary_attach_link": "ur5e_rg2_gripper_tcp",
           "detach_timeout_sec": 3.0,
           "detach_max_link_attempts": 3,
-          "release_detach_timeout_sec": 8.0
+          "release_detach_timeout_sec": 6.0
         },
         "motion": {
           "approach_height_m": 0.2,
@@ -97,8 +98,8 @@
           "release_postopen_settle_sec": 0.2,
           "release_postdetach_settle_sec": 0.15,
           "release_descend_time_scale": 1.35,
-          "release_detach_retry_count": 3,
-          "release_detach_retry_delay_sec": 0.2,
+          "release_detach_retry_count": 1,
+          "release_detach_retry_delay_sec": 0.15,
           "release_retry_lift_m": 0.012,
           "trajectory_time_scale": 0.8
         },

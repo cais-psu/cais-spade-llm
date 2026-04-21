@@ -1525,6 +1525,73 @@ def _primitive_rejection_feedback_summary(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
+def _primitive_escalation_diagnostics_summary(rows: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        outline_id = str(row.get("outline_id") or "").strip()
+        resource_jid = str(row.get("resource_jid") or "").strip()
+        part_name = str(row.get("part_name") or "").strip()
+        constraint_code = str(row.get("trigger") or "primitive_authoring_stalled").strip()
+        reason = str(row.get("reason") or "").strip()
+        label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
+        label = " / ".join(label_parts) if label_parts else "primitive escalation"
+        if constraint_code and reason:
+            lines.append(f"- {label} [{constraint_code}]: {reason}")
+        elif constraint_code:
+            lines.append(f"- {label} [{constraint_code}]")
+        elif reason:
+            lines.append(f"- {label}: {reason}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _top_validation_feedback_section(
+    *,
+    summary: str,
+    label: str = "Previous Validation Feedback (read first)",
+) -> list[str]:
+    normalized = str(summary or "").strip()
+    if not normalized or normalized == "(none)":
+        return []
+    return [
+        "",
+        label,
+        normalized,
+    ]
+
+
+def _outline_immediate_validation_feedback_summary(
+    *,
+    outline_validation_findings: list[dict[str, Any]],
+    candidate_rejection_feedback: list[dict[str, Any]],
+    primitive_escalation_diagnostics: list[dict[str, Any]],
+    feedback_render_style: str = "raw_code",
+    resources_by_jid: dict[str, dict[str, Any]] | None = None,
+    parts_by_name: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    if outline_validation_findings:
+        return _outline_validation_summary(
+            outline_validation_findings,
+            feedback_render_style=feedback_render_style,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
+    if candidate_rejection_feedback:
+        return _candidate_rejection_learning_summary(
+            history=[],
+            feedback_rows=candidate_rejection_feedback,
+            feedback_render_style=feedback_render_style,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
+    if primitive_escalation_diagnostics:
+        return _primitive_escalation_diagnostics_summary(
+            primitive_escalation_diagnostics
+        )
+    return "(none)"
+
+
 def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -2286,6 +2353,11 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "(primary modeled task-function decompositions for this resource), /memo/primitive_authoring "
             "(prior accepted decompositions)."
         ),
+    ]
+    sections.extend(
+        _top_validation_feedback_section(summary=primitive_feedback)
+    )
+    sections.extend([
         "",
         "Active DES Transition (token)",
         _compact_json(active_event_token),
@@ -2295,7 +2367,7 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         "",
         "Transition Authoring Cursor",
         _compact_json(cursor_state),
-    ]
+    ])
 
     if accepted_outline_prefix:
         sections.extend([
@@ -2355,13 +2427,6 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "",
             "Input Diagnostics",
             _compact_json(input_diagnostics),
-        ])
-
-    if primitive_feedback != "(none)":
-        sections.extend([
-            "",
-            "Validator Feedback (previous turn)",
-            primitive_feedback,
         ])
 
     active_resource_jid = str(active_event_token.get("resource_jid") or "").strip()
@@ -2466,6 +2531,14 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         feedback_render_style=feedback_render_style,
         excluded_diagnostic_signatures=recent_candidate_diagnostic_signatures,
     )
+    immediate_validation_feedback = _outline_immediate_validation_feedback_summary(
+        outline_validation_findings=outline_validation_findings,
+        candidate_rejection_feedback=candidate_rejection_feedback,
+        primitive_escalation_diagnostics=primitive_escalation_diagnostics,
+        feedback_render_style=feedback_render_style,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
 
     if is_single_pass:
         role_text = (
@@ -2512,6 +2585,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         "Task and Role",
         role_text,
     ]
+    sections.extend(
+        _top_validation_feedback_section(summary=immediate_validation_feedback)
+    )
 
     if not is_single_pass and accepted_prefix:
         sections.extend([

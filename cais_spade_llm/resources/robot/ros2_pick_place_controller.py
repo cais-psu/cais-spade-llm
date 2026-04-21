@@ -194,6 +194,9 @@ class Ros2PickPlaceController:
         self.service_set_entity_state = need_str(
             services, "set_entity_state", "controller.services.set_entity_state"
         )
+        self.service_get_entity_state = str(
+            services.get("get_entity_state") or "/get_entity_state"
+        ).strip()
 
         self.robot_model_name = need_str(
             attach_cfg, "robot_model_name", "controller.attach.robot_model_name"
@@ -266,6 +269,18 @@ class Ros2PickPlaceController:
             0.0,
             opt_float(motion, "release_detach_retry_delay_sec", 0.35),
         )
+        self.release_detach_verify_distance_m = max(
+            0.005,
+            opt_float(motion, "release_detach_verify_distance_m", 0.04),
+        )
+        self.release_detach_verify_timeout_sec = max(
+            0.0,
+            opt_float(motion, "release_detach_verify_timeout_sec", 0.75),
+        )
+        self.release_detach_verify_poll_sec = max(
+            0.05,
+            opt_float(motion, "release_detach_verify_poll_sec", 0.1),
+        )
         self.release_retry_lift_m = max(
             0.0,
             opt_float(motion, "release_retry_lift_m", 0.005),
@@ -328,6 +343,7 @@ class Ros2PickPlaceController:
         self._attach_client = None
         self._detach_client = None
         self._set_state_client = None
+        self._get_state_client = None
         self._gripper_pub = None
         self._arm_pub = None
 
@@ -388,7 +404,7 @@ class Ros2PickPlaceController:
             from std_srvs.srv import Trigger
             from moveit_msgs.action import ExecuteTrajectory
             from moveit_msgs.srv import GetCartesianPath
-            from gazebo_msgs.srv import SetEntityState
+            from gazebo_msgs.srv import GetEntityState, SetEntityState
             from geometry_msgs.msg import Pose
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
             from builtin_interfaces.msg import Duration
@@ -413,6 +429,7 @@ class Ros2PickPlaceController:
         self._ExecuteTrajectory = ExecuteTrajectory
         self._GetCartesianPath = GetCartesianPath
         self._SetEntityState = SetEntityState
+        self._GetEntityState = GetEntityState
         self._Pose = Pose
         self._JointTrajectory = JointTrajectory
         self._JointTrajectoryPoint = JointTrajectoryPoint
@@ -441,6 +458,9 @@ class Ros2PickPlaceController:
             )
         self._set_state_client = self._node.create_client(
             SetEntityState, self.service_set_entity_state, callback_group=self._cb_group
+        )
+        self._get_state_client = self._node.create_client(
+            GetEntityState, self.service_get_entity_state, callback_group=self._cb_group
         )
 
         if self.gripper_topic and self.gripper_joint:
@@ -890,10 +910,6 @@ class Ros2PickPlaceController:
             )
             if ok:
                 break
-            
-            if not ok and assume_released_if_open and self._gripper_is_open_enough():
-                # Avoid massive delays retrying if the gripper is already open
-                break
 
             if attempt_idx + 1 < attempts:
                 self._log().warn(
@@ -905,14 +921,39 @@ class Ros2PickPlaceController:
             if assume_released_if_open and self._gripper_is_open_enough():
                 if not target_model and self._attached_model:
                     target_model = str(self._attached_model)
+                verified_release = self._verify_detach_timeout_release(target_model)
+                if verified_release is False:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"detach timed out and release verification kept "
+                            f"{target_model or 'held part'} near the gripper"
+                        ),
+                        "release_mode": "verification_failed_after_detach_timeout",
+                    }
                 self._attached_model = None
                 self._attached_link = None
+                if verified_release is True:
+                    self._log().warn(
+                        f"Confirmed {target_model or 'held part'} was released after detach timeout because the model is separated from the gripper"
+                    )
+                    return {
+                        "success": True,
+                        "message": (
+                            f"verified detached {target_model or 'held part'} "
+                            "after gripper opened"
+                        ),
+                        "release_mode": "verified_open_after_detach_timeout",
+                    }
                 self._log().warn(
-                    f"Assuming {target_model or 'held part'} was released because the gripper is already open"
+                    f"Assuming {target_model or 'held part'} was released because the gripper is already open and detach verification is unavailable"
                 )
                 return {
                     "success": True,
-                    "message": f"assumed detached {target_model or 'held part'} after gripper opened",
+                    "message": (
+                        f"assumed detached {target_model or 'held part'} after gripper "
+                        "opened (verification unavailable)"
+                    ),
                     "release_mode": "assumed_open_after_detach_timeout",
                 }
             return {"success": False, "message": f"failed to detach {model_name or 'held part'}"}
@@ -1545,6 +1586,21 @@ class Ros2PickPlaceController:
     # ------------------------------------------------------------------ #
     # Standalone utility methods (called directly by UI bridge / tests)
     # ------------------------------------------------------------------ #
+    def return_to_remembered_start_pose(self) -> dict[str, Any]:
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._unavailable_message("services not ready"),
+            }
+
+        if self._last_start_pose is None:
+            return {"success": False, "message": "no remembered start pose available"}
+
+        if self._cartesian_move(self._last_start_pose, "Return to remembered start pose"):
+            self._last_start_pose = None
+            return {"success": True, "message": "returned to remembered start pose"}
+        return {"success": False, "message": "failed to return to remembered start pose"}
+
     def move_home(self) -> dict[str, Any]:
         if not self.wait_for_services():
             return {
@@ -1552,27 +1608,64 @@ class Ros2PickPlaceController:
                 "message": self._unavailable_message("services not ready"),
             }
 
-        # 1) Prefer returning to remembered Cartesian start pose.
-        if self._last_start_pose is not None:
-            if self._cartesian_move(self._last_start_pose, "Return home"):
-                return {"success": True, "message": "returned to remembered start pose"}
-
         home = self.named_positions.get("home")
         if not isinstance(home, (list, tuple)) or not home:
             return {"success": False, "message": "no home pose available"}
 
-        # 2) Fallback to named joint-space home via trajectory publisher.
+        target_positions = [float(v) for v in home]
+        actual_positions, missing = self._get_arm_joint_positions(timeout_sec=0.2)
+        if actual_positions is not None:
+            if len(actual_positions) == len(target_positions):
+                already_home = all(
+                    self._angular_joint_error(actual, target) <= 0.08
+                    for actual, target in zip(actual_positions, target_positions)
+                )
+                if already_home:
+                    self._last_start_pose = None
+                    return {"success": True, "message": "already at named home pose"}
+        elif missing:
+            self._log().warning(
+                "move_home could not confirm current joint state before homing; missing=%s",
+                missing,
+            )
+
+        # Move to the explicit named joint-space home pose.
         if self._arm_pub:
-            if self.move_joints([float(v) for v in home], duration_sec=4):
-                return {"success": True, "message": "sent joint-space home command"}
+            if self.move_joints(target_positions, duration_sec=4):
+                self._last_start_pose = None
+                return {"success": True, "message": "moved to named home pose"}
+            if actual_positions is not None and len(actual_positions) == len(target_positions):
+                already_home_after_attempt = all(
+                    self._angular_joint_error(actual, target) <= 0.08
+                    for actual, target in zip(actual_positions, target_positions)
+                )
+                if already_home_after_attempt:
+                    self._last_start_pose = None
+                    return {"success": True, "message": "already at named home pose"}
 
-        # 3) Fallback to MoveIt execute_trajectory action (for robots like
-        #    xarm6 that have no direct arm trajectory publisher).
+        # Fallback to MoveIt execute_trajectory action (for robots like
+        # xarm6 that have no direct arm trajectory publisher).
         if self._exec_client and self._JointTrajectory:
-            if self._move_joints_via_moveit([float(v) for v in home], duration_sec=4):
-                return {"success": True, "message": "moved home via MoveIt"}
+            if self._move_joints_via_moveit(target_positions, duration_sec=4):
+                self._last_start_pose = None
+                return {"success": True, "message": "moved to named home pose"}
+            actual_positions, missing = self._get_arm_joint_positions(timeout_sec=0.5)
+            if actual_positions is not None and len(actual_positions) == len(target_positions):
+                already_home_after_attempt = all(
+                    self._angular_joint_error(actual, target) <= 0.08
+                    for actual, target in zip(actual_positions, target_positions)
+                )
+                if already_home_after_attempt:
+                    self._last_start_pose = None
+                    self._log().warning(
+                        "move_home execute_trajectory reported failure but current joints are already at home; treating as success"
+                    )
+                    return {"success": True, "message": "already at named home pose"}
 
-        return {"success": False, "message": "no home pose available"}
+        return {
+            "success": False,
+            "message": self._with_last_failure("failed to move to named home pose"),
+        }
 
     def _format_moveit_error(self, code: int | None) -> str:
         if code is None:
@@ -1943,6 +2036,127 @@ class Ros2PickPlaceController:
         if self.gripper_open >= self.gripper_close:
             return float(pos) >= (midpoint - tol)
         return float(pos) <= (midpoint + tol)
+
+    def _get_link_world_position(self, link_name: str) -> tuple[float, float, float] | None:
+        link_name = str(link_name or "").strip()
+        if not link_name:
+            return None
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self.frame_id,
+                link_name,
+                self._rclpy.time.Time(),
+            )
+        except Exception:
+            return None
+        translation = transform.transform.translation
+        return (
+            float(translation.x),
+            float(translation.y),
+            float(translation.z),
+        )
+
+    def _get_entity_world_position(self, model_name: str) -> tuple[float, float, float] | None:
+        target_model = str(model_name or "").strip()
+        if not target_model or self.execution_mode == "physical":
+            return None
+        if not self._get_state_client or not getattr(self, "_GetEntityState", None):
+            return None
+        if not self._get_state_client.wait_for_service(timeout_sec=0.2):
+            return None
+
+        req = self._GetEntityState.Request()
+        req.name = target_model
+        req.reference_frame = str(self.frame_id or "world")
+        future = self._get_state_client.call_async(req)
+        response = self._wait_future(
+            future,
+            timeout_sec=1.0,
+            label=f"get_entity_state:{target_model}",
+        )
+        if not response or not getattr(response, "success", False):
+            return None
+        pose = response.state.pose
+        return (
+            float(pose.position.x),
+            float(pose.position.y),
+            float(pose.position.z),
+        )
+
+    @staticmethod
+    def _xyz_distance(
+        a: tuple[float, float, float],
+        b: tuple[float, float, float],
+    ) -> float:
+        return math.sqrt(
+            (float(a[0]) - float(b[0])) ** 2
+            + (float(a[1]) - float(b[1])) ** 2
+            + (float(a[2]) - float(b[2])) ** 2
+        )
+
+    def _verify_detach_timeout_release(self, target_model: str) -> bool | None:
+        target_model = str(target_model or "").strip()
+        if not target_model:
+            return None
+
+        link_candidates: list[str] = []
+        if self._attached_link:
+            link_candidates.append(str(self._attached_link))
+        if self.primary_attach_link and self.primary_attach_link not in link_candidates:
+            link_candidates.append(self.primary_attach_link)
+        for link_name in self.attach_link_candidates:
+            if link_name not in link_candidates:
+                link_candidates.append(link_name)
+        if not link_candidates:
+            return None
+
+        deadline = time.monotonic() + max(0.0, self.release_detach_verify_timeout_sec)
+        best_min_distance: float | None = None
+        best_link_name = ""
+        while True:
+            model_position = self._get_entity_world_position(target_model)
+            if model_position is None:
+                return None
+
+            min_distance: float | None = None
+            min_link_name = ""
+            for link_name in link_candidates:
+                link_position = self._get_link_world_position(link_name)
+                if link_position is None:
+                    continue
+                distance = self._xyz_distance(model_position, link_position)
+                if min_distance is None or distance < min_distance:
+                    min_distance = distance
+                    min_link_name = link_name
+
+            if min_distance is None:
+                return None
+
+            if best_min_distance is None or min_distance > best_min_distance:
+                best_min_distance = min_distance
+                best_link_name = min_link_name
+
+            if min_distance > self.release_detach_verify_distance_m:
+                self._log().info(
+                    "Verified detach fallback for %s: closest link %s is %.3fm away",
+                    target_model,
+                    min_link_name or "<unknown>",
+                    min_distance,
+                )
+                return True
+
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.release_detach_verify_poll_sec)
+
+        self._log().warn(
+            "Detach fallback verification failed for %s: closest link %s remained within %.3fm (threshold=%.3fm)",
+            target_model,
+            best_link_name or "<unknown>",
+            float(best_min_distance or 0.0),
+            self.release_detach_verify_distance_m,
+        )
+        return False
 
     def _gripper_command(
         self,

@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_BRIDGE_DEBUG_DIR = Path("cais_spade_llm/monitor/debug")
+DEFAULT_BRIDGE_RUNTIME_DATA_DIR = Path(
+    "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"
+)
+DEFAULT_BRIDGE_DEBUG_DIR = DEFAULT_BRIDGE_RUNTIME_DATA_DIR
 
 
 def _resolve_debug_dir(debug_dir: str | Path | None) -> Path:
@@ -582,4 +585,8 @@ def write_bridge_artifacts(
     return artifact_paths
 
 
-__all__ = ["DEFAULT_BRIDGE_DEBUG_DIR", "write_bridge_artifacts"]
+__all__ = [
+    "DEFAULT_BRIDGE_RUNTIME_DATA_DIR",
+    "DEFAULT_BRIDGE_DEBUG_DIR",
+    "write_bridge_artifacts",
+]

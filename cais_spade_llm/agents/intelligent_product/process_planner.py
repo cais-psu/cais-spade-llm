@@ -924,6 +924,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     "function_name": event["function_name"],
                     "params": params,
                     "resource_jid": event.get("ra_jid"),
+                    "status": "pending",
                     "predecessors": [predecessor] if predecessor else [],
                     "successors": [],
                     "sequence_index": base_si + index,
@@ -939,22 +940,17 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         *,
         tail_task_id: str,
         before_task_ids: list[str] | None = None,
+        deleted_task_ids: list[str] | None = None,
         change_prefix: str = "DES recovery",
+        recovery_tasks: list[dict[str, Any]] | None = None,
     ) -> None:
         if not tail_task_id:
             return
-        max_sequence_index = 0
-        for node in self.nodes:
-            try:
-                max_sequence_index = max(max_sequence_index, int(node.get("sequence_index") or 0))
-            except (TypeError, ValueError):
-                continue
-        for node in modified_tasks:
-            try:
-                max_sequence_index = max(max_sequence_index, int(node.get("sequence_index") or 0))
-            except (TypeError, ValueError):
-                continue
-        next_sequence_index = max_sequence_index + 1
+        deleted_task_id_set = {
+            str(task_id or "").strip()
+            for task_id in (deleted_task_ids or [])
+            if str(task_id or "").strip()
+        }
         seen: set[str] = set()
         ordered_task_ids: list[str] = []
         existing_by_id: dict[str, dict[str, Any]] = {}
@@ -978,17 +974,27 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 sequence_index = 0
             return (sequence_index, task_id)
 
-        # Resolve the tail task's resource so we only bump sequence_index
-        # for same-resource gating (cross-resource bumps break local ordering).
-        tail_resource_jid = ""
-        for t in modified_tasks:
-            if str(t.get("id", "")).strip() == tail_task_id:
-                tail_resource_jid = str(t.get("resource_jid", "")).strip()
-                break
-        if not tail_resource_jid:
-            existing_tail = self._find_node(tail_task_id)
-            if existing_tail:
-                tail_resource_jid = str(existing_tail.get("resource_jid", "")).strip()
+        recovery_task_rows = list(recovery_tasks or modified_tasks or [])
+        inserted_highwater_by_resource: dict[str, int] = {}
+        for task in recovery_task_rows:
+            if not isinstance(task, dict) or task.get("delete") is True:
+                continue
+            resource_jid = str(task.get("resource_jid", "")).strip()
+            if not resource_jid:
+                continue
+            try:
+                sequence_index = int(task.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                continue
+            inserted_highwater_by_resource[resource_jid] = max(
+                inserted_highwater_by_resource.get(resource_jid, sequence_index),
+                sequence_index,
+            )
+        next_sequence_index_by_resource = {
+            resource_jid: highwater + 1
+            for resource_jid, highwater in inserted_highwater_by_resource.items()
+        }
+        reorder_logs: list[tuple[str, str, int, int, int]] = []
 
         for blocked_task_id in sorted(ordered_task_ids, key=_sort_key):
             existing = existing_by_id[blocked_task_id]
@@ -996,6 +1002,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 str(pred).strip()
                 for pred in (existing.get("predecessors") or [])
                 if str(pred or "").strip()
+                and str(pred).strip() not in deleted_task_id_set
             ]
             gated_by_resume_chain = any(pred in resume_task_ids for pred in existing_preds)
             preds = (
@@ -1004,11 +1011,6 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 else list(dict.fromkeys(existing_preds + [tail_task_id]))
             )
             blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
-            same_resource = (
-                tail_resource_jid
-                and blocked_resource_jid
-                and tail_resource_jid == blocked_resource_jid
-            )
             mod: dict[str, Any] = {
                 "id": blocked_task_id,
                 "predecessors": preds,
@@ -1016,10 +1018,271 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
                 ),
             }
-            if same_resource:
-                mod["sequence_index"] = next_sequence_index
-                next_sequence_index += 1
+            if blocked_resource_jid in next_sequence_index_by_resource:
+                try:
+                    old_sequence_index = int(existing.get("sequence_index") or 0)
+                except (TypeError, ValueError):
+                    old_sequence_index = 0
+                resource_highwater = inserted_highwater_by_resource[blocked_resource_jid]
+                next_sequence_index = next_sequence_index_by_resource[blocked_resource_jid]
+                if old_sequence_index < next_sequence_index:
+                    new_sequence_index = next_sequence_index
+                    mod["sequence_index"] = new_sequence_index
+                    next_sequence_index_by_resource[blocked_resource_jid] = new_sequence_index + 1
+                    reorder_logs.append(
+                        (
+                            blocked_task_id,
+                            blocked_resource_jid,
+                            old_sequence_index,
+                            new_sequence_index,
+                            resource_highwater,
+                        )
+                    )
+                else:
+                    next_sequence_index_by_resource[blocked_resource_jid] = old_sequence_index + 1
             modified_tasks.append(mod)
+        for (
+            blocked_task_id,
+            blocked_resource_jid,
+            old_sequence_index,
+            new_sequence_index,
+            resource_highwater,
+        ) in reorder_logs:
+            self.logger.info(
+                "[Planner] %s reordered survivor %s on %s after inserted recovery tasks: sequence_index %d -> %d (recovery_highwater=%d)",
+                change_prefix,
+                blocked_task_id,
+                blocked_resource_jid,
+                old_sequence_index,
+                new_sequence_index,
+                resource_highwater,
+            )
+
+    def _splice_runtime_des_repair_before_task(
+        self,
+        modified_tasks: list[dict[str, Any]],
+        *,
+        repair_task: dict[str, Any],
+        target_task_id: str,
+        change_prefix: str = "Runtime DES guard-restoration repair",
+    ) -> None:
+        repair_task_id = str((repair_task or {}).get("id") or "").strip()
+        target_task_id = str(target_task_id or "").strip()
+        if not repair_task_id:
+            raise ValueError("repair task id is required")
+        if not target_task_id:
+            raise ValueError("target task id is required")
+
+        target_task = self._find_node(target_task_id)
+        if not isinstance(target_task, dict):
+            raise ValueError(
+                f"target task '{target_task_id}' was not found for runtime DES repair splice"
+            )
+
+        repair_resource_jid = str((repair_task or {}).get("resource_jid") or "").strip()
+        target_resource_jid = str(target_task.get("resource_jid") or "").strip()
+        if not repair_resource_jid:
+            raise ValueError(
+                f"repair task '{repair_task_id}' is missing resource_jid"
+            )
+        if not target_resource_jid:
+            raise ValueError(
+                f"target task '{target_task_id}' is missing resource_jid"
+            )
+        if repair_resource_jid != target_resource_jid:
+            raise ValueError(
+                f"repair task '{repair_task_id}' resource '{repair_resource_jid}' "
+                f"does not match target task '{target_task_id}' resource '{target_resource_jid}'"
+            )
+
+        try:
+            target_sequence_index = int(target_task.get("sequence_index") or 0)
+        except (TypeError, ValueError):
+            target_sequence_index = 0
+
+        target_predecessors = [
+            str(pred).strip()
+            for pred in (target_task.get("predecessors") or [])
+            if str(pred or "").strip()
+        ]
+        live_target_predecessors: list[str] = []
+        skipped_completed_predecessors: list[str] = []
+        for predecessor_task_id in target_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            predecessor_status = (
+                str((predecessor_task or {}).get("status") or "").strip().lower()
+            )
+            if predecessor_task is not None and predecessor_status in {"completed", "finished"}:
+                skipped_completed_predecessors.append(predecessor_task_id)
+                continue
+            live_target_predecessors.append(predecessor_task_id)
+        target_successors = [
+            str(succ).strip()
+            for succ in (target_task.get("successors") or [])
+            if str(succ or "").strip()
+        ]
+
+        repair_patch = deepcopy(repair_task)
+        repair_patch["predecessors"] = list(live_target_predecessors)
+        repair_patch["successors"] = [target_task_id]
+        repair_patch["sequence_index"] = target_sequence_index
+        repair_patch["change_reason"] = (
+            f"INSERTION: {change_prefix} — splice {repair_task_id} before {target_task_id}"
+        )
+        modified_tasks.append(repair_patch)
+
+        predecessor_rewire_logs: list[tuple[str, list[str], list[str]]] = []
+        for predecessor_task_id in live_target_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            if not isinstance(predecessor_task, dict):
+                continue
+            old_successors = [
+                str(succ).strip()
+                for succ in (predecessor_task.get("successors") or [])
+                if str(succ or "").strip()
+            ]
+            new_successors = [
+                succ for succ in old_successors if succ != target_task_id
+            ]
+            if repair_task_id not in new_successors:
+                new_successors.append(repair_task_id)
+            modified_tasks.append(
+                {
+                    "id": predecessor_task_id,
+                    "successors": new_successors,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — reroute {predecessor_task_id} "
+                        f"through {repair_task_id} before {target_task_id}"
+                    ),
+                }
+            )
+            predecessor_rewire_logs.append(
+                (predecessor_task_id, old_successors, list(new_successors))
+            )
+
+        historical_edge_removal_logs: list[tuple[str, list[str], list[str]]] = []
+        for predecessor_task_id in skipped_completed_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            if not isinstance(predecessor_task, dict):
+                continue
+            old_successors = [
+                str(succ).strip()
+                for succ in (predecessor_task.get("successors") or [])
+                if str(succ or "").strip()
+            ]
+            if target_task_id not in old_successors:
+                continue
+            new_successors = [
+                succ for succ in old_successors if succ != target_task_id
+            ]
+            modified_tasks.append(
+                {
+                    "id": predecessor_task_id,
+                    "successors": new_successors,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — remove historical edge "
+                        f"{predecessor_task_id} -> {target_task_id} after inserting {repair_task_id}"
+                    ),
+                }
+            )
+            historical_edge_removal_logs.append(
+                (predecessor_task_id, old_successors, list(new_successors))
+            )
+
+        target_sort_key = (target_sequence_index, target_task_id)
+        tasks_to_shift: list[tuple[tuple[int, str], dict[str, Any]]] = []
+        for node in self.nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id") or "").strip()
+            if not node_id or node_id == repair_task_id:
+                continue
+            if str(node.get("resource_jid") or "").strip() != target_resource_jid:
+                continue
+            try:
+                node_sequence_index = int(node.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                node_sequence_index = 0
+            status = str(node.get("status") or "").strip().lower()
+            node_sort_key = (node_sequence_index, node_id)
+            if node_id == target_task_id or (
+                status in {"pending", "blocked"} and node_sort_key >= target_sort_key
+            ):
+                tasks_to_shift.append((node_sort_key, node))
+
+        tasks_to_shift.sort(key=lambda row: row[0])
+        next_sequence_index = target_sequence_index + 1
+        sequence_shift_logs: list[tuple[str, int, int]] = []
+        for _sort_key, node in tasks_to_shift:
+            node_id = str(node.get("id") or "").strip()
+            try:
+                old_sequence_index = int(node.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                old_sequence_index = 0
+            patch: dict[str, Any] = {
+                "id": node_id,
+                "sequence_index": next_sequence_index,
+            }
+            if node_id == target_task_id:
+                patch["predecessors"] = [repair_task_id]
+                patch["change_reason"] = (
+                    f"MODIFICATION: {change_prefix} — gate {target_task_id} after {repair_task_id}"
+                )
+            else:
+                patch["change_reason"] = (
+                    f"MODIFICATION: {change_prefix} — shift {node_id} after inserted repair {repair_task_id}"
+                )
+            modified_tasks.append(patch)
+            sequence_shift_logs.append(
+                (node_id, old_sequence_index, next_sequence_index)
+            )
+            next_sequence_index += 1
+
+        self.logger.info(
+            "[Planner] %s spliced %s on %s before %s: predecessors=%s successors=%s sequence_index=%d",
+            change_prefix,
+            repair_task_id,
+            target_resource_jid,
+            target_task_id,
+            live_target_predecessors,
+            target_successors,
+            target_sequence_index,
+        )
+        if skipped_completed_predecessors:
+            self.logger.info(
+                "[Planner] %s skipped completed predecessor(s) for %s before %s: %s",
+                change_prefix,
+                repair_task_id,
+                target_task_id,
+                skipped_completed_predecessors,
+            )
+        for predecessor_task_id, old_successors, new_successors in historical_edge_removal_logs:
+            self.logger.info(
+                "[Planner] %s removed historical successor edge from completed predecessor %s: %s -> %s",
+                change_prefix,
+                predecessor_task_id,
+                old_successors,
+                new_successors,
+            )
+        for predecessor_task_id, old_successors, new_successors in predecessor_rewire_logs:
+            self.logger.info(
+                "[Planner] %s rewired predecessor %s successors: %s -> %s",
+                change_prefix,
+                predecessor_task_id,
+                old_successors,
+                new_successors,
+            )
+        for node_id, old_sequence_index, new_sequence_index in sequence_shift_logs:
+            if old_sequence_index == new_sequence_index:
+                continue
+            self.logger.info(
+                "[Planner] %s shifted %s on %s: sequence_index %d -> %d",
+                change_prefix,
+                node_id,
+                target_resource_jid,
+                old_sequence_index,
+                new_sequence_index,
+            )
 
     def apply_bridge_macro_proposal(
         self,
@@ -1155,6 +1418,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 "function_name": "execute_recovery_macro",
                 "params": params,
                 "resource_jid": resource_jid,
+                "status": "pending",
                 "predecessors": [predecessor] if predecessor else [],
                 "successors": [],
                 "sequence_index": base_si + index,
@@ -1601,139 +1865,33 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 bridge_safety_context=bridge_safety_context,
                 failure_context=failure_context_payload,
             )
-            if str(bridge_generation_mode or "auto").strip().lower() == "manual":
-                message = (
-                    "DES found no modeled continuation. Review the prepared bridge request and "
-                    "run LLM exploration from the dashboard when ready."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=False,
-                    human_required=False,
-                    awaiting_bridge_generation=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=self.get_last_bridge_debug(),
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            bridge_proposal = await self.execute_prepared_bridge_request(prepared_bridge_request)
-            if bridge_proposal:
-                used_llm_bridge = True
-                bridge_summary = self._bridge_summary(bridge_proposal)
-                message = (
-                    "DES found no catalog-valid continuation. A bridge macro proposal is ready for approval."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=True,
-                    human_required=False,
-                    awaiting_bridge_approval=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_proposal=bridge_proposal,
-                    bridge_debug=self.get_last_bridge_debug(),
-                )
-            bridge_debug = self.get_last_bridge_debug()
-            bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
-            if bridge_status == "ready_for_llm":
-                message = (
-                    "DES found no modeled continuation. The bridge request is ready for "
-                    "LLM review, but no validated bridge proposal is available yet."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=False,
-                    human_required=False,
-                    awaiting_bridge_generation=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            if bridge_status == "paused_after_grounding":
-                message = (
-                    "DES found no modeled continuation. Bridge grounding completed and "
-                    "paused before recovery synthesis for review."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=True,
-                    human_required=False,
-                    awaiting_bridge_generation=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            if bridge_status == "paused_after_outline_turn":
-                message = (
-                    "DES found no modeled continuation. Multi-turn bridge accepted an outline "
-                    "and is ready to continue primitive generation."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=True,
-                    human_required=False,
-                    awaiting_bridge_generation=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            if bridge_status == "paused_after_primitive_turn":
-                message = (
-                    "DES found no modeled continuation. Multi-turn bridge requested another "
-                    "primitive-generation retry from the prepared session."
-                )
-                self.logger.info("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    plan_changed=False,
-                    used_llm_bridge=True,
-                    human_required=False,
-                    awaiting_bridge_generation=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            if bridge_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
-                message = (
-                    "DES found no modeled continuation. Multi-turn bridge stalled during "
-                    "primitive generation and requires operator review."
-                )
-                self.logger.warning("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    human_required=True,
-                    used_llm_bridge=True,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            if bridge_status == "unsupported_reasoning_mode":
-                message = (
-                    "DES found no modeled continuation, but the selected bridge reasoning mode "
-                    "is not implemented."
-                )
-                self.logger.error("[Planner] %s", message)
-                return self._build_des_replan_result(
-                    human_required=True,
-                    used_llm_bridge=False,
-                    message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                )
-            message = "DES recovery could not find a modeled path and the LLM bridge produced no compilable proposal."
-            self.logger.error("[Planner] %s", message)
+            bridge_debug = deepcopy(self.get_last_bridge_debug() or {})
+            runtime_handoff = dict(bridge_debug.get("runtime_handoff") or {})
+            runtime_handoff.update(
+                {
+                    "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "handoff_owner": "product_agent",
+                    "bridge_generation_mode": str(bridge_generation_mode or "auto").strip().lower() or "auto",
+                    "auto_start_requested": str(bridge_generation_mode or "auto").strip().lower() == "auto",
+                    "auto_start_started": False,
+                }
+            )
+            bridge_debug["runtime_handoff"] = runtime_handoff
+            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+            if hasattr(self, "_set_last_bridge_debug"):
+                self._set_last_bridge_debug(bridge_debug)
+            message = (
+                "DES found no modeled continuation. Prepared bridge request returned for runtime handoff."
+                if str(bridge_generation_mode or "auto").strip().lower() != "manual"
+                else "DES found no modeled continuation. Review the prepared bridge request and "
+                "run LLM exploration from the dashboard when ready."
+            )
+            self.logger.info("[Planner] %s", message)
             return self._build_des_replan_result(
-                human_required=True,
-                used_llm_bridge=used_llm_bridge,
+                plan_changed=False,
+                used_llm_bridge=False,
+                human_required=False,
+                awaiting_bridge_generation=True,
                 message=message,
                 bridge_summary=bridge_summary,
                 bridge_debug=bridge_debug,
@@ -1937,7 +2095,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             if "predecessors" in t:
                 target["predecessors"] = t["predecessors"]
 
-            if "successors" in t and tid not in node_map:
+            if "successors" in t:
                 target["successors"] = t["successors"]
 
             if "change_reason" in t:
@@ -1960,8 +2118,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             ):
                 if extra_key in t:
                     target[extra_key] = deepcopy(t[extra_key])
-
-            target["status"] = "pending"
+            if "status" in t:
+                target["status"] = str(t.get("status") or "pending").strip() or "pending"
 
         tentative_nodes = list(node_map.values())
         self._ensure_graph_consistency(tentative_nodes)
@@ -2018,9 +2176,11 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         system_state: dict | None,
         llm_response: str | None = None,
     ) -> None:
-        """Write a timestamped Markdown report to cais_spade_llm/monitor/debug/ for each replan."""
+        """Write a timestamped Markdown report to the llm_bridge runtime-data directory for each replan."""
         try:
-            debug_dir = Path("cais_spade_llm/monitor/debug")
+            debug_dir = Path(
+                "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"
+            )
             debug_dir.mkdir(parents=True, exist_ok=True)
 
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")

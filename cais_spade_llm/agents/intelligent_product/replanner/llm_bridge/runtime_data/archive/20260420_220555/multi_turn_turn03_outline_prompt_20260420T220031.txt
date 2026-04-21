@@ -1,0 +1,154 @@
+Task and Role
+You are the active replanner for a DES fallback recovery session.
+Current phase: Recovery Event Synthesis (one transition at a time).
+Propose exactly ONE next transition to append after the accepted transition prefix, serialized in JSON field `next_transition`.
+You may include an optional transition suffix, serialized in JSON field `transition_suffix`, to show your intended remaining trace; only `next_transition` will be validated and accepted.
+When `next_transition` is your LAST recovery event, leave `transition_suffix` empty to signal that the recovery event sequence is complete.
+
+Current DES State
+Resources
+[
+  {
+    "resource_jid": "xarm6@localhost",
+    "current_state": "failed",
+    "current_location": null,
+    "held_part": null,
+    "gripper_state": "open",
+    "current_pose": {
+      "x": 0.10000000764037048,
+      "y": 0.08000026830588403,
+      "z": 1.4101124937537137
+    },
+    "workspace_bounds": {
+      "x_min_m": -0.6,
+      "x_max_m": 0.6,
+      "y_min_m": -1.0,
+      "y_max_m": 0.1,
+      "z_min_m": 0.9,
+      "z_max_m": 1.5
+    }
+  },
+  {
+    "resource_jid": "ur5e@localhost",
+    "current_state": "picked",
+    "current_location": "prusa-mk4-2",
+    "held_part": "MCP",
+    "gripper_state": "closed",
+    "current_pose": {
+      "x": 0.40000011175940176,
+      "y": 0.1999990707643477,
+      "z": 1.4739188639723708
+    },
+    "workspace_bounds": {
+      "x_min_m": -0.7,
+      "x_max_m": 0.7,
+      "y_min_m": -0.35,
+      "y_max_m": 1.1,
+      "z_min_m": 0.85,
+      "z_max_m": 1.6
+    }
+  }
+]
+
+Parts
+[
+  {
+    "part_name": "LG",
+    "current_state": "unknown",
+    "current_location": null,
+    "observed_pose": {
+      "x": 0.0,
+      "y": 0.2,
+      "z": 1.035
+    },
+    "current_holder_resource_jid": null,
+    "origin_location": "prusa-mk4-1",
+    "goal_location": "assembly_board-v1",
+    "goal_requirement_id": "REQ_2"
+  },
+  {
+    "part_name": "MCP",
+    "current_state": "in_gripper",
+    "current_location": "ur5e@localhost_gripper",
+    "observed_pose": null,
+    "current_holder_resource_jid": "ur5e@localhost",
+    "origin_location": "prusa-mk4-2",
+    "goal_location": "assembly_board-v1",
+    "goal_requirement_id": "REQ_1"
+  }
+]
+Marked-State Conditions
+- REQ_2 [failed]: restore LG to assembly_board-v1
+- REQ_1 [in_progress]: restore MCP to assembly_board-v1
+
+Safety Rules
+- SAFE_1: LG by xarm6 must place_approach first before MCP by ur5e to the assembly station.
+- SAFE_2: ur5e and xarm6 must not both be in the assembly board destination area at the same time.
+
+Assembly Requirements
+- REQ_2 [failed]: xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.
+- REQ_1 [in_progress]: ur5e assemble MCP from prusa-mk4-2 to the Assembly Station.
+
+Modeled Continuation Gap (unresolved target predicates)
+{
+  "pending_nominal_tasks": [
+    {
+      "id": "REQ_1_T3",
+      "function": "place_approach",
+      "part": "MCP",
+      "resource": "ur5e@localhost"
+    },
+    {
+      "id": "REQ_1_T4",
+      "function": "place_insert",
+      "part": "MCP",
+      "resource": "ur5e@localhost"
+    },
+    {
+      "id": "REQ_1_T5",
+      "function": "move_home",
+      "part": null,
+      "resource": "ur5e@localhost"
+    },
+    {
+      "id": "REQ_2_T5",
+      "function": "move_home",
+      "part": null,
+      "resource": "xarm6@localhost"
+    }
+  ],
+  "unmet_continuation_conditions": [
+    {
+      "kind": "resource_terminal_state",
+      "entity_kind": "resource",
+      "entity": "xarm6@localhost",
+      "field": "current_state",
+      "expected": "idle",
+      "actual": "failed",
+      "source_task_id": "REQ_2_T5",
+      "source_function_name": "move_home"
+    },
+    {
+      "kind": "safety_blocked_suffix_task",
+      "entity_kind": "task",
+      "entity": "REQ_1_T3",
+      "field": "safety_gate",
+      "expected": "unblocked",
+      "actual": "blocked_by_SAFE_1",
+      "blocking_rule_id": "SAFE_1",
+      "blocking_reason": "LG must be placed at 'assembly_board-v1' before MCP place_approach"
+    }
+  ],
+  "resume_ready": false
+}
+
+Output Constraints
+- Use only the listed resources.
+- Each transition is one physical action by one resource.
+- expected_start_state is the source-state predicate snapshot; expected_end_state is the target-state predicate snapshot.
+- The description must include guard/feasibility reasoning: why the source state enables the event and what target predicates change.
+- expected_start_state and expected_end_state may use only: resource_state, held_part, part_state, part_location, part_holder_resource_jid.
+- Use flat scalar values in state objects.
+- Use JSON null (not the string "-" or "null") for unset scalar state fields. A `null` rendered in Grounded Event Facts maps to JSON null in your output.
+- Propose exactly one next transition serialized in JSON field `next_transition`.
+- Optional remaining transitions are serialized in JSON field `transition_suffix`.

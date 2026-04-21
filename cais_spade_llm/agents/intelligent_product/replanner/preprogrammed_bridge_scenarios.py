@@ -66,11 +66,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
         part_name="MCP",
         preferred_resource_jid="ur5e@localhost",
     )
-    mcp_resume_task_ids = _recover_resume_task_ids(
-        prepared_bridge_request,
-        part_name="MCP",
-        preferred_resource_jid="ur5e@localhost",
-    )
     _part_model_name(grounding_context, "MCP")
     _part_model_name(grounding_context, "LG")
 
@@ -353,11 +348,6 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
         ]
 
     proposal = {
-        "plan_rewrite": {
-            "replace_failed_branch": True,
-            "resume_task_ids": [],
-            "delete_task_ids": mcp_resume_task_ids,
-        },
         "macro_tasks": [
             {
                 "resource_jid": "xarm6@localhost",
