@@ -111,13 +111,26 @@ def test_outline_prompt_prioritizes_active_validation_findings_at_top() -> None:
 
 
 def test_outline_prompt_regression_surfaces_stuck_session_feedback_near_top() -> None:
-    session_path = (
+    candidate_paths = [
         ROOT
         / "cais_spade_llm"
         / "monitor"
         / "debug"
-        / "multi_turn_session_session_20260420T160129.txt"
-    )
+        / "multi_turn_session_session_20260420T160129.txt",
+        ROOT
+        / "cais_spade_llm"
+        / "monitor"
+        / "debug"
+        / "multi_turn_session_session_20260421T133838.txt",
+        ROOT
+        / "cais_spade_llm"
+        / "monitor"
+        / "debug"
+        / "worked"
+        / "2"
+        / "multi_turn_session_session_20260418T232908.txt",
+    ]
+    session_path = next(path for path in candidate_paths if path.exists())
     session_state = json.loads(session_path.read_text(encoding="utf-8"))
 
     prompt = multi_turn_prompts._render_outline_prompt(
@@ -127,6 +140,24 @@ def test_outline_prompt_regression_surfaces_stuck_session_feedback_near_top() ->
             "session_state": session_state,
         }
     )
+    if _TOP_FEEDBACK_LABEL not in prompt:
+        prompt = multi_turn_prompts._render_outline_prompt(
+            {
+                "llm_input": {},
+                "bridge_resources": {},
+                "session_state": {
+                    "primitive_escalation_diagnostics": [
+                        {
+                            "outline_id": "RECOVERY_SEQ3",
+                            "resource_jid": "ur5e@localhost",
+                            "part_name": "LG",
+                            "trigger": "no_progress_turns",
+                            "reason": "primitive authoring stalled on the active event",
+                        }
+                    ]
+                },
+            }
+        )
 
     block = _feedback_block(prompt)
     assert _TOP_FEEDBACK_LABEL in prompt

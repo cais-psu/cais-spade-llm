@@ -169,6 +169,40 @@ class ResourceAgent(LlmAgent):
         del operation_kind, part_name, part_context, bridge_snapshot, grounded_action
         return {"allowed": True, "reason": "default permissive oracle"}
 
+    async def generate_bridge_primitives_batch(
+        self,
+        *,
+        bridge_session_id: str = "",
+        resource_jid: str = "",
+        assigned_outline_events: list[dict[str, Any]] | None = None,
+        prepared_bridge_request: Dict[str, Any] | None = None,
+        carried_session_state: Dict[str, Any] | None = None,
+        max_turns: int = 24,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+            generate_primitive_batch_with_llm_agent,
+        )
+
+        normalized_resource_jid = str(resource_jid or getattr(self, "jid", "") or "").strip()
+        if normalized_resource_jid and normalized_resource_jid != str(getattr(self, "jid", "") or "").strip():
+            raise ValueError(
+                f"resource-owned primitive batch was assigned to {normalized_resource_jid!r} "
+                f"but invoked on {str(getattr(self, 'jid', '') or '').strip()!r}"
+            )
+        return await generate_primitive_batch_with_llm_agent(
+            llm_agent=self,
+            prepared_bridge_request=dict(prepared_bridge_request or {}),
+            assigned_outline_events=[
+                dict(row)
+                for row in (assigned_outline_events or [])
+                if isinstance(row, dict)
+            ],
+            bridge_session_id=str(bridge_session_id or "").strip(),
+            carried_session_state=dict(carried_session_state or {}),
+            max_turns=max_turns,
+        )
+
     async def execute_recovery_macro(
         self,
         *,
@@ -631,11 +665,15 @@ class ResourceAgent(LlmAgent):
                 await self._ack(msg, task_id=task_id, status="no_tool_match")
                 return
 
-            # Recovery bridge macros use a fast path: skip the "accepted" ACK,
-            # safety_check round-trip, "running" ACK, and "running" CCA event.
-            # CCA already defers safety decisions for these tasks, so the
-            # round-trips are pure overhead (~3-4 s per task).
+            start_safety_mode = str(
+                fn_args.get("start_safety_mode") or "fast_path"
+            ).strip().lower() or "fast_path"
+            # Recovery bridge macros can still request the legacy fast path, but
+            # DAG-mode recovery defaults to full per-macro CCA start checks.
             is_recovery_macro = fn_name == "execute_recovery_macro"
+            use_recovery_fast_path = (
+                is_recovery_macro and start_safety_mode != "cca_check"
+            )
 
             # ----- plumb routing/context ----- #
             # Pass routing info into the tool implementation for downstream logging/rpc calls.
@@ -655,7 +693,7 @@ class ResourceAgent(LlmAgent):
                 )
                 return
 
-            if is_recovery_macro:
+            if use_recovery_fast_path:
                 # Fast path: self-allow, log, and proceed directly to execution.
                 # Skip the safety_check round-trip but still notify CCA of
                 # the running state so the plan FSA can track .start events.
@@ -707,7 +745,7 @@ class ResourceAgent(LlmAgent):
                 await self._ack(msg, task_id=task_id, status="blocked")
                 return
 
-            if not is_recovery_macro:
+            if not use_recovery_fast_path:
                 # ---------------------------
                 #  SAFETY PASSED → RUNNING
                 # ---------------------------

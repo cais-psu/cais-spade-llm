@@ -139,6 +139,8 @@ class ProductAgent(LlmAgent):
         self._bridge_reasoning_mode = "multi_turn"
         self._runtime_bridge_mode = "pre_ran"
         self._runtime_bridge_validation_policy = "validated"
+        self._runtime_bridge_start_safety_mode = ""
+        self._runtime_bridge_execution_shape = ""
         self._runtime_bridge_archive_path = ""
         self._runtime_bridge_archive_label = ""
         self._orphaned_bridge_task_warning_ids: set[str] = set()

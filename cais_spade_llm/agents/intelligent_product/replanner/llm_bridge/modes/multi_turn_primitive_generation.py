@@ -60,13 +60,43 @@ def _active_primitive_outline_event(
         for row in (session_state.get("accepted_outline_prefix") or [])
         if isinstance(row, dict)
     ]
-    cursor = int(session_state.get("primitive_generation_cursor") or 0)
-    if cursor < 0:
-        cursor = 0
-        session_state["primitive_generation_cursor"] = 0
-    if cursor >= len(accepted_prefix):
-        return cursor, None, accepted_prefix
-    return cursor, deepcopy(accepted_prefix[cursor]), accepted_prefix
+    accepted_outline_ids = {
+        str(row.get("outline_id") or "").strip()
+        for row in (session_state.get("accepted_primitive_program") or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    cursor = max(0, int(session_state.get("primitive_generation_cursor") or 0))
+    for index, row in enumerate(accepted_prefix):
+        outline_id = str(row.get("outline_id") or "").strip()
+        if outline_id and outline_id in accepted_outline_ids:
+            continue
+        cursor = index
+        session_state["primitive_generation_cursor"] = cursor
+        return cursor, deepcopy(row), accepted_prefix
+    session_state["primitive_generation_cursor"] = len(accepted_prefix)
+    return len(accepted_prefix), None, accepted_prefix
+
+
+def _missing_primitive_outline_events(
+    session_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    accepted_prefix = [
+        dict(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    accepted_outline_ids = {
+        str(row.get("outline_id") or "").strip()
+        for row in (session_state.get("accepted_primitive_program") or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    missing: list[dict[str, Any]] = []
+    for row in accepted_prefix:
+        outline_id = str(row.get("outline_id") or "").strip()
+        if outline_id and outline_id in accepted_outline_ids:
+            continue
+        missing.append(deepcopy(row))
+    return missing
 
 
 def _primitive_feedback_row(
@@ -1551,8 +1581,170 @@ def _accepted_program_row(
         "part_name": str(outline_event.get("part_name") or "").strip() or None,
         "event_name": str(outline_event.get("event_name") or "").strip(),
         "description": str(outline_event.get("description") or "").strip(),
+        "depends_on": [
+            str(item).strip()
+            for item in (outline_event.get("depends_on") or [])
+            if str(item).strip()
+        ],
         "primitive_steps": deepcopy(primitive_steps),
         "projected_snapshot": deepcopy(projected_snapshot),
+    }
+
+
+def _primitive_batch_session_state(
+    *,
+    assigned_outline_events: list[dict[str, Any]],
+    carried_session_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    carried = deepcopy(carried_session_state or {})
+    accepted_outline_prefix = [
+        deepcopy(row)
+        for row in (assigned_outline_events or [])
+        if isinstance(row, dict)
+    ]
+    return {
+        "current_phase": "primitive_generation",
+        "status": "running",
+        "turn_index": 0,
+        "turns": [],
+        "accepted_outline_prefix": accepted_outline_prefix,
+        "accepted_transition_prefix": deepcopy(accepted_outline_prefix),
+        "des_event_sequence": deepcopy(accepted_outline_prefix),
+        "transition_trace": deepcopy(accepted_outline_prefix),
+        "primitive_generation_turn_index": 0,
+        "primitive_generation_cursor": 0,
+        "accepted_primitive_program": [],
+        "primitive_rejection_feedback": [],
+        "primitive_served_context": deepcopy(
+            carried.get("primitive_served_context") or {}
+        ),
+        "primitive_context_errors": deepcopy(
+            carried.get("primitive_context_errors") or []
+        ),
+        "primitive_input_diagnostics": [],
+        "primitive_event_guard": {},
+        "primitive_escalation_diagnostics": [],
+        "primitive_authoring_memo": deepcopy(
+            carried.get("primitive_authoring_memo") or []
+        ),
+        "observation_store": deepcopy(carried.get("observation_store") or {}),
+        "symbolic_resources": deepcopy(carried.get("symbolic_resources") or {}),
+        "symbolic_parts": deepcopy(carried.get("symbolic_parts") or {}),
+    }
+
+
+async def generate_primitive_batch_with_llm_agent(
+    *,
+    llm_agent: Any,
+    prepared_bridge_request: dict[str, Any],
+    assigned_outline_events: list[dict[str, Any]],
+    bridge_session_id: str = "",
+    carried_session_state: dict[str, Any] | None = None,
+    max_turns: int = 24,
+) -> dict[str, Any]:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_prompts import (
+        build_multi_turn_phase_prompt_input,
+        multi_turn_phase_response_schema,
+        render_multi_turn_phase_prompt,
+    )
+
+    ask_llm_structured = getattr(llm_agent, "ask_llm_structured", None)
+    if not callable(ask_llm_structured):
+        raise RuntimeError(
+            "llm_agent.ask_llm_structured is required for primitive batch generation"
+        )
+
+    assigned_events = [
+        deepcopy(row)
+        for row in (assigned_outline_events or [])
+        if isinstance(row, dict)
+    ]
+    resource_jids = {
+        str(row.get("resource_jid") or "").strip()
+        for row in assigned_events
+        if str(row.get("resource_jid") or "").strip()
+    }
+    resource_jid = next(iter(resource_jids)) if len(resource_jids) == 1 else ""
+    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
+    bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+    response_schema = multi_turn_phase_response_schema("primitive_generation")
+    session_state = _primitive_batch_session_state(
+        assigned_outline_events=assigned_events,
+        carried_session_state=carried_session_state,
+    )
+    turn_records: list[dict[str, Any]] = []
+    final_decision = "need_primitive_revision"
+
+    for turn_index in range(1, max(1, int(max_turns or 1)) + 1):
+        session_state["turn_index"] = turn_index
+        prompt_input = build_multi_turn_phase_prompt_input(
+            phase="primitive_generation",
+            llm_input=llm_input,
+            session_state=session_state,
+            bridge_resources=bridge_resources,
+        )
+        prompt_input.update(
+            build_primitive_generation_prompt_context(
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+        )
+        prompt_text = render_multi_turn_phase_prompt(prompt_input)
+        raw_response = await ask_llm_structured(
+            prompt=prompt_text,
+            response_format=response_schema,
+        )
+        parsed_response = (
+            deepcopy(raw_response) if isinstance(raw_response, dict) else {}
+        )
+        decision, turn_entry = await _handle_primitive_generation_phase(
+            session_state=session_state,
+            parsed_response=parsed_response,
+            prepared_bridge_request=prepared_bridge_request,
+            planner=None,
+        )
+        turn_entry["turn_index"] = turn_index
+        turn_entry["phase"] = "primitive_generation"
+        turn_entry["decision"] = decision
+        turn_entry["prompt_input"] = deepcopy(prompt_input)
+        turn_entry["prompt_text"] = prompt_text
+        turn_entry["llm_raw_response"] = deepcopy(parsed_response)
+        turn_entry["resource_jid"] = resource_jid
+        turn_entry["bridge_session_id"] = str(bridge_session_id or "").strip()
+        turn_records.append(deepcopy(turn_entry))
+        session_state.setdefault("turns", []).append(deepcopy(turn_entry))
+        final_decision = decision
+        if decision in {"draft_ready", "primitive_blocked", "primitive_event_stuck"}:
+            break
+
+    if final_decision not in {
+        "draft_ready",
+        "primitive_blocked",
+        "primitive_event_stuck",
+    }:
+        final_decision = "need_primitive_revision"
+
+    return {
+        "decision": final_decision,
+        "resource_jid": resource_jid,
+        "bridge_session_id": str(bridge_session_id or "").strip(),
+        "primitive_events": [
+            deepcopy(row)
+            for row in (session_state.get("accepted_primitive_program") or [])
+            if isinstance(row, dict)
+        ],
+        "feedback": [
+            deepcopy(row)
+            for row in (session_state.get("primitive_rejection_feedback") or [])
+            if isinstance(row, dict)
+        ],
+        "context_errors": [
+            deepcopy(row)
+            for row in (session_state.get("primitive_context_errors") or [])
+            if isinstance(row, dict)
+        ],
+        "turns": turn_records,
+        "session_state": deepcopy(session_state),
     }
 
 
@@ -1589,7 +1781,7 @@ def build_primitive_generation_prompt_context(
     prepared_bridge_request: dict[str, Any],
 ) -> dict[str, Any]:
     cursor, active_event, accepted_prefix = _active_primitive_outline_event(session_state)
-    remaining_events = accepted_prefix[cursor:] if cursor < len(accepted_prefix) else []
+    remaining_events = _missing_primitive_outline_events(session_state)
     context: dict[str, Any] = {
         "primitive_active_outline_event": _primitive_authoring_event_context(active_event),
         "primitive_generation_cursor_state": {
@@ -2210,6 +2402,7 @@ async def _handle_primitive_generation_phase(
 
 __all__ = [
     "_active_primitive_outline_event",
+    "_missing_primitive_outline_events",
     "_primitive_feedback_row",
     "_primitive_catalog_for_resource",
     "_primitive_resource_sequence_findings",
@@ -2220,6 +2413,8 @@ __all__ = [
     "_validate_authored_plan",
     "_validate_single_event_primitive_steps",
     "_accepted_program_row",
+    "_primitive_batch_session_state",
+    "generate_primitive_batch_with_llm_agent",
     "_visible_primitive_catalog_card",
     "_visible_primitive_catalog_names",
     "_compact_active_event_token",

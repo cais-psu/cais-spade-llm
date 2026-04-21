@@ -9,6 +9,10 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
+from cais_spade_llm.resources.robot.robot_task_specs import (
+    robot_task_docstring,
+    robot_task_spec_names,
+)
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
@@ -63,13 +67,7 @@ class RobotAgent(ResourceAgent):
 
         kw.setdefault(
             "function_names",
-            [
-                "pick_approach",
-                "pick_grasp",
-                "place_approach",
-                "move_home",
-                "place_insert",
-            ],
+            list(robot_task_spec_names()),
         )
         super().__init__(jid, password, name=name, **kw)
 
@@ -2793,3 +2791,13 @@ class RobotAgent(ResourceAgent):
             )
 
         self.logger.info("[%s] Finished: %s", robot, description)
+
+
+for _robot_task_name in robot_task_spec_names():
+    _robot_task = getattr(RobotAgent, _robot_task_name, None)
+    if callable(_robot_task):
+        _robot_task.__doc__ = robot_task_docstring(_robot_task_name)
+
+
+del _robot_task_name
+del _robot_task

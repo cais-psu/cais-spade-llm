@@ -8,6 +8,9 @@ from typing import Any
 
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.resources.resource_profile import resource_snapshot_field_value
+from cais_spade_llm.resources.robot.robot_task_specs import (
+    robot_task_capability_decompositions,
+)
 
 destination_token_from_place_inputs = ProductProfile.destination_token_from_place_inputs
 has_place_geometry_fields = ProductProfile.has_place_geometry_fields
@@ -2131,163 +2134,12 @@ def robot_capability_decompositions(
 ) -> dict[str, Any]:
     """Modeled task-function decompositions for LLM primitive authoring."""
     _ = primitive_catalog
-    resource_token = str(resource_jid or "<RESOURCE_JID>").strip() or "<RESOURCE_JID>"
-    decompositions: dict[str, dict[str, Any]] = {
-        "pick_approach": {
-            "function_name": "pick_approach",
-            "source": "robot_agent.py",
-            "modeled_transition": "idle -> at_pick",
-            "task_preconditions": [
-                "held_part is empty",
-                "part pose is available from detect_parts, product_geometry, or served context",
-            ],
-            "bridge_visible_steps": [
-                {
-                    "primitive": "detect_parts",
-                    "params": {"part_name": "<PART>"},
-                    "note": "May be skipped only when equivalent observed pose was retrieved.",
-                },
-                {
-                    "primitive": "compute_pick_targets",
-                    "params": {"part_name": "<PART>"},
-                },
-                {
-                    "primitive": "move_cartesian",
-                    "params": {
-                        "x": _step_ref("pick_targets.<PART>", "approach_pose.x"),
-                        "y": _step_ref("pick_targets.<PART>", "approach_pose.y"),
-                        "z": _step_ref("pick_targets.<PART>", "approach_pose.z"),
-                    },
-                },
-                {
-                    "primitive": "move_cartesian",
-                    "params": {
-                        "x": _step_ref("pick_targets.<PART>", "target_pose.x"),
-                        "y": _step_ref("pick_targets.<PART>", "target_pose.y"),
-                        "z": _step_ref("pick_targets.<PART>", "target_pose.z"),
-                    },
-                },
-            ],
-            "execution_notes": [
-                "RobotAgent.pick_approach computes pick geometry, opens the gripper, moves above the part, then descends to the pick pose.",
-                "open_gripper and direct controller pose helpers are hidden from synthesis; use compute_pick_targets plus move_cartesian approach/target poses.",
-            ],
-        },
-        "pick_grasp": {
-            "function_name": "pick_grasp",
-            "source": "robot_agent.py",
-            "modeled_transition": "at_pick -> picked",
-            "task_preconditions": [
-                "resource is already at the pick pose from pick_approach",
-                "held_part is empty",
-                "pick target was grounded for the active part",
-            ],
-            "bridge_visible_steps": [
-                {
-                    "primitive": "grasp_part",
-                    "params": {
-                        "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
-                        "part_name": "<PART>",
-                    },
-                },
-                {
-                    "primitive": "move_relative",
-                    "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8},
-                    "note": "Positive dz lift/retreat after grasp.",
-                },
-            ],
-            "execution_notes": [
-                "RobotAgent.pick_grasp closes the gripper, attaches the part in simulation, then lifts to travel height.",
-                "close_gripper and attach_part are hidden from synthesis; use grasp_part as the visible composite.",
-            ],
-        },
-        "place_approach": {
-            "function_name": "place_approach",
-            "source": "robot_agent.py",
-            "modeled_transition": "picked -> positioned",
-            "task_preconditions": [
-                "held_part exists",
-                "destination geometry is available from destination_location, product_geometry, or served context",
-            ],
-            "bridge_visible_steps": [
-                {
-                    "primitive": "compute_place_targets",
-                    "params": {
-                        "part_name": "<PART>",
-                        "destination_location": "<DESTINATION_LOCATION>",
-                    },
-                },
-                {
-                    "primitive": "move_cartesian",
-                    "params": {
-                        "x": _step_ref("place_targets.<PART>", "approach_pose.x"),
-                        "y": _step_ref("place_targets.<PART>", "approach_pose.y"),
-                        "z": _step_ref("place_targets.<PART>", "approach_pose.z"),
-                    },
-                },
-                {
-                    "primitive": "move_cartesian",
-                    "params": {
-                        "x": _step_ref("place_targets.<PART>", "target_pose.x"),
-                        "y": _step_ref("place_targets.<PART>", "target_pose.y"),
-                        "z": _step_ref("place_targets.<PART>", "target_pose.z"),
-                    },
-                },
-            ],
-            "execution_notes": [
-                "RobotAgent.place_approach computes destination geometry, moves above the destination, then descends to the place pose.",
-                "Direct controller pose helpers are hidden from synthesis; use compute_place_targets plus move_cartesian approach/target poses.",
-            ],
-        },
-        "place_insert": {
-            "function_name": "place_insert",
-            "source": "robot_agent.py",
-            "modeled_transition": "positioned -> placed",
-            "task_preconditions": [
-                "held_part exists",
-                "place_approach already positioned the robot at the target pose",
-            ],
-            "bridge_visible_steps": [
-                {
-                    "primitive": "release_part",
-                    "params": {
-                        "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
-                        "part_name": "<PART>",
-                    },
-                },
-                {
-                    "primitive": "move_relative",
-                    "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0},
-                    "note": "Positive dz retreat after release.",
-                },
-            ],
-            "execution_notes": [
-                "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches in simulation, snaps/settles as needed, then lifts away.",
-                "open_gripper and detach_part are hidden from synthesis; use release_part as the visible composite.",
-            ],
-        },
-        "move_home": {
-            "function_name": "move_home",
-            "source": "robot_agent.py",
-            "modeled_transition": "any -> idle",
-            "task_preconditions": [
-                f"resource {resource_token} exposes a named pose called 'home'",
-            ],
-            "bridge_visible_steps": [
-                {
-                    "primitive": "move_to_named_pose",
-                    "params": {"pose_name": "home", "speed": 0.8},
-                },
-            ],
-            "execution_notes": [
-                "RobotAgent.move_home maps to the controller's home/named-pose motion when that named pose is available.",
-            ],
-        },
-    }
-    token = str(function_name or "").strip()
-    if token:
-        return deepcopy(decompositions.get(token) or {})
-    return deepcopy(decompositions)
+    return deepcopy(
+        robot_task_capability_decompositions(
+            function_name=function_name,
+            resource_jid=resource_jid,
+        )
+    )
 
 
 __all__ = [

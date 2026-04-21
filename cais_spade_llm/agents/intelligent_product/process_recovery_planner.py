@@ -623,20 +623,15 @@ class ProcessRecoveryPlanner:
         bridge_sequence_id: str,
         completed_task_id: str,
     ) -> list[dict[str, Any]]:
-        """Delete unexecuted bridge macro tasks after the given sequence task."""
+        """Delete remaining bridge macro tasks that have not started executing."""
         completed_task_id = str(completed_task_id or "").strip()
-        current_node = self._find_node(completed_task_id)
-        cutoff_index = int(current_node.get("bridge_sequence_index") or 0) if current_node else 0
         deletions: list[dict[str, Any]] = []
         for node in self._bridge_sequence_nodes(bridge_sequence_id):
             node_id = str(node.get("id") or "").strip()
             if not node_id or node_id == completed_task_id:
                 continue
-            sequence_index = int(node.get("bridge_sequence_index") or 0)
-            if cutoff_index and sequence_index <= cutoff_index:
-                continue
             status = str(node.get("status") or "").strip().lower()
-            if status in {"running", "dispatched", "completed"}:
+            if status in {"accepted", "running", "dispatched", "completed", "finished"}:
                 continue
             deletions.append(
                 {
@@ -709,13 +704,21 @@ class ProcessRecoveryPlanner:
         self,
         modified_tasks: list[dict[str, Any]],
         *,
-        tail_task_id: str,
+        tail_task_id: str = "",
+        tail_task_ids: list[str] | None = None,
         before_task_ids: list[str] | None = None,
         deleted_task_ids: list[str] | None = None,
         change_prefix: str = "DES recovery",
         recovery_tasks: list[dict[str, Any]] | None = None,
     ) -> None:
-        if not tail_task_id:
+        gating_task_ids = [
+            str(task_id or "").strip()
+            for task_id in (tail_task_ids or [])
+            if str(task_id or "").strip()
+        ]
+        if tail_task_id and tail_task_id not in gating_task_ids:
+            gating_task_ids.append(str(tail_task_id).strip())
+        if not gating_task_ids:
             return
         deleted_task_id_set = {
             str(task_id or "").strip()
@@ -779,14 +782,14 @@ class ProcessRecoveryPlanner:
             preds = (
                 list(existing_preds)
                 if gated_by_resume_chain
-                else list(dict.fromkeys(existing_preds + [tail_task_id]))
+                else list(dict.fromkeys(existing_preds + gating_task_ids))
             )
             blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
             mod: dict[str, Any] = {
                 "id": blocked_task_id,
                 "predecessors": preds,
                 "change_reason": (
-                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
+                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {gating_task_ids}"
                 ),
             }
             if blocked_resource_jid in next_sequence_index_by_resource:
@@ -1120,10 +1123,17 @@ class ProcessRecoveryPlanner:
         base_si = max_si + 1000
 
         compiled_nodes: list[dict[str, Any]] = []
-        predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
         total_tasks = len(macro_tasks)
         primary_obligation = deepcopy(proposal.get("primary_obligation") or {})
         bridge_sequence_id = f"BRIDGESEQ_{uuid4().hex[:8].upper()}"
+        anchor_predecessor = (
+            str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
+        )
+        compiled_task_ids_by_outline_id: dict[str, str] = {}
+        previous_outline_id = ""
+        start_safety_mode = str(
+            proposal.get("start_safety_mode") or "fast_path"
+        ).strip().lower() or "fast_path"
 
         for index, macro_task in enumerate(macro_tasks, start=1):
             macro_name = str(
@@ -1131,6 +1141,17 @@ class ProcessRecoveryPlanner:
                 or proposal.get("macro_name")
                 or f"bridge_recovery_macro_{index}"
             ).strip()
+            outline_id = str(
+                macro_task.get("outline_id")
+                or f"bridge_outline_{index}"
+            ).strip()
+            depends_on = [
+                str(item).strip()
+                for item in (macro_task.get("depends_on") or [])
+                if str(item).strip()
+            ]
+            if "depends_on" not in macro_task and previous_outline_id:
+                depends_on = [previous_outline_id]
             resource_jid = str(macro_task.get("resource_jid") or proposal.get("resource_jid") or "").strip()
             primitive_steps = list(macro_task.get("primitive_steps") or [])
             expected_start_state = str(
@@ -1163,8 +1184,11 @@ class ProcessRecoveryPlanner:
             task_id = f"RECOVERY_BRIDGE_{uuid4().hex[:6].upper()}"
             params: dict[str, Any] = {
                 "macro_name": macro_name,
+                "outline_id": outline_id,
+                "depends_on": deepcopy(depends_on),
                 "primitive_steps": primitive_steps,
                 "expected_start_state": expected_start_state,
+                "start_safety_mode": start_safety_mode,
                 "product_jid": str(self.product_agent.jid),
                 "task_id": task_id,
             }
@@ -1184,13 +1208,27 @@ class ProcessRecoveryPlanner:
             if len(primitive_steps) > 5:
                 step_summary += f", ... ({len(primitive_steps)} total)"
 
+            predecessors: list[str] = []
+            if depends_on:
+                for dependency_outline_id in depends_on:
+                    dependency_task_id = compiled_task_ids_by_outline_id.get(
+                        dependency_outline_id
+                    )
+                    if not dependency_task_id:
+                        raise ValueError(
+                            f"bridge macro_task {index} depends on unknown or later outline_id {dependency_outline_id!r}"
+                        )
+                    predecessors.append(dependency_task_id)
+            elif anchor_predecessor:
+                predecessors.append(anchor_predecessor)
+
             task_node: dict[str, Any] = {
                 "id": task_id,
                 "function_name": "execute_recovery_macro",
                 "params": params,
                 "resource_jid": resource_jid,
                 "status": "pending",
-                "predecessors": [predecessor] if predecessor else [],
+                "predecessors": predecessors,
                 "successors": [],
                 "sequence_index": base_si + index,
                 "change_reason": (
@@ -1201,6 +1239,10 @@ class ProcessRecoveryPlanner:
                 "bridge_sequence_id": bridge_sequence_id,
                 "bridge_sequence_index": index,
                 "bridge_sequence_length": total_tasks,
+                "bridge_outline_id": outline_id,
+                "depends_on_outline_ids": deepcopy(depends_on),
+                "recovery_group_id": bridge_sequence_id,
+                "recovery_kind": "bridge_macro",
             }
 
             if isinstance(task_metadata, dict):
@@ -1224,7 +1266,8 @@ class ProcessRecoveryPlanner:
                 task_node["primary_obligation"] = deepcopy(primary_obligation)
 
             compiled_nodes.append(task_node)
-            predecessor = task_id
+            compiled_task_ids_by_outline_id[outline_id] = task_id
+            previous_outline_id = outline_id
 
         self._apply_replan_patch(compiled_nodes)
         return compiled_nodes
@@ -1883,6 +1926,11 @@ class ProcessRecoveryPlanner:
                 "bridge_sequence_id",
                 "bridge_sequence_index",
                 "bridge_sequence_length",
+                "bridge_outline_id",
+                "depends_on_outline_ids",
+                "recovery_group_id",
+                "recovery_parent_failure_id",
+                "recovery_kind",
                 "projected_snapshot",
                 "projected_part_entry",
             ):

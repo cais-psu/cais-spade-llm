@@ -7,6 +7,9 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
+    bridge_process_schema_registry,
+)
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
 )
@@ -38,42 +41,27 @@ _PHASE_TITLES: dict[str, str] = {
 # Response schemas
 # ---------------------------------------------------------------------------
 
-_OUTLINE_TASK_SCHEMA: dict[str, Any] = {
+_OUTLINE_EVENT_INSTANCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "outline_id": {"type": "string"},
-        "resource_jid": {"type": "string"},
-        "description": {"type": "string"},
-        "part_name": {"type": "string"},
-        "expected_start_state": {"type": "object"},
-        "expected_end_state": {"type": "object"},
+        "event_schema_id": {"type": "string"},
+        "surface_event_name": {"type": "string"},
+        "surface_description": {"type": "string"},
+        "resource_binding": {"type": "string"},
+        "object_bindings": {"type": "object"},
+        "parameters": {"type": "object"},
+        "depends_on": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "rationale": {"type": "string"},
     },
     "required": [
-        "outline_id",
-        "resource_jid",
-        "description",
-        "expected_start_state",
-        "expected_end_state",
-    ],
-}
-
-_OUTLINE_CANDIDATE_ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "resource_jid": {"type": "string"},
-        "event_name": {"type": "string"},
-        "part_name": {"type": "string"},
-        "target_ref": {"type": "string"},
-        "description": {"type": "string"},
-        "expected_start_state": {"type": "object"},
-        "expected_end_state": {"type": "object"},
-    },
-    "required": [
-        "resource_jid",
-        "event_name",
-        "description",
-        "expected_start_state",
-        "expected_end_state",
+        "resource_binding",
+        "object_bindings",
+        "parameters",
+        "rationale",
     ],
 }
 
@@ -86,10 +74,10 @@ def _outline_incremental_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
-                "next_transition": deepcopy(_OUTLINE_TASK_SCHEMA),
+                "next_transition": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
                 "transition_suffix": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
+                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
                 },
             },
             "required": ["thought", "next_transition"],
@@ -113,7 +101,7 @@ def _outline_candidates_response_schema(
                     "type": "array",
                     "minItems": 1,
                     "maxItems": normalized_bound,
-                    "items": deepcopy(_OUTLINE_CANDIDATE_ACTION_SCHEMA),
+                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
                 },
             },
             "required": ["thought", "candidate_events"],
@@ -131,7 +119,7 @@ def _outline_single_pass_response_schema() -> dict[str, Any]:
                 "thought": {"type": "string"},
                 "transition_trace": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_TASK_SCHEMA),
+                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
                 },
             },
             "required": ["thought", "transition_trace"],
@@ -422,7 +410,12 @@ _PROMPT_PERSISTENT_FINDING_CODES = {
     "holder_conflict",
     "required_part_not_held",
     "part_relocation_without_carrier",
+    "resource_validation_unavailable",
     "source_reference_unavailable",
+    "unsatisfied_guard_predicate",
+    "unknown_location_binding",
+    "unknown_product_binding",
+    "unknown_resource_binding",
 }
 
 
@@ -432,6 +425,13 @@ def _feedback_render_style_token(session_state: dict[str, Any]) -> str:
 
 def _finding_constraint_code_token(finding: dict[str, Any]) -> str:
     return str(finding.get("constraint_code") or "").strip().lower()
+
+
+def _finding_durable(finding: dict[str, Any]) -> bool:
+    durable = finding.get("durable")
+    if durable is not None:
+        return bool(durable)
+    return _finding_constraint_code_token(finding) in _PROMPT_PERSISTENT_FINDING_CODES
 
 
 def _task_target_ref(task: dict[str, Any], finding: dict[str, Any] | None = None) -> str:
@@ -577,12 +577,86 @@ def _finding_state_evidence_text(
     if current_location:
         facts.append(f"current_location={current_location}")
 
+    unsatisfied_predicates = [
+        str(item).strip()
+        for item in (finding.get("unsatisfied_predicates") or [])
+        if str(item).strip()
+    ]
+    if unsatisfied_predicates:
+        facts.append("unsatisfied_predicates=" + ",".join(unsatisfied_predicates))
+
     return "; ".join(facts) if facts else "projected_state_facts=not_available"
 
 
 def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
+    stage = str(finding.get("stage") or "").strip().lower()
     constraint_code = _finding_constraint_code_token(finding)
     constraint_family = str(finding.get("constraint_family") or "").strip().lower()
+
+    if stage in {"ontology_binding", "schema_grounding"}:
+        return {
+            "event_status": "disabled",
+            "diagnosis": "ontology_or_schema_binding_failed",
+            "guard_or_condition": (
+                "candidate event instance does not bind cleanly to the PPR entity/schema model"
+            ),
+            "re_enablement": (
+                "bind the event to known resources/products/locations and a registered event schema"
+            ),
+        }
+
+    if stage == "plant_enabledness":
+        unsatisfied = [
+            str(item).strip()
+            for item in (finding.get("unsatisfied_predicates") or [])
+            if str(item).strip()
+        ]
+        predicate_text = ", ".join(unsatisfied) if unsatisfied else "event guard predicates"
+        return {
+            "event_status": "disabled",
+            "diagnosis": "event_not_enabled",
+            "guard_or_condition": f"plant guard predicates are false: {predicate_text}",
+            "re_enablement": (
+                str(finding.get("retry_hint") or "").strip()
+                or "first satisfy the missing plant guard predicates"
+            ),
+        }
+
+    if stage == "supervisor_admissibility":
+        return {
+            "event_status": "blocked_by_supervisor",
+            "diagnosis": "supervisor_admissibility_block",
+            "guard_or_condition": (
+                "candidate event is not admissible under the current ordering or safety supervisor"
+            ),
+            "re_enablement": (
+                "choose an enabled event whose projected successor remains supervisor-admissible"
+            ),
+        }
+
+    if stage == "marked_progress":
+        return {
+            "event_status": "nonprogressing",
+            "diagnosis": "marked_progress_failure",
+            "guard_or_condition": (
+                "candidate event is enabled but does not reduce the marked-state recovery gap"
+            ),
+            "re_enablement": (
+                "choose an enabled event that strictly reduces the active continuation blockers"
+            ),
+        }
+
+    if stage == "resource_realizability":
+        return {
+            "event_status": "disabled",
+            "diagnosis": "resource_realizability_failure",
+            "guard_or_condition": (
+                "resource-specific realizability rejected the event instance after plant/supervisor checks"
+            ),
+            "re_enablement": (
+                "choose an enabled event whose bindings are feasible for the acting resource"
+            ),
+        }
 
     if constraint_code in {
         "unknown_location_token",
@@ -709,7 +783,7 @@ def _render_des_event_diagnostic(
         f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
         f" | re_enablement={diagnostic['re_enablement']}"
     )
-    if _finding_constraint_code_token(finding) in _PROMPT_PERSISTENT_FINDING_CODES:
+    if _finding_durable(finding):
         line += (
             " | persistence=diagnosis persists until the relevant projected state facts change"
         )
@@ -786,17 +860,21 @@ def _outline_validation_summary(
         task_id = str(finding.get("task_id") or "").strip()
         resource_jid = str(finding.get("resource_jid") or "").strip()
         part_name = str(finding.get("part_name") or "").strip()
+        stage = str(finding.get("stage") or "").strip()
         constraint_code = str(finding.get("constraint_code") or "").strip()
         reason = str(finding.get("reason") or "").strip()
 
         label_parts = [item for item in (task_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "validation finding"
-        if constraint_code and reason:
-            lines.append(f"- {label} [{constraint_code}]: {reason}")
+        code_label = constraint_code
+        if stage:
+            code_label = f"{stage}:{constraint_code}" if constraint_code else stage
+        if code_label and reason:
+            lines.append(f"- {label} [{code_label}]: {reason}")
         elif reason:
             lines.append(f"- {label}: {reason}")
-        elif constraint_code:
-            lines.append(f"- {label} [{constraint_code}]")
+        elif code_label:
+            lines.append(f"- {label} [{code_label}]")
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -821,6 +899,9 @@ def _effective_task_part_holder(
 
 def _structured_task_action_summary(task: dict[str, Any]) -> str:
     event_name = str(task.get("event_name") or "").strip()
+    event_schema_id = str(task.get("event_schema_id") or "").strip()
+    surface_event_name = str(task.get("surface_event_name") or "").strip()
+    surface_description = str(task.get("surface_description") or "").strip()
     part_name = str(task.get("part_name") or "").strip()
     target_ref = str(task.get("target_ref") or "").strip()
     if event_name:
@@ -832,6 +913,24 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
         if target_ref and target_ref.lower() not in lower_summary:
             summary = f"{summary} to {target_ref}"
         return summary
+    if surface_event_name or surface_description:
+        surface_summary = surface_event_name or surface_description
+        if event_schema_id:
+            return f"{surface_summary} -> {event_schema_id}"
+        return surface_summary
+    if event_schema_id:
+        object_bindings = {
+            str(key).strip(): str(value).strip()
+            for key, value in dict(task.get("bridge_event_instance") or {}).get("object_bindings", {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        binding_text = ", ".join(
+            f"{key}={value}"
+            for key, value in sorted(object_bindings.items())
+        )
+        if binding_text:
+            return f"{event_schema_id} ({binding_text})"
+        return event_schema_id
 
     resource_jid = str(task.get("resource_jid") or "").strip()
     start_state = dict(task.get("expected_start_state") or {})
@@ -1798,6 +1897,7 @@ _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
     "required_part_not_held",
     "source_reference_unavailable",
     "part_relocation_without_carrier",
+    "resource_validation_unavailable",
     "safety_rule_violation",
     "blocker_open",
     "dependency_unsatisfied",
@@ -1812,10 +1912,11 @@ def _finding_currently_applicable_for_pruned_actions(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
 ) -> bool:
-    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
-    if not constraint_code:
+    if not _finding_durable(finding):
         return False
-    if constraint_code not in _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES:
+    stage = str(finding.get("stage") or "").strip().lower()
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
+    if not constraint_code and not stage:
         return False
 
     resource_jid = str(
@@ -1830,6 +1931,40 @@ def _finding_currently_applicable_for_pruned_actions(
     ).strip()
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     part_row = dict(parts_by_name.get(part_name) or {})
+
+    if stage == "plant_enabledness":
+        unsatisfied_predicates = {
+            str(item).strip()
+            for item in (finding.get("unsatisfied_predicates") or [])
+            if str(item).strip()
+        }
+        if any(predicate.startswith("holds(") for predicate in unsatisfied_predicates):
+            actual_held = str(resource_row.get("held_part") or "").strip()
+            current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
+            return bool(resource_jid and part_name and (actual_held != part_name or current_holder != resource_jid))
+        if any(
+            predicate.startswith("observed_pose(") or predicate.startswith("available_source(")
+            for predicate in unsatisfied_predicates
+        ):
+            observed_pose = dict(part_row.get("observed_pose") or {})
+            current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
+            current_location = str(part_row.get("current_location") or "").strip()
+            return bool(part_name and not current_holder and not current_location and not observed_pose)
+        return True
+
+    if stage == "supervisor_admissibility":
+        return True
+
+    if stage == "resource_realizability":
+        if constraint_code == "workspace_unreachable":
+            current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
+            current_state = str(part_row.get("current_state") or "").strip().lower()
+            current_location = str(part_row.get("current_location") or "").strip()
+            if current_holder or current_state in {"held", "in_gripper", "assembled", "placed"}:
+                return False
+            if current_location:
+                return False
+        return True
 
     if constraint_code == "workspace_unreachable":
         current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
@@ -2509,6 +2644,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         if isinstance(row, dict)
     ]
     candidate_rejection_history = _candidate_rejection_history(session_state)
+    available_schema_ids = sorted(bridge_process_schema_registry().keys())
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
     recent_candidate_diagnostic_signatures = (
@@ -2544,10 +2680,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text = (
             "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Synthesis (single pass).\n"
-            "Propose ALL recovery events as an ordered transition trace, "
+            "Propose ALL recovery events as typed DES/PPR event instances, "
             "serialized in JSON field `transition_trace`.\n"
-            "Each row must be one recovery transition: one concrete physical action "
-            "for one resource, with source-state and target-state predicates."
+            "Each row must be one enabled recovery event instance for one resource. "
+            "Do not author state deltas. Product derives projected state."
         )
     elif is_candidate_mode:
         candidate_bound = int(
@@ -2557,9 +2693,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text = (
             "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Candidate Selection.\n"
-            "Choose grounded recovery events enabled by the current symbolic state.\n"
+            "Choose grounded DES recovery event instances enabled by the current symbolic state.\n"
             "Accepted events extend the recovery trace toward marked-state conditions.\n"
-            "The runtime supervisor may validate and commit at most one event."
+            "The runtime supervisor may validate and commit at most one event.\n"
+            "Return event instances only; Product derives state projection and effects."
         )
         if candidate_rejection_feedback or candidate_rejection_history:
             role_text += (
@@ -2571,7 +2708,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
             "Current phase: Recovery Event Synthesis (one transition at a time).\n"
-            "Propose exactly ONE next transition to append after the accepted "
+            "Propose exactly ONE next typed DES event instance to append after the accepted "
             "transition prefix, serialized in JSON field `next_transition`.\n"
             "You may include an optional transition suffix, serialized in JSON "
             "field `transition_suffix`, to show your intended remaining trace; "
@@ -2644,6 +2781,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 projected_resources=projected_resources,
                 projected_parts=projected_parts,
             ),
+            "",
+            "Registered Process Schemas",
+            "- " + "\n- ".join(available_schema_ids),
             # Experiment: keep raw observed poses and workspace bounds visible,
             # but do not precompute the resource/part workspace relationship.
         ])
@@ -2708,28 +2848,19 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Controllable Event JSON Template",
             """```json
 {
-  "thought": "WHY THESE EVENTS ARE ENABLED FROM THE CURRENT STATE",
+  "thought": "WHY THESE EVENT INSTANCES ARE ENABLED FROM THE CURRENT PLANT STATE",
   "candidate_events": [
     {
-      "resource_jid": "RESOURCE_JID",
-      "event_name": "UNIQUE_DES_EVENT_LABEL",
-      "description": "STATE-BASED EVENT INTENT (cite source-state predicates and target-state deltas)",
-      "part_name": "OPTIONAL_PART_NAME",
-      "target_ref": "OPTIONAL_GROUNDED_TARGET_REF",
-      "expected_start_state": {
-        "resource_state": "SOURCE_RESOURCE_STATE",
-        "held_part": "PART_NAME_OR_NULL",
-        "part_state": "SOURCE_PART_STATE_OR_NULL",
-        "part_location": "SOURCE_PART_LOCATION_OR_NULL",
-        "part_holder_resource_jid": "HOLDER_JID_OR_NULL"
+      "surface_event_name": "pick_lg_from_observed_pose",
+      "surface_description": "establish control of LG from observed_pose with ur5e",
+      "resource_binding": "ur5e@localhost",
+      "object_bindings": {
+        "part": "LG",
+        "source_location": "observed_pose"
       },
-      "expected_end_state": {
-        "resource_state": "TARGET_RESOURCE_STATE",
-        "held_part": "PART_NAME_OR_NULL",
-        "part_state": "TARGET_PART_STATE_OR_NULL",
-        "part_location": "TARGET_PART_LOCATION_OR_NULL",
-        "part_holder_resource_jid": "HOLDER_JID_OR_NULL"
-      }
+      "parameters": {},
+      "depends_on": [],
+      "rationale": "pick_part is enabled because LG is visible at observed_pose and ur5e is free to establish control of LG"
     }
   ]
 }
@@ -2758,26 +2889,24 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         constraints.extend([
             "- Return JSON with field `candidate_events`.",
             f"- `candidate_events` contains 1 to {candidate_bound} candidate events.",
-            "- Each event is one physical action by one listed resource.",
-            "- Each event must include resource_jid, event_name, description, expected_start_state, and expected_end_state.",
-            "- Use part_name and target_ref only when applicable.",
+            "- Each event is one atomic recovery proposal by one listed resource.",
+            "- Each event must include resource_binding, object_bindings, parameters, and rationale.",
+            "- You may include surface_event_name and/or surface_description; Product will normalize them to the closed canonical DES event alphabet.",
+            "- event_schema_id is optional hint-only metadata, not authoritative runtime semantics.",
+            "- Use depends_on only to reference already accepted outline ids or explicit ids you provide in the same trace.",
             "- Use only listed resources, parts, and grounded target refs.",
             f"- Returning fewer than {candidate_bound} rows is valid when fewer grounded candidates are worth proposing.",
+            "- If your idea is multi-step or compound, split it into separate atomic candidate rows instead of inventing a new combined semantic event.",
         ])
     else:
         constraints.extend([
             "- Use only the listed resources.",
-            "- Each transition is one physical action by one resource.",
+            "- Each transition is one typed DES/PPR event instance by one resource.",
         ])
     constraints.extend([
-        "- expected_start_state is the source-state predicate snapshot; "
-        "expected_end_state is the target-state predicate snapshot.",
-        "- The description must include guard/feasibility reasoning: why the source state enables the event and what target predicates change.",
-        "- expected_start_state and expected_end_state may use only: "
-        "resource_state, held_part, part_state, part_location, part_holder_resource_jid.",
-        "- Use flat scalar values in state objects.",
-        "- Use JSON null (not the string \"-\" or \"null\") for unset scalar state fields. "
-        "A `null` rendered in Grounded Event Facts maps to JSON null in your output.",
+        "- Do not author expected_start_state or expected_end_state in outline mode.",
+        "- Bind only entities and location tokens grounded in the current plant state or the registered process schemas.",
+        "- Rationale should explain enabledness, unsatisfied blockers being cleared, or why the candidate reduces the marked-state gap.",
     ])
 
     if is_single_pass:

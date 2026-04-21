@@ -553,6 +553,19 @@ def normalize_primitive_bridge_proposal(
         logger.warning("[EnvironmentModel] Bridge proposal has no macro_tasks/primitive_steps.")
         return None
 
+    outline_ids_in_order: list[str] = []
+    seen_outline_ids: set[str] = set()
+    for index, raw_task in enumerate(raw_macro_tasks, start=1):
+        outline_id = _normalize_optional_name(raw_task.get("outline_id")) or f"bridge_outline_{index}"
+        if outline_id in seen_outline_ids:
+            logger.warning(
+                "[EnvironmentModel] Bridge proposal has duplicate outline_id %r.",
+                outline_id,
+            )
+            return None
+        seen_outline_ids.add(outline_id)
+        outline_ids_in_order.append(outline_id)
+
     projected_resource_snapshots: dict[str, dict[str, Any]] = {
         resource_jid: deepcopy(entry.get("bridge_snapshot") or {})
         for resource_jid, entry in resources.items()
@@ -564,6 +577,40 @@ def normalize_primitive_bridge_proposal(
         if not isinstance(raw_task, dict):
             logger.warning("[EnvironmentModel] Bridge macro_task %d must be an object.", index)
             return None
+        outline_id = outline_ids_in_order[index - 1]
+        raw_depends_on = raw_task.get("depends_on")
+        depends_on: list[str] = []
+        if isinstance(raw_depends_on, list):
+            depends_on = [
+                str(item).strip()
+                for item in raw_depends_on
+                if str(item).strip()
+            ]
+        elif "depends_on" not in raw_task and index > 1:
+            depends_on = [outline_ids_in_order[index - 2]]
+        for dependency in depends_on:
+            if dependency not in seen_outline_ids:
+                logger.warning(
+                    "[EnvironmentModel] Bridge macro_task %d depends on unknown outline_id %r.",
+                    index,
+                    dependency,
+                )
+                return None
+            if dependency == outline_id:
+                logger.warning(
+                    "[EnvironmentModel] Bridge macro_task %d cannot depend on itself (%r).",
+                    index,
+                    outline_id,
+                )
+                return None
+            dependency_index = outline_ids_in_order.index(dependency)
+            if dependency_index >= index:
+                logger.warning(
+                    "[EnvironmentModel] Bridge macro_task %d depends on %r, but bridge outlines must remain topologically ordered.",
+                    index,
+                    dependency,
+                )
+                return None
 
         resource_jid = str(raw_task.get("resource_jid") or parsed.get("resource_jid") or "").strip() or ra_jid
         resource_entry = resources.get(resource_jid)
@@ -799,6 +846,8 @@ def normalize_primitive_bridge_proposal(
             else None
         )
         normalized_task = {
+            "outline_id": outline_id,
+            "depends_on": depends_on,
             "resource_jid": resource_jid,
             "macro_name": macro_name,
             "description": str(raw_task.get("description") or parsed.get("description") or "").strip(),

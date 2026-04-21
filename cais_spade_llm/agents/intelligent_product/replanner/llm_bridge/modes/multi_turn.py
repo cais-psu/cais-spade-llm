@@ -15,6 +15,16 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_validation_service import (
+    validate_bridge_candidate_event,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
+    BridgeEventInstance,
+    BridgeValidationFinding,
+    build_bridge_validation_context,
+    parse_bridge_event_instance,
+    validate_bridge_event_instance,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
     compile_grounded_outline_task,
 )
@@ -76,6 +86,11 @@ _DURABLE_PRUNED_CONSTRAINT_CODES = {
     "required_part_not_held",
     "source_reference_unavailable",
     "part_relocation_without_carrier",
+    "resource_validation_unavailable",
+    "unsatisfied_guard_predicate",
+    "unknown_location_binding",
+    "unknown_product_binding",
+    "unknown_resource_binding",
     "safety_rule_violation",
     "blocker_open",
     "dependency_unsatisfied",
@@ -1322,6 +1337,118 @@ def _validate_outline_task_cca(
     ]
 
 
+def _stage_finding(
+    *,
+    stage: str,
+    code: str,
+    reason: str,
+    task: dict[str, Any] | BridgeEventInstance | None = None,
+    resource_jid: str = "",
+    part_name: str = "",
+    unsatisfied_predicates: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
+    retry_hint: str = "",
+) -> dict[str, Any]:
+    if isinstance(task, BridgeEventInstance):
+        task_id = str(task.outline_id or "").strip()
+        resource_jid = resource_jid or str(task.resource_binding or "").strip()
+        part_name = part_name or str(task.object_bindings.get("part") or "").strip()
+    else:
+        task_dict = dict(task or {})
+        task_id = str(task_dict.get("outline_id") or "").strip()
+        resource_jid = resource_jid or str(task_dict.get("resource_jid") or "").strip()
+        part_name = part_name or str(task_dict.get("part_name") or "").strip()
+    finding = BridgeValidationFinding(
+        stage=stage,
+        code=code,
+        reason=reason,
+        task_id=task_id,
+        resource_jid=resource_jid,
+        part_name=part_name,
+        unsatisfied_predicates=list(unsatisfied_predicates or []),
+        evidence=deepcopy(evidence or {}),
+        retry_hint=retry_hint,
+    )
+    return finding.to_dict()
+
+
+def _translate_resource_findings_to_stage(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    for finding in findings:
+        row = deepcopy(dict(finding or {}))
+        translated.append(
+            _stage_finding(
+                stage="resource_realizability",
+                code=str(row.get("constraint_code") or "resource_realizability_rejected").strip(),
+                reason=str(row.get("reason") or "resource realizability rejected the candidate event").strip(),
+                resource_jid=str(row.get("resource_jid") or "").strip(),
+                part_name=str(row.get("part_name") or "").strip(),
+                evidence=deepcopy(row.get("evidence") or {}),
+            )
+        )
+    return translated
+
+
+def _translate_cca_findings_to_stage(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    for finding in findings:
+        row = deepcopy(dict(finding or {}))
+        constraint_code = str(row.get("constraint_code") or "supervisor_blocked").strip()
+        translated.append(
+            _stage_finding(
+                stage="supervisor_admissibility",
+                code=constraint_code,
+                reason=str(row.get("reason") or "supervisor rejected the candidate event").strip(),
+                resource_jid=str(row.get("resource_jid") or "").strip(),
+                part_name=str(row.get("part_name") or "").strip(),
+                evidence=deepcopy(row.get("evidence") or {}),
+            )
+        )
+    return translated
+
+
+def _event_instance_from_candidate_task(
+    *,
+    candidate_task: dict[str, Any],
+    outline_id: str,
+) -> BridgeEventInstance:
+    return parse_bridge_event_instance(
+        candidate_task,
+        outline_id=outline_id,
+    )
+
+
+def _validate_and_derive_outline_event_instance(
+    *,
+    planner: Any,
+    candidate_task: dict[str, Any],
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    event_instance = _event_instance_from_candidate_task(
+        candidate_task=candidate_task,
+        outline_id=str(candidate_task.get("outline_id") or "").strip(),
+    )
+    validation_result = validate_bridge_candidate_event(
+        planner=planner,
+        event_instance=event_instance,
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        progress_evaluator=_candidate_progress_score,
+    )
+    normalized_task = (
+        deepcopy(dict(validation_result.normalized_task or {}))
+        if validation_result.ok
+        else None
+    )
+    grounded_action = deepcopy(dict(validation_result.grounded_action or {})) or None
+    return normalized_task, validation_result.finding_dicts(), grounded_action
+
+
 def _validate_single_outline_task(
     *,
     planner: Any,
@@ -1947,11 +2074,28 @@ def _preparatory_transit_toward_blocker(
 
 
 def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
+    object_bindings = {
+        str(key).strip(): str(value).strip()
+        for key, value in dict(task.get("object_bindings") or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
     return json.dumps(
         {
-            "resource_jid": str(task.get("resource_jid") or "").strip(),
+            "event_schema_id": str(
+                task.get("event_schema_id")
+                or dict(task.get("bridge_event_instance") or {}).get("event_schema_id")
+                or ""
+            ).strip(),
+            "surface_event_name": str(task.get("surface_event_name") or "").strip(),
+            "surface_description": str(task.get("surface_description") or "").strip(),
+            "resource_jid": str(
+                task.get("resource_jid")
+                or task.get("resource_binding")
+                or ""
+            ).strip(),
             "part_name": str(task.get("part_name") or "").strip(),
             "target_ref": str(task.get("target_ref") or "").strip(),
+            "object_bindings": object_bindings,
             "effect": _candidate_effect_match_key(task),
         },
         sort_keys=True,
@@ -1960,6 +2104,9 @@ def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
 
 
 def _is_durable_candidate_finding(finding: dict[str, Any]) -> bool:
+    durable = finding.get("durable")
+    if durable is not None:
+        return bool(durable)
     constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     return constraint_code in _DURABLE_PRUNED_CONSTRAINT_CODES
 
@@ -1986,6 +2133,7 @@ def _current_candidate_state_signature(
         or ""
     ).strip()
     target_ref = str(task.get("target_ref") or "").strip()
+    stage = str(finding.get("stage") or "").strip().lower()
     constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     part_row = dict(parts_by_name.get(part_name) or {})
@@ -1994,12 +2142,37 @@ def _current_candidate_state_signature(
         prepared_bridge_request=prepared_bridge_request,
     )
     payload: dict[str, Any] = {
+        "stage": stage,
         "constraint_code": constraint_code,
         "resource_jid": resource_jid,
         "part_name": part_name,
         "target_ref": target_ref,
     }
-    if constraint_code == "workspace_unreachable":
+    if stage == "plant_enabledness":
+        payload.update({
+            "unsatisfied_predicates": [
+                str(item).strip()
+                for item in (finding.get("unsatisfied_predicates") or [])
+                if str(item).strip()
+            ],
+            "resource_held_part": str(resource_row.get("held_part") or "").strip(),
+            "part_current_holder_resource_jid": str(
+                part_row.get("current_holder_resource_jid") or ""
+            ).strip(),
+            "part_current_location": str(part_row.get("current_location") or "").strip(),
+            "has_observed_pose": bool(dict(part_row.get("observed_pose") or {})),
+        })
+    elif stage == "supervisor_admissibility":
+        payload.update({
+            "condition_ids": list(finding.get("condition_ids") or []),
+            "rule_id": str(finding.get("rule_id") or "").strip(),
+            "active_blockers": [
+                str(row.get("summary") or "").strip()
+                for row in active_blockers
+                if isinstance(row, dict) and str(row.get("summary") or "").strip()
+            ],
+        })
+    elif stage == "resource_realizability" and constraint_code == "workspace_unreachable":
         payload.update({
             "part_current_location": str(part_row.get("current_location") or "").strip(),
             "part_current_holder_resource_jid": str(
@@ -2509,26 +2682,21 @@ def _normalize_candidate_task(
     raw_task = deepcopy(task or {})
     original_outline_id = str(raw_task.get("outline_id") or "").strip()
     normalized: dict[str, Any] = {
-        "resource_jid": str(raw_task.get("resource_jid") or "").strip(),
+        "resource_binding": str(raw_task.get("resource_binding") or "").strip(),
+        "event_schema_id": str(raw_task.get("event_schema_id") or "").strip(),
+        "object_bindings": {
+            str(key).strip(): str(value).strip()
+            for key, value in dict(raw_task.get("object_bindings") or {}).items()
+            if str(key).strip() and str(value).strip()
+        },
+        "parameters": deepcopy(dict(raw_task.get("parameters") or {})),
+        "depends_on": [
+            str(item).strip()
+            for item in (raw_task.get("depends_on") or [])
+            if str(item).strip()
+        ],
+        "rationale": str(raw_task.get("rationale") or "").strip(),
     }
-    event_name = str(raw_task.get("event_name") or "").strip()
-    description = str(raw_task.get("description") or "").strip()
-    part_name = str(raw_task.get("part_name") or "").strip()
-    target_ref = _candidate_target_ref_from_surface_task(raw_task)
-    if event_name:
-        normalized["event_name"] = event_name
-    if description:
-        normalized["description"] = description
-    if part_name:
-        normalized["part_name"] = part_name
-    if target_ref:
-        normalized["target_ref"] = target_ref
-    raw_start_state = raw_task.get("expected_start_state")
-    if isinstance(raw_start_state, dict):
-        normalized["expected_start_state"] = deepcopy(raw_start_state)
-    raw_end_state = raw_task.get("expected_end_state")
-    if isinstance(raw_end_state, dict):
-        normalized["expected_end_state"] = deepcopy(raw_end_state)
     if original_outline_id:
         normalized["llm_outline_id"] = original_outline_id
     normalized["outline_id"] = _candidate_outline_id(
@@ -3801,13 +3969,17 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
     _active_primitive_outline_event,
+    _missing_primitive_outline_events,
     _primitive_feedback_row,
     _primitive_catalog_for_resource,
     _primitive_resource_sequence_findings,
     _primitive_start_snapshot,
     _primitive_grounding_context,
     _primitive_projected_snapshot_matches_event,
+    _validate_single_event_primitive_steps,
+    _accepted_program_row,
     build_primitive_generation_prompt_context,
+    generate_primitive_batch_with_llm_agent,
     _handle_primitive_generation_phase,
 )
 
@@ -3907,11 +4079,18 @@ _ARTIFACT_TASK_KEYS = (
     "outline_id",
     "candidate_outline_id",
     "llm_outline_id",
+    "event_schema_id",
+    "resource_binding",
     "resource_jid",
     "event_name",
     "description",
     "part_name",
     "target_ref",
+    "object_bindings",
+    "parameters",
+    "depends_on",
+    "rationale",
+    "bridge_event_instance",
     "action_target",
     "expected_start_state",
     "expected_end_state",
@@ -3935,6 +4114,8 @@ def _compact_artifact_finding(finding: Any) -> dict[str, Any]:
         return {}
     compact: dict[str, Any] = {}
     for key in (
+        "stage",
+        "code",
         "constraint_code",
         "constraint_family",
         "constraint_owner",
@@ -3942,6 +4123,8 @@ def _compact_artifact_finding(finding: Any) -> dict[str, Any]:
         "part_name",
         "task_id",
         "reason",
+        "retry_hint",
+        "unsatisfied_predicates",
     ):
         value = finding.get(key)
         if value in (None, "", [], {}):
@@ -4446,13 +4629,31 @@ def normalize_multi_turn_final_output_to_bridge_proposal(
             primitive_row=primitive_row,
             prepared_bridge_request=prepared_bridge_request,
         )
+        depends_on = [
+            str(item).strip()
+            for item in (
+                primitive_row.get("depends_on")
+                or transition_event.get("depends_on")
+                or []
+            )
+            if str(item).strip()
+        ]
         macro_tasks.append(
             {
+                "outline_id": outline_id,
+                "event_schema_id": str(
+                    transition_event.get("event_schema_id")
+                    or dict(transition_event.get("bridge_event_instance") or {}).get("event_schema_id")
+                    or primitive_row.get("event_schema_id")
+                    or ""
+                ).strip(),
+                "depends_on": depends_on,
                 "resource_jid": resource_jid,
                 "macro_name": str(
                     primitive_row.get("event_name")
                     or transition_event.get("action_name")
                     or transition_event.get("event_name")
+                    or transition_event.get("event_schema_id")
                     or outline_id
                 ).strip(),
                 "description": str(
@@ -4469,6 +4670,9 @@ def normalize_multi_turn_final_output_to_bridge_proposal(
                     or transition_event.get("part_name")
                     or ""
                 ).strip(),
+                "bridge_event_instance": deepcopy(
+                    transition_event.get("bridge_event_instance") or {}
+                ),
                 "task_params": task_params,
                 "task_metadata": task_metadata,
                 "primitive_steps": primitive_steps,
@@ -4544,6 +4748,7 @@ def _build_final_output_payload(
         executable_trace.append({
             "outline_id": outline_id,
             "des_event_id": outline_id,
+            "event_schema_id": str(event.get("event_schema_id") or "").strip() or None,
             "event_name": str(
                 event.get("event_name")
                 or primitive_row.get("event_name")
@@ -4553,6 +4758,7 @@ def _build_final_output_payload(
             "part_name": str(event.get("part_name") or "").strip() or None,
             "target_ref": str(event.get("target_ref") or "").strip() or None,
             "description": str(event.get("description") or "").strip(),
+            "bridge_event_instance": deepcopy(event.get("bridge_event_instance") or {}),
             "expected_start_state": deepcopy(event.get("expected_start_state") or {}),
             "expected_end_state": deepcopy(event.get("expected_end_state") or {}),
             "primitive_steps": deepcopy(primitive_row.get("primitive_steps") or []),
@@ -4674,6 +4880,342 @@ def _write_per_turn_artifact(
 
 
 # ---------------------------------------------------------------------------
+# Resource-owned primitive batching
+# ---------------------------------------------------------------------------
+
+
+def _ordered_accepted_primitive_program(
+    *,
+    session_state: dict[str, Any],
+    rows_by_outline_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ordered_rows: list[dict[str, Any]] = []
+    for outline_event in (session_state.get("accepted_outline_prefix") or []):
+        if not isinstance(outline_event, dict):
+            continue
+        outline_id = str(outline_event.get("outline_id") or "").strip()
+        row = dict(rows_by_outline_id.get(outline_id) or {})
+        if not row:
+            continue
+        ordered_rows.append(deepcopy(row))
+    return ordered_rows
+
+
+def _resource_outline_batches(
+    session_state: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    missing_events = _missing_primitive_outline_events(session_state)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in missing_events:
+        resource_jid = str(event.get("resource_jid") or "").strip()
+        if not resource_jid:
+            continue
+        grouped.setdefault(resource_jid, []).append(deepcopy(event))
+    return grouped
+
+
+async def _run_resource_primitive_batch(
+    *,
+    planner: Any,
+    prepared_bridge_request: dict[str, Any],
+    session_state: dict[str, Any],
+    resource_jid: str,
+    assigned_outline_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    resource_agents = _resource_agent_map(planner)
+    resource_agent = resource_agents.get(resource_jid)
+    product_agent = getattr(planner, "product_agent", None)
+    batch_fn = getattr(resource_agent, "generate_bridge_primitives_batch", None)
+    carried_session_state = {
+        "observation_store": deepcopy(session_state.get("observation_store") or {}),
+        "primitive_authoring_memo": deepcopy(
+            session_state.get("primitive_authoring_memo") or []
+        ),
+        "symbolic_resources": deepcopy(session_state.get("symbolic_resources") or {}),
+        "symbolic_parts": deepcopy(session_state.get("symbolic_parts") or {}),
+    }
+
+    if callable(batch_fn):
+        return await batch_fn(
+            bridge_session_id=str(
+                dict(prepared_bridge_request.get("bridge_session") or {}).get("session_id")
+                or ""
+            ).strip(),
+            resource_jid=resource_jid,
+            assigned_outline_events=assigned_outline_events,
+            prepared_bridge_request=prepared_bridge_request,
+            carried_session_state=carried_session_state,
+        )
+
+    llm_owner = resource_agent
+    if not callable(getattr(llm_owner, "ask_llm_structured", None)):
+        llm_owner = product_agent
+    return await generate_primitive_batch_with_llm_agent(
+        llm_agent=llm_owner,
+        prepared_bridge_request=prepared_bridge_request,
+        assigned_outline_events=assigned_outline_events,
+        bridge_session_id=str(
+            dict(prepared_bridge_request.get("bridge_session") or {}).get("session_id")
+            or ""
+        ).strip(),
+        carried_session_state=carried_session_state,
+    )
+
+
+def _validate_resource_primitive_batch(
+    *,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    resource_jid: str,
+    assigned_outline_events: list[dict[str, Any]],
+    primitive_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    assigned_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): deepcopy(row)
+        for row in (assigned_outline_events or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    proposed_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): deepcopy(row)
+        for row in (primitive_rows or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    validation_feedback: list[dict[str, Any]] = []
+    accepted_rows: list[dict[str, Any]] = []
+    validation_state = deepcopy(session_state)
+    validation_state["accepted_primitive_program"] = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_primitive_program") or [])
+        if isinstance(row, dict)
+        and str(row.get("resource_jid") or "").strip() == resource_jid
+    ]
+
+    for outline_event in assigned_outline_events:
+        outline_id = str(outline_event.get("outline_id") or "").strip()
+        row = dict(proposed_by_outline_id.get(outline_id) or {})
+        if not row:
+            validation_feedback.append(
+                _primitive_feedback_row(
+                    outline_event=outline_event,
+                    constraint_code="primitive_batch_missing_event",
+                    reason=(
+                        f"resource batch for {resource_jid} did not return outline_id {outline_id!r}"
+                    ),
+                )
+            )
+            break
+        returned_resource_jid = str(row.get("resource_jid") or "").strip()
+        if returned_resource_jid != resource_jid:
+            validation_feedback.append(
+                _primitive_feedback_row(
+                    outline_event=outline_event,
+                    constraint_code="primitive_batch_wrong_resource",
+                    reason=(
+                        f"resource batch returned resource_jid {returned_resource_jid!r} "
+                        f"for outline_id {outline_id!r}; expected {resource_jid!r}"
+                    ),
+                )
+            )
+            break
+        primitive_steps = [
+            deepcopy(step)
+            for step in (row.get("primitive_steps") or [])
+            if isinstance(step, dict)
+        ]
+        per_event_result, feedback = _validate_single_event_primitive_steps(
+            session_state=validation_state,
+            prepared_bridge_request=prepared_bridge_request,
+            outline_event=outline_event,
+            primitive_steps=primitive_steps,
+        )
+        if feedback:
+            validation_feedback.extend(deepcopy(feedback))
+            break
+        accepted_row = _accepted_program_row(
+            outline_event=outline_event,
+            primitive_steps=primitive_steps,
+            projected_snapshot=dict(per_event_result.get("projected_snapshot") or {}),
+        )
+        accepted_rows.append(deepcopy(accepted_row))
+        updated_program = [
+            deepcopy(item)
+            for item in (validation_state.get("accepted_primitive_program") or [])
+            if isinstance(item, dict)
+        ]
+        updated_program.append(deepcopy(accepted_row))
+        validation_state["accepted_primitive_program"] = updated_program
+
+    extra_outline_ids = sorted(
+        outline_id
+        for outline_id in proposed_by_outline_id
+        if outline_id and outline_id not in assigned_by_outline_id
+    )
+    if extra_outline_ids and not validation_feedback:
+        validation_feedback.append(
+            _primitive_feedback_row(
+                outline_event=assigned_outline_events[0] if assigned_outline_events else {},
+                constraint_code="primitive_batch_extra_event",
+                reason=(
+                    f"resource batch for {resource_jid} returned unexpected outline_ids: "
+                    f"{extra_outline_ids}"
+                ),
+            )
+        )
+    return accepted_rows, validation_feedback
+
+
+async def _run_resource_owned_primitive_generation_phase(
+    *,
+    planner: Any,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    outline_events = [
+        deepcopy(row)
+        for row in (session_state.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    turn_entry: dict[str, Any] = {
+        "accepted_transition_prefix": deepcopy(outline_events),
+        "des_event_sequence": deepcopy(outline_events),
+        "remaining_outline_events": _missing_primitive_outline_events(session_state),
+    }
+    if not outline_events:
+        feedback = [
+            _primitive_feedback_row(
+                outline_event={},
+                constraint_code="outline_prefix_missing",
+                reason="primitive generation requires an accepted outline prefix",
+            )
+        ]
+        session_state["primitive_rejection_feedback"] = deepcopy(feedback)
+        session_state["status"] = "paused_after_primitive_blocked"
+        turn_entry["primitive_rejection_feedback"] = deepcopy(feedback)
+        return "primitive_blocked", turn_entry, {}
+
+    batches = _resource_outline_batches(session_state)
+    if not batches:
+        session_state["primitive_rejection_feedback"] = []
+        session_state["status"] = "paused_after_primitive_generation"
+        turn_entry["resource_batch_statuses"] = {}
+        return "draft_ready", turn_entry, {}
+
+    _logger.info(
+        "[MultiTurn] primitive_generation: starting %d resource batch(es): %s",
+        len(batches),
+        ", ".join(batch_order for batch_order in sorted(batches)),
+    )
+    batch_order = list(batches.keys())
+    results = await asyncio.gather(
+        *[
+            _run_resource_primitive_batch(
+                planner=planner,
+                prepared_bridge_request=prepared_bridge_request,
+                session_state=session_state,
+                resource_jid=resource_jid,
+                assigned_outline_events=batches[resource_jid],
+            )
+            for resource_jid in batch_order
+        ]
+    )
+
+    existing_rows_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): deepcopy(row)
+        for row in (session_state.get("accepted_primitive_program") or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    batch_statuses: dict[str, Any] = {}
+    merged_rows_by_outline_id = dict(existing_rows_by_outline_id)
+    terminal_feedback: list[dict[str, Any]] = []
+    terminal_decision = "draft_ready"
+
+    for resource_jid, raw_result in zip(batch_order, results):
+        result = deepcopy(raw_result if isinstance(raw_result, dict) else {})
+        decision = str(result.get("decision") or "").strip()
+        primitive_rows = [
+            deepcopy(row)
+            for row in (result.get("primitive_events") or [])
+            if isinstance(row, dict)
+        ]
+        accepted_rows, validation_feedback = _validate_resource_primitive_batch(
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+            resource_jid=resource_jid,
+            assigned_outline_events=batches[resource_jid],
+            primitive_rows=primitive_rows,
+        )
+        if accepted_rows:
+            for row in accepted_rows:
+                outline_id = str(row.get("outline_id") or "").strip()
+                if outline_id:
+                    merged_rows_by_outline_id[outline_id] = deepcopy(row)
+        batch_statuses[resource_jid] = {
+            "decision": decision,
+            "assigned_outline_ids": [
+                str(row.get("outline_id") or "").strip()
+                for row in batches[resource_jid]
+                if str(row.get("outline_id") or "").strip()
+            ],
+            "accepted_outline_ids": [
+                str(row.get("outline_id") or "").strip()
+                for row in accepted_rows
+                if str(row.get("outline_id") or "").strip()
+            ],
+            "feedback": deepcopy(validation_feedback or result.get("feedback") or []),
+            "context_errors": deepcopy(result.get("context_errors") or []),
+            "turn_count": len(result.get("turns") or []),
+        }
+        if validation_feedback and terminal_decision == "draft_ready":
+            terminal_feedback = deepcopy(validation_feedback)
+            terminal_decision = "need_primitive_revision"
+        elif decision in {"primitive_blocked", "primitive_event_stuck", "need_primitive_revision"} and terminal_decision == "draft_ready":
+            terminal_feedback = deepcopy(result.get("feedback") or [])
+            terminal_decision = decision or "need_primitive_revision"
+        _logger.info(
+            "[MultiTurn] primitive_generation: resource batch %s -> %s (accepted=%d assigned=%d)",
+            resource_jid,
+            decision or "unknown",
+            len(accepted_rows),
+            len(batches[resource_jid]),
+        )
+
+    session_state["accepted_primitive_program"] = _ordered_accepted_primitive_program(
+        session_state=session_state,
+        rows_by_outline_id=merged_rows_by_outline_id,
+    )
+    turn_entry["resource_batch_statuses"] = deepcopy(batch_statuses)
+    turn_entry["accepted_primitive_macros"] = deepcopy(
+        session_state.get("accepted_primitive_program") or []
+    )
+    turn_entry["remaining_outline_events"] = _missing_primitive_outline_events(session_state)
+
+    if terminal_decision == "draft_ready" and turn_entry["remaining_outline_events"]:
+        terminal_decision = "need_primitive_revision"
+        terminal_feedback = [
+            _primitive_feedback_row(
+                outline_event=turn_entry["remaining_outline_events"][0],
+                constraint_code="primitive_batch_incomplete",
+                reason="one or more resource primitive batches completed without covering every remaining outline event",
+            )
+        ]
+
+    session_state["primitive_rejection_feedback"] = deepcopy(terminal_feedback)
+    if terminal_decision == "draft_ready":
+        session_state["status"] = "paused_after_primitive_generation"
+    elif terminal_decision == "primitive_event_stuck":
+        session_state["status"] = "paused_after_primitive_stuck"
+    elif terminal_decision == "primitive_blocked":
+        session_state["status"] = "paused_after_primitive_blocked"
+    else:
+        session_state["status"] = "paused_after_primitive_turn"
+    if terminal_feedback:
+        turn_entry["primitive_rejection_feedback"] = deepcopy(terminal_feedback)
+    return terminal_decision, turn_entry, {
+        "resource_batches": results,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main execution loop
 # ---------------------------------------------------------------------------
 
@@ -4720,8 +5262,10 @@ async def execute_multi_turn_bridge(
         phase_text = f"phase={current_phase}"
         status_key = str(status_label or "running").strip().lower()
         suffix = ""
+        emit_debug_only = False
         if status_key == "waiting_for_llm":
             suffix = " | waiting for LLM"
+            emit_debug_only = True
         elif status_key == "still_waiting_for_llm":
             elapsed_text = (
                 f"{max(0.0, float(elapsed_s)):.1f}s elapsed"
@@ -4729,8 +5273,12 @@ async def execute_multi_turn_bridge(
                 else "waiting"
             )
             suffix = f" | still waiting for LLM ({elapsed_text})"
+            emit_debug_only = True
         elif status_key == "response_received":
             suffix = " | response received"
+            emit_debug_only = True
+        elif status_key == "primitive_generation_started":
+            suffix = " | resource-owned primitive generation started"
         elif status_key == "decision":
             decision_text = str(decision or "").strip()
             next_phase_text = str(next_phase or "").strip()
@@ -4741,7 +5289,12 @@ async def execute_multi_turn_bridge(
             elif next_phase_text:
                 suffix = f" | next_phase={next_phase_text}"
         line = f"{turn_text} | {phase_text}{suffix}"
-        if product_logger is not None and hasattr(product_logger, "info"):
+        if emit_debug_only:
+            if product_logger is not None and hasattr(product_logger, "debug"):
+                product_logger.debug("[Product] Live bridge %s", line)
+            else:
+                _logger.debug("[MultiTurn] %s", line)
+        elif product_logger is not None and hasattr(product_logger, "info"):
             product_logger.info("[Product] Live bridge %s", line)
         else:
             _logger.info("[MultiTurn] %s", line)
@@ -4756,6 +5309,14 @@ async def execute_multi_turn_bridge(
             )
             if inspect.isawaitable(result):
                 await result
+
+    def _sync_bridge_debug_state() -> None:
+        bridge_debug["status"] = str(session_state.get("status") or "running")
+        bridge_debug["multi_turn_session"] = deepcopy(session_state)
+        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
+        if hasattr(planner, "_set_last_bridge_debug"):
+            planner._set_last_bridge_debug(bridge_debug)
 
     if session_state is not None:
         # Resume from a prior pause
@@ -4781,76 +5342,91 @@ async def execute_multi_turn_bridge(
         turn_idx = int(session_state.get("turn_index") or 0)
         max_turns = int(session_state.get("max_turns") or 0)
 
-        bridge_debug["status"] = str(session_state.get("status") or "running")
-        bridge_debug["multi_turn_session"] = deepcopy(session_state)
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
-        if hasattr(planner, "_set_last_bridge_debug"):
-            planner._set_last_bridge_debug(bridge_debug)
+        _sync_bridge_debug_state()
         await _emit_progress(
             session_state=session_state,
             current_phase=current_phase,
             status_label="running",
         )
 
-        # 1. Build prompt
-        prompt_input, prompt_text = _build_phase_prompt(
-            prepared_bridge_request, session_state,
-        )
+        prompt_input: dict[str, Any] = {}
+        prompt_text = ""
+        parsed_response: dict[str, Any] = {}
 
-        # 2. Call LLM
-        response_schema = _get_response_schema(current_phase, session_state)
-        await _emit_progress(
-            session_state=session_state,
-            current_phase=current_phase,
-            status_label="waiting_for_llm",
-        )
-        llm_started_at = asyncio.get_running_loop().time()
-        response_task = asyncio.create_task(
-            ask_llm_structured(
-                prompt=prompt_text,
-                response_format=response_schema,
+        if current_phase == "primitive_generation":
+            session_state["status"] = "running_primitive_generation"
+            _sync_bridge_debug_state()
+            await _emit_progress(
+                session_state=session_state,
+                current_phase=current_phase,
+                status_label="primitive_generation_started",
             )
-        )
-        while True:
-            try:
-                raw_response = await asyncio.wait_for(
-                    asyncio.shield(response_task),
-                    timeout=_LLM_WAIT_LOG_INTERVAL_S,
+            decision, turn_entry, parsed_response = await _run_resource_owned_primitive_generation_phase(
+                planner=planner,
+                session_state=session_state,
+                prepared_bridge_request=prepared_bridge_request,
+            )
+        else:
+            # 1. Build prompt
+            prompt_input, prompt_text = _build_phase_prompt(
+                prepared_bridge_request, session_state,
+            )
+
+            # 2. Call LLM
+            response_schema = _get_response_schema(current_phase, session_state)
+            await _emit_progress(
+                session_state=session_state,
+                current_phase=current_phase,
+                status_label="waiting_for_llm",
+            )
+            llm_started_at = asyncio.get_running_loop().time()
+            response_task = asyncio.create_task(
+                ask_llm_structured(
+                    prompt=prompt_text,
+                    response_format=response_schema,
                 )
+            )
+            while True:
+                try:
+                    raw_response = await asyncio.wait_for(
+                        asyncio.shield(response_task),
+                        timeout=_LLM_WAIT_LOG_INTERVAL_S,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    elapsed_s = asyncio.get_running_loop().time() - llm_started_at
+                    await _emit_progress(
+                        session_state=session_state,
+                        current_phase=current_phase,
+                        status_label="still_waiting_for_llm",
+                        elapsed_s=elapsed_s,
+                    )
+            parsed_response = deepcopy(raw_response if isinstance(raw_response, dict) else {})
+            await _emit_progress(
+                session_state=session_state,
+                current_phase=current_phase,
+                status_label="response_received",
+            )
+
+            # 3. Dispatch to phase handler
+            handler = _PHASE_HANDLERS.get(current_phase)
+            if handler is None:
+                _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
+                session_state["status"] = "error"
                 break
-            except asyncio.TimeoutError:
-                elapsed_s = asyncio.get_running_loop().time() - llm_started_at
-                await _emit_progress(
-                    session_state=session_state,
-                    current_phase=current_phase,
-                    status_label="still_waiting_for_llm",
-                    elapsed_s=elapsed_s,
-                )
-        parsed_response = deepcopy(raw_response if isinstance(raw_response, dict) else {})
-        await _emit_progress(
-            session_state=session_state,
-            current_phase=current_phase,
-            status_label="response_received",
-        )
 
-        # 3. Dispatch to phase handler
-        handler = _PHASE_HANDLERS.get(current_phase)
-        if handler is None:
-            _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
-            session_state["status"] = "error"
-            break
-
-        decision, turn_entry = await handler(
-            session_state=session_state,
-            parsed_response=parsed_response,
-            prepared_bridge_request=prepared_bridge_request,
-            planner=planner,
-        )
+            decision, turn_entry = await handler(
+                session_state=session_state,
+                parsed_response=parsed_response,
+                prepared_bridge_request=prepared_bridge_request,
+                planner=planner,
+            )
 
         # 4. Record turn
         turn_entry["turn_index"] = turn_idx
         turn_entry["phase"] = current_phase
+        if prompt_input:
+            turn_entry["prompt_input"] = deepcopy(prompt_input)
         turn_entry["prompt_text"] = prompt_text
         turn_entry["llm_raw_response"] = deepcopy(parsed_response)
         turn_entry["decision"] = decision
@@ -4878,11 +5454,7 @@ async def execute_multi_turn_bridge(
             session_state["status"] = "completed"
 
         # Update debug + write per-turn artifacts
-        bridge_debug["multi_turn_session"] = deepcopy(session_state)
-        bridge_debug["status"] = str(session_state.get("status") or "running")
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        if hasattr(planner, "_set_last_bridge_debug"):
-            planner._set_last_bridge_debug(bridge_debug)
+        _sync_bridge_debug_state()
         _write_per_turn_artifact(prepared_bridge_request, session_state, turn_entry)
 
         if current_phase == "outline" and decision == "outline_ready":
@@ -4899,6 +5471,14 @@ async def execute_multi_turn_bridge(
                 session_state=session_state,
                 stage="primitive_program_ready",
             )
+
+        stop_after_phase = str(
+            prepared_bridge_request.get("_stop_after_multi_turn_phase") or ""
+        ).strip().lower()
+        if stop_after_phase == "outline" and current_phase == "outline" and decision == "outline_ready":
+            break
+        if stop_after_phase == "primitive" and current_phase == "primitive_generation" and decision == "draft_ready":
+            break
 
         if session_state.get("status") in (
             "completed", "paused_after_outline_turn",

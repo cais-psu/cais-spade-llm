@@ -1623,12 +1623,24 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
     return [
         {
             "outline_id": "RECOVERY_SEQ1",
+            "event_schema_id": "place_part",
             "resource_jid": "ur5e@localhost",
             "event_name": "release MCP to prusa-mk4-2",
             "description": "Move UR5e to a non-interfering position preparing for MCP delivery.",
             "part_name": "MCP",
             "target_ref": "prusa-mk4-2",
             "action_type": "release_part",
+            "bridge_event_instance": {
+                "event_schema_id": "place_part",
+                "resource_binding": "ur5e@localhost",
+                "object_bindings": {
+                    "part": "MCP",
+                    "target_location": "prusa-mk4-2",
+                },
+                "parameters": {},
+                "depends_on": [],
+                "rationale": "Place MCP back on the printer before LG recovery continues.",
+            },
             "expected_start_state": {
                 "resource_state": "picked",
                 "held_part": "MCP",
@@ -1646,10 +1658,19 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         },
         {
             "outline_id": "RECOVERY_SEQ2",
+            "event_schema_id": "recover_resource_idle",
             "resource_jid": "xarm6@localhost",
             "event_name": "recover resource",
             "description": "Attempt to restart xarm6 to transition from failed to idle state.",
             "action_type": "recover_resource",
+            "bridge_event_instance": {
+                "event_schema_id": "recover_resource_idle",
+                "resource_binding": "xarm6@localhost",
+                "object_bindings": {},
+                "parameters": {},
+                "depends_on": [],
+                "rationale": "Return xarm6 to idle after the failure.",
+            },
             "expected_start_state": {
                 "resource_state": "failed",
                 "held_part": None,
@@ -1660,11 +1681,23 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         },
         {
             "outline_id": "RECOVERY_SEQ3",
+            "event_schema_id": "pick_part",
             "resource_jid": "ur5e@localhost",
             "event_name": "acquire LG",
             "description": "Position UR5e to pick up LG which is misplaced at observed_pose.",
             "part_name": "LG",
             "action_type": "acquire_part",
+            "bridge_event_instance": {
+                "event_schema_id": "pick_part",
+                "resource_binding": "ur5e@localhost",
+                "object_bindings": {
+                    "part": "LG",
+                    "source_location": "observed_pose",
+                },
+                "parameters": {},
+                "depends_on": ["RECOVERY_SEQ1", "RECOVERY_SEQ2"],
+                "rationale": "Pick LG from the observed pose once MCP is clear and xarm6 is recovered.",
+            },
             "expected_start_state": {
                 "resource_state": "idle",
                 "held_part": None,
@@ -1682,12 +1715,24 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
         },
         {
             "outline_id": "RECOVERY_SEQ4",
+            "event_schema_id": "place_part",
             "resource_jid": "ur5e@localhost",
             "event_name": "release LG to assembly_board-v1",
             "description": "Position UR5e to place LG at the designated assembly board location.",
             "part_name": "LG",
             "target_ref": "assembly_board-v1",
             "action_type": "release_part",
+            "bridge_event_instance": {
+                "event_schema_id": "place_part",
+                "resource_binding": "ur5e@localhost",
+                "object_bindings": {
+                    "part": "LG",
+                    "target_location": "assembly_board-v1",
+                },
+                "parameters": {},
+                "depends_on": ["RECOVERY_SEQ3"],
+                "rationale": "Place LG on the assembly board once control is established.",
+            },
             "expected_start_state": {
                 "resource_state": "picked",
                 "held_part": "LG",
@@ -1836,7 +1881,7 @@ async def _prepare_bridge_dryrun_harness(
         return func(*args, **kwargs)
 
     with patch(
-        "cais_spade_llm.agents.intelligent_product.process_planner.asyncio.to_thread",
+        "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_session.asyncio.to_thread",
         new=_direct_to_thread,
     ):
         prepared_bridge_request = await planner.prepare_bridge_request(
@@ -1932,7 +1977,10 @@ async def run_case3_bridge_dryrun(
         )
     else:
         # First run: grounding + first outline task
+        if stop_before_primitive_generation:
+            prepared_bridge_request["_stop_after_multi_turn_phase"] = "outline"
         proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
+        prepared_bridge_request["_stop_after_multi_turn_phase"] = ""
 
     effective_reasoning_mode = str(
         dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode")
@@ -1989,6 +2037,7 @@ async def run_case3_bridge_dryrun(
                 break
             if current_status not in {
                 "paused_after_outline_turn",
+                "ready_for_primitive_generation",
                 "paused_after_primitive_turn",
             }:
                 break
@@ -2024,7 +2073,10 @@ async def run_case3_bridge_dryrun(
                 next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
                 if (
                     post_validation_resume_budget == 0
-                    and next_ss.get("status") == "paused_after_outline_turn"
+                    and next_ss.get("status") in {
+                        "paused_after_outline_turn",
+                        "ready_for_primitive_generation",
+                    }
                 ):
                     logging.getLogger("case3_bridge_dryrun").info(
                         "[DryRun] Paused after final post-validation inspection turn — inspect debug artifacts"

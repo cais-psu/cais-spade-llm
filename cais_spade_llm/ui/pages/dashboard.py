@@ -1646,8 +1646,13 @@ def render(bridge: SystemBridge) -> None:
                         "compiled": 0,
                         "dispatched": 0,
                         "completed": 0,
+                        "ready": 0,
+                        "running": 0,
                         "state": "",
                         "mode": "",
+                        "execution_shape": "",
+                        "start_safety_mode": "",
+                        "claimed_resources": [],
                         "archive_path": "",
                         "validation_policy": "",
                     }
@@ -1671,8 +1676,25 @@ def render(bridge: SystemBridge) -> None:
                     "compiled": len(bridge_task_ids),
                     "dispatched": len(dispatched_task_ids),
                     "completed": len(completed_task_ids),
+                    "ready": len([
+                        str(task_id or "").strip()
+                        for task_id in (sequence.get("ready_task_ids") or [])
+                        if str(task_id or "").strip()
+                    ]),
+                    "running": len([
+                        str(task_id or "").strip()
+                        for task_id in (sequence.get("running_task_ids") or [])
+                        if str(task_id or "").strip()
+                    ]),
                     "state": state,
                     "mode": str(sequence.get("source_mode") or "").strip().lower(),
+                    "execution_shape": str(sequence.get("execution_shape") or "").strip().lower(),
+                    "start_safety_mode": str(sequence.get("start_safety_mode") or "").strip().lower(),
+                    "claimed_resources": [
+                        str(item or "").strip()
+                        for item in (sequence.get("claimed_resource_jids") or [])
+                        if str(item or "").strip()
+                    ],
                     "archive_path": str(sequence.get("source_archive_path") or "").strip(),
                     "validation_policy": str(
                         sequence.get("validation_policy") or ""
@@ -1854,6 +1876,8 @@ def render(bridge: SystemBridge) -> None:
                                     f"{sequence_label}: "
                                     f"{str(bridge_sequence_progress.get('state') or 'unknown').replace('_', ' ')} | "
                                     f"Compiled: {int(bridge_sequence_progress.get('compiled') or 0)} | "
+                                    f"Ready: {int(bridge_sequence_progress.get('ready') or 0)} | "
+                                    f"Running: {int(bridge_sequence_progress.get('running') or 0)} | "
                                     f"Dispatched: {int(bridge_sequence_progress.get('dispatched') or 0)} | "
                                     f"Completed: {int(bridge_sequence_progress.get('completed') or 0)} | "
                                     f"Mode: {source_mode_label}"
@@ -1861,12 +1885,31 @@ def render(bridge: SystemBridge) -> None:
                                 archive_path = str(
                                     bridge_sequence_progress.get("archive_path") or ""
                                 ).strip()
+                                execution_shape = str(
+                                    bridge_sequence_progress.get("execution_shape") or ""
+                                ).strip()
+                                start_safety_mode = str(
+                                    bridge_sequence_progress.get("start_safety_mode") or ""
+                                ).strip()
+                                claimed_resources = [
+                                    str(item).strip()
+                                    for item in (bridge_sequence_progress.get("claimed_resources") or [])
+                                    if str(item).strip()
+                                ]
                                 sequence_validation_policy = str(
                                     bridge_sequence_progress.get("validation_policy")
                                     or validation_policy
                                 ).strip()
                                 if archive_path:
                                     status_line += f" | Archive source: {archive_path}"
+                                if execution_shape:
+                                    status_line += f" | Shape: {execution_shape}"
+                                if start_safety_mode:
+                                    status_line += f" | Start safety: {start_safety_mode}"
+                                if claimed_resources:
+                                    status_line += (
+                                        " | Claimed: " + ", ".join(claimed_resources)
+                                    )
                                 if bridge_mode == "pre_ran" and sequence_validation_policy:
                                     status_line += (
                                         " | Validation: "
