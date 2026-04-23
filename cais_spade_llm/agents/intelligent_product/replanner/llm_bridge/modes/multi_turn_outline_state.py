@@ -5,6 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
+    BridgeEventInstance,
+    BridgeEventProjection,
+)
+
 
 def _task_findings_block_projected_state(findings: list[dict[str, Any]]) -> bool:
     return bool(findings)
@@ -22,24 +27,11 @@ def _first_non_empty_state_value(state: dict[str, Any], *field_names: str) -> An
 
 
 def _is_part_lifecycle_state(token: str) -> bool:
-    return str(token or "").strip().lower() in {
-        "misplaced",
-        "picked",
-        "placed",
-        "assembled",
-        "in_gripper",
-    }
+    return bool(str(token or "").strip())
 
 
 def _is_resource_state_token(token: str) -> bool:
-    return str(token or "").strip().lower() in {
-        "failed",
-        "idle",
-        "busy",
-        "picked",
-        "ready",
-        "engaged",
-    }
+    return bool(str(token or "").strip())
 
 
 def _outline_state_resource_state_token(state: dict[str, Any]) -> str:
@@ -234,13 +226,293 @@ def _outline_task_part_binding(
     }
 
 
-def _outline_task_depends_on(task: dict[str, Any]) -> list[str]:
-    dependency_ids: list[str] = []
-    for item in (task.get("depends_on") or []):
+def _outline_task_predecessors(task: dict[str, Any]) -> list[str]:
+    predecessor_ids: list[str] = []
+    for item in (task.get("predecessors") or []):
         token = str(item).strip()
-        if token and token not in dependency_ids:
-            dependency_ids.append(token)
-    return dependency_ids
+        if token and token not in predecessor_ids:
+            predecessor_ids.append(token)
+    return predecessor_ids
+
+
+def _resource_row_state_token(row: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty_state_value(row, "current_state", "state", "resource_state")
+        or ""
+    ).strip()
+
+
+def _resource_row_held_part_token(row: dict[str, Any]) -> str:
+    return str(_first_non_empty_state_value(row, "held_part") or "").strip()
+
+
+def _part_row_state_token(row: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty_state_value(row, "part_state", "current_state", "state")
+        or ""
+    ).strip()
+
+
+def _part_row_location_token(row: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty_state_value(
+            row,
+            "part_location",
+            "current_location",
+            "location",
+            "current_pose_ref",
+        )
+        or ""
+    ).strip()
+
+
+def _outline_task_effective_part_name(task: dict[str, Any]) -> str:
+    explicit_part_name = str(task.get("part_name") or "").strip()
+    if explicit_part_name:
+        return explicit_part_name
+    for token in _outline_task_part_references(task):
+        normalized = str(token or "").strip()
+        if normalized:
+            return normalized
+    return ""
+
+
+_FACT_VALUE_UNAVAILABLE = object()
+
+
+def _exact_fact_value(mapping: dict[str, Any], field_name: str) -> Any:
+    if field_name not in mapping:
+        return _FACT_VALUE_UNAVAILABLE
+    return deepcopy(mapping.get(field_name))
+
+
+def _outline_task_requirement_facts(task: dict[str, Any]) -> list[tuple[tuple[str, str, str], Any]]:
+    requirements: list[tuple[tuple[str, str, str], Any]] = []
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = _outline_task_effective_part_name(task)
+    start_state = dict(task.get("expected_start_state") or {})
+
+    if resource_jid:
+        if "resource_state" in start_state:
+            requirements.append(
+                (("resource", resource_jid, "resource_state"), deepcopy(start_state.get("resource_state")))
+            )
+        if "held_part" in start_state:
+            requirements.append(
+                (("resource", resource_jid, "held_part"), deepcopy(start_state.get("held_part")))
+            )
+        if "resource_location" in start_state:
+            requirements.append(
+                (
+                    ("resource", resource_jid, "resource_location"),
+                    deepcopy(start_state.get("resource_location")),
+                )
+            )
+
+    if part_name:
+        if "part_state" in start_state:
+            requirements.append(
+                (("part", part_name, "part_state"), deepcopy(start_state.get("part_state")))
+            )
+        if "part_location" in start_state:
+            requirements.append(
+                (("part", part_name, "part_location"), deepcopy(start_state.get("part_location")))
+            )
+        if "part_holder_resource_jid" in start_state:
+            requirements.append(
+                (
+                    ("part", part_name, "part_holder_resource_jid"),
+                    deepcopy(start_state.get("part_holder_resource_jid")),
+                )
+            )
+    return requirements
+
+
+def _outline_task_produced_facts(task: dict[str, Any]) -> dict[tuple[str, str, str], Any]:
+    produced: dict[tuple[str, str, str], Any] = {}
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = _outline_task_effective_part_name(task)
+    end_state = dict(task.get("expected_end_state") or {})
+
+    if resource_jid:
+        if "resource_state" in end_state:
+            produced[("resource", resource_jid, "resource_state")] = deepcopy(
+                end_state.get("resource_state")
+            )
+        if "held_part" in end_state:
+            produced[("resource", resource_jid, "held_part")] = deepcopy(
+                end_state.get("held_part")
+            )
+        if "resource_location" in end_state:
+            produced[("resource", resource_jid, "resource_location")] = deepcopy(
+                end_state.get("resource_location")
+            )
+
+    if part_name:
+        if "part_state" in end_state:
+            produced[("part", part_name, "part_state")] = deepcopy(
+                end_state.get("part_state")
+            )
+        if "part_location" in end_state:
+            produced[("part", part_name, "part_location")] = deepcopy(
+                end_state.get("part_location")
+            )
+        if "part_holder_resource_jid" in end_state:
+            produced[("part", part_name, "part_holder_resource_jid")] = deepcopy(
+                end_state.get("part_holder_resource_jid")
+            )
+    return produced
+
+
+def _state_fact_value(
+    fact_key: tuple[str, str, str],
+    *,
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> Any:
+    scope, entity_id, field_name = fact_key
+    if scope == "resource":
+        row = dict(resources_by_jid.get(entity_id) or {})
+        return _exact_fact_value(row, field_name)
+    row = dict(parts_by_name.get(entity_id) or {})
+    return _exact_fact_value(row, field_name)
+
+
+def _task_transitive_predecessors(
+    predecessor_ids: list[str],
+    predecessors_by_outline_id: dict[str, list[str]],
+) -> set[str]:
+    visited: set[str] = set()
+    stack = list(predecessor_ids)
+    while stack:
+        outline_id = str(stack.pop() or "").strip()
+        if not outline_id or outline_id in visited:
+            continue
+        visited.add(outline_id)
+        stack.extend(predecessors_by_outline_id.get(outline_id) or [])
+    return visited
+
+
+def _is_failed_resource_recovery_task(
+    task: dict[str, Any],
+    *,
+    initial_resources_by_jid: dict[str, dict[str, Any]],
+) -> bool:
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    if not resource_jid:
+        return False
+    initial_resource_state = _resource_row_state_token(
+        dict(initial_resources_by_jid.get(resource_jid) or {})
+    )
+    start_state = dict(task.get("expected_start_state") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+    start_token = _outline_state_resource_state_token(start_state) or initial_resource_state
+    end_token = _outline_state_resource_state_token(end_state) or start_token
+    return initial_resource_state == "failed" and start_token == "failed" and end_token == "idle"
+
+
+def infer_outline_predecessors(
+    outline_tasks: list[dict[str, Any]],
+    *,
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    inferred_tasks: list[dict[str, Any]] = []
+    task_types_by_id = _build_outline_task_type_lookup(
+        outline_tasks,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+        llm_input=llm_input,
+    )
+    projected_resources = deepcopy(resources_by_jid or {})
+    projected_parts = deepcopy(parts_by_name or {})
+    predecessors_by_outline_id: dict[str, list[str]] = {}
+    previous_outline_id_by_resource: dict[str, str] = {}
+    prior_failed_resource_recoveries: list[str] = []
+
+    for index, raw_task in enumerate(outline_tasks):
+        if not isinstance(raw_task, dict):
+            continue
+        task = deepcopy(raw_task)
+        outline_id = str(task.get("outline_id") or "").strip() or f"task_{index}"
+        resource_jid = str(task.get("resource_jid") or "").strip()
+        task_predecessors: list[str] = []
+        initial_unsatisfied = False
+
+        requirements = _outline_task_requirement_facts(task)
+        for fact_key, expected_value in requirements:
+            if _state_fact_value(
+                fact_key,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            ) == expected_value:
+                continue
+            initial_unsatisfied = True
+            for prior_task in reversed(inferred_tasks):
+                prior_outline_id = str(prior_task.get("outline_id") or "").strip()
+                if not prior_outline_id:
+                    continue
+                prior_produced_facts = _outline_task_produced_facts(prior_task)
+                if (
+                    fact_key in prior_produced_facts
+                    and prior_produced_facts.get(fact_key) == expected_value
+                ):
+                    if prior_outline_id not in task_predecessors:
+                        task_predecessors.append(prior_outline_id)
+                    break
+
+        predecessor_closure = _task_transitive_predecessors(
+            task_predecessors,
+            predecessors_by_outline_id,
+        )
+        if (
+            initial_unsatisfied
+            and not _is_failed_resource_recovery_task(
+                task,
+                initial_resources_by_jid=resources_by_jid,
+            )
+        ):
+            for recovery_outline_id in prior_failed_resource_recoveries:
+                if (
+                    recovery_outline_id not in task_predecessors
+                    and recovery_outline_id not in predecessor_closure
+                ):
+                    task_predecessors.append(recovery_outline_id)
+                    predecessor_closure = _task_transitive_predecessors(
+                        task_predecessors,
+                        predecessors_by_outline_id,
+                    )
+
+        previous_outline_id = previous_outline_id_by_resource.get(resource_jid) or ""
+        if (
+            previous_outline_id
+            and previous_outline_id not in task_predecessors
+            and previous_outline_id not in predecessor_closure
+        ):
+            task_predecessors.append(previous_outline_id)
+
+        task["predecessors"] = list(task_predecessors)
+        inferred_tasks.append(task)
+        predecessors_by_outline_id[outline_id] = list(task_predecessors)
+
+        if _is_failed_resource_recovery_task(
+            task,
+            initial_resources_by_jid=resources_by_jid,
+        ):
+            prior_failed_resource_recoveries.append(outline_id)
+
+        task_type = str(task_types_by_id.get(outline_id) or "resource_only")
+        _apply_outline_task_effects(
+            task,
+            resources_by_jid=projected_resources,
+            parts_by_name=projected_parts,
+            task_type=task_type,
+        )
+        if resource_jid:
+            previous_outline_id_by_resource[resource_jid] = outline_id
+
+    return inferred_tasks
 
 
 def _outline_task_requirement_id(
@@ -456,10 +728,7 @@ def _infer_outline_macro_signature(
         if not before_holder and before_held_part == part_name:
             before_holder = resource_jid
         after_holder = before_holder
-        explicit_end_holder = _outline_state_part_holder_token(end_state)
-        if explicit_end_holder:
-            after_holder = explicit_end_holder
-        elif after_held_part == part_name:
+        if after_held_part == part_name:
             after_holder = resource_jid
         elif before_held_part == part_name and after_held_part != part_name:
             after_holder = ""
@@ -476,19 +745,13 @@ def _infer_outline_macro_signature(
         if explicit_start_part_state:
             before_part_state = explicit_start_part_state
         after_part_state = explicit_end_part_state or before_part_state
-        if after_holder == resource_jid and not after_part_state:
-            after_part_state = "picked"
 
         before_part_location = str(
             part_row.get("current_location") or part_row.get("location") or ""
         ).strip()
-        if not before_part_location and before_holder == resource_jid:
-            before_part_location = f"{resource_jid}_gripper"
         after_part_location = before_part_location
         explicit_end_location = _outline_state_location_token(end_state)
-        if after_holder == resource_jid:
-            after_part_location = f"{resource_jid}_gripper"
-        elif explicit_end_location and (
+        if explicit_end_location and (
             task_part_name == part_name
             or inferable_primary_part == part_name
             or str(end_state.get("part_name") or "").strip() == part_name
@@ -536,7 +799,6 @@ def _infer_outline_macro_signature(
             if (
                 _outline_state_pose_value(state)
                 or _outline_state_location_token(state)
-                or _outline_state_part_holder_token(state)
                 or str(state.get("held_part") or "").strip() == primary_part_for_intent
             ):
                 state_scoped_part_anchor = True
@@ -651,74 +913,36 @@ def _apply_outline_task_effects(
     parts_by_name: dict[str, dict[str, Any]],
     task_type: str,
     grounded_action: dict[str, Any] | None = None,
+    event_instance: BridgeEventInstance | None = None,
+    projection: BridgeEventProjection | None = None,
 ) -> None:
-    grounded_action = dict(grounded_action or {})
+    del grounded_action, event_instance
     resource_jid = str(task.get("resource_jid") or "").strip()
     if not resource_jid or resource_jid not in resources_by_jid:
         return
 
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     end_state = dict(task.get("expected_end_state") or {})
-    action_target = _outline_task_action_target(task)
     task_part_name = str(
-        grounded_action.get("part_name")
+        getattr(projection, "part_name", "")
         or _outline_task_part_binding(task, parts_by_name=parts_by_name).get("effective_part_name")
         or task.get("part_name")
         or ""
     ).strip()
-    expected_effect = dict(grounded_action.get("expected_effect") or {})
-    resource_effect = dict(expected_effect.get("resource") or {})
-    part_effect = dict(expected_effect.get("part") or {})
-    effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
 
-    if "current_state" in resource_effect:
-        candidate_state = str(resource_effect.get("current_state") or "").strip()
-        if candidate_state:
-            resource_row["current_state"] = candidate_state
-    elif "current_state" in end_state or "state" in end_state or "resource_state" in end_state:
-        candidate_state = str(
-            end_state.get("current_state")
-            or end_state.get("state")
-            or end_state.get("resource_state")
-            or ""
-        ).strip()
-        if task_type == "resource_only" or _is_resource_state_token(candidate_state):
-            resource_row["current_state"] = candidate_state or resource_row.get("current_state")
-    if "gripper_state" in resource_effect:
-        resource_row["gripper_state"] = deepcopy(resource_effect.get("gripper_state"))
-    elif "gripper_state" in end_state:
-        resource_row["gripper_state"] = deepcopy(end_state.get("gripper_state"))
-    if "held_part" in resource_effect:
-        held_part = str(resource_effect.get("held_part") or "").strip()
-        resource_row["held_part"] = held_part or None
-    elif "held_part" in end_state:
-        held_part = str(end_state.get("held_part") or "").strip()
-        resource_row["held_part"] = held_part or None
-    if "held_part" in resource_effect or "held_part" in end_state:
-        resource_row["gripper_state"] = "closed" if resource_row.get("held_part") else "open"
-    if "location" in resource_effect:
-        resource_row["current_location"] = str(resource_effect.get("location") or "").strip() or None
-    elif (
-        "resource_location" in end_state
-        or "current_location" in end_state
-        or "location" in end_state
-        or "named_pose" in end_state
-    ):
-        resource_row["current_location"] = str(
-            end_state.get("resource_location")
-            or end_state.get("current_location")
-            or end_state.get("location")
-            or end_state.get("named_pose")
-            or ""
-        ).strip() or None
-    end_pose = resource_effect.get("pose")
-    if not isinstance(end_pose, dict):
-        end_pose = end_state.get("position") or end_state.get("pose") or end_state.get("current_pose")
+    if "resource_state" in end_state:
+        candidate_state = deepcopy(end_state.get("resource_state"))
+        resource_row["resource_state"] = candidate_state
+        resource_row["current_state"] = candidate_state
+    if "held_part" in end_state:
+        resource_row["held_part"] = deepcopy(end_state.get("held_part"))
+    if "resource_location" in end_state:
+        resource_row["resource_location"] = deepcopy(end_state.get("resource_location"))
+        resource_row["current_location"] = deepcopy(end_state.get("resource_location"))
+    end_pose = end_state.get("position") or end_state.get("pose")
     if isinstance(end_pose, dict):
         if "x" in end_pose:
             resource_row["current_pose"] = deepcopy(end_pose)
-        elif str(end_pose.get("named_pose") or "").strip():
-            resource_row["current_location"] = str(end_pose.get("named_pose") or "").strip()
     resources_by_jid[resource_jid] = deepcopy(resource_row)
 
     if task_type != "part_handling" or not task_part_name:
@@ -727,63 +951,19 @@ def _apply_outline_task_effects(
     part_row = dict(parts_by_name.get(task_part_name) or {})
     if not part_row:
         return
-    if effect_scope in {"part_only", "resource_and_part"} or part_effect:
-        if "state" in part_effect:
-            candidate_state = str(part_effect.get("state") or "").strip()
-            if candidate_state:
-                part_row["current_state"] = candidate_state
-        if "location" in part_effect:
-            part_row["current_location"] = str(part_effect.get("location") or "").strip() or None
-        if "holder" in part_effect:
-            holder = str(part_effect.get("holder") or "").strip()
-            part_row["current_holder_resource_jid"] = holder or None
-            if holder and "location" not in part_effect:
-                part_row["current_location"] = f"{holder}_gripper"
-        if "pose" in part_effect and isinstance(part_effect.get("pose"), dict):
-            part_row["observed_pose"] = deepcopy(part_effect.get("pose"))
-        elif any(key in part_effect for key in ("holder", "location")):
-            if str(part_row.get("current_holder_resource_jid") or "").strip() or str(
-                part_row.get("current_location") or ""
-            ).strip():
-                part_row["observed_pose"] = None
-    else:
-        candidate_state = str(
-            end_state.get("part_state")
-            or end_state.get("current_state")
-            or end_state.get("state")
-            or ""
-        ).strip() or None
-        if _is_part_lifecycle_state(candidate_state):
-            part_row["current_state"] = candidate_state
-        if (
-            "part_location" in end_state
-            or "resource_location" in end_state
-            or "location" in end_state
-            or "current_location" in end_state
-        ):
-            part_row["current_location"] = str(
-                end_state.get("part_location")
-                or end_state.get("resource_location")
-                or end_state.get("location")
-                or end_state.get("current_location")
-                or ""
-            ).strip() or None
-        elif str(action_target.get("target_location") or "").strip():
-            part_row["current_location"] = str(action_target.get("target_location") or "").strip()
-        if "held_part" in end_state:
-            held_part = str(end_state.get("held_part") or "").strip()
-            if held_part == task_part_name:
-                part_row["current_holder_resource_jid"] = resource_jid
-                part_row["current_location"] = f"{resource_jid}_gripper"
-            elif not held_part:
-                part_row["current_holder_resource_jid"] = None
-        elif _outline_state_part_holder_token(end_state):
-            part_row["current_holder_resource_jid"] = _outline_state_part_holder_token(end_state)
-        part_end_pose = end_state.get("position") or end_state.get("pose") or end_state.get("current_pose")
-        if isinstance(part_end_pose, dict) and "x" in part_end_pose:
-            part_row["observed_pose"] = deepcopy(part_end_pose)
-        elif str(part_row.get("current_holder_resource_jid") or "").strip() or str(
-            part_row.get("current_location") or ""
-        ).strip():
-            part_row["observed_pose"] = None
+    if "part_state" in end_state:
+        candidate_state = deepcopy(end_state.get("part_state"))
+        part_row["part_state"] = candidate_state
+        part_row["current_state"] = candidate_state
+    if "part_location" in end_state:
+        candidate_location = deepcopy(end_state.get("part_location"))
+        part_row["part_location"] = candidate_location
+        part_row["current_location"] = candidate_location
+    if "part_holder_resource_jid" in end_state:
+        candidate_holder = deepcopy(end_state.get("part_holder_resource_jid"))
+        part_row["part_holder_resource_jid"] = candidate_holder
+        part_row["current_holder_resource_jid"] = candidate_holder
+    part_end_pose = end_state.get("position") or end_state.get("pose")
+    if isinstance(part_end_pose, dict) and "x" in part_end_pose:
+        part_row["observed_pose"] = deepcopy(part_end_pose)
     parts_by_name[task_part_name] = deepcopy(part_row)

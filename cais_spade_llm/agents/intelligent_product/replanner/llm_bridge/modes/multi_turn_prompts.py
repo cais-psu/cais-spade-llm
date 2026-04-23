@@ -7,9 +7,6 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
-    bridge_process_schema_registry,
-)
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
 )
@@ -35,32 +32,112 @@ _PHASE_TITLES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+_OUTLINE_PART_STATE_FIELDS = (
+    "held_part",
+    "part_state",
+    "part_location",
+)
+
+
+def _task_resource_jid(task: dict[str, Any]) -> str:
+    return str(
+        task.get("resource_jid")
+        or task.get("resource_binding")
+        or ""
+    ).strip()
+
+
+def _task_part_name(task: dict[str, Any]) -> str:
+    return str(
+        task.get("part_name")
+        or ""
+    ).strip()
+
+
+def _task_target_ref(task: dict[str, Any]) -> str:
+    action_target = dict(task.get("action_target") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+    return str(
+        task.get("target_ref")
+        or action_target.get("target_ref")
+        or action_target.get("target_location")
+        or end_state.get("part_location")
+        or ""
+    ).strip()
+
+
+def _task_source_ref(task: dict[str, Any]) -> str:
+    action_target = dict(task.get("action_target") or {})
+    start_state = dict(task.get("expected_start_state") or {})
+    return str(
+        task.get("source_ref")
+        or action_target.get("source_ref")
+        or action_target.get("source_location")
+        or start_state.get("part_location")
+        or ""
+    ).strip()
+
+
+def _task_description(task: dict[str, Any]) -> str:
+    return str(
+        task.get("description")
+        or task.get("rationale")
+        or ""
+    ).strip()
+
+
+def _outline_task_view(task: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        return {}
+    view = deepcopy(task)
+    if "resource_jid" not in view or not str(view.get("resource_jid") or "").strip():
+        resource_jid = _task_resource_jid(task)
+        if resource_jid:
+            view["resource_jid"] = resource_jid
+    if "part_name" not in view or not str(view.get("part_name") or "").strip():
+        part_name = _task_part_name(task)
+        if part_name:
+            view["part_name"] = part_name
+    if "target_ref" not in view or not str(view.get("target_ref") or "").strip():
+        target_ref = _task_target_ref(task)
+        if target_ref:
+            view["target_ref"] = target_ref
+    if "description" not in view or not str(view.get("description") or "").strip():
+        description = _task_description(task)
+        if description:
+            view["description"] = description
+    return view
+
 
 
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
 
-_OUTLINE_EVENT_INSTANCE_SCHEMA: dict[str, Any] = {
+_OUTLINE_STATE_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "additionalProperties": True,
+}
+
+
+_OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
     "properties": {
         "outline_id": {"type": "string"},
-        "event_schema_id": {"type": "string"},
-        "surface_event_name": {"type": "string"},
-        "surface_description": {"type": "string"},
-        "resource_binding": {"type": "string"},
-        "object_bindings": {"type": "object"},
-        "parameters": {"type": "object"},
-        "depends_on": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
+        "event_name": {"type": "string"},
+        "resource_jid": {"type": "string"},
+        "part_name": {"type": "string"},
+        "expected_start_state": deepcopy(_OUTLINE_STATE_SCHEMA),
+        "expected_end_state": deepcopy(_OUTLINE_STATE_SCHEMA),
         "rationale": {"type": "string"},
     },
     "required": [
-        "resource_binding",
-        "object_bindings",
-        "parameters",
+        "outline_id",
+        "event_name",
+        "resource_jid",
+        "expected_start_state",
+        "expected_end_state",
         "rationale",
     ],
 }
@@ -74,10 +151,10 @@ def _outline_incremental_response_schema() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
-                "next_transition": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
+                "next_transition": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 "transition_suffix": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
+                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 },
             },
             "required": ["thought", "next_transition"],
@@ -97,14 +174,19 @@ def _outline_candidates_response_schema(
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
+                "selected_candidate_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": max(0, normalized_bound - 1),
+                },
                 "candidate_events": {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": normalized_bound,
-                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
+                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 },
             },
-            "required": ["thought", "candidate_events"],
+            "required": ["thought", "selected_candidate_index", "candidate_events"],
         },
     }
 
@@ -119,7 +201,7 @@ def _outline_single_pass_response_schema() -> dict[str, Any]:
                 "thought": {"type": "string"},
                 "transition_trace": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_EVENT_INSTANCE_SCHEMA),
+                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 },
             },
             "required": ["thought", "transition_trace"],
@@ -297,6 +379,17 @@ def _compact_json(obj: Any) -> str:
     return json.dumps(obj, indent=2, default=str, ensure_ascii=False)
 
 
+def _inline_json(obj: Any) -> str:
+    """Single-line JSON fragment for prompt diagnostics."""
+    return json.dumps(
+        obj,
+        default=str,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(", ", ": "),
+    )
+
+
 _RESOURCE_ACTOR_PATTERN = re.compile(
     r"\b([A-Za-z][A-Za-z0-9_-]*)\s+by\s+([A-Za-z][A-Za-z0-9_.@-]*)"
 )
@@ -406,11 +499,7 @@ def _outline_rejection_history(session_state: dict[str, Any]) -> list[dict[str, 
 _PROMPT_FEEDBACK_RENDER_STYLES = {"des_event_diagnostic", "raw_code"}
 
 _PROMPT_PERSISTENT_FINDING_CODES = {
-    "workspace_unreachable",
-    "holder_conflict",
-    "required_part_not_held",
     "part_relocation_without_carrier",
-    "resource_validation_unavailable",
     "source_reference_unavailable",
     "unsatisfied_guard_predicate",
     "unknown_location_binding",
@@ -448,6 +537,10 @@ def _task_target_ref(task: dict[str, Any], finding: dict[str, Any] | None = None
         ).strip()
         if target:
             return target
+    end_state = dict(task.get("expected_end_state") or {})
+    direct_target = str(end_state.get("part_location") or "").strip()
+    if direct_target:
+        return direct_target
     if isinstance(finding, dict):
         evidence = dict(finding.get("evidence") or {})
         return str(
@@ -470,12 +563,12 @@ def _candidate_event_label(
         or ""
     ).strip()
     resource_jid = str(
-        task.get("resource_jid")
+        _task_resource_jid(task)
         or (finding or {}).get("resource_jid")
         or ""
     ).strip()
     part_name = str(
-        task.get("part_name")
+        _task_part_name(task)
         or (finding or {}).get("part_name")
         or ""
     ).strip()
@@ -516,9 +609,9 @@ def _finding_state_evidence_text(
 ) -> str:
     evidence = dict(finding.get("evidence") or {})
     resource_jid = str(
-        task.get("resource_jid") or finding.get("resource_jid") or ""
+        _task_resource_jid(task) or finding.get("resource_jid") or ""
     ).strip()
-    part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
+    part_name = str(_task_part_name(task) or finding.get("part_name") or "").strip()
     target_ref = _task_target_ref(task, finding=finding)
     resource_row = dict((resources_by_jid or {}).get(resource_jid) or {})
     part_row = dict((parts_by_name or {}).get(part_name) or {})
@@ -565,17 +658,47 @@ def _finding_state_evidence_text(
     if rule_id:
         facts.append(f"rule_id={rule_id}")
 
+    mismatches = [
+        dict(item)
+        for item in (evidence.get("mismatches") or [])
+        if isinstance(item, dict)
+    ]
+    if mismatches:
+        mismatch_parts: list[str] = []
+        for item in mismatches:
+            field_name = str(item.get("field") or "").strip()
+            if not field_name:
+                continue
+            expected_text = _inline_json(item.get("expected"))
+            available = bool(item.get("available"))
+            actual_text = (
+                _inline_json(item.get("actual"))
+                if available
+                else "<unavailable>"
+            )
+            mismatch_parts.append(
+                f"{field_name}(expected={expected_text}, actual={actual_text})"
+            )
+        if mismatch_parts:
+            facts.append("state_mismatches=" + ", ".join(mismatch_parts))
+
+    if "resource_state" in resource_row:
+        facts.append(f"resource_state={_inline_json(resource_row.get('resource_state'))}")
+
     held_part = str(resource_row.get("held_part") or "").strip()
     if held_part:
         facts.append(f"held_part={held_part}")
 
-    current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
-    if current_holder:
-        facts.append(f"current_holder_resource_jid={current_holder}")
+    if "part_state" in part_row:
+        facts.append(f"part_state={_inline_json(part_row.get('part_state'))}")
 
-    current_location = str(part_row.get("current_location") or "").strip()
-    if current_location:
-        facts.append(f"current_location={current_location}")
+    part_holder = str(part_row.get("part_holder_resource_jid") or "").strip()
+    if part_holder:
+        facts.append(f"part_holder_resource_jid={part_holder}")
+
+    part_location = str(part_row.get("part_location") or "").strip()
+    if part_location:
+        facts.append(f"part_location={part_location}")
 
     unsatisfied_predicates = [
         str(item).strip()
@@ -636,25 +759,13 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
 
     if stage == "marked_progress":
         return {
-            "event_status": "nonprogressing",
+            "event_status": "disabled",
             "diagnosis": "marked_progress_failure",
             "guard_or_condition": (
                 "candidate event is enabled but does not reduce the marked-state recovery gap"
             ),
             "re_enablement": (
                 "choose an enabled event that strictly reduces the active continuation blockers"
-            ),
-        }
-
-    if stage == "resource_realizability":
-        return {
-            "event_status": "disabled",
-            "diagnosis": "resource_realizability_failure",
-            "guard_or_condition": (
-                "resource-specific realizability rejected the event instance after plant/supervisor checks"
-            ),
-            "re_enablement": (
-                "choose an enabled event whose bindings are feasible for the acting resource"
             ),
         }
 
@@ -669,21 +780,31 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             "event_status": "disabled",
             "diagnosis": "state_estimate_not_grounded",
             "guard_or_condition": (
-                "candidate event parameters are not grounded in the current state estimate"
+                "candidate symbolic bindings are not grounded in the current state estimate"
             ),
             "re_enablement": (
                 "ground the referenced entity, pose, or location in the current state estimate"
             ),
         }
 
+    if constraint_code == "part_relocation_without_carrier":
+        return {
+            "event_status": "disabled",
+            "diagnosis": "part_relocation_without_carrier",
+            "guard_or_condition": (
+                "candidate changes part location without showing that the acting resource "
+                "controls the part in this single-action row"
+            ),
+            "re_enablement": (
+                "split the recovery into separate acquire and place rows, or author "
+                "held_part/part_holder state that shows control of the moving part"
+            ),
+        }
+
     if constraint_code in {
         "resource_unbound",
         "part_unbound",
-        "part_relocation_without_carrier",
-        "required_part_not_held",
-        "holder_conflict",
         "missing_release_destination",
-        "expected_start_state_mismatch",
     }:
         return {
             "event_status": "disabled",
@@ -697,15 +818,47 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             ),
         }
 
-    if constraint_code == "workspace_unreachable" or constraint_family == "resource_feasibility":
+    if constraint_code in {
+        "candidate_schema_violation",
+        "disallowed_outline_state_field",
+    }:
         return {
             "event_status": "disabled",
-            "diagnosis": "feasibility_guard_disabled",
+            "diagnosis": "candidate_schema_violation",
             "guard_or_condition": (
-                "resource feasibility guard is false for the referenced source/target"
+                "candidate event uses outline fields outside the allowed outline contract"
             ),
             "re_enablement": (
-                "choose an event whose source/target is feasible for the acting resource"
+                "author only the allowed outline state fields shown in the Outline Candidate Contract"
+            ),
+        }
+
+    if constraint_code == "expected_start_state_mismatch":
+        return {
+            "event_status": "disabled",
+            "diagnosis": "expected_start_state_mismatch",
+            "guard_or_condition": (
+                "exact authored expected_start_state does not match the current "
+                "projected outline state"
+            ),
+            "re_enablement": (
+                "match expected_start_state exactly to the authored state fields "
+                "shown in Current DES State"
+            ),
+        }
+
+    if constraint_code in {
+        "invalid_dependency_reference",
+    }:
+        return {
+            "event_status": "disabled",
+            "diagnosis": "dependency_reference_invalid",
+            "guard_or_condition": (
+                "candidate event uses predecessors outside the current candidate response"
+            ),
+            "re_enablement": (
+                "omit predecessors in candidate mode; if you must use them elsewhere, "
+                "reference only ids declared in the same response"
             ),
         }
 
@@ -713,7 +866,6 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
         "blocker_open",
         "dependency_unsatisfied",
         "order_violation",
-        "invalid_dependency_reference",
         "claimed_condition_not_currently_unmet",
     } or constraint_family == "sequence":
         return {
@@ -741,17 +893,16 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             ),
         }
 
-    if constraint_code in {"no_state_change", "no_blocker_reduction"} or constraint_family == "candidate_selection":
+    if constraint_code == "no_state_change":
         return {
-            "event_status": "nonprogressing",
-            "diagnosis": "nonblocking_progress_failure",
+            "event_status": "disabled",
+            "diagnosis": "no_state_change",
             "guard_or_condition": (
-                "candidate event does not move the recovery plant toward a marked "
-                "continuation-ready state"
+                "candidate event leaves the exact authored symbolic state unchanged"
             ),
             "re_enablement": (
-                "choose an event that changes projected state and closes an open "
-                "nonblocking condition"
+                "revise the event so the authored end state differs from the current "
+                "projected authored state"
             ),
         }
 
@@ -898,12 +1049,13 @@ def _effective_task_part_holder(
 
 
 def _structured_task_action_summary(task: dict[str, Any]) -> str:
-    event_name = str(task.get("event_name") or "").strip()
-    event_schema_id = str(task.get("event_schema_id") or "").strip()
-    surface_event_name = str(task.get("surface_event_name") or "").strip()
-    surface_description = str(task.get("surface_description") or "").strip()
-    part_name = str(task.get("part_name") or "").strip()
-    target_ref = str(task.get("target_ref") or "").strip()
+    view = _outline_task_view(task)
+    event_name = str(view.get("event_name") or "").strip()
+    event_schema_id = str(view.get("event_schema_id") or "").strip()
+    surface_event_name = str(view.get("surface_event_name") or "").strip()
+    surface_description = str(view.get("surface_description") or "").strip()
+    part_name = str(view.get("part_name") or "").strip()
+    target_ref = str(view.get("target_ref") or "").strip()
     if event_name:
         summary = event_name
         lower_summary = event_name.lower()
@@ -932,9 +1084,9 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
             return f"{event_schema_id} ({binding_text})"
         return event_schema_id
 
-    resource_jid = str(task.get("resource_jid") or "").strip()
-    start_state = dict(task.get("expected_start_state") or {})
-    end_state = dict(task.get("expected_end_state") or {})
+    resource_jid = str(view.get("resource_jid") or "").strip()
+    start_state = dict(view.get("expected_start_state") or {})
+    end_state = dict(view.get("expected_end_state") or {})
 
     start_resource_state = str(start_state.get("resource_state") or "").strip()
     end_resource_state = str(end_state.get("resource_state") or "").strip()
@@ -976,7 +1128,7 @@ def _structured_task_action_summary(task: dict[str, Any]) -> str:
 
     if summary_parts:
         return "; ".join(summary_parts)
-    return str(task.get("description") or "").strip() or "state transition"
+    return str(view.get("description") or "").strip() or "state transition"
 
 
 def _outline_task_sequence_summary(
@@ -988,13 +1140,14 @@ def _outline_task_sequence_summary(
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        outline_id = str(task.get("outline_id") or "").strip()
-        resource_jid = str(task.get("resource_jid") or "").strip()
-        part_name = str(task.get("part_name") or "").strip()
+        view = _outline_task_view(task)
+        outline_id = str(view.get("outline_id") or "").strip()
+        resource_jid = str(view.get("resource_jid") or "").strip()
+        part_name = str(view.get("part_name") or "").strip()
         label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "accepted event"
-        lines.append(f"- {label} -> {_structured_task_action_summary(task)}")
-        description = str(task.get("description") or "").strip()
+        lines.append(f"- {label} -> {_structured_task_action_summary(view)}")
+        description = str(view.get("description") or "").strip()
         if include_descriptions and description:
             lines.append(f"  ({description})")
     return "\n".join(lines) if lines else "(none)"
@@ -1006,7 +1159,7 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         if not isinstance(row, dict):
             continue
         turn_index = int(row.get("turn_index") or 0)
-        task = dict(row.get("proposed_next_transition") or {})
+        task = _outline_task_view(dict(row.get("proposed_next_transition") or {}))
         outline_id = str(task.get("outline_id") or "").strip()
         resource_jid = str(task.get("resource_jid") or "").strip()
         part_name = str(task.get("part_name") or "").strip()
@@ -1597,9 +1750,10 @@ def _active_event_start_facts_for_prompt(
             part["current_state"] = deepcopy(expected_start.get("part_state"))
         if "part_location" in expected_start:
             part["current_location"] = deepcopy(expected_start.get("part_location"))
-        if "part_holder_resource_jid" in expected_start:
-            part["current_holder_resource_jid"] = deepcopy(
-                expected_start.get("part_holder_resource_jid")
+        if "held_part" in expected_start:
+            held_part = str(expected_start.get("held_part") or "").strip()
+            part["current_holder_resource_jid"] = (
+                resource_jid if part_name and held_part == part_name else None
             )
     return projected_resources, projected_parts
 
@@ -1806,6 +1960,7 @@ def _candidate_grounding_target_refs(
         for raw_token in (
             part.get("origin_location"),
             part.get("goal_location"),
+            part.get("part_location"),
             part.get("current_location"),
         ):
             token = str(raw_token or "").strip()
@@ -1866,9 +2021,11 @@ def _candidate_grounding_facts_summary(
             if reachable_refs
             else "null"
         )
+        resource_state = str(resource_row.get("resource_state") or "").strip() or "null"
         held_part = str(resource_row.get("held_part") or "").strip() or "null"
         lines.append(
-            f"- resource_jid={resource_jid} | named_poses={named_pose_text} | "
+            f"- resource_jid={resource_jid} | resource_state={resource_state} | "
+            f"named_poses={named_pose_text} | "
             f"grounded_target_refs={reachable_text} | held_part={held_part}"
         )
 
@@ -1878,26 +2035,23 @@ def _candidate_grounding_facts_summary(
         part_name = str(part.get("part_name") or "").strip()
         if not part_name:
             continue
-        current_holder = str(part.get("current_holder_resource_jid") or "").strip() or "null"
-        current_location = str(part.get("current_location") or "").strip() or "null"
+        part_state = str(part.get("part_state") or "").strip() or "null"
+        part_holder = str(part.get("part_holder_resource_jid") or "").strip() or "null"
+        part_location = str(part.get("part_location") or "").strip() or "null"
         goal_location = str(part.get("goal_location") or "").strip() or "null"
         source_ref = "observed_pose" if dict(part.get("observed_pose") or {}) else "null"
         lines.append(
-            f"- part_name={part_name} | current_holder_resource_jid={current_holder} | "
-            f"current_location={current_location} | goal_location={goal_location} | "
-            f"source_ref={source_ref}"
+            f"- part_name={part_name} | part_state={part_state} | "
+            f"part_holder_resource_jid={part_holder} | part_location={part_location} | "
+            f"goal_location={goal_location} | source_ref={source_ref}"
         )
 
     return "\n".join(lines) if lines else "(none)"
 
 
 _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
-    "workspace_unreachable",
-    "holder_conflict",
-    "required_part_not_held",
     "source_reference_unavailable",
     "part_relocation_without_carrier",
-    "resource_validation_unavailable",
     "safety_rule_violation",
     "blocker_open",
     "dependency_unsatisfied",
@@ -1954,39 +2108,6 @@ def _finding_currently_applicable_for_pruned_actions(
 
     if stage == "supervisor_admissibility":
         return True
-
-    if stage == "resource_realizability":
-        if constraint_code == "workspace_unreachable":
-            current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
-            current_state = str(part_row.get("current_state") or "").strip().lower()
-            current_location = str(part_row.get("current_location") or "").strip()
-            if current_holder or current_state in {"held", "in_gripper", "assembled", "placed"}:
-                return False
-            if current_location:
-                return False
-        return True
-
-    if constraint_code == "workspace_unreachable":
-        current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
-        current_state = str(part_row.get("current_state") or "").strip().lower()
-        current_location = str(part_row.get("current_location") or "").strip()
-        if current_holder or current_state in {"held", "in_gripper", "assembled", "placed"}:
-            return False
-        if current_location:
-            return False
-        return True
-
-    if constraint_code == "holder_conflict":
-        actual_held = str(resource_row.get("held_part") or "").strip()
-        current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
-        return bool(
-            (part_name and actual_held and actual_held != part_name)
-            or (resource_jid and current_holder and current_holder != resource_jid)
-        )
-
-    if constraint_code == "required_part_not_held":
-        actual_held = str(resource_row.get("held_part") or "").strip()
-        return bool(resource_jid and part_name and actual_held != part_name)
 
     if constraint_code == "part_relocation_without_carrier":
         actual_held = str(resource_row.get("held_part") or "").strip()
@@ -2291,6 +2412,75 @@ def _slim_part_facts(parts: list[Any]) -> list[dict[str, Any]]:
     }
     return [
         {k: v for k, v in dict(row).items() if k in _keep}
+        for row in parts
+        if isinstance(row, dict)
+    ]
+
+
+def _prompt_outline_resource_view(resource: dict[str, Any]) -> dict[str, Any]:
+    """Render one resource row in outline-contract vocabulary."""
+    if not isinstance(resource, dict):
+        return {}
+    view: dict[str, Any] = {}
+    resource_jid = str(resource.get("resource_jid") or "").strip()
+    if resource_jid:
+        view["resource_jid"] = resource_jid
+    if "resource_state" in resource:
+        view["resource_state"] = deepcopy(resource.get("resource_state"))
+    elif "current_state" in resource:
+        view["resource_state"] = deepcopy(resource.get("current_state"))
+    if "held_part" in resource:
+        view["held_part"] = deepcopy(resource.get("held_part"))
+    if "current_pose" in resource:
+        view["current_pose"] = deepcopy(resource.get("current_pose"))
+    if "workspace_bounds" in resource:
+        view["workspace_bounds"] = deepcopy(resource.get("workspace_bounds"))
+    return view
+
+
+def _prompt_outline_part_view(part: dict[str, Any]) -> dict[str, Any]:
+    """Render one part row in outline-contract vocabulary."""
+    if not isinstance(part, dict):
+        return {}
+    view: dict[str, Any] = {}
+    part_name = str(part.get("part_name") or "").strip()
+    if part_name:
+        view["part_name"] = part_name
+    if "part_state" in part:
+        view["part_state"] = deepcopy(part.get("part_state"))
+    elif "current_state" in part:
+        view["part_state"] = deepcopy(part.get("current_state"))
+    if "part_location" in part:
+        view["part_location"] = deepcopy(part.get("part_location"))
+    elif "current_location" in part:
+        view["part_location"] = deepcopy(part.get("current_location"))
+    if "part_holder_resource_jid" in part:
+        view["part_holder_resource_jid"] = deepcopy(
+            part.get("part_holder_resource_jid")
+        )
+    elif "current_holder_resource_jid" in part:
+        view["part_holder_resource_jid"] = deepcopy(
+            part.get("current_holder_resource_jid")
+        )
+    if "observed_pose" in part:
+        view["observed_pose"] = deepcopy(part.get("observed_pose"))
+    for field_name in ("origin_location", "goal_location", "goal_requirement_id"):
+        if field_name in part:
+            view[field_name] = deepcopy(part.get(field_name))
+    return view
+
+
+def _outline_prompt_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
+    return [
+        _prompt_outline_resource_view(dict(row))
+        for row in resources
+        if isinstance(row, dict)
+    ]
+
+
+def _outline_prompt_part_facts(parts: list[Any]) -> list[dict[str, Any]]:
+    return [
+        _prompt_outline_part_view(dict(row))
         for row in parts
         if isinstance(row, dict)
     ]
@@ -2631,8 +2821,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     projected_parts = _projected_outline_parts(
         llm_input=llm_input, session_state=session_state,
     )
-    resources_by_jid = _finding_resources_by_jid(projected_resources)
-    parts_by_name = _finding_parts_by_name(projected_parts)
+    prompt_projected_resources = _outline_prompt_resource_facts(projected_resources)
+    prompt_projected_parts = _outline_prompt_part_facts(projected_parts)
+    resources_by_jid = _finding_resources_by_jid(prompt_projected_resources)
+    parts_by_name = _finding_parts_by_name(prompt_projected_parts)
     candidate_rejection_feedback = [
         deepcopy(row)
         for row in (session_state.get("candidate_rejection_feedback") or [])
@@ -2644,7 +2836,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         if isinstance(row, dict)
     ]
     candidate_rejection_history = _candidate_rejection_history(session_state)
-    available_schema_ids = sorted(bridge_process_schema_registry().keys())
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
     recent_candidate_diagnostic_signatures = (
@@ -2662,8 +2853,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         rejection_history=[] if is_candidate_mode else rejection_history,
         candidate_rejection_history=[] if is_candidate_mode else candidate_rejection_history,
         candidate_rejection_feedback=[] if is_candidate_mode else candidate_rejection_feedback,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
+        projected_resources=prompt_projected_resources,
+        projected_parts=prompt_projected_parts,
         feedback_render_style=feedback_render_style,
         excluded_diagnostic_signatures=recent_candidate_diagnostic_signatures,
     )
@@ -2680,10 +2871,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text = (
             "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Synthesis (single pass).\n"
-            "Propose ALL recovery events as typed DES/PPR event instances, "
+            "Propose ALL recovery events as symbolic outline rows, "
             "serialized in JSON field `transition_trace`.\n"
-            "Each row must be one enabled recovery event instance for one resource. "
-            "Do not author state deltas. Product derives projected state."
+            "Each row must be one enabled recovery transition for one resource. "
+            "Author the expected symbolic start and end states directly."
         )
     elif is_candidate_mode:
         candidate_bound = int(
@@ -2693,22 +2884,22 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text = (
             "You are the active replanner for a bridge recovery session.\n"
             "Current phase: Recovery Event Candidate Selection.\n"
-            "Choose grounded DES recovery event instances enabled by the current symbolic state.\n"
+            "Choose grounded symbolic recovery transitions enabled by the current symbolic state.\n"
             "Accepted events extend the recovery trace toward marked-state conditions.\n"
             "The runtime supervisor may validate and commit at most one event.\n"
-            "Return event instances only; Product derives state projection and effects."
+            "Return authored symbolic rows only; Product validates the stated transition."
         )
         if candidate_rejection_feedback or candidate_rejection_history:
             role_text += (
                 "\nUse listed diagnostics as projected-state evidence and avoid "
-                "repeating candidate events that remain disabled, blocked_by_supervisor, "
-                "or nonprogressing under unchanged facts."
+                "repeating candidate events that remain disabled or blocked_by_supervisor "
+                "under unchanged facts."
             )
     else:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
             "Current phase: Recovery Event Synthesis (one transition at a time).\n"
-            "Propose exactly ONE next typed DES event instance to append after the accepted "
+            "Propose exactly ONE next symbolic recovery row to append after the accepted "
             "transition prefix, serialized in JSON field `next_transition`.\n"
             "You may include an optional transition suffix, serialized in JSON "
             "field `transition_suffix`, to show your intended remaining trace; "
@@ -2722,9 +2913,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         "Task and Role",
         role_text,
     ]
-    sections.extend(
-        _top_validation_feedback_section(summary=immediate_validation_feedback)
-    )
 
     if not is_single_pass and accepted_prefix:
         sections.extend([
@@ -2735,6 +2923,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 include_descriptions=not is_candidate_mode,
             ),
         ])
+
+    sections.extend(
+        _top_validation_feedback_section(summary=immediate_validation_feedback)
+    )
 
     if is_candidate_mode:
         rejected_candidate_summary = _candidate_rejection_learning_summary(
@@ -2778,12 +2970,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Grounded Event Facts",
             _candidate_grounding_facts_summary(
                 bridge_resources=bridge_resources,
-                projected_resources=projected_resources,
-                projected_parts=projected_parts,
+                projected_resources=prompt_projected_resources,
+                projected_parts=prompt_projected_parts,
             ),
-            "",
-            "Registered Process Schemas",
-            "- " + "\n- ".join(available_schema_ids),
             # Experiment: keep raw observed poses and workspace bounds visible,
             # but do not precompute the resource/part workspace relationship.
         ])
@@ -2816,11 +3005,12 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     sections.extend([
         "",
         "Current DES State",
+        "`Current DES State` is the authoritative exact propagated state after applying the accepted transition prefix; author the next row's `expected_start_state` to match it exactly on the fields you include.",
         "Resources",
-        _compact_json(_slim_resource_facts(projected_resources)),
+        _compact_json(prompt_projected_resources),
         "",
         "Parts",
-        _compact_json(_slim_part_facts(projected_parts)),
+        _compact_json(prompt_projected_parts),
         "Marked-State Conditions",
         _compact_recovery_objectives(llm_input, projected_parts=projected_parts),
     ])
@@ -2845,22 +3035,41 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     if is_candidate_mode:
         sections.extend([
             "",
-            "Controllable Event JSON Template",
+            "Outline Candidate Contract",
+            "- Return one JSON object with top-level fields `thought`, `selected_candidate_index`, and `candidate_events`.",
+            f"- Propose 1 to {candidate_bound} candidate rows and set `selected_candidate_index` to the row you choose.",
+            "- Each candidate row is one physical action by one listed resource; split compound recoveries like fetch+place into separate rows.",
+            "- Each row must include `outline_id`, `event_name`, `resource_jid`, `expected_start_state`, `expected_end_state`, and `rationale`.",
+            "- Use top-level `resource_jid` and optional top-level `part_name`. `resource_location` and `part_location` are optional: include `resource_location` only when the row constrains a resource-only location change, and include `part_location` only when the row constrains a part location.",
+            "- Do not emit execution-layer fields such as `source_ref`, `target_ref`, `ppr_ontology`, `event_schema_id`, bindings objects, parameters, surface fields, or `predecessors`.",
+            "- If `part_name` is present, both state objects must include `held_part` and `part_state`; include `part_location` only when the row constrains a part location. If `part_name` is absent, omit part-specific state keys.",
+            "- Bind only listed resources, parts, and grounded location tokens from the current plant state.",
+            "- `rationale` should explain enabledness, blocker clearing, or why the action reduces the marked-state gap.",
             """```json
 {
-  "thought": "WHY THESE EVENT INSTANCES ARE ENABLED FROM THE CURRENT PLANT STATE",
+  "thought": "<why these symbolic transitions are enabled from the current plant state>",
+  "selected_candidate_index": 0,
   "candidate_events": [
     {
-      "surface_event_name": "pick_lg_from_observed_pose",
-      "surface_description": "establish control of LG from observed_pose with ur5e",
-      "resource_binding": "ur5e@localhost",
-      "object_bindings": {
-        "part": "LG",
-        "source_location": "observed_pose"
+      "outline_id": "<required_outline_id>",
+      "event_name": "<free_form_event_name>",
+      "resource_jid": "<resource_jid>",
+      "part_name": "<optional_part_name>",
+      "expected_start_state": {
+        "resource_state": "<required_resource_state>",
+        "resource_location": "<optional_resource_location>",
+        "held_part": "<required_when_part_name_is_present>",
+        "part_state": "<required_when_part_name_is_present>",
+        "part_location": "<optional_part_location>"
       },
-      "parameters": {},
-      "depends_on": [],
-      "rationale": "pick_part is enabled because LG is visible at observed_pose and ur5e is free to establish control of LG"
+      "expected_end_state": {
+        "resource_state": "<required_resource_state>",
+        "resource_location": "<optional_resource_location>",
+        "held_part": "<required_when_part_name_is_present>",
+        "part_state": "<required_when_part_name_is_present>",
+        "part_location": "<optional_part_location>"
+      },
+      "rationale": "<why this recovery transition is enabled and helpful now>"
     }
   ]
 }
@@ -2881,33 +3090,21 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             _compact_json(previous_lookahead),
         ])
 
-    constraints: list[str] = [
-        "",
-        "Output Constraints",
-    ]
-    if is_candidate_mode:
+    constraints: list[str] = []
+    if not is_candidate_mode:
         constraints.extend([
-            "- Return JSON with field `candidate_events`.",
-            f"- `candidate_events` contains 1 to {candidate_bound} candidate events.",
-            "- Each event is one atomic recovery proposal by one listed resource.",
-            "- Each event must include resource_binding, object_bindings, parameters, and rationale.",
-            "- You may include surface_event_name and/or surface_description; Product will normalize them to the closed canonical DES event alphabet.",
-            "- event_schema_id is optional hint-only metadata, not authoritative runtime semantics.",
-            "- Use depends_on only to reference already accepted outline ids or explicit ids you provide in the same trace.",
-            "- Use only listed resources, parts, and grounded target refs.",
-            f"- Returning fewer than {candidate_bound} rows is valid when fewer grounded candidates are worth proposing.",
-            "- If your idea is multi-step or compound, split it into separate atomic candidate rows instead of inventing a new combined semantic event.",
-        ])
-    else:
-        constraints.extend([
+            "",
+            "Output Constraints",
             "- Use only the listed resources.",
-            "- Each transition is one typed DES/PPR event instance by one resource.",
+            "- Each transition is one symbolic recovery row by one resource.",
+            "- Each transition must include outline_id, event_name, resource_jid, expected_start_state, expected_end_state, and rationale.",
+            "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
+            "- Author both expected_start_state and expected_end_state in outline mode.",
+            "- If part_name is present, expected_start_state and expected_end_state must include held_part and part_state; include part_location only when the row constrains a part location.",
+            "- If part_name is absent, do not emit part-specific state keys.",
+            "- Bind only entities and location tokens grounded in the current plant state.",
+            "- Rationale should explain enabledness, unsatisfied blockers being cleared, or why the candidate reduces the marked-state gap.",
         ])
-    constraints.extend([
-        "- Do not author expected_start_state or expected_end_state in outline mode.",
-        "- Bind only entities and location tokens grounded in the current plant state or the registered process schemas.",
-        "- Rationale should explain enabledness, unsatisfied blockers being cleared, or why the candidate reduces the marked-state gap.",
-    ])
 
     if is_single_pass:
         constraints.append(

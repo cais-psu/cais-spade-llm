@@ -723,6 +723,49 @@ def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, s
 
 def snapshot_matches_expected(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool, str | None]:
     """Compare an expected snapshot subset against the runtime snapshot."""
+    resource_type = str(
+        expected.get("resource_type")
+        or dict(expected.get("resource_core") or {}).get("resource_type")
+        or actual.get("resource_type")
+        or dict(actual.get("resource_core") or {}).get("resource_type")
+        or "resource"
+    ).strip().lower() or "resource"
+    profile = get_resource_profile(resource_type)
+    comparable_fields = {
+        "current_state",
+        "current_location",
+        "active_work",
+        "current_pose_ref",
+        *profile.snapshot_fields,
+    }
+    compared_fields: set[str] = set()
+    for field in comparable_fields:
+        if field not in expected:
+            continue
+        actual_value = resource_snapshot_field_value(actual, field, profile=profile)
+        expected_value = resource_snapshot_field_value(expected, field, profile=profile)
+        if actual_value == expected_value:
+            compared_fields.add(field)
+            continue
+        equivalence_resolver = getattr(profile, "snapshot_equivalence_resolver", None)
+        if callable(equivalence_resolver) and equivalence_resolver(
+            field=field,
+            actual_snapshot=actual,
+            projected_snapshot=expected,
+            actual_value=actual_value,
+            projected_value=expected_value,
+            profile=profile,
+        ):
+            compared_fields.add(field)
+            continue
+        return False, f"{field} expected={expected_value!r} actual={actual_value!r}"
+    if compared_fields:
+        remaining_expected = {
+            key: value for key, value in expected.items() if key not in compared_fields
+        }
+        if not remaining_expected:
+            return True, None
+        return _compare_subset(actual, remaining_expected)
     return _compare_subset(actual, expected)
 
 

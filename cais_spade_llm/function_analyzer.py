@@ -61,6 +61,16 @@ class FunctionAnalyzer:
         # primitive
         return {"type": FunctionAnalyzer.openai_types.get(py_type, "string")}
 
+    @staticmethod
+    def _tool_spec(fn):
+        spec = getattr(fn, "__tool_spec__", None)
+        if spec is not None:
+            return spec
+        underlying = getattr(fn, "__func__", None)
+        if underlying is not None:
+            return getattr(underlying, "__tool_spec__", None)
+        return None
+
 
 
     def analyze_function(self, fn) -> dict:
@@ -72,6 +82,10 @@ class FunctionAnalyzer:
         * Parameter descriptions are indicated by `:param x:`.
         * Handles functions with zero or more parameters.
         """
+        tool_spec = self._tool_spec(fn)
+        if tool_spec is not None and hasattr(tool_spec, "tool_schema"):
+            return tool_spec.tool_schema()
+
         name = fn.__name__
 
         # 1. type hints -------------------------------------------------
@@ -170,6 +184,9 @@ class FunctionAnalyzer:
         Return the YAML dict from the first '--- … ---' block of a function's
         doc-string, or {} if no such block exists.
         """
+        tool_spec = FunctionAnalyzer._tool_spec(fn)
+        if tool_spec is not None and hasattr(tool_spec, "tool_frontmatter"):
+            return tool_spec.tool_frontmatter()
         doc = inspect.getdoc(fn) or ""
         meta, _ = FunctionAnalyzer._frontmatter_and_body(doc)
         return meta

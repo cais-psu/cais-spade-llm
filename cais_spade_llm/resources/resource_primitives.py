@@ -6,9 +6,9 @@ from copy import deepcopy
 from typing import Any
 import inspect
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_adapter import (
+    adapt_bridge_resource_snapshot,
     bridge_resource_capabilities,
-    normalize_bridge_resource,
     resolve_bridge_resource_type,
 )
 from cais_spade_llm.function_analyzer import FunctionAnalyzer
@@ -268,18 +268,18 @@ def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
         getattr(resource_agent, "jid", "") or getattr(resource_agent, "agent_name", "") or ""
     ).strip()
     resource_type = _resource_type_for_agent(resource_agent, snapshot=raw_snapshot)
-    normalized_resource = normalize_bridge_resource(
+    adapted_resource = adapt_bridge_resource_snapshot(
         resource_jid=resource_jid,
         resource_type=resource_type,
         snapshot=raw_snapshot,
         modeled_state={},
     )
     execution_catalog = _execution_catalog_for_snapshot(resource_agent)
-    normalized_resource["bridge_adapter"] = bridge_resource_capabilities(
+    adapted_resource["bridge_adapter"] = bridge_resource_capabilities(
         resource_type,
         primitive_catalog=execution_catalog,
     )
-    return normalized_resource
+    return adapted_resource
 
 
 def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:

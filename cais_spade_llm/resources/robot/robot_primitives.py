@@ -8,7 +8,7 @@ from typing import Any
 
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.resources.resource_profile import resource_snapshot_field_value
-from cais_spade_llm.resources.robot.robot_task_specs import (
+from cais_spade_llm.resources.robot.robot_tasks import (
     robot_task_capability_decompositions,
 )
 
@@ -71,6 +71,7 @@ ROBOT_PRIMITIVE_KIND_MAP = {
     "close_gripper": "pick",
     "attach_part": "pick",
     "detach_part": "place",
+    "snap_part_to_slot": "place",
 }
 
 
@@ -1462,6 +1463,7 @@ _ROBOT_PROMPT_HIDDEN_PRIMITIVES = frozenset(
         "close_gripper",
         "attach_part",
         "detach_part",
+        "snap_part_to_slot",
         "move_pose",
         "get_current_pose",
     }

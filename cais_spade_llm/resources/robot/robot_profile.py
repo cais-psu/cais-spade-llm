@@ -97,6 +97,39 @@ def _robot_carried_location(resource_jid: str, _snapshot: dict[str, Any] | None 
     return f"{str(resource_jid or '').strip()}_gripper"
 
 
+def _robot_snapshot_equivalence(
+    *,
+    field: str,
+    actual_snapshot: dict[str, Any],
+    projected_snapshot: dict[str, Any],
+    actual_value: Any,
+    projected_value: Any,
+    profile: ResourceProfile,
+) -> bool:
+    if field != "current_state":
+        return False
+    if projected_value != "picked" or actual_value != "idle":
+        return False
+    actual_carried = str(
+        resource_snapshot_carried_entity(actual_snapshot, profile=profile) or ""
+    ).strip()
+    projected_carried = str(
+        resource_snapshot_carried_entity(projected_snapshot, profile=profile) or ""
+    ).strip()
+    actual_gripper_state = str(
+        resource_snapshot_field_value(actual_snapshot, "gripper_state", profile=profile) or ""
+    ).strip()
+    projected_gripper_state = str(
+        resource_snapshot_field_value(projected_snapshot, "gripper_state", profile=profile) or ""
+    ).strip()
+    return (
+        bool(actual_carried)
+        and actual_carried == projected_carried
+        and actual_gripper_state == projected_gripper_state
+        and actual_gripper_state == "closed"
+    )
+
+
 def _robot_event_family(event: dict[str, Any]) -> str:
     event_name = str(event.get("event_name", "") or "").strip().lower()
     has_pick_verb = "pick" in event_name or "grasp" in event_name or "acquire" in event_name
@@ -442,5 +475,6 @@ ROBOT_PROFILE = RobotProfile(
     },
     carried_entity_field="held_part",
     carried_entity_location_builder=_robot_carried_location,
+    snapshot_equivalence_resolver=_robot_snapshot_equivalence,
 )
 register_resource_profile(ROBOT_PROFILE)

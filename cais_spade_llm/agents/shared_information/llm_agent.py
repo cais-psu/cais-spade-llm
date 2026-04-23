@@ -79,7 +79,7 @@ class LlmAgent(Agent):
             "CAIS_SPADE_LLM_MODEL",
             "OPENAI_MODEL",
             "CASE3_RECOVERY_MODEL",
-            fallback="gpt-5.4-mini",
+            fallback="gpt-5.4",
         )
         selected_non_function_model = str(non_function_model or "").strip() or _default_model_name(
             "CAIS_SPADE_NON_FUNCTION_MODEL",

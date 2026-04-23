@@ -23,6 +23,15 @@ def _first_non_empty(mapping: dict[str, Any], *field_names: str) -> Any:
     return None
 
 
+_EXACT_STATE_UNAVAILABLE = object()
+
+
+def _exact_mapping_value(mapping: dict[str, Any], field_name: str) -> Any:
+    if field_name not in mapping:
+        return _EXACT_STATE_UNAVAILABLE
+    return deepcopy(mapping.get(field_name))
+
+
 def _dedupe_tokens(values: list[str]) -> list[str]:
     deduped: list[str] = []
     for value in values:
@@ -32,9 +41,42 @@ def _dedupe_tokens(values: list[str]) -> list[str]:
     return deduped
 
 
+def _task_resource_jid(task: dict[str, Any]) -> str:
+    return str(
+        task.get("resource_jid")
+        or ""
+    ).strip()
+
+
+def _task_part_name(task: dict[str, Any]) -> str:
+    return str(
+        task.get("part_name")
+        or ""
+    ).strip()
+
+
 def _task_action_target(task: dict[str, Any]) -> dict[str, Any]:
     action_target = task.get("action_target")
-    return dict(action_target) if isinstance(action_target, dict) else {}
+    normalized = dict(action_target) if isinstance(action_target, dict) else {}
+    start_state = dict(task.get("expected_start_state") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+    source_ref = str(
+        task.get("source_ref")
+        or _state_location_token(start_state)
+        or ""
+    ).strip()
+    target_ref = str(
+        task.get("target_ref")
+        or _state_location_token(end_state)
+        or ""
+    ).strip()
+    if source_ref and "source_location" not in normalized and "source_ref" not in normalized:
+        normalized["source_ref"] = source_ref
+        normalized["source_location"] = source_ref
+    if target_ref and "target_location" not in normalized and "target_ref" not in normalized:
+        normalized["target_ref"] = target_ref
+        normalized["target_location"] = target_ref
+    return normalized
 
 
 def _state_location_token(state: dict[str, Any]) -> str:
@@ -46,6 +88,31 @@ def _state_location_token(state: dict[str, Any]) -> str:
             "location",
             "current_location",
             "named_pose",
+        )
+        or ""
+    ).strip()
+
+
+def _state_part_location_token(state: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty(
+            state,
+            "part_location",
+            "location",
+            "current_location",
+        )
+        or ""
+    ).strip()
+
+
+def _state_resource_location_token(state: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty(
+            state,
+            "resource_location",
+            "named_pose",
+            "location",
+            "current_location",
         )
         or ""
     ).strip()
@@ -277,7 +344,7 @@ def _known_location_tokens(
 
 def _task_part_references(task: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
-    explicit_part_name = str(task.get("part_name") or "").strip()
+    explicit_part_name = _task_part_name(task)
     if explicit_part_name:
         tokens.append(explicit_part_name)
     for state_key in ("expected_start_state", "expected_end_state"):
@@ -330,7 +397,7 @@ def _task_part_binding(
 ) -> dict[str, Any]:
     explicit_candidates = _dedupe_tokens(
         [
-            str(task.get("part_name") or "").strip(),
+            _task_part_name(task),
             str(dict(task.get("expected_start_state") or {}).get("part_name") or "").strip(),
             str(dict(task.get("expected_end_state") or {}).get("part_name") or "").strip(),
         ]
@@ -352,10 +419,15 @@ def _task_part_binding(
         candidates.extend(_task_part_references(task))
 
     if not candidates:
-        action_target = _task_action_target(task)
+        raw_action_target = task.get("action_target")
+        action_target = dict(raw_action_target) if isinstance(raw_action_target, dict) else {}
         candidates.extend(
             _part_names_matching_location(
-                location_token=str(action_target.get("source_location") or "").strip(),
+                location_token=str(
+                    action_target.get("source_location")
+                    or task.get("source_ref")
+                    or ""
+                ).strip(),
                 parts_by_name=parts_by_name,
                 include_current=True,
                 include_goal=False,
@@ -363,7 +435,11 @@ def _task_part_binding(
         )
         candidates.extend(
             _part_names_matching_location(
-                location_token=str(action_target.get("target_location") or "").strip(),
+                location_token=str(
+                    action_target.get("target_location")
+                    or task.get("target_ref")
+                    or ""
+                ).strip(),
                 parts_by_name=parts_by_name,
                 include_current=False,
                 include_goal=True,
@@ -372,7 +448,7 @@ def _task_part_binding(
         for state_key in ("expected_start_state", "expected_end_state"):
             candidates.extend(
                 _part_names_matching_location(
-                    location_token=_state_location_token(dict(task.get(state_key) or {})),
+                    location_token=_state_part_location_token(dict(task.get(state_key) or {})),
                     parts_by_name=parts_by_name,
                     include_current=True,
                     include_goal=True,
@@ -398,12 +474,12 @@ def _task_has_part_semantics(
     *,
     part_binding: dict[str, Any],
 ) -> bool:
-    action_target = _task_action_target(task)
-    if str(action_target.get("source_location") or "").strip():
-        return True
-    if str(action_target.get("target_location") or "").strip():
-        return True
     if part_binding.get("candidate_part_names"):
+        action_target = _task_action_target(task)
+        if str(action_target.get("source_location") or "").strip():
+            return True
+        if str(action_target.get("target_location") or "").strip():
+            return True
         for state_key in ("expected_start_state", "expected_end_state"):
             state = dict(task.get(state_key) or {})
             state_part_name = str(state.get("part_name") or "").strip()
@@ -413,7 +489,7 @@ def _task_has_part_semantics(
                 or held_part in set(part_binding.get("candidate_part_names") or [])
                 or _state_part_holder_token(state)
                 or _state_part_state_token(state)
-                or _state_location_token(state)
+                or _state_part_location_token(state)
                 or (_state_pose_value(state) and state_part_name)
             ):
                 return True
@@ -433,10 +509,7 @@ def _task_has_resource_semantics(
             or _state_pose_value(state)
             or _state_pose_ref_token(state)
             or str(state.get("gripper_state") or "").strip()
-            or (
-                _state_location_token(state)
-                and not str(state.get("part_name") or "").strip()
-            )
+            or _state_resource_location_token(state)
         ):
             return True
     return False
@@ -748,12 +821,7 @@ def _build_preconditions_and_effects(
     if part_pose is not None:
         expected_part_effect["pose"] = deepcopy(part_pose)
 
-    explicit_holder = _state_part_holder_token(end_state)
-    if explicit_holder:
-        expected_part_effect["holder"] = explicit_holder
-    elif "current_holder_resource_jid" in end_state or "part_holder_resource_jid" in end_state:
-        expected_part_effect["holder"] = None
-    elif "held_part" in end_state:
+    if "held_part" in end_state:
         end_held_part = str(end_state.get("held_part") or "").strip()
         expected_part_effect["holder"] = resource_jid if end_held_part == part_name else None
     elif requested_target_location or part_location or part_pose is not None:
@@ -983,42 +1051,34 @@ def _outline_contract_finding(
     if bool(contract.get("require_expected_start_match")):
         mismatches: list[dict[str, Any]] = []
         for field_name, actual in (
-            ("resource_state", _first_non_empty(resource_row, "current_state", "state")),
-            ("held_part", _first_non_empty(resource_row, "held_part")),
+            ("resource_state", _exact_mapping_value(resource_row, "resource_state")),
+            ("held_part", _exact_mapping_value(resource_row, "held_part")),
         ):
             if field_name not in start_state:
                 continue
-            expected = start_state.get(field_name)
-            expected_token = None if expected in (None, "") else str(expected).strip()
-            actual_token = None if actual in (None, "") else str(actual).strip()
-            if expected_token != actual_token:
+            expected = deepcopy(start_state.get(field_name))
+            if actual is _EXACT_STATE_UNAVAILABLE or actual != expected:
                 mismatches.append({
                     "field": field_name,
-                    "expected": deepcopy(expected),
-                    "actual": deepcopy(actual),
+                    "expected": expected,
+                    "actual": None if actual is _EXACT_STATE_UNAVAILABLE else deepcopy(actual),
+                    "available": actual is not _EXACT_STATE_UNAVAILABLE,
                 })
 
         if part_name:
             for field_name, actual in (
-                ("part_state", _first_non_empty(part_row, "current_state", "state")),
-                ("part_location", _part_row_location_token(part_row)),
-                (
-                    "part_holder_resource_jid",
-                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
-                ),
+                ("part_state", _exact_mapping_value(part_row, "part_state")),
+                ("part_location", _exact_mapping_value(part_row, "part_location")),
             ):
                 if field_name not in start_state:
                     continue
-                expected = start_state.get(field_name)
-                expected_token = None if expected in (None, "") else str(expected).strip()
-                actual_token = None if actual in (None, "") else str(actual).strip()
-                if field_name == "part_location" and {expected_token, actual_token} <= {None, "observed_pose"}:
-                    continue
-                if expected_token != actual_token:
+                expected = deepcopy(start_state.get(field_name))
+                if actual is _EXACT_STATE_UNAVAILABLE or actual != expected:
                     mismatches.append({
                         "field": field_name,
-                        "expected": deepcopy(expected),
-                        "actual": deepcopy(actual),
+                        "expected": expected,
+                        "actual": None if actual is _EXACT_STATE_UNAVAILABLE else deepcopy(actual),
+                        "available": actual is not _EXACT_STATE_UNAVAILABLE,
                     })
 
         if mismatches:
@@ -1040,18 +1100,15 @@ def _outline_contract_finding(
     if bool(contract.get("require_meaningful_delta")):
         has_delta = False
         for field_name, before in (
-            ("resource_state", _first_non_empty(resource_row, "current_state", "state")),
-            ("held_part", _first_non_empty(resource_row, "held_part")),
-            ("part_state", _first_non_empty(part_row, "current_state", "state")),
-            ("part_location", _first_non_empty(part_row, "current_location", "location")),
-            (
-                "part_holder_resource_jid",
-                _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
-            ),
+            ("resource_state", _exact_mapping_value(resource_row, "resource_state")),
+            ("resource_location", _exact_mapping_value(resource_row, "resource_location")),
+            ("held_part", _exact_mapping_value(resource_row, "held_part")),
+            ("part_state", _exact_mapping_value(part_row, "part_state")),
+            ("part_location", _exact_mapping_value(part_row, "part_location")),
         ):
             if field_name not in end_state:
                 continue
-            if before != end_state.get(field_name):
+            if before is _EXACT_STATE_UNAVAILABLE or before != end_state.get(field_name):
                 has_delta = True
                 break
         if not has_delta:
@@ -1066,22 +1123,16 @@ def _outline_contract_finding(
 
     if bool(contract.get("require_release_destination_for_release")) and resource_jid and part_name:
         current_holder = str(
-            _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid") or ""
+            (None if _exact_mapping_value(part_row, "part_holder_resource_jid") is _EXACT_STATE_UNAVAILABLE
+             else _exact_mapping_value(part_row, "part_holder_resource_jid"))
+            or ""
         ).strip()
         current_held_part = str(resource_row.get("held_part") or "").strip()
-        start_holder = str(start_state.get("part_holder_resource_jid") or "").strip()
         start_held_part = str(start_state.get("held_part") or "").strip()
-        release_requested = (
-            ("held_part" in end_state and end_state.get("held_part") in (None, ""))
-            or (
-                "part_holder_resource_jid" in end_state
-                and end_state.get("part_holder_resource_jid") in (None, "")
-            )
-        ) and (
+        release_requested = ("held_part" in end_state and end_state.get("held_part") in (None, "")) and (
             current_held_part == part_name
             or current_holder == resource_jid
             or start_held_part == part_name
-            or start_holder == resource_jid
         )
         if release_requested:
             has_release_destination = bool(
@@ -1110,13 +1161,10 @@ def _outline_contract_finding(
         changed_part_fields = [
             field_name
             for field_name, before in (
-                ("part_location", _first_non_empty(part_row, "current_location", "location")),
-                (
-                    "part_holder_resource_jid",
-                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
-                ),
+                ("part_location", _exact_mapping_value(part_row, "part_location")),
             )
-            if field_name in end_state and before != end_state.get(field_name)
+            if field_name in end_state
+            and (before is _EXACT_STATE_UNAVAILABLE or before != end_state.get(field_name))
         ]
         if changed_part_fields:
             resource_controls_part = any(
@@ -1129,9 +1177,9 @@ def _outline_contract_finding(
             ) or any(
                 str(value or "").strip() == resource_jid
                 for value in (
-                    _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid"),
-                    start_state.get("part_holder_resource_jid"),
-                    end_state.get("part_holder_resource_jid"),
+                    None
+                    if _exact_mapping_value(part_row, "part_holder_resource_jid") is _EXACT_STATE_UNAVAILABLE
+                    else _exact_mapping_value(part_row, "part_holder_resource_jid"),
                 )
             )
             if not resource_controls_part:
@@ -1162,15 +1210,11 @@ def _binding_token_findings(
     parts_by_name: dict[str, dict[str, Any]],
     location_validation_mode: str = "strict",
 ) -> list[dict[str, Any]]:
-    action_target = _task_action_target(task)
+    raw_action_target = dict(task.get("action_target") or {})
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
 
-    requested_named_pose = str(action_target.get("named_pose") or "").strip()
-    if not requested_named_pose and task_kind == "resource_only":
-        requested_named_pose = (
-            _state_pose_ref_token(end_state) or _state_pose_ref_token(start_state)
-        )
+    requested_named_pose = str(raw_action_target.get("named_pose") or "").strip()
     if requested_named_pose:
         available_named_poses = set(_resource_named_pose_tokens(resource_row))
         if requested_named_pose not in available_named_poses:
@@ -1188,53 +1232,17 @@ def _binding_token_findings(
                 )
             ]
 
-    if task_kind == "resource_only":
-        requested_resource_state = _state_resource_state_token(end_state)
-        known_resource_states = set(
-            _resource_state_tokens(
-                resource_row,
-                resources_by_jid=resources_by_jid,
-            )
-        )
-        advertised_recovery_states = {
-            str(state_token).strip()
-            for state_token in (
-                resource_row.get("supported_recovery_states")
-                or resource_row.get("available_recovery_states")
-                or []
-            )
-            if str(state_token).strip()
-        }
-        if (
-            requested_resource_state
-            and advertised_recovery_states
-            and requested_resource_state not in known_resource_states
-        ):
-            return [
-                _binding_finding(
-                    task=task,
-                    constraint_code="unknown_state_token",
-                    resource_jid=resource_jid,
-                    part_name=part_name or None,
-                    reason=(
-                        f"task '{str(task.get('outline_id') or '').strip()}' references unknown "
-                        f"resource state '{requested_resource_state}' for '{resource_jid}'"
-                    ),
-                    evidence={"state_token": requested_resource_state},
-                )
-            ]
-
     location_candidates: list[tuple[str, str]] = []
     for field_name in ("source_location", "target_location"):
-        token = str(action_target.get(field_name) or "").strip()
+        token = str(raw_action_target.get(field_name) or "").strip()
         if token:
             location_candidates.append((field_name, token))
-    for state_name, state in (
-        ("expected_start_state", start_state),
-        ("expected_end_state", end_state),
-    ):
-        for token in _explicit_state_location_tokens(state):
-            location_candidates.append((state_name, token))
+    explicit_source_ref = str(task.get("source_ref") or "").strip()
+    if explicit_source_ref:
+        location_candidates.append(("source_ref", explicit_source_ref))
+    explicit_target_ref = str(task.get("target_ref") or "").strip()
+    if explicit_target_ref:
+        location_candidates.append(("target_ref", explicit_target_ref))
 
     known_locations = set(
         _known_location_tokens(
@@ -1292,7 +1300,7 @@ def compile_grounded_outline_task(
     location_validation_mode: str = "strict",
 ) -> dict[str, Any]:
     task_id = str(task.get("outline_id") or "").strip()
-    resource_jid = str(task.get("resource_jid") or "").strip()
+    resource_jid = _task_resource_jid(task)
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     part_binding = _task_part_binding(task, parts_by_name=parts_by_name)
     candidate_part_names = list(part_binding.get("candidate_part_names") or [])

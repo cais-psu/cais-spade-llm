@@ -2312,7 +2312,7 @@ def render(bridge: SystemBridge) -> None:
                                 react_turns = list(bridge_debug.get("turns") or [])
                                 debug_prompt = str(bridge_debug.get("prompt", "") or "").strip()
                                 raw_response = str(bridge_debug.get("raw_response", "") or "").strip()
-                                normalized_proposal = bridge_debug.get("normalized_proposal")
+                                bridge_proposal_debug = bridge_debug.get("bridge_proposal")
                                 request_ra = str(
                                     request_payload.get("ra_jid")
                                     or llm_inputs.get("ra_jid")
@@ -2386,10 +2386,10 @@ def render(bridge: SystemBridge) -> None:
                                         ).classes("w-full text-xs")
                                     elif debug_status not in {"ready", "running"}:
                                         ui.label("No raw LLM output was captured.").classes("text-xs text-slate-600 mt-2")
-                                    if normalized_proposal:
-                                        ui.label("Normalization preview").classes("text-xs font-medium mt-2")
+                                    if bridge_proposal_debug:
+                                        ui.label("Bridge proposal preview").classes("text-xs font-medium mt-2")
                                         ui.code(
-                                            _preview_text(_json_text(normalized_proposal)),
+                                            _preview_text(_json_text(bridge_proposal_debug)),
                                             language="json",
                                         ).classes("w-full text-xs")
                                     if react_turns:
@@ -2444,7 +2444,7 @@ def render(bridge: SystemBridge) -> None:
                                                 language="text",
                                             ).classes("w-full text-xs")
                                     with ui.expansion(
-                                        "Normalization result",
+                                        "Bridge proposal",
                                         icon="rule",
                                         value=status in {"llm_bridge", "human_required"},
                                     ).classes("w-full mt-2"):
@@ -2453,9 +2453,9 @@ def render(bridge: SystemBridge) -> None:
                                                 "\n".join(f"- {msg}" for msg in warning_messages),
                                                 language="text",
                                             ).classes("w-full text-xs")
-                                        if normalized_proposal:
+                                        if bridge_proposal_debug:
                                             ui.code(
-                                                _json_text(normalized_proposal),
+                                                _json_text(bridge_proposal_debug),
                                                 language="json",
                                             ).classes("w-full text-xs")
                                         else:

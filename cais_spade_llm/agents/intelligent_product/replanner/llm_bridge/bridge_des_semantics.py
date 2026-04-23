@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-import re
 from typing import Any, Callable
 
 
@@ -41,24 +40,9 @@ class ProcessSchema:
     operation_kind: str
     object_roles: dict[str, str] = field(default_factory=dict)
     parameter_roles: tuple[str, ...] = ()
-    normalization_aliases: tuple[str, ...] = ()
-    normalization_examples: tuple[str, ...] = ()
     projector: BridgeProjector | None = None
     progress_policy: BridgeProgressPolicy | None = None
     retry_hint: str = ""
-
-
-@dataclass
-class SurfaceBridgeProposal:
-    outline_id: str
-    resource_binding: str
-    object_bindings: dict[str, str] = field(default_factory=dict)
-    parameters: dict[str, Any] = field(default_factory=dict)
-    depends_on: list[str] = field(default_factory=list)
-    rationale: str = ""
-    surface_event_name: str = ""
-    surface_description: str = ""
-    event_schema_hint: str = ""
 
 
 @dataclass
@@ -68,11 +52,8 @@ class BridgeEventInstance:
     resource_binding: str
     object_bindings: dict[str, str] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
-    depends_on: list[str] = field(default_factory=list)
+    predecessors: list[str] = field(default_factory=list)
     rationale: str = ""
-    surface_event_name: str = ""
-    surface_description: str = ""
-    event_schema_hint: str = ""
 
 
 CanonicalBridgeEventInstance = BridgeEventInstance
@@ -140,8 +121,7 @@ class BridgeValidationResult:
     event_instance: BridgeEventInstance
     findings: list[BridgeValidationFinding] = field(default_factory=list)
     schema: ProcessSchema | None = None
-    normalized_task: dict[str, Any] | None = None
-    grounded_action: dict[str, Any] | None = None
+    projection: BridgeEventProjection | None = None
     projected_resources: dict[str, dict[str, Any]] = field(default_factory=dict)
     projected_parts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -152,8 +132,6 @@ class BridgeValidationResult:
 def _finding_traits(*, stage: str, code: str) -> dict[str, Any]:
     stage_token = str(stage or "").strip().lower()
     code_token = str(code or "").strip().lower()
-    if stage_token == "surface_normalization":
-        return {"owner": "normalization", "durable": False, "retriable": True}
     if stage_token in {"ontology_binding", "schema_grounding"}:
         return {"owner": "binding", "durable": True, "retriable": True}
     if stage_token == "plant_enabledness":
@@ -176,17 +154,6 @@ def bridge_process_schema_registry() -> dict[str, ProcessSchema]:
             display_name="Recover Resource To Idle",
             action_type="recover_resource",
             operation_kind="recover_resource",
-            normalization_aliases=(
-                "recover_resource_idle",
-                "recover idle",
-                "recover to idle",
-                "clear zone",
-                "clear resource",
-                "return idle",
-                "move home",
-                "return home",
-            ),
-            normalization_examples=("clear_xarm6_zone", "return_ur5e_home"),
             projector=_project_recover_resource_idle,
             progress_policy=_progress_recover_resource_idle,
             retry_hint="choose recovery only when the resource is not already idle",
@@ -197,15 +164,6 @@ def bridge_process_schema_registry() -> dict[str, ProcessSchema]:
             action_type="acquire_part",
             operation_kind="pick_part",
             object_roles={"part": "product", "source_location": "location"},
-            normalization_aliases=(
-                "pick_part",
-                "pick",
-                "grasp",
-                "acquire",
-                "take",
-                "repick",
-            ),
-            normalization_examples=("pick_lg_from_observed_pose",),
             projector=_project_pick_part,
             progress_policy=_progress_pick_part,
             retry_hint="bind a visible source location or observation before proposing pick_part",
@@ -216,16 +174,6 @@ def bridge_process_schema_registry() -> dict[str, ProcessSchema]:
             action_type="release_part",
             operation_kind="place_part",
             object_roles={"part": "product", "target_location": "location"},
-            normalization_aliases=(
-                "place_part",
-                "place",
-                "insert",
-                "assemble",
-                "mount",
-                "put",
-                "return to board",
-            ),
-            normalization_examples=("return_lg_to_board",),
             projector=_project_place_part,
             retry_hint="establish control of the part before proposing place_part",
         ),
@@ -235,17 +183,6 @@ def bridge_process_schema_registry() -> dict[str, ProcessSchema]:
             action_type="stage_part",
             operation_kind="stage_part",
             object_roles={"part": "product", "target_location": "location"},
-            normalization_aliases=(
-                "stage_part",
-                "stage",
-                "restage",
-                "return to printer",
-                "return to tray",
-                "set aside",
-                "stash",
-                "park",
-            ),
-            normalization_examples=("return_mcp_to_printer",),
             projector=_project_stage_part,
             retry_hint="establish control of the part before proposing stage_part",
         ),
@@ -255,14 +192,6 @@ def bridge_process_schema_registry() -> dict[str, ProcessSchema]:
             action_type="resume_nominal_task",
             operation_kind="resume_nominal_task",
             parameter_roles=("nominal_task_id",),
-            normalization_aliases=(
-                "resume_nominal_task",
-                "resume nominal task",
-                "resume",
-                "continue task",
-                "continue nominal",
-            ),
-            normalization_examples=("resume_interrupted_nominal_task",),
             projector=_project_resume_nominal_task,
             retry_hint="bind a concrete nominal_task_id and ensure the resource is idle",
         ),
@@ -388,115 +317,28 @@ def build_bridge_validation_context(
     )
 
 
-def parse_surface_bridge_proposal(
+def parse_bridge_event_instance(
     raw_event: dict[str, Any],
     *,
     outline_id: str,
-) -> SurfaceBridgeProposal:
+) -> BridgeEventInstance:
     raw = dict(raw_event or {})
-    return SurfaceBridgeProposal(
+    return BridgeEventInstance(
         outline_id=str(raw.get("outline_id") or outline_id or "").strip(),
-        resource_binding=str(raw.get("resource_binding") or raw.get("resource_jid") or "").strip(),
+        event_schema_id=str(raw.get("event_schema_id") or "").strip(),
+        resource_binding=str(raw.get("resource_binding") or "").strip(),
         object_bindings={
             str(key).strip(): str(value).strip()
             for key, value in dict(raw.get("object_bindings") or {}).items()
             if str(key).strip() and str(value).strip()
         },
         parameters=deepcopy(dict(raw.get("parameters") or {})),
-        depends_on=[
+        predecessors=[
             str(item).strip()
-            for item in (raw.get("depends_on") or [])
+            for item in (raw.get("predecessors") or [])
             if str(item).strip()
         ],
         rationale=str(raw.get("rationale") or "").strip(),
-        surface_event_name=str(
-            raw.get("surface_event_name")
-            or raw.get("event_name")
-            or ""
-        ).strip(),
-        surface_description=str(
-            raw.get("surface_description")
-            or raw.get("description")
-            or ""
-        ).strip(),
-        event_schema_hint=str(raw.get("event_schema_id") or "").strip(),
-    )
-
-
-def parse_bridge_event_instance(
-    raw_event: dict[str, Any],
-    *,
-    outline_id: str,
-) -> BridgeEventInstance:
-    proposal = parse_surface_bridge_proposal(raw_event, outline_id=outline_id)
-    return BridgeEventInstance(
-        outline_id=proposal.outline_id,
-        event_schema_id=proposal.event_schema_hint,
-        resource_binding=proposal.resource_binding,
-        object_bindings=deepcopy(proposal.object_bindings),
-        parameters=deepcopy(proposal.parameters),
-        depends_on=deepcopy(proposal.depends_on),
-        rationale=proposal.rationale,
-        surface_event_name=proposal.surface_event_name,
-        surface_description=proposal.surface_description,
-        event_schema_hint=proposal.event_schema_hint,
-    )
-
-
-def normalize_surface_bridge_proposal(
-    proposal: SurfaceBridgeProposal,
-    *,
-    context: BridgeValidationContext,
-) -> tuple[BridgeEventInstance | None, list[BridgeValidationFinding]]:
-    resource_jid = str(proposal.resource_binding or "").strip()
-    part_name = str(proposal.object_bindings.get("part") or "").strip()
-    surface_text = _normalized_surface_text(proposal)
-    if not surface_text and not proposal.event_schema_hint:
-        return None, [
-            BridgeValidationFinding(
-                stage="surface_normalization",
-                code="missing_surface_event_identity",
-                reason=(
-                    "candidate must provide a surface event label/description or a canonical event_schema_id hint"
-                ),
-                task_id=proposal.outline_id,
-                resource_jid=resource_jid,
-                part_name=part_name,
-                evidence={"proposal": _surface_proposal_evidence(proposal)},
-                retry_hint=(
-                    "propose one atomic recovery intent, e.g. pick_part, place_part, stage_part, recover_resource_idle, or resume_nominal_task"
-                ),
-            )
-        ]
-
-    matched_schema_ids = _matched_surface_schema_ids(
-        proposal=proposal,
-        context=context,
-        surface_text=surface_text,
-    )
-    normalized_schema_id, normalization_error = _resolve_surface_schema_id(
-        proposal=proposal,
-        context=context,
-        matched_schema_ids=matched_schema_ids,
-        surface_text=surface_text,
-    )
-    if normalization_error is not None:
-        return None, [normalization_error]
-
-    return (
-        BridgeEventInstance(
-            outline_id=proposal.outline_id,
-            event_schema_id=normalized_schema_id,
-            resource_binding=resource_jid,
-            object_bindings=deepcopy(proposal.object_bindings),
-            parameters=deepcopy(proposal.parameters),
-            depends_on=deepcopy(proposal.depends_on),
-            rationale=proposal.rationale,
-            surface_event_name=proposal.surface_event_name,
-            surface_description=proposal.surface_description,
-            event_schema_hint=proposal.event_schema_hint,
-        ),
-        [],
     )
 
 
@@ -539,7 +381,7 @@ def validate_bridge_event_instance(
             BridgeValidationFinding(
                 stage="schema_grounding",
                 code="missing_event_schema_id",
-                reason="candidate must normalize to a canonical event schema",
+                reason="candidate must include a canonical event_schema_id",
                 task_id=instance.outline_id,
                 resource_jid=resource_jid,
                 evidence={"field": "event_schema_id"},
@@ -616,12 +458,6 @@ def validate_bridge_event_instance(
             schema=schema,
         )
 
-    normalized_task, grounded_action = _derive_task_and_grounded_action(
-        instance=instance,
-        schema=schema,
-        context=context,
-        projection=projection,
-    )
     projected_resources, projected_parts = _project_symbolic_state(
         context=context,
         resource_jid=resource_jid,
@@ -632,184 +468,10 @@ def validate_bridge_event_instance(
         event_instance=instance,
         findings=[],
         schema=schema,
-        normalized_task=normalized_task,
-        grounded_action=grounded_action,
+        projection=projection,
         projected_resources=projected_resources,
         projected_parts=projected_parts,
     )
-
-
-def _surface_proposal_evidence(proposal: SurfaceBridgeProposal) -> dict[str, Any]:
-    return {
-        "surface_event_name": proposal.surface_event_name,
-        "surface_description": proposal.surface_description,
-        "event_schema_hint": proposal.event_schema_hint,
-        "resource_binding": proposal.resource_binding,
-        "object_bindings": deepcopy(proposal.object_bindings),
-        "parameters": deepcopy(proposal.parameters),
-    }
-
-
-def _normalized_surface_text(proposal: SurfaceBridgeProposal) -> str:
-    chunks = [
-        str(proposal.surface_event_name or "").strip(),
-        str(proposal.surface_description or "").strip(),
-        str(proposal.rationale or "").strip(),
-    ]
-    return " ".join(chunk for chunk in chunks if chunk).strip()
-
-
-def _matched_surface_schema_ids(
-    *,
-    proposal: SurfaceBridgeProposal,
-    context: BridgeValidationContext,
-    surface_text: str,
-) -> list[str]:
-    matched: list[str] = []
-    hint = str(proposal.event_schema_hint or "").strip()
-    if hint:
-        matched.append(hint)
-
-    normalized_text = _phrase_normalize(surface_text)
-    for schema_id, schema in context.process_schemas.items():
-        aliases = tuple(schema.normalization_aliases or ()) + (
-            schema.schema_id,
-            schema.display_name,
-        )
-        for alias in aliases:
-            token = _phrase_normalize(alias)
-            if not token:
-                continue
-            if re.search(rf"(^|[^a-z0-9]){re.escape(token)}([^a-z0-9]|$)", normalized_text):
-                matched.append(schema_id)
-                break
-
-    inferred = _infer_schema_ids_from_shape(
-        proposal=proposal,
-        context=context,
-        surface_text=normalized_text,
-    )
-    matched.extend(inferred)
-    deduped: list[str] = []
-    for schema_id in matched:
-        token = str(schema_id or "").strip()
-        if token and token not in deduped:
-            deduped.append(token)
-    return deduped
-
-
-def _infer_schema_ids_from_shape(
-    *,
-    proposal: SurfaceBridgeProposal,
-    context: BridgeValidationContext,
-    surface_text: str,
-) -> list[str]:
-    part_name = str(proposal.object_bindings.get("part") or "").strip()
-    source_location = str(proposal.object_bindings.get("source_location") or "").strip()
-    target_location = str(proposal.object_bindings.get("target_location") or "").strip()
-    nominal_task_id = str(proposal.parameters.get("nominal_task_id") or "").strip()
-    inferred: list[str] = []
-
-    if nominal_task_id:
-        return ["resume_nominal_task"]
-    if part_name and source_location:
-        inferred.append("pick_part")
-    if part_name and target_location:
-        goal_location = _goal_location_for_part(context, part_name=part_name)
-        if goal_location and target_location == goal_location:
-            inferred.append("place_part")
-        elif _text_has_any(surface_text, ("stage", "printer", "tray", "stash", "set aside", "park")):
-            inferred.append("stage_part")
-        elif _text_has_any(surface_text, ("place", "insert", "assemble", "board", "mount", "put")):
-            inferred.append("place_part")
-        else:
-            inferred.extend(["place_part", "stage_part"])
-    if (
-        not part_name
-        and _text_has_any(surface_text, ("recover", "idle", "clear", "home"))
-    ):
-        inferred.append("recover_resource_idle")
-    return inferred
-
-
-def _resolve_surface_schema_id(
-    *,
-    proposal: SurfaceBridgeProposal,
-    context: BridgeValidationContext,
-    matched_schema_ids: list[str],
-    surface_text: str,
-) -> tuple[str, BridgeValidationFinding | None]:
-    resource_jid = str(proposal.resource_binding or "").strip()
-    part_name = str(proposal.object_bindings.get("part") or "").strip()
-    valid_ids = [
-        schema_id
-        for schema_id in matched_schema_ids
-        if schema_id in context.process_schemas
-    ]
-    if not valid_ids:
-        hint = str(proposal.event_schema_hint or "").strip()
-        code = "unsupported_surface_event"
-        reason = "candidate surface event could not be normalized to a single registered canonical event"
-        if hint:
-            code = "unknown_surface_event_schema_hint"
-            reason = f"event_schema_id hint '{hint}' is not registered in the canonical bridge alphabet"
-        return "", BridgeValidationFinding(
-            stage="surface_normalization",
-            code=code,
-            reason=reason,
-            task_id=proposal.outline_id,
-            resource_jid=resource_jid,
-            part_name=part_name,
-            evidence={
-                "proposal": _surface_proposal_evidence(proposal),
-                "matched_schema_ids": matched_schema_ids,
-            },
-            retry_hint=(
-                "rewrite the proposal as one atomic canonical event such as pick_part, place_part, stage_part, recover_resource_idle, or resume_nominal_task"
-            ),
-        )
-
-    if len(valid_ids) == 1:
-        return valid_ids[0], None
-
-    part_target = str(proposal.object_bindings.get("target_location") or "").strip()
-    goal_location = _goal_location_for_part(context, part_name=part_name) if part_name else ""
-    if set(valid_ids) == {"place_part", "stage_part"} and part_target:
-        if goal_location and part_target == goal_location:
-            return "place_part", None
-        if _text_has_any(surface_text, ("stage", "printer", "tray", "stash", "set aside", "park")):
-            return "stage_part", None
-        if _text_has_any(surface_text, ("place", "insert", "assemble", "board", "mount", "put")):
-            return "place_part", None
-
-    conjunction = _text_has_any(surface_text, (" and ", " then ", "after ", "before ", "pick and place", "move and place"))
-    code = "ambiguous_surface_event"
-    retry_hint = "choose one canonical event only; Product validates one atomic bridge event per row"
-    if conjunction or {"pick_part", "place_part"} <= set(valid_ids):
-        code = "compound_surface_event"
-        retry_hint = "split the compound intent into atomic canonical events such as pick_part followed by place_part"
-    return "", BridgeValidationFinding(
-        stage="surface_normalization",
-        code=code,
-        reason="candidate surface proposal maps to more than one canonical event in the closed bridge alphabet",
-        task_id=proposal.outline_id,
-        resource_jid=resource_jid,
-        part_name=part_name,
-        evidence={
-            "proposal": _surface_proposal_evidence(proposal),
-            "matched_schema_ids": valid_ids,
-        },
-        retry_hint=retry_hint,
-    )
-
-
-def _phrase_normalize(text: str) -> str:
-    return re.sub(r"[\s_\-]+", " ", str(text or "").strip().lower())
-
-
-def _text_has_any(text: str, fragments: tuple[str, ...]) -> bool:
-    normalized = _phrase_normalize(text)
-    return any(_phrase_normalize(fragment) in normalized for fragment in fragments)
 
 
 def _validate_schema_roles(
@@ -821,6 +483,31 @@ def _validate_schema_roles(
     findings: list[BridgeValidationFinding] = []
     resource_jid = str(instance.resource_binding or "").strip()
     part_name = str(instance.object_bindings.get("part") or "").strip()
+
+    unexpected_roles = sorted(
+        role
+        for role in instance.object_bindings
+        if str(role or "").strip() and role not in schema.object_roles
+    )
+    if unexpected_roles:
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="unexpected_object_binding",
+                reason=(
+                    f"event schema '{schema.schema_id}' does not allow object_bindings "
+                    f"keys: {', '.join(unexpected_roles)}"
+                ),
+                task_id=instance.outline_id,
+                resource_jid=resource_jid,
+                part_name=part_name,
+                evidence={
+                    "unexpected_roles": unexpected_roles,
+                    "allowed_roles": sorted(schema.object_roles),
+                },
+            )
+        )
+        return findings
 
     required_roles = {
         role: role_kind
@@ -886,6 +573,31 @@ def _validate_schema_roles(
                 resource_jid=resource_jid,
                 part_name=part_name,
                 evidence={"parameter": parameter_name},
+            )
+        )
+        return findings
+
+    unexpected_parameters = sorted(
+        key
+        for key in instance.parameters
+        if str(key or "").strip() and key not in schema.parameter_roles
+    )
+    if unexpected_parameters:
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="unexpected_parameter_binding",
+                reason=(
+                    f"event schema '{schema.schema_id}' does not allow parameters "
+                    f"keys: {', '.join(unexpected_parameters)}"
+                ),
+                task_id=instance.outline_id,
+                resource_jid=resource_jid,
+                part_name=part_name,
+                evidence={
+                    "unexpected_parameters": unexpected_parameters,
+                    "allowed_parameters": list(schema.parameter_roles),
+                },
             )
         )
         return findings
@@ -1098,69 +810,46 @@ def _project_resume_nominal_task(
     ), unsatisfied
 
 
-def _derive_task_and_grounded_action(
+def build_outline_task_row(
     *,
     instance: BridgeEventInstance,
     schema: ProcessSchema,
-    context: BridgeValidationContext,
     projection: BridgeEventProjection,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> dict[str, Any]:
     resource_jid = str(instance.resource_binding or "").strip()
     part_name = str(projection.part_name or "").strip()
     event_name = _event_name_for_instance(instance, schema=schema, projection=projection)
-    normalized_task: dict[str, Any] = {
+    outline_task: dict[str, Any] = {
         "outline_id": instance.outline_id,
         "event_schema_id": schema.schema_id,
         "resource_jid": resource_jid,
         "event_name": event_name,
         "description": projection.description,
-        "depends_on": [str(item).strip() for item in (instance.depends_on or []) if str(item).strip()],
+        "predecessors": [
+            str(item).strip()
+            for item in (instance.predecessors or [])
+            if str(item).strip()
+        ],
         "expected_start_state": deepcopy(projection.start_state),
         "expected_end_state": deepcopy(projection.end_state),
         "action_type": schema.action_type,
+        "task_kind": schema.action_type,
         "action_target": deepcopy(projection.action_target),
         "bridge_event_instance": {
             "event_schema_id": schema.schema_id,
             "resource_binding": resource_jid,
             "object_bindings": deepcopy(instance.object_bindings),
             "parameters": deepcopy(instance.parameters),
-            "depends_on": deepcopy(instance.depends_on),
+            "predecessors": deepcopy(instance.predecessors),
             "rationale": instance.rationale,
-            "surface_event_name": instance.surface_event_name,
-            "surface_description": instance.surface_description,
-            "event_schema_hint": instance.event_schema_hint,
-        },
-        "surface_bridge_proposal": {
-            "surface_event_name": instance.surface_event_name,
-            "surface_description": instance.surface_description,
-            "event_schema_hint": instance.event_schema_hint,
-        },
-        "grounded_action": {
-            "event_schema_id": schema.schema_id,
-            "resource_jid": resource_jid,
-            "part_name": part_name or None,
-            "operation_kind": schema.action_type,
-            "target": deepcopy(projection.action_target),
         },
     }
-    if instance.surface_event_name:
-        normalized_task["surface_event_name"] = instance.surface_event_name
-    if instance.surface_description:
-        normalized_task["surface_description"] = instance.surface_description
     if part_name:
-        normalized_task["part_name"] = part_name
+        outline_task["part_name"] = part_name
     target_ref = str(projection.target_ref or "").strip()
     if target_ref:
-        normalized_task["target_ref"] = target_ref
-
-    grounded_action = {
-        "event_schema_id": schema.schema_id,
-        "resource_jid": resource_jid,
-        "part_name": part_name or None,
-        "operation_kind": schema.action_type,
-        "target": deepcopy(projection.action_target),
-    }
-    return normalized_task, grounded_action
+        outline_task["target_ref"] = target_ref
+    return outline_task
 
 
 def _project_symbolic_state(
@@ -1214,12 +903,14 @@ def _event_name_for_instance(
 
 def _progress_pick_part(
     *,
-    normalized_task: dict[str, Any],
+    event_instance: BridgeEventInstance,
+    projection: BridgeEventProjection,
     context: BridgeValidationContext,
     semantic_result: BridgeValidationResult,
     projected_satisfied: int,
 ) -> tuple[int, dict[str, Any]]:
-    part_name = str(normalized_task.get("part_name") or "").strip()
+    del event_instance, semantic_result
+    part_name = str(projection.part_name or "").strip()
     marked_parts = {
         str(row.get("entity") or "").strip()
         for row in (context.marked_conditions or [])
@@ -1245,12 +936,14 @@ def _progress_pick_part(
 
 def _progress_recover_resource_idle(
     *,
-    normalized_task: dict[str, Any],
+    event_instance: BridgeEventInstance,
+    projection: BridgeEventProjection,
     context: BridgeValidationContext,
     semantic_result: BridgeValidationResult,
     projected_satisfied: int,
 ) -> tuple[int, dict[str, Any]]:
-    start_state = dict(normalized_task.get("expected_start_state") or {})
+    del event_instance, semantic_result
+    start_state = dict(projection.start_state or {})
     if str(start_state.get("resource_state") or "").strip() not in {"", "idle"}:
         return (
             1,
@@ -1319,6 +1012,7 @@ def _part_holder(part_row: dict[str, Any]) -> str:
 __all__ = [
     "BridgeEventInstance",
     "BridgePlantState",
+    "BridgeEventProjection",
     "BridgeValidationContext",
     "BridgeValidationFinding",
     "BridgeValidationResult",
@@ -1326,11 +1020,9 @@ __all__ = [
     "ProcessSchema",
     "ProductEntity",
     "ResourceEntity",
-    "SurfaceBridgeProposal",
+    "build_outline_task_row",
     "bridge_process_schema_registry",
     "build_bridge_validation_context",
-    "normalize_surface_bridge_proposal",
     "parse_bridge_event_instance",
-    "parse_surface_bridge_proposal",
     "validate_bridge_event_instance",
 ]

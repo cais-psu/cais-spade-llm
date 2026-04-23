@@ -9,9 +9,11 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
-from cais_spade_llm.resources.robot.robot_task_specs import (
-    robot_task_docstring,
-    robot_task_spec_names,
+from cais_spade_llm.resources.robot.robot_tasks import (
+    execute_robot_task,
+    resolve_robot_task_names,
+    robot_task_names,
+    robot_task_registry,
 )
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
@@ -64,11 +66,14 @@ class RobotAgent(ResourceAgent):
 
         # Pop before super().__init__ to avoid unexpected kwarg error.
         self._injected_controller = kw.pop("prewarmed_controller", None)
-
-        kw.setdefault(
-            "function_names",
-            list(robot_task_spec_names()),
+        requested_function_names = kw.pop("function_names", None)
+        resolved_function_names = self.resolve_registered_function_names(
+            static_capabilities=kw.get("static_capabilities") or {},
+            named_positions=self.named_positions,
+            controller_config=self.controller_config,
+            requested_names=requested_function_names,
         )
+        kw["function_names"] = resolved_function_names
         super().__init__(jid, password, name=name, **kw)
 
         self.agent_name = name
@@ -113,6 +118,36 @@ class RobotAgent(ResourceAgent):
                 }
                 for binding in self.failure_scenarios
             ],
+        )
+
+    @classmethod
+    def resolve_registered_function_names(
+        cls,
+        *,
+        static_capabilities: dict[str, Any] | None = None,
+        named_positions: dict[str, Any] | None = None,
+        controller_config: dict[str, Any] | None = None,
+        requested_names: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    ) -> list[str]:
+        requested_list: list[str] | None
+        if isinstance(requested_names, str):
+            token = str(requested_names or "").strip().lower()
+            requested_list = None if token in {"", "auto"} else [requested_names]
+        elif requested_names is None:
+            requested_list = None
+        else:
+            requested_list = [
+                str(name).strip()
+                for name in requested_names
+                if str(name or "").strip()
+            ]
+        return list(
+            resolve_robot_task_names(
+                static_capabilities=static_capabilities,
+                named_positions=named_positions,
+                controller_config=controller_config,
+                requested_names=requested_list,
+            )
         )
 
     async def teardown(self) -> None:
@@ -182,6 +217,14 @@ class RobotAgent(ResourceAgent):
     @_pick_ctx.setter
     def _pick_ctx(self, value: Dict[str, Any]) -> None:
         self._task_ctx = value if isinstance(value, dict) else {}
+
+    async def _execute_registered_robot_task(
+        self,
+        task_name: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Execute a registry-backed robot task through the generic DSL runtime."""
+        return await execute_robot_task(self, task_name, **kwargs)
 
     @staticmethod
     def _normalize_failure_scenario_bindings(raw_bindings: Any) -> list[dict[str, Any]]:
@@ -797,851 +840,6 @@ class RobotAgent(ResourceAgent):
         suffix = f" ({details})" if details else ""
         self.logger.info("[Robot] %s: %s%s", step, message, suffix)
 
-    async def pick_approach(
-        self,
-        origin_resource_location: str,
-        part_name: str,
-        *,
-        speed: Optional[float] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-        product_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: idle
-        out_state: at_pick
-
-        required_context_keys: [origin]
-        context_mapping:
-          location_param: origin_resource_location
-          location_type: part_location
-
-        params:
-          origin_resource_location:
-            type: string
-            description: Target origin location to approach for picking.
-          part_name:
-            type: string
-            description: Name of the part intended to be picked (for tracking).
-          speed:
-            type: number
-            description: Optional motion speed.
-          product_geometry:
-            type: object
-            description: Product geometry payload containing part poses in world frame.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Approach the part's origin location with empty gripper.
-        ---
-        """
-
-        if self._held_part:
-            msg = "Cannot move-to-pick while already holding a part."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        call_args = {
-            "origin_resource_location": origin_resource_location,
-            "part_name": part_name,
-            "speed": speed,
-            "product_jid": product_jid,
-            "task_id": task_id,
-            "product_geometry": product_geometry,
-        }
-        injected = await self._maybe_inject_failure(
-            function_name="pick_approach",
-            checkpoint="before_execute",
-            part_name=part_name,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        if self.execution_mode == "dry_run":
-            await self._simulate_action(
-                f"Travel empty to pick location {origin_resource_location} for {part_name} "
-                f"(speed={speed or 'default'})",
-                duration=5.0,
-            )
-            injected = await self._maybe_inject_failure(
-                function_name="pick_approach",
-                checkpoint="after_execute_before_commit",
-                part_name=part_name,
-                call_args=call_args,
-            )
-            if injected is not None:
-                return injected
-            self._task_ctx = {
-                "part_name": part_name,
-                "model_name": "",
-                "tx": 0.0, "ty": 0.0, "tz": 0.0,
-                "pick_z": 0.0, "travel_z": 1.2,
-                "part_height": 0.08, "tcp_offset_z": -0.17,
-                "pick_tcp_z": 0.0,
-                "origin_resource_location": origin_resource_location,
-                "origin_pose": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "start_x": 0.0, "start_y": 0.0, "start_z": 0.0,
-            }
-            self._current_state = "at_pick"
-            self._position = {"x": 0.0, "y": 0.0, "z": 300.0}
-            self._bridge_pose_ref = None
-            return {
-                "status": "completed",
-                "content": f"Arrived at {origin_resource_location} ready to pick {part_name}.",
-            }
-
-        # Simulation / physical: geometry helper + primitives.
-        targets = await asyncio.to_thread(
-            self._controller.compute_pick_targets,
-            part_name,
-            product_geometry,
-        )
-        if not targets.get("success"):
-            return self._task_failure(
-                str(targets.get("message") or "failed to compute pick targets"),
-                step="pick_approach.compute_pick_targets",
-                observations={"part_name": part_name},
-            )
-        self._log_step(
-            "pick_approach",
-            "computed pick targets",
-            part=targets.get("part_name"),
-            x=f"{targets.get('tx', 0.0):.3f}",
-            y=f"{targets.get('ty', 0.0):.3f}",
-            pick_z=f"{targets.get('pick_z', 0.0):.3f}",
-            travel_z=f"{targets.get('travel_z', 0.0):.3f}",
-        )
-
-        # Open gripper.
-        self._log_step("pick_approach", "opening gripper")
-        r = await self._execute_primitive("open_gripper", {})
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to open gripper before pick approach"),
-                step="pick_approach.open_gripper",
-            )
-
-        # Move above part at travel height.
-        self._log_step("pick_approach", "moving above part", z=f"{targets['travel_z']:.3f}")
-        r = await self._execute_controller_helper(
-            "_move_xy_at_z",
-            {
-                "x": targets["tx"],
-                "y": targets["ty"],
-                "z": targets["travel_z"],
-                "label": "Move above part",
-                "speed": speed,
-            },
-        )
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to move above part"),
-                step="pick_approach.move_above_part",
-                observations={"part_name": targets.get("part_name")},
-            )
-
-        # Descend to pick height.
-        self._log_step("pick_approach", "descending to pick pose", z=f"{targets['pick_z']:.3f}")
-        r = await self._execute_controller_helper(
-            "_move_pose_direct",
-            {
-                "x": targets["tx"],
-                "y": targets["ty"],
-                "z": targets["pick_z"],
-                "label": (
-                    f"Descend to pick (EE z={targets['pick_z']:.3f}, "
-                    f"TCP z={targets['pick_tcp_z']:.3f})"
-                ),
-            },
-        )
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to descend to pick position"),
-                step="pick_approach.descend",
-                observations={"part_name": targets.get("part_name")},
-            )
-
-        injected = await self._maybe_inject_failure(
-            function_name="pick_approach",
-            checkpoint="after_execute_before_commit",
-            part_name=part_name,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        self._task_ctx = {
-            "part_name": targets["part_name"],
-            "model_name": targets["model_name"],
-            "tx": targets["tx"],
-            "ty": targets["ty"],
-            "tz": targets["tz"],
-            "pick_z": targets["pick_z"],
-            "travel_z": targets["travel_z"],
-            "part_height": targets["part_height"],
-            "tcp_offset_z": targets["tcp_offset_z"],
-            "pick_tcp_z": targets["pick_tcp_z"],
-            "origin_resource_location": origin_resource_location,
-            "origin_pose": {
-                "x": targets["tx"],
-                "y": targets["ty"],
-                "z": targets["tz"],
-            },
-            "start_x": targets["start_x"],
-            "start_y": targets["start_y"],
-            "start_z": targets["start_z"],
-        }
-        self._current_state = "at_pick"
-        self._position = {"x": targets["tx"], "y": targets["ty"], "z": targets["pick_z"]}
-        self._bridge_pose_ref = None
-        return {
-            "status": "completed",
-            "content": f"Arrived at {origin_resource_location} ready to pick {part_name}.",
-        }
-
-    async def pick_grasp(
-        self,
-        part_name: str,
-        origin_resource_location: str,
-        *,
-        gripper: Optional[str] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-        product_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: at_pick
-        out_state: picked
-        part_in_state: ready
-
-        required_context_keys: [origin]
-        context_mapping:
-          location_param: origin_resource_location
-          location_type: current_location
-
-        part_transition:
-          completed:
-            state: in_gripper
-            location_template: "{resource_jid}_gripper"
-
-        params:
-          part_name:
-            type: string
-            description: Name of the part to pick.
-          origin_resource_location:
-            type: string
-            description: Origin location of the part (printer or fixture).
-          gripper:
-            type: string
-            description: Optional gripper configuration.
-          product_geometry:
-            type: object
-            description: Product geometry payload containing part poses in world frame.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Pick a ready part from an origin location.
-        ---
-        """
-
-        if self._held_part:
-            msg = f"Already holding {self._held_part}; assemble it before picking a new part."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        call_args = {
-            "part_name": part_name,
-            "origin_resource_location": origin_resource_location,
-            "gripper": gripper,
-            "product_jid": product_jid,
-            "task_id": task_id,
-            "product_geometry": product_geometry,
-        }
-        injected = await self._maybe_inject_failure(
-            function_name="pick_grasp",
-            checkpoint="before_execute",
-            part_name=part_name,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        if self.execution_mode == "dry_run":
-            await self._simulate_action(
-                f"Picking {part_name} from {origin_resource_location} "
-                f"(gripper={gripper or 'default'})",
-                duration=5.0,
-            )
-        else:
-            model_name = str(self._task_ctx.get("model_name") or "").strip()
-            self._log_step(
-                "pick_grasp",
-                "grasping part",
-                part=part_name,
-                model=model_name or "(none)",
-            )
-            r = await self._execute_primitive(
-                "grasp_part",
-                {"model_name": model_name, "part_name": part_name},
-            )
-            if not r.get("success"):
-                return self._task_failure(
-                    str(r.get("message") or f"failed to grasp {part_name}"),
-                    step="pick_grasp.grasp_part",
-                    observations={"part_name": part_name, "model_name": model_name},
-                )
-
-            # Lift part to travel height after grasping.
-            travel_z = self._task_ctx.get("travel_z", 1.2)
-            tx = self._task_ctx.get("tx", 0.0)
-            ty = self._task_ctx.get("ty", 0.0)
-            self._log_step("pick_grasp", "lifting part", z=f"{travel_z:.3f}")
-            r = await self._execute_controller_helper(
-                "_move_pose_direct",
-                {"x": tx, "y": ty, "z": travel_z, "label": "Lift after grasp"},
-            )
-            if not r.get("success"):
-                return self._task_failure(
-                    str(r.get("message") or "failed to lift after grasp"),
-                    step="pick_grasp.lift",
-                    observations={"part_name": part_name},
-                )
-
-        injected = await self._maybe_inject_failure(
-            function_name="pick_grasp",
-            checkpoint="after_execute_before_commit",
-            part_name=part_name,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        self._held_part = part_name
-        self._current_state = "picked"
-        self._gripper_state = "closed"
-        return {
-            "status": "completed",
-            "content": f"Picked {part_name}.",
-            "observations": {
-                "part_name": part_name,
-                "origin_pose": {
-                    "x": self._task_ctx.get("tx", 0.0),
-                    "y": self._task_ctx.get("ty", 0.0),
-                    "z": self._task_ctx.get("tz", 0.0),
-                },
-            },
-        }
-
-    async def place_approach(
-        self,
-        destination_location: str,
-        part_name: str,
-        *,
-        speed: Optional[float] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-        product_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: picked
-        out_state: positioned
-        part_in_state: in_gripper
-
-        required_context_keys: [destination]
-        context_mapping:
-          location_param: destination_location
-          location_type: reachable_location
-
-        part_transition:
-          completed:
-            state: in_transit
-            location_template: "{resource_jid}_gripper"
-
-        params:
-          destination_location:
-            type: string
-            description: Destination location to carry the loaded part.
-          part_name:
-            type: string
-            description: Name of the part being moved.
-          speed:
-            type: number
-            description: Optional motion speed while loaded.
-          product_geometry:
-            type: object
-            description: Product geometry payload containing target placement poses.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Move the loaded part to its destination location.
-        ---
-        """
-
-        if not self._held_part:
-            msg = "Cannot move-loaded without holding a part."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        # Consistency check: Ensure we are moving the part we think we are moving
-        if part_name and self._held_part != part_name:
-            self.logger.warning(
-                "[Robot] Requested to move '%s' but currently holding '%s'. Proceeding with held part.",
-                part_name, self._held_part
-            )
-
-        call_args = {
-            "destination_location": destination_location,
-            "part_name": part_name,
-            "speed": speed,
-            "product_jid": product_jid,
-            "task_id": task_id,
-            "product_geometry": product_geometry,
-        }
-        injected = await self._maybe_inject_failure(
-            function_name="place_approach",
-            checkpoint="before_execute",
-            part_name=part_name or str(self._held_part or ""),
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        if self.execution_mode == "dry_run":
-            await self._simulate_action(
-                f"Move loaded part {self._held_part} to {destination_location} "
-                f"(speed={speed or 'default'})",
-                duration=5.0,
-            )
-            injected = await self._maybe_inject_failure(
-                function_name="place_approach",
-                checkpoint="after_execute_before_commit",
-                part_name=part_name or str(self._held_part or ""),
-                call_args=call_args,
-            )
-            if injected is not None:
-                return injected
-            self._task_ctx.update({
-                "slot_x": 0.0, "slot_y": 0.0,
-                "board_top_z": 1.025, "place_z": 1.1,
-                "destination_location": destination_location,
-            })
-            self._current_state = "positioned"
-            self._position = {"x": 400.0, "y": -200.0, "z": 200.0}
-            self._bridge_pose_ref = None
-            return {
-                "status": "completed",
-                "content": f"Reached {destination_location} with {self._held_part}.",
-            }
-
-        # Simulation / physical: geometry helper + primitives.
-        place = await asyncio.to_thread(
-            self._controller.compute_place_targets,
-            self._task_ctx,
-            product_geometry,
-            part_name,
-            0.0,
-            destination_location,
-        )
-        if not place.get("success"):
-            return self._task_failure(
-                str(place.get("message") or "failed to compute place targets"),
-                step="place_approach.compute_place_targets",
-                observations={"part_name": self._held_part},
-            )
-        travel_z = self._task_ctx.get("travel_z", 1.2)
-        tx = self._task_ctx.get("tx", 0.0)
-        ty = self._task_ctx.get("ty", 0.0)
-        self._log_step(
-            "place_approach",
-            "computed place targets",
-            part=self._held_part,
-            slot_x=f"{place.get('slot_x', 0.0):.3f}",
-            slot_y=f"{place.get('slot_y', 0.0):.3f}",
-            place_z=f"{place.get('place_z', 0.0):.3f}",
-            travel_z=f"{travel_z:.3f}",
-        )
-
-        # Move laterally above destination (already at travel_z from pick_grasp lift).
-        self._log_step("place_approach", "moving above destination")
-        r = await self._execute_controller_helper(
-            "_move_xy_at_z",
-            {
-                "x": place["slot_x"],
-                "y": place["slot_y"],
-                "z": travel_z,
-                "label": "Move above destination",
-                "speed": speed,
-            },
-        )
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to move above destination"),
-                step="place_approach.move_above_destination",
-                observations={"part_name": self._held_part},
-            )
-
-        # Descend to place height.
-        self._log_step("place_approach", "descending to place pose", z=f"{place['place_z']:.3f}")
-        r = await self._execute_controller_helper(
-            "_move_pose_direct",
-            {
-                "x": place["slot_x"],
-                "y": place["slot_y"],
-                "z": place["place_z"],
-                "label": (
-                    f"Descend to place (EE z={place['place_z']:.3f}, "
-                    f"TCP z={place.get('place_tcp_z', 0.0):.3f})"
-                ),
-                "speed": getattr(self._controller, "release_descend_time_scale", None),
-            },
-        )
-        if not r.get("success"):
-            return self._task_failure(
-                str(r.get("message") or "failed to descend to place position"),
-                step="place_approach.descend",
-                observations={"part_name": self._held_part},
-            )
-
-        injected = await self._maybe_inject_failure(
-            function_name="place_approach",
-            checkpoint="after_execute_before_commit",
-            part_name=part_name or str(self._held_part or ""),
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        self._task_ctx.update({
-            "slot_x": place["slot_x"],
-            "slot_y": place["slot_y"],
-            "board_top_z": place["board_top_z"],
-            "place_z": place["place_z"],
-            "place_part_origin_z": place.get("place_part_origin_z"),
-            "part_height": place["part_height"],
-            "destination_location": destination_location,
-        })
-        if place.get("model_name"):
-            self._task_ctx["model_name"] = place["model_name"]
-
-        self._current_state = "positioned"
-        self._position = {
-            "x": place["slot_x"], "y": place["slot_y"], "z": place["place_z"],
-        }
-        self._bridge_pose_ref = None
-        return {
-            "status": "completed",
-            "content": f"Reached {destination_location} with {self._held_part}.",
-        }
-
-    async def place_insert(
-        self,
-        destination_location: str,
-        part_name: str,
-        *,
-        orientation: Optional[str] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-        product_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: positioned
-        out_state: placed
-        part_in_state: in_transit
-
-        required_context_keys: [destination]
-        context_mapping:
-          location_param: destination_location
-          location_type: current_location
-
-        part_transition:
-          completed:
-            state: assembled
-            verify_camera: true
-            location_param: destination_location
-
-        params:
-          destination_location:
-            type: string
-            description: Final assembly location for the part.
-          part_name:
-            type: string
-            description: Name of the part being assembled.
-          orientation:
-            type: string
-            description: Optional placement orientation.
-          product_geometry:
-            type: object
-            description: Product geometry payload containing insertion target pose.
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Assemble the currently held part at its final destination.
-        ---
-        """
-
-        if not self._held_part:
-            msg = "No part currently held; run pick_grasp first."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        placed_target = part_name or self._held_part
-        call_args = {
-            "destination_location": destination_location,
-            "part_name": part_name,
-            "orientation": orientation,
-            "product_jid": product_jid,
-            "task_id": task_id,
-            "product_geometry": product_geometry,
-        }
-        injected = await self._maybe_inject_failure(
-            function_name="place_insert",
-            checkpoint="before_execute",
-            part_name=placed_target,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        if self.execution_mode == "dry_run":
-            await self._simulate_action(
-                f"Assembling {self._held_part} at {destination_location} "
-                f"(orientation={orientation or 'default'})",
-                duration=5.0,
-            )
-            injected = await self._maybe_inject_failure(
-                function_name="place_insert",
-                checkpoint="after_execute_before_commit",
-                part_name=placed_target,
-                call_args=call_args,
-            )
-            if injected is not None:
-                return injected
-            placed = self._held_part
-            self._held_part = None
-            self._current_state = "placed"
-            self._gripper_state = "open"
-            self._task_ctx = {}
-            return {
-                "status": "completed",
-                "content": f"Assembled {placed} at {destination_location}.",
-                "placed_location": destination_location,
-            }
-
-        # Simulation / physical: release pair, then post-release cleanup.
-        model_name = self._task_ctx.get("model_name", "")
-        slot_x = self._task_ctx.get("slot_x", 0.0)
-        slot_y = self._task_ctx.get("slot_y", 0.0)
-        board_top_z = self._task_ctx.get("board_top_z", 1.025)
-        part_height = self._task_ctx.get("part_height", 0.08)
-        part_origin_z = self._task_ctx.get("place_part_origin_z")
-        place_z = self._task_ctx.get("place_z", board_top_z + part_height)
-        travel_z = self._task_ctx.get("travel_z", 1.2)
-        self._log_step(
-            "place_insert",
-            "releasing part",
-            part=self._held_part,
-            model=model_name or "(none)",
-            slot_x=f"{slot_x:.3f}",
-            slot_y=f"{slot_y:.3f}",
-        )
-        release = await self._execute_primitive(
-            "release_part",
-            {
-                "model_name": model_name,
-                "part_name": str(self._held_part or ""),
-            },
-        )
-        released_ok = bool(release.get("success"))
-
-        if not released_ok:
-            return self._task_failure(
-                str(release.get("message") or f"failed to assemble {self._held_part} at {destination_location}"),
-                step="place_insert.release_part",
-                observations={"part_name": self._held_part, "destination_location": destination_location},
-            )
-
-        if model_name:
-            snap = await self._execute_controller_helper(
-                "snap_part_to_slot",
-                {
-                    "model_name": model_name,
-                    "slot_x": slot_x,
-                    "slot_y": slot_y,
-                    "part_height": part_height,
-                    "board_top_z": board_top_z,
-                    "part_origin_z": part_origin_z,
-                },
-            )
-            if not snap.get("success"):
-                self.logger.warning(
-                    "[Robot] post-release snap_part_to_slot failed for %s: %s",
-                    model_name,
-                    snap.get("message"),
-                )
-
-        self._log_step("place_insert", "lifting clear after release", z=f"{travel_z:.3f}")
-        lift = await self._execute_controller_helper(
-            "_move_pose_direct",
-            {
-                "x": slot_x,
-                "y": slot_y,
-                "z": travel_z,
-                "label": "Lift after place",
-            },
-        )
-        if not lift.get("success"):
-            lift = await self._execute_controller_helper(
-                "_move_pose_direct",
-                {
-                    "x": slot_x,
-                    "y": slot_y,
-                    "z": travel_z,
-                    "label": "Lift after place (no-collision)",
-                    "avoid_collisions": False,
-                    "min_fraction": 0.70,
-                    "allow_partial": True,
-                },
-            )
-        if not lift.get("success"):
-            return self._task_failure(
-                str(lift.get("message") or "failed to lift clear after release"),
-                step="place_insert.lift",
-                observations={"part_name": self._held_part, "destination_location": destination_location},
-            )
-
-        injected = await self._maybe_inject_failure(
-            function_name="place_insert",
-            checkpoint="after_execute_before_commit",
-            part_name=placed_target,
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        placed = self._held_part
-        self._held_part = None
-        self._current_state = "placed"
-        self._gripper_state = "open"
-        self._task_ctx = {}
-
-        return {
-            "status": "completed",
-            "content": f"Assembled {placed} at {destination_location}.",
-            "placed_location": destination_location,
-        }
-
-    async def move_home(
-        self,
-        *,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        ---
-        process: assembly
-        resource_type: robot
-
-        in_state: any
-        out_state: idle
-
-        context: []
-
-        params:
-          product_jid:
-            type: string
-            description: JID of the ProductAgent that owns this task.
-          task_id:
-            type: string
-
-        description: Robot arm move to its home position.
-        ---
-        """
-
-        if self._held_part:
-            msg = "Cannot move home while still holding a part; assemble it first."
-            self.logger.warning("[Robot] %s", msg)
-            return {"status": "blocked", "content": msg}
-
-        call_args = {
-            "product_jid": product_jid,
-            "task_id": task_id,
-        }
-        injected = await self._maybe_inject_failure(
-            function_name="move_home",
-            checkpoint="before_execute",
-            part_name="",
-            call_args=call_args,
-        )
-        if injected is not None:
-            return injected
-
-        if self.execution_mode == "dry_run":
-            await self._simulate_action("Moving arm to home position", duration=3.0)
-            injected = await self._maybe_inject_failure(
-                function_name="move_home",
-                checkpoint="after_execute_before_commit",
-                part_name="",
-                call_args=call_args,
-            )
-            if injected is not None:
-                return injected
-            self._current_state = "idle"
-            self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
-            self._bridge_pose_ref = "home"
-            self._task_ctx = {}
-            return {"status": "completed", "content": "At home position."}
-
-        self._log_step("move_home", "returning robot to home pose")
-        r = await self._execute_controller_helper("move_home", {})
-        if r.get("success"):
-            injected = await self._maybe_inject_failure(
-                function_name="move_home",
-                checkpoint="after_execute_before_commit",
-                part_name="",
-                call_args=call_args,
-            )
-            if injected is not None:
-                return injected
-            self._current_state = "idle"
-            self._position = {"x": 0.0, "y": 0.0, "z": 445.0}
-            self._bridge_pose_ref = "home"
-            self._task_ctx = {}
-            return {"status": "completed", "content": "At home position."}
-
-        return self._task_failure(
-            str(r.get("message") or "failed to move to home position"),
-            step="move_home.controller",
-        )
-
     # ------------------------------------------------------------------ #
     # Bridge-only recovery macro executor
     # ------------------------------------------------------------------ #
@@ -1661,6 +859,7 @@ class RobotAgent(ResourceAgent):
         "compute_place_targets",
         "attach_part",
         "detach_part",
+        "snap_part_to_slot",
         "get_current_pose",
     })
     _BRIDGE_OBSERVATION_PRIMITIVES = frozenset({
@@ -1955,7 +1154,7 @@ class RobotAgent(ResourceAgent):
         if not model_name:
             return
 
-        snap = await self._execute_controller_helper(
+        snap = await self._execute_primitive(
             "snap_part_to_slot",
             {
                 "model_name": model_name,
@@ -2460,41 +1659,93 @@ class RobotAgent(ResourceAgent):
     def bridge_feasibility_oracle(
         self,
         *,
-        operation_kind: str,
-        part_name: str | None,
+        event_instance: Any | None = None,
+        schema: Any | None = None,
+        projection: Any | None = None,
         part_context: Dict[str, Any],
         bridge_snapshot: Dict[str, Any],
-        grounded_action: Dict[str, Any] | None = None,
+        **_compat_kwargs: Any,
     ) -> Dict[str, Any]:
         """Workspace-aware feasibility check for bridge recovery events.
 
-        Uses the grounded bridge action's structured target/effect contract
-        rather than natural-language task labels. Falls back to permissive
-        behavior when the task does not expose a pose that can be checked.
+        Uses the canonical bridge event instance plus typed projection rather
+        than any derived task/action dict. Falls back to permissive behavior
+        when the event does not expose a pose that can be checked.
         """
         from copy import deepcopy
 
-        del operation_kind
         evidence: Dict[str, Any] = {
             "part_context": deepcopy(part_context),
             "bridge_snapshot": deepcopy(bridge_snapshot),
             "resource_jid": str(getattr(self, "jid", "") or ""),
-            "grounded_action": deepcopy(grounded_action or {}),
+            "event_instance": {
+                "event_schema_id": str(getattr(event_instance, "event_schema_id", "") or ""),
+                "resource_binding": str(getattr(event_instance, "resource_binding", "") or ""),
+                "object_bindings": deepcopy(getattr(event_instance, "object_bindings", {}) or {}),
+                "parameters": deepcopy(getattr(event_instance, "parameters", {}) or {}),
+            },
+            "projection": {
+                "start_state": deepcopy(getattr(projection, "start_state", {}) or {}),
+                "end_state": deepcopy(getattr(projection, "end_state", {}) or {}),
+                "action_target": deepcopy(getattr(projection, "action_target", {}) or {}),
+                "part_name": str(getattr(projection, "part_name", "") or ""),
+                "target_ref": str(getattr(projection, "target_ref", "") or ""),
+            },
         }
 
         bridge_snapshot = deepcopy(bridge_snapshot or {})
         part_context = deepcopy(part_context or {})
-        grounded_action = deepcopy(grounded_action or {})
-        target_info = dict(grounded_action.get("target") or part_context.get("target") or {})
-        expected_effect = dict(grounded_action.get("expected_effect") or {})
-        preconditions = dict(grounded_action.get("preconditions") or {})
-        resource_preconditions = dict(preconditions.get("resource") or {})
-        part_preconditions = dict(preconditions.get("part") or {})
-        source_ref = dict(preconditions.get("source_ref") or {})
-        effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
-        task_kind = str(grounded_action.get("task_kind") or "").strip().lower()
-        expected_resource = dict(expected_effect.get("resource") or {})
-        expected_part = dict(expected_effect.get("part") or {})
+        target_info = dict(getattr(projection, "action_target", {}) or part_context.get("target") or {})
+        event_instance = event_instance
+        projection = projection
+        schema_id = str(getattr(schema, "schema_id", "") or "").strip().lower()
+        action_type = str(getattr(schema, "action_type", "") or "").strip().lower()
+        part_name = str(getattr(projection, "part_name", "") or "").strip() or None
+        start_state = dict(getattr(projection, "start_state", {}) or {})
+        end_state = dict(getattr(projection, "end_state", {}) or {})
+        source_ref: Dict[str, Any] = {
+            "location": str(getattr(event_instance, "object_bindings", {}).get("source_location") or "").strip() or None,
+        }
+        if source_ref.get("location") == "observed_pose":
+            source_pose = dict(part_context.get("observed_pose") or {})
+            if source_pose:
+                source_ref["pose"] = deepcopy(source_pose)
+        desired_resource_state = str(end_state.get("resource_state") or "").strip()
+        desired_resource_location = str(
+            end_state.get("resource_location")
+            or end_state.get("current_location")
+            or end_state.get("location")
+            or end_state.get("named_pose")
+            or ""
+        ).strip()
+        desired_held_part = str(end_state.get("held_part") or "").strip()
+        desired_part_holder = str(end_state.get("part_holder_resource_jid") or "").strip()
+        desired_part_location = str(end_state.get("part_location") or "").strip()
+        expected_resource = {
+            "current_state": desired_resource_state or None,
+            "location": desired_resource_location or None,
+            "held_part": desired_held_part or None,
+        }
+        expected_part = {
+            "state": str(end_state.get("part_state") or "").strip() or None,
+            "location": desired_part_location or None,
+            "holder": desired_part_holder or None,
+        }
+        part_affecting = bool(
+            part_name
+            and any(expected_part.get(key) not in (None, "", [], {}) for key in ("state", "location", "holder"))
+        )
+        resource_affecting = bool(
+            any(expected_resource.get(key) not in (None, "", [], {}) for key in ("current_state", "location", "held_part"))
+        )
+        effect_scope = (
+            "resource_and_part"
+            if resource_affecting and part_affecting
+            else "part_only"
+            if part_affecting
+            else "resource_only"
+        )
+        task_kind = action_type
         named_pose = str(target_info.get("named_pose") or part_context.get("named_pose") or "").strip()
         available_named_poses = {
             str(name).strip()
@@ -2556,27 +1807,11 @@ class RobotAgent(ResourceAgent):
             )
             if str(token).strip()
         }
-        desired_held_part = str(expected_resource.get("held_part") or "").strip()
-        desired_part_holder = str(expected_part.get("holder") or "").strip()
-        desired_part_location = str(expected_part.get("location") or "").strip()
-        desired_resource_location = str(expected_resource.get("location") or "").strip()
-        desired_resource_state = str(expected_resource.get("current_state") or "").strip()
         allows_abstract_idle_recovery = (
             effect_scope == "resource_only"
             and desired_resource_state.lower() == "idle"
         )
-        part_affecting = bool(
-            effect_scope in {"part_only", "resource_and_part"}
-            or any(
-                key in expected_part and expected_part.get(key) not in (None, "", [], {})
-                for key in ("state", "location", "pose", "holder")
-            )
-        )
-        requires_part_acquisition = bool(
-            part_name
-            and part_affecting
-            and bool(part_preconditions.get("requires_acquisition"))
-        )
+        requires_part_acquisition = bool(part_name and schema_id == "pick_part")
         if (
             effect_scope == "resource_only"
             and desired_resource_state
@@ -2604,7 +1839,6 @@ class RobotAgent(ResourceAgent):
                 "evidence": {
                     **evidence,
                     "supported_recovery_states": sorted(supported_recovery_states),
-                    "resource_preconditions": deepcopy(resource_preconditions),
                 },
             }
         if requires_part_acquisition and part_name:
@@ -2718,7 +1952,6 @@ class RobotAgent(ResourceAgent):
             target_pose = (
                 target_info.get("slot_pose")
                 or target_info.get("pose")
-                or dict(expected_part.get("pose") or {})
                 or None
             )
 
@@ -2792,12 +2025,8 @@ class RobotAgent(ResourceAgent):
 
         self.logger.info("[%s] Finished: %s", robot, description)
 
-
-for _robot_task_name in robot_task_spec_names():
-    _robot_task = getattr(RobotAgent, _robot_task_name, None)
-    if callable(_robot_task):
-        _robot_task.__doc__ = robot_task_docstring(_robot_task_name)
+for _robot_task_name in robot_task_names():
+    setattr(RobotAgent, _robot_task_name, robot_task_registry()[_robot_task_name].handler)
 
 
 del _robot_task_name
-del _robot_task

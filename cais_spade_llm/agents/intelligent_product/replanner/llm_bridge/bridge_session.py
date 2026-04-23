@@ -16,9 +16,9 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import
     build_multi_turn_session_seed,
     execute_multi_turn_bridge,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_normalization import (
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_adapter import (
+    adapt_bridge_resource_snapshot,
     bridge_resource_capabilities,
-    normalize_bridge_resource,
     resolve_bridge_resource_type,
 )
 from cais_spade_llm.resources.resource_profile import (
@@ -875,7 +875,7 @@ class BridgeSessionMixin:
             return flat
 
         snapshot = dict(bridge_snapshot or {})
-        focused_snapshot = normalize_bridge_resource(
+        focused_snapshot = adapt_bridge_resource_snapshot(
             resource_jid=str(focused_resource_jid or "").strip(),
             resource_type=resolve_bridge_resource_type(
                 snapshot=snapshot,
@@ -922,20 +922,20 @@ class BridgeSessionMixin:
                 modeled_state=dict(raw_entry.get("modeled_state") or {}),
                 static_capabilities=dict(raw_entry.get("static_capabilities") or {}),
             )
-            normalized_entry = normalize_bridge_resource(
+            adapted_entry = adapt_bridge_resource_snapshot(
                 resource_jid=str(resource_jid),
                 resource_type=resource_type,
                 snapshot=resource_snapshot,
                 modeled_state=dict(raw_entry.get("modeled_state") or {}),
             )
-            profile = get_resource_profile(str(normalized_entry.get("resource_type") or "resource"))
+            profile = get_resource_profile(str(adapted_entry.get("resource_type") or "resource"))
             context["resources"][str(resource_jid)] = {
                 "jid": str(resource_jid),
-                "resource_core": deepcopy(normalized_entry.get("resource_core") or {}),
-                "resource_facets": deepcopy(normalized_entry.get("resource_facets") or {}),
-                "resource_type": normalized_entry.get("resource_type"),
-                "current_state": normalized_entry.get("current_state"),
-                "current_location": deepcopy(normalized_entry.get("current_location")),
+                "resource_core": deepcopy(adapted_entry.get("resource_core") or {}),
+                "resource_facets": deepcopy(adapted_entry.get("resource_facets") or {}),
+                "resource_type": adapted_entry.get("resource_type"),
+                "current_state": adapted_entry.get("current_state"),
+                "current_location": deepcopy(adapted_entry.get("current_location")),
                 "modeled_state": deepcopy(raw_entry.get("modeled_state") or {}),
                 "pending_tasks": deepcopy(raw_entry.get("pending_tasks") or []),
                 "static_capabilities": deepcopy(raw_entry.get("static_capabilities") or {}),
@@ -943,12 +943,12 @@ class BridgeSessionMixin:
             }
             context["resources"][str(resource_jid)].update(
                 resource_snapshot_fields_map(
-                    normalized_entry,
+                    adapted_entry,
                     profile.snapshot_fields,
                     profile=profile,
                 )
             )
-            context["resources"][str(resource_jid)].update(_flat_facet_fields(normalized_entry))
+            context["resources"][str(resource_jid)].update(_flat_facet_fields(adapted_entry))
 
         geometry_lookup = getattr(self.product_agent, "_geometry_for_part", None)
         for part_name, raw_info in (part_tracker or {}).items():
@@ -1059,7 +1059,7 @@ class BridgeSessionMixin:
                     modeled_state=modeled_state,
                     static_capabilities=static_capabilities,
                 )
-                bridge_snapshot = normalize_bridge_resource(
+                bridge_snapshot = adapt_bridge_resource_snapshot(
                     resource_jid=resource_jid,
                     resource_type=resource_type,
                     snapshot=raw_bridge_snapshot,
@@ -1183,7 +1183,7 @@ class BridgeSessionMixin:
                 or entry.get("bridge_snapshot")
                 or {}
             )
-            normalized_snapshot = normalize_bridge_resource(
+            normalized_snapshot = adapt_bridge_resource_snapshot(
                 resource_jid=jid,
                 resource_type=str(
                     snapshot.get("resource_type")

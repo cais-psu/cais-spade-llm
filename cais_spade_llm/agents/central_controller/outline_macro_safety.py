@@ -51,7 +51,7 @@ def _modeled_gap_unmet_conditions_by_id(llm_input: dict[str, Any]) -> dict[str, 
 def _task_dependency_ids(task: dict[str, Any]) -> list[str]:
     return [
         str(item).strip()
-        for item in (task.get("depends_on") or [])
+        for item in (task.get("predecessors") or [])
         if str(item).strip()
     ]
 
@@ -76,10 +76,9 @@ def _task_enables_task_ids(task: dict[str, Any]) -> list[str]:
     )
 
 
-def _task_part_names(task: dict[str, Any], grounded_action: dict[str, Any]) -> list[str]:
+def _task_part_names(task: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
     for candidate in (
-        grounded_action.get("part_name"),
         task.get("part_name"),
         dict(task.get("expected_start_state") or {}).get("part_name"),
         dict(task.get("expected_end_state") or {}).get("part_name"),
@@ -96,12 +95,11 @@ def _task_type_for_cca(
     task: dict[str, Any],
     *,
     task_types_by_id: dict[str, str],
-    grounded_action: dict[str, Any],
 ) -> str:
     task_id = str(task.get("outline_id") or "").strip()
     if task_id and str(task_types_by_id.get(task_id) or "").strip():
         return str(task_types_by_id.get(task_id) or "").strip()
-    return str(grounded_action.get("task_kind") or "").strip()
+    return str(task.get("task_kind") or "").strip()
 
 
 def _fault_event_fallback_parts(llm_input: dict[str, Any]) -> list[str]:
@@ -175,7 +173,6 @@ def _continuation_condition_cleared(
 def _continuation_prerequisite_task_ids(
     task: dict[str, Any],
     *,
-    grounded_action: dict[str, Any],
     outline_tasks: list[dict[str, Any]],
     task_types_by_id: dict[str, str],
     llm_input: dict[str, Any],
@@ -184,10 +181,9 @@ def _continuation_prerequisite_task_ids(
     if _task_type_for_cca(
         task,
         task_types_by_id=task_types_by_id,
-        grounded_action=grounded_action,
     ) != "continuation_resume":
         return []
-    referenced_parts = _task_part_names(task, grounded_action)
+    referenced_parts = _task_part_names(task)
     pending_nominal_task_ids: list[str] = []
     for part_name in referenced_parts:
         pending_nominal_task_ids.extend(
@@ -966,7 +962,9 @@ def validate_outline_macro_bridge_safety(
 def validate_outline_macro_cca_constraints(
     *,
     task: dict[str, Any],
-    grounded_action: dict[str, Any],
+    grounded_action: dict[str, Any] | None = None,
+    event_instance: dict[str, Any] | Any | None = None,
+    projection: dict[str, Any] | Any | None = None,
     signature: dict[str, Any],
     pre_resources: dict[str, dict[str, Any]],
     pre_parts: dict[str, dict[str, Any]],
@@ -979,6 +977,7 @@ def validate_outline_macro_cca_constraints(
     dependency_map: dict[str, list[str]],
     previously_cleared_condition_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    del grounded_action, event_instance, projection
     findings: list[dict[str, Any]] = []
     condition_lookup = _modeled_gap_unmet_conditions_by_id(llm_input)
     pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
@@ -986,7 +985,6 @@ def validate_outline_macro_cca_constraints(
     task_type = _task_type_for_cca(
         task,
         task_types_by_id=task_types_by_id,
-        grounded_action=grounded_action,
     )
     invalid_dependency_ids = [
         dependency_id
@@ -998,10 +996,10 @@ def validate_outline_macro_cca_constraints(
             task=task,
             constraint_code="invalid_dependency_reference",
             reason=(
-                "depends_on may reference only outline_id values from outline rows in "
+                "predecessors may reference only outline_id values from outline rows in "
                 f"this same response ({', '.join(invalid_dependency_ids)})"
             ),
-            part_name=grounded_action.get("part_name"),
+            part_name=task.get("part_name"),
             evidence={"dependency_ids": deepcopy(invalid_dependency_ids)},
         )
         finding["dependency_ids"] = deepcopy(invalid_dependency_ids)
@@ -1010,7 +1008,6 @@ def validate_outline_macro_cca_constraints(
     if task_type == "continuation_resume":
         prerequisite_ids = _continuation_prerequisite_task_ids(
             task,
-            grounded_action=grounded_action,
             outline_tasks=outline_tasks,
             task_types_by_id=task_types_by_id,
             llm_input=llm_input,
@@ -1035,7 +1032,7 @@ def validate_outline_macro_cca_constraints(
                         f"continuation task is missing prerequisite dependencies on "
                         f"{', '.join(missing_dependency_ids)}"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"required_dependency_ids": deepcopy(missing_dependency_ids)},
                 )
             )
@@ -1054,7 +1051,7 @@ def validate_outline_macro_cca_constraints(
                         f"continuation task appears before prerequisite tasks "
                         f"{', '.join(late_prerequisite_ids)}"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"required_dependency_ids": deepcopy(late_prerequisite_ids)},
                 )
             )
@@ -1077,7 +1074,7 @@ def validate_outline_macro_cca_constraints(
                         "continuation blockers are still uncleared in symbolic state "
                         f"({', '.join(blocking_condition_ids)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"condition_ids": deepcopy(blocking_condition_ids)},
                 )
             )
@@ -1109,7 +1106,7 @@ def validate_outline_macro_cca_constraints(
                         "that are not currently unmet "
                         f"({', '.join(not_currently_unmet)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"claimed_condition_ids": deepcopy(not_currently_unmet)},
                     claimed_condition_ids=not_currently_unmet,
                 )
@@ -1129,7 +1126,7 @@ def validate_outline_macro_cca_constraints(
                         "closes_condition_ids claims continuation conditions that remain "
                         f"unmet after projection ({', '.join(not_cleared)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"claimed_condition_ids": deepcopy(not_cleared)},
                     claimed_condition_ids=not_cleared,
                 )
@@ -1150,7 +1147,7 @@ def validate_outline_macro_cca_constraints(
                         "enables_task_ids references task ids that are not pending "
                         f"nominal tasks ({', '.join(not_pending)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"claimed_task_ids": deepcopy(not_pending)},
                     claimed_task_ids=not_pending,
                 )
@@ -1174,7 +1171,7 @@ def validate_outline_macro_cca_constraints(
                         "enables_task_ids references nominal tasks that are not currently "
                         f"blocked in recovery gap state ({', '.join(not_currently_blocked)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"claimed_task_ids": deepcopy(not_currently_blocked)},
                     claimed_task_ids=not_currently_blocked,
                 )
@@ -1198,7 +1195,7 @@ def validate_outline_macro_cca_constraints(
                         "enables_task_ids claims blocked nominal tasks that remain blocked "
                         f"after projection ({', '.join(not_enabled)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"claimed_task_ids": deepcopy(not_enabled)},
                     claimed_task_ids=not_enabled,
                 )
@@ -1238,7 +1235,7 @@ def validate_outline_macro_cca_constraints(
                         "projected state transition reopens previously cleared continuation "
                         f"conditions ({', '.join(reopened_condition_ids)})"
                     ),
-                    part_name=grounded_action.get("part_name"),
+                    part_name=task.get("part_name"),
                     evidence={"condition_ids": deepcopy(reopened_condition_ids)},
                 )
             )

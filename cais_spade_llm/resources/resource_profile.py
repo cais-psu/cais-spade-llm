@@ -31,6 +31,7 @@ ExtractOutputResolver = Callable[
 ]
 EventFactKeyResolver = Callable[[dict[str, Any]], tuple[str | None, str | None]]
 CarriedEntityLocationBuilder = Callable[[str, dict[str, Any] | None], str]
+SnapshotEquivalenceResolver = Callable[..., bool]
 
 
 def resource_type_from_value(value: Any) -> str:
@@ -76,6 +77,7 @@ class ResourceProfile:
     )
     carried_entity_field: str = ""
     carried_entity_location_builder: CarriedEntityLocationBuilder | None = None
+    snapshot_equivalence_resolver: SnapshotEquivalenceResolver | None = None
     prompt_addendum: str = ""
     repair_example: str = ""
 

@@ -107,14 +107,15 @@ class PrintingAgent(ResourceAgent):
     def bridge_feasibility_oracle(
         self,
         *,
-        operation_kind: str = "",
-        part_name: str | None = None,
+        event_instance: Any | None = None,
+        schema: Any | None = None,
+        projection: Any | None = None,
         part_context: dict[str, Any] | None = None,
         bridge_snapshot: dict[str, Any] | None = None,
-        grounded_action: dict[str, Any] | None = None,
+        **_compat_kwargs: Any,
     ) -> Dict[str, Any]:
         """Printer-specific bridge feasibility checks."""
-        del operation_kind, part_name, part_context, grounded_action
+        del event_instance, schema, projection, part_context
         snapshot = bridge_snapshot or {}
         material = str(snapshot.get("material_state") or "").strip()
         bed = str(snapshot.get("bed_state") or "").strip()

@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import patch
@@ -84,8 +85,23 @@ def _normalize_reasoning_effort_for_model(model_name: str, effort: str) -> str:
     return normalized_effort
 
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.agents.intelligent_product.product_agent import (
+    ProductAgent,
+    _ack_status_is_regression,
+    _should_persist_ack_state,
+)
+from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
+    ProductRecoveryController,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
+    snapshot_matches_expected,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
     multi_turn as multi_turn_mode,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+    _resolve_context_ref,
+    generate_primitive_batch_with_llm_agent,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     write_bridge_artifacts,
@@ -117,7 +133,7 @@ DEFAULT_LIVE_MODEL = _env_default(
     "CAIS_SPADE_LLM_MODEL",
     "OPENAI_MODEL",
     "CASE3_RECOVERY_MODEL",
-    fallback="gpt-5.4-mini",
+    fallback="gpt-5.4",
 )
 DEFAULT_REASONING_EFFORT = _env_default(
     "CAIS_SPADE_REASONING_EFFORT",
@@ -132,6 +148,19 @@ CASE3_COMPLETED_TASK_IDS = (
     "REQ_2_T1",
     "REQ_2_T2",
     "REQ_2_T3",
+)
+CASE3_ARCHIVED_FINAL_OUTPUT_PATH = (
+    ROOT
+    / "cais_spade_llm"
+    / "agents"
+    / "intelligent_product"
+    / "replanner"
+    / "llm_bridge"
+    / "runtime_data"
+    / "imported"
+    / "worked"
+    / "1"
+    / "multi_turn_turn09_final_output_response_20260423T013259.txt"
 )
 
 
@@ -149,8 +178,105 @@ def _repo_root() -> Path:
     return ROOT
 
 
+def _resolve_debug_root() -> Path:
+    debug_dir = Path(DEBUG_DIR)
+    if not debug_dir.is_absolute():
+        debug_dir = _repo_root() / debug_dir
+    return debug_dir
+
+
+def _allocate_dryrun_artifact_directory() -> Path:
+    artifact_directory = _resolve_debug_root()
+    artifact_directory.mkdir(parents=True, exist_ok=True)
+    return artifact_directory
+
+
+def _payload_artifact_directory(payload: dict[str, Any] | None = None) -> Path:
+    if isinstance(payload, dict):
+        bridge_debug = payload.get("bridge_debug")
+        if not isinstance(bridge_debug, dict):
+            prepared_bridge_request = payload.get("prepared_bridge_request")
+            if isinstance(prepared_bridge_request, dict):
+                bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+            else:
+                bridge_debug = {}
+        for key in ("artifact_directory", "per_turn_debug_dir"):
+            candidate_raw = str(bridge_debug.get(key) or "").strip()
+            if not candidate_raw:
+                continue
+            candidate = Path(candidate_raw)
+            return candidate if candidate.is_absolute() else (_repo_root() / candidate)
+    return _resolve_debug_root()
+
+
 def _load_json(path: Path) -> dict[str, Any] | list[Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _resolve_resume_checkpoint_path(path_raw: str | Path) -> Path:
+    candidate = Path(path_raw)
+    if not candidate.is_absolute():
+        candidate = (_repo_root() / candidate).resolve()
+    if candidate.suffix.lower() == ".json" and candidate.exists():
+        return candidate
+
+    candidate_name = candidate.name
+    checkpoint_name_variants = [
+        candidate_name.replace("_prompt_", "_resume_checkpoint_").replace(".txt", ".json"),
+        candidate_name.replace("_response_", "_resume_checkpoint_").replace(".txt", ".json"),
+        candidate_name.replace("_prompt_latest.txt", "_resume_checkpoint_latest.json"),
+        candidate_name.replace("_response_latest.txt", "_resume_checkpoint_latest.json"),
+    ]
+    for checkpoint_name in checkpoint_name_variants:
+        if checkpoint_name == candidate_name:
+            continue
+        checkpoint_path = candidate.with_name(checkpoint_name)
+        if checkpoint_path.exists():
+            return checkpoint_path
+    raise FileNotFoundError(
+        f"resume checkpoint not found for {str(candidate)}"
+    )
+
+
+def _load_resume_checkpoint(path_raw: str | Path) -> tuple[Path, dict[str, Any]]:
+    checkpoint_path = _resolve_resume_checkpoint_path(path_raw)
+    payload = _load_json(checkpoint_path)
+    if not isinstance(payload, dict):
+        raise ValueError("resume checkpoint payload must be a JSON object")
+    checkpoint_kind = str(payload.get("kind") or "").strip()
+    if checkpoint_kind not in {
+        "multi_turn_resume_checkpoint",
+        "primitive_batch_resume_checkpoint",
+    }:
+        raise ValueError(
+            f"unsupported resume checkpoint kind: {checkpoint_kind or '<missing>'}"
+        )
+    return checkpoint_path, payload
+
+
+def _configure_resume_bridge_debug(
+    *,
+    prepared_bridge_request: dict[str, Any],
+    write_debug: bool,
+    write_resume_checkpoints: bool = False,
+    checkpoint_path: Path | None = None,
+) -> None:
+    bridge_debug_seed = dict(prepared_bridge_request.get("bridge_debug") or {})
+    bridge_debug_seed["write_resume_checkpoints"] = bool(write_resume_checkpoints)
+    if write_debug:
+        checkpoint_dir = (
+            checkpoint_path.parent
+            if checkpoint_path is not None
+            else _allocate_dryrun_artifact_directory()
+        )
+        if not str(bridge_debug_seed.get("artifact_directory") or "").strip():
+            bridge_debug_seed["artifact_directory"] = str(checkpoint_dir)
+        if not str(bridge_debug_seed.get("per_turn_debug_dir") or "").strip():
+            bridge_debug_seed["per_turn_debug_dir"] = str(checkpoint_dir)
+    else:
+        bridge_debug_seed["artifact_directory"] = ""
+        bridge_debug_seed["per_turn_debug_dir"] = ""
+    prepared_bridge_request["bridge_debug"] = bridge_debug_seed
 
 
 def _case3_paths() -> dict[str, Path]:
@@ -917,15 +1043,87 @@ class FakeBridgeRobot:
     def bridge_feasibility_oracle(
         self,
         *,
-        operation_kind: str,
-        part_name: str | None,
+        event_instance: Any | None = None,
+        schema: Any | None = None,
+        projection: Any | None = None,
         part_context: dict[str, Any],
         bridge_snapshot: dict[str, Any],
+        operation_kind: str = "",
+        part_name: str | None = None,
         grounded_action: dict[str, Any] | None = None,
+        **_compat_kwargs: Any,
     ) -> dict[str, Any]:
-        del operation_kind
         bridge_snapshot = deepcopy(bridge_snapshot or {})
         part_context = deepcopy(part_context or {})
+        if grounded_action is None and projection is not None:
+            end_state = dict(getattr(projection, "end_state", {}) or {})
+            part_name = part_name or str(getattr(projection, "part_name", "") or "").strip() or None
+            expected_resource = {
+                "current_state": str(end_state.get("resource_state") or "").strip() or None,
+                "location": str(
+                    end_state.get("resource_location")
+                    or end_state.get("current_location")
+                    or end_state.get("location")
+                    or end_state.get("named_pose")
+                    or ""
+                ).strip() or None,
+                "held_part": str(end_state.get("held_part") or "").strip() or None,
+            }
+            expected_part = {
+                "state": str(end_state.get("part_state") or "").strip() or None,
+                "location": str(end_state.get("part_location") or "").strip() or None,
+                "holder": str(end_state.get("part_holder_resource_jid") or "").strip() or None,
+            }
+            part_affecting = bool(
+                part_name
+                and any(
+                    expected_part.get(key) not in (None, "", [], {})
+                    for key in ("state", "location", "holder")
+                )
+            )
+            resource_affecting = bool(
+                any(
+                    expected_resource.get(key) not in (None, "", [], {})
+                    for key in ("current_state", "location", "held_part")
+                )
+            )
+            effect_scope = (
+                "resource_and_part"
+                if resource_affecting and part_affecting
+                else "part_only"
+                if part_affecting
+                else "resource_only"
+            )
+            source_ref = {
+                "location": str(
+                    getattr(event_instance, "object_bindings", {}).get("source_location") or ""
+                ).strip() or None,
+            }
+            if source_ref.get("location") == "observed_pose":
+                observed_pose = dict(part_context.get("observed_pose") or {})
+                if observed_pose:
+                    source_ref["pose"] = deepcopy(observed_pose)
+            grounded_action = {
+                "resource_jid": self.jid,
+                "part_name": part_name,
+                "operation_kind": str(getattr(schema, "action_type", "") or operation_kind or "").strip(),
+                "task_kind": str(getattr(schema, "action_type", "") or operation_kind or "").strip(),
+                "target": deepcopy(getattr(projection, "action_target", {}) or {}),
+                "expected_effect": {
+                    "resource": expected_resource,
+                    "part": expected_part,
+                },
+                "preconditions": {
+                    "source_ref": source_ref,
+                    "part": {
+                        "requires_acquisition": str(
+                            getattr(schema, "schema_id", "") or ""
+                        ).strip().lower()
+                        == "pick_part"
+                    },
+                },
+                "effect_scope": effect_scope,
+            }
         grounded_action = deepcopy(grounded_action or {})
         evidence = {
             "part_context": deepcopy(part_context),
@@ -1623,130 +1821,122 @@ def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
     return [
         {
             "outline_id": "RECOVERY_SEQ1",
-            "event_schema_id": "place_part",
+            "event_name": "recover_to_home_idle",
+            "resource_jid": "xarm6@localhost",
+            "rationale": (
+                "Enabled because xarm6 is currently failed and has a grounded named pose "
+                "home. This directly advances the open guard requiring xarm6@localhost "
+                "to reach idle and reduces coordination risk before LG/MCP recovery "
+                "continues."
+            ),
+            "description": (
+                "Enabled because xarm6 is currently failed and has a grounded named pose "
+                "home. This directly advances the open guard requiring xarm6@localhost "
+                "to reach idle and reduces coordination risk before LG/MCP recovery "
+                "continues."
+            ),
+            "predecessors": [],
+            "expected_start_state": {
+                "resource_state": "failed",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "resource_location": "home",
+            },
+        },
+        {
+            "outline_id": "RECOVERY_SEQ2",
+            "event_name": "stage_mcp_to_prusa_mk4_2",
             "resource_jid": "ur5e@localhost",
-            "event_name": "release MCP to prusa-mk4-2",
-            "description": "Move UR5e to a non-interfering position preparing for MCP delivery.",
             "part_name": "MCP",
             "target_ref": "prusa-mk4-2",
-            "action_type": "release_part",
-            "bridge_event_instance": {
-                "event_schema_id": "place_part",
-                "resource_binding": "ur5e@localhost",
-                "object_bindings": {
-                    "part": "MCP",
-                    "target_location": "prusa-mk4-2",
-                },
-                "parameters": {},
-                "depends_on": [],
-                "rationale": "Place MCP back on the printer before LG recovery continues.",
-            },
+            "rationale": (
+                "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded "
+                "reachable location for ur5e. This clears ur5e's gripper so it can "
+                "recover LG first, which is required before any MCP place approach at "
+                "assembly_board-v1."
+            ),
+            "description": (
+                "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded "
+                "reachable location for ur5e. This clears ur5e's gripper so it can "
+                "recover LG first, which is required before any MCP place approach at "
+                "assembly_board-v1."
+            ),
+            "predecessors": [],
             "expected_start_state": {
                 "resource_state": "picked",
                 "held_part": "MCP",
                 "part_state": "in_gripper",
                 "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
             },
             "expected_end_state": {
                 "resource_state": "idle",
                 "held_part": None,
+                "part_state": "placed",
                 "part_location": "prusa-mk4-2",
-                "part_holder_resource_jid": None,
-            },
-            "action_target": {"target_location": "prusa-mk4-2"},
-        },
-        {
-            "outline_id": "RECOVERY_SEQ2",
-            "event_schema_id": "recover_resource_idle",
-            "resource_jid": "xarm6@localhost",
-            "event_name": "recover resource",
-            "description": "Attempt to restart xarm6 to transition from failed to idle state.",
-            "action_type": "recover_resource",
-            "bridge_event_instance": {
-                "event_schema_id": "recover_resource_idle",
-                "resource_binding": "xarm6@localhost",
-                "object_bindings": {},
-                "parameters": {},
-                "depends_on": [],
-                "rationale": "Return xarm6 to idle after the failure.",
-            },
-            "expected_start_state": {
-                "resource_state": "failed",
-                "held_part": None,
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
             },
         },
         {
             "outline_id": "RECOVERY_SEQ3",
-            "event_schema_id": "pick_part",
+            "event_name": "recover_pick_LG_from_observed_pose",
             "resource_jid": "ur5e@localhost",
-            "event_name": "acquire LG",
-            "description": "Position UR5e to pick up LG which is misplaced at observed_pose.",
             "part_name": "LG",
-            "action_type": "acquire_part",
-            "bridge_event_instance": {
-                "event_schema_id": "pick_part",
-                "resource_binding": "ur5e@localhost",
-                "object_bindings": {
-                    "part": "LG",
-                    "source_location": "observed_pose",
-                },
-                "parameters": {},
-                "depends_on": ["RECOVERY_SEQ1", "RECOVERY_SEQ2"],
-                "rationale": "Pick LG from the observed pose once MCP is clear and xarm6 is recovered.",
-            },
+            "rationale": (
+                "Enabled because ur5e@localhost is idle, not holding any part, and LG "
+                "is misplaced and unheld at an observed pose within ur5e's reachable "
+                "workspace. This is the necessary next recovery step to clear the "
+                "blocker on LG and move toward satisfying REQ_2, which must be "
+                "completed before MCP can safely proceed to the assembly station."
+            ),
+            "description": (
+                "Enabled because ur5e@localhost is idle, not holding any part, and LG "
+                "is misplaced and unheld at an observed pose within ur5e's reachable "
+                "workspace. This is the necessary next recovery step to clear the "
+                "blocker on LG and move toward satisfying REQ_2, which must be "
+                "completed before MCP can safely proceed to the assembly station."
+            ),
+            "predecessors": ["RECOVERY_SEQ2"],
             "expected_start_state": {
                 "resource_state": "idle",
                 "held_part": None,
                 "part_state": "misplaced",
-                "part_location": "observed_pose",
-                "part_holder_resource_jid": None,
             },
             "expected_end_state": {
-                "resource_state": "picked",
+                "resource_state": "idle",
                 "held_part": "LG",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
+                "part_state": "held",
             },
-            "action_target": {"source_location": "observed_pose"},
         },
         {
             "outline_id": "RECOVERY_SEQ4",
-            "event_schema_id": "place_part",
+            "event_name": "recover_place_LG_to_assembly_board-v1",
             "resource_jid": "ur5e@localhost",
-            "event_name": "release LG to assembly_board-v1",
-            "description": "Position UR5e to place LG at the designated assembly board location.",
             "part_name": "LG",
             "target_ref": "assembly_board-v1",
-            "action_type": "release_part",
-            "bridge_event_instance": {
-                "event_schema_id": "place_part",
-                "resource_binding": "ur5e@localhost",
-                "object_bindings": {
-                    "part": "LG",
-                    "target_location": "assembly_board-v1",
-                },
-                "parameters": {},
-                "depends_on": ["RECOVERY_SEQ3"],
-                "rationale": "Place LG on the assembly board once control is established.",
-            },
+            "rationale": (
+                "Enabled now because ur5e is idle, currently holding LG, and can reach "
+                "assembly_board-v1. This directly satisfies REQ_2 and clears the "
+                "explicit guard that LG must be placed at assembly_board-v1 before MCP "
+                "can proceed toward assembly placement."
+            ),
+            "description": (
+                "Enabled now because ur5e is idle, currently holding LG, and can reach "
+                "assembly_board-v1. This directly satisfies REQ_2 and clears the "
+                "explicit guard that LG must be placed at assembly_board-v1 before MCP "
+                "can proceed toward assembly placement."
+            ),
+            "predecessors": ["RECOVERY_SEQ3"],
             "expected_start_state": {
-                "resource_state": "picked",
+                "resource_state": "idle",
                 "held_part": "LG",
-                "part_state": "in_gripper",
-                "part_location": "ur5e@localhost_gripper",
-                "part_holder_resource_jid": "ur5e@localhost",
+                "part_state": "held",
             },
             "expected_end_state": {
                 "resource_state": "idle",
                 "held_part": None,
+                "part_state": "placed",
                 "part_location": "assembly_board-v1",
-                "part_holder_resource_jid": None,
             },
-            "action_target": {"target_location": "assembly_board-v1"},
         },
     ]
 
@@ -1800,6 +1990,162 @@ def _seed_case3_primitive_generation_focus(session_state: dict[str, Any]) -> dic
         "current_holder_resource_jid": "ur5e@localhost",
     })
     return seeded
+
+
+def test_case3_seeded_primitive_focus_seed_starts_with_xarm6_seq1() -> None:
+    session_state = _seed_case3_primitive_generation_focus({})
+    first_event = deepcopy(session_state["accepted_outline_prefix"][0])
+    second_event = deepcopy(session_state["accepted_outline_prefix"][1])
+
+    assert first_event["outline_id"] == "RECOVERY_SEQ1"
+    assert first_event["resource_jid"] == "xarm6@localhost"
+    assert first_event["event_name"] == "recover_to_home_idle"
+    assert second_event["outline_id"] == "RECOVERY_SEQ2"
+    assert second_event["resource_jid"] == "ur5e@localhost"
+    assert second_event["event_name"] == "stage_mcp_to_prusa_mk4_2"
+    assert first_event["predecessors"] == []
+    assert second_event["predecessors"] == []
+
+
+def test_case3_seeded_primitive_context_uses_event_local_start_state_for_seq2() -> None:
+    session_state = _seed_case3_primitive_generation_focus({})
+    outline_event = deepcopy(session_state["accepted_outline_prefix"][1])
+    prepared_bridge_request = {
+        "bridge_resources": {
+            "ur5e@localhost": {
+                "resource_type": "resource",
+                "bridge_snapshot": {
+                    "resource_jid": "ur5e@localhost",
+                    "resource_type": "resource",
+                    "current_state": "idle",
+                    "current_location": "prusa-mk4-2",
+                    "held_part": None,
+                    "gripper_state": "closed",
+                },
+            }
+        },
+        "grounding_context": {"parts": {}},
+    }
+
+    held_part, held_error = _resolve_context_ref(
+        ref="/resources/ur5e@localhost/held_part",
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        outline_event=outline_event,
+    )
+    snapshot, snapshot_error = _resolve_context_ref(
+        ref="/resources/ur5e@localhost/snapshot",
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        outline_event=outline_event,
+    )
+
+    assert held_error is None
+    assert snapshot_error is None
+    assert held_part == "MCP"
+    assert snapshot["resource_state"] == "picked"
+    assert snapshot["held_part"] == "MCP"
+    assert "current_state" not in snapshot
+
+
+def test_bridge_snapshot_mismatch_ignores_missing_current_location_for_part_projection() -> None:
+    mismatch = ProductRecoveryController._bridge_snapshot_mismatch(
+        actual_snapshot={
+            "resource_type": "robot",
+            "current_state": "idle",
+            "current_location": None,
+            "held_part": None,
+            "gripper_state": "open",
+        },
+        projected_snapshot={
+            "resource_type": "robot",
+            "current_state": "idle",
+            "current_location": "prusa-mk4-2",
+            "held_part": None,
+            "gripper_state": "open",
+        },
+        allow_missing_current_location=True,
+    )
+
+    assert mismatch == ""
+
+
+def test_bridge_snapshot_mismatch_accepts_picked_alias_from_closed_gripper() -> None:
+    mismatch = ProductRecoveryController._bridge_snapshot_mismatch(
+        actual_snapshot={
+            "resource_type": "robot",
+            "current_state": "idle",
+            "current_location": None,
+            "held_part": "LG",
+            "gripper_state": "closed",
+        },
+        projected_snapshot={
+            "resource_type": "robot",
+            "current_state": "picked",
+            "current_location": "prusa-mk4-2",
+            "held_part": "LG",
+            "gripper_state": "closed",
+        },
+        allow_missing_current_location=True,
+    )
+
+    assert mismatch == ""
+
+
+def test_snapshot_matches_expected_accepts_picked_alias_from_closed_gripper() -> None:
+    matches, mismatch = snapshot_matches_expected(
+        actual={
+            "resource_type": "robot",
+            "current_state": "idle",
+            "held_part": "LG",
+            "gripper_state": "closed",
+        },
+        expected={
+            "resource_type": "robot",
+            "current_state": "picked",
+            "held_part": "LG",
+            "gripper_state": "closed",
+        },
+    )
+
+    assert matches is True
+    assert mismatch is None
+
+
+def test_ack_status_is_regression_for_late_bridge_updates() -> None:
+    assert _ack_status_is_regression("completed", "running") is True
+    assert _ack_status_is_regression("running", "accepted") is True
+    assert _ack_status_is_regression("dispatched", "running") is False
+    assert _ack_status_is_regression("running", "failed") is False
+
+
+def test_should_persist_ack_state_skips_transient_bridge_updates() -> None:
+    bridge_task = {"function_name": "execute_recovery_macro"}
+    nominal_task = {"function_name": "move_home"}
+
+    assert _should_persist_ack_state(bridge_task, "accepted") is False
+    assert _should_persist_ack_state(bridge_task, "running") is False
+    assert _should_persist_ack_state(bridge_task, "completed") is True
+    assert _should_persist_ack_state(nominal_task, "running") is True
+
+
+def test_case3_archived_bridge_exposes_two_ready_roots_for_batch_dispatch(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
+
+    assert recovery["status"] == "resolved"
+    ready_nodes = product_agent._active_bridge_ready_tasks(max_count=2)
+
+    assert [str(node.get("bridge_outline_id") or "").strip() for node in ready_nodes] == [
+        "RECOVERY_SEQ1",
+        "RECOVERY_SEQ2",
+    ]
+    assert [str(node.get("resource_jid") or "").strip() for node in ready_nodes] == [
+        "xarm6@localhost",
+        "ur5e@localhost",
+    ]
+    assert all(str(node.get("status") or "").strip() == "pending" for node in ready_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -1921,6 +2267,316 @@ async def _prepare_bridge_dryrun_harness(
     return fixture, product_agent, planner, prepared_bridge_request
 
 
+class _ImmediateThread:
+    def __init__(
+        self,
+        *,
+        target: Callable[..., Any] | None = None,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+        name: str | None = None,
+        daemon: bool | None = None,
+    ) -> None:
+        self._target = target
+        self._args = tuple(args or ())
+        self._kwargs = dict(kwargs or {})
+        self.name = name
+        self.daemon = daemon
+
+    def start(self) -> None:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+        return None
+
+
+def _configure_runtime_bridge_approval_harness(
+    *,
+    product_agent: FakeProductAgent,
+    planner: ProcessPlanner,
+    fixture: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    product_agent._utc_now_iso = staticmethod(
+        lambda: datetime.now(timezone.utc).isoformat()
+    )
+    product_agent._direct_predecessors_from_nodes = staticmethod(
+        ProductAgent._direct_predecessors_from_nodes
+    )
+    product_agent._collect_descendants_from_nodes = staticmethod(
+        ProductAgent._collect_descendants_from_nodes
+    )
+    product_agent._violation_summary = staticmethod(
+        lambda violations: (
+            sorted(
+                {
+                    str(v.get("violated_rule_id"))
+                    for v in (violations if isinstance(violations, list) else [])
+                    if isinstance(v, dict) and v.get("violated_rule_id")
+                }
+            ),
+            len(violations if isinstance(violations, list) else []),
+        )
+    )
+    product_agent.agent_name = "assembly_board-v1"
+    product_agent.process_planner = planner
+    product_agent.resource_agents = list(getattr(planner, "resource_agents", []) or [])
+    product_agent.task_states = {}
+    product_agent.part_tracker = deepcopy(fixture.get("part_tracker") or {})
+    product_agent.execution_timeline = []
+    product_agent.runtime_repair_state = "idle"
+    product_agent.plan_safety_alert = None
+    product_agent._runtime_repair_inflight = False
+    product_agent._runtime_repair_fail_streak = 0
+    product_agent._runtime_repair_max_attempts = 3
+    product_agent._bridge_generation_mode = "auto"
+    product_agent._runtime_bridge_mode = "pre_ran"
+    product_agent._runtime_bridge_validation_policy = "no_validation"
+    product_agent._runtime_bridge_start_safety_mode = "cca_check"
+    product_agent._runtime_bridge_execution_shape = "dag"
+    product_agent._runtime_bridge_archive_path = str(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    product_agent._runtime_bridge_archive_label = CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name
+    product_agent._orphaned_bridge_task_warning_ids = set()
+    product_agent._generated_bridge_gazebo_verification_enabled = False
+    product_agent.cca_jid = "cca@localhost"
+    product_agent.plan_path = tmp_path / "case3_plan.json"
+    product_agent.global_fsa_path = tmp_path / "case3_global_fsa.json"
+    product_agent.product_state_path = tmp_path / "case3_product_state.json"
+    product_agent.resource_state_path = tmp_path / "case3_resource_state.json"
+    product_agent.recovery_controller = ProductRecoveryController(product_agent)
+    product_agent.recovery_controller.bind_methods()
+    product_agent._refresh_bridge_sequence_runtime_metadata = (
+        product_agent.recovery_controller._refresh_bridge_sequence_runtime_metadata
+    )
+    product_agent.runtime_recovery = product_agent._empty_runtime_recovery()
+    product_agent._runtime_recovery_context = {}
+
+
+def _approve_case3_archived_bridge(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any], dict[str, Any]]:
+    fixture, product_agent, planner, prepared_bridge_request = asyncio.run(
+        _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
+    )
+    _configure_runtime_bridge_approval_harness(
+        product_agent=product_agent,
+        planner=planner,
+        fixture=fixture,
+        tmp_path=tmp_path,
+    )
+
+    final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    if not isinstance(final_output_payload, dict):
+        raise TypeError("archived final output payload must decode to an object")
+    proposal_result = multi_turn_mode.build_multi_turn_bridge_proposal(
+        final_output_payload=deepcopy(final_output_payload),
+        prepared_bridge_request=deepcopy(prepared_bridge_request),
+    )
+    assert proposal_result["accepted"] is True
+    bridge_proposal = deepcopy(proposal_result.get("bridge_proposal") or {})
+    bridge_debug = {
+        "source": "archived_final_output",
+        "archive_replay": {
+            "source_path": str(CASE3_ARCHIVED_FINAL_OUTPUT_PATH),
+            "source_label": CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name,
+        },
+        "execution_policy": {
+            "complete_full_tail": True,
+            "execution_shape": "dag",
+            "start_safety_mode": "cca_check",
+        },
+    }
+    violations = [
+        {
+            "failed_task_id": FAILED_TASK_ID,
+            "task_id": FAILED_TASK_ID,
+            "resource_jid": "xarm6@localhost",
+            "failure_context": deepcopy(fixture.get("failure_context") or {}),
+        }
+    ]
+    product_agent._runtime_recovery_context = {
+        "trigger": "runtime_des_replan",
+        "failed_task_id": FAILED_TASK_ID,
+        "violations": deepcopy(violations),
+        "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        "system_coordination_state": {
+            "resource_states": deepcopy(fixture.get("resource_states") or {})
+        },
+    }
+    product_agent._set_runtime_recovery(
+        reset=True,
+        status="llm_bridge",
+        resolution_class="none",
+        trigger="runtime_des_replan",
+        failed_task_id=FAILED_TASK_ID,
+        message="Awaiting archived bridge approval.",
+        used_llm_bridge=True,
+        bridge_proposal=bridge_proposal,
+        bridge_debug=bridge_debug,
+        bridge_approval_state="pending",
+        violations=violations,
+    )
+    with patch(
+        "cais_spade_llm.agents.intelligent_product.product_recovery_controller.threading.Thread",
+        new=_ImmediateThread,
+    ):
+        recovery = product_agent.approve_runtime_bridge_proposal_sync()
+    return fixture, product_agent, planner, prepared_bridge_request, recovery
+
+
+def test_case3_archived_bridge_approval_compiles_per_resource_concurrency(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
+
+    assert recovery["status"] == "resolved"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    assert active_bridge_sequence["execution_shape"] == "dag"
+    assert active_bridge_sequence["start_safety_mode"] == "cca_check"
+
+    bridge_nodes_by_outline_id = {
+        str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+    }
+    seq1 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ1"])
+    seq2 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ2"])
+    seq3 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ3"])
+    seq4 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ4"])
+    req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
+    req_1_t4 = dict(planner._find_node("REQ_1_T4") or {})
+    req_1_t5 = dict(planner._find_node("REQ_1_T5") or {})
+    req_2_t5 = dict(planner._find_node("REQ_2_T5") or {})
+
+    assert max(
+        int(seq2.get("sequence_index") or 0),
+        int(seq3.get("sequence_index") or 0),
+        int(seq4.get("sequence_index") or 0),
+    ) < min(
+        int(req_1_t3.get("sequence_index") or 0),
+        int(req_1_t4.get("sequence_index") or 0),
+        int(req_1_t5.get("sequence_index") or 0),
+    )
+    assert int(seq1.get("sequence_index") or 0) < int(req_2_t5.get("sequence_index") or 0)
+    assert seq4["id"] in list(req_1_t3.get("predecessors") or [])
+    assert seq1["id"] not in list(req_1_t3.get("predecessors") or [])
+    assert seq4["id"] not in list(req_2_t5.get("predecessors") or [])
+    assert seq1["id"] in list(req_2_t5.get("predecessors") or [])
+
+    transitions = list((planner.global_fsa or {}).get("A", {}).get("Tr", []) or [])
+    seq2_start_events = [
+        tr
+        for tr in transitions
+        if isinstance(tr, dict) and str(tr.get("task_id") or "").strip() == str(seq2.get("id") or "").strip()
+        and str(tr.get("event") or "").strip().endswith(".start")
+    ]
+    assert any(
+        str(tr.get("from") or "")
+        == "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))"
+        for tr in seq2_start_events
+    )
+
+
+def test_case3_archived_bridge_allows_xarm6_nominal_release_while_ur5e_bridge_active(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, _ = _approve_case3_archived_bridge(tmp_path)
+
+    bridge_nodes_by_outline_id = {
+        str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+    }
+    seq1 = bridge_nodes_by_outline_id["RECOVERY_SEQ1"]
+    seq2 = bridge_nodes_by_outline_id["RECOVERY_SEQ2"]
+    seq3 = bridge_nodes_by_outline_id["RECOVERY_SEQ3"]
+    seq4 = bridge_nodes_by_outline_id["RECOVERY_SEQ4"]
+
+    seq1["status"] = "completed"
+    seq2["status"] = "running"
+    seq3["status"] = "pending"
+    seq4["status"] = "pending"
+    req_2_t5 = planner._find_node("REQ_2_T5")
+    assert isinstance(req_2_t5, dict)
+    req_2_t5["status"] = "pending"
+
+    refreshed_sequence = product_agent._refresh_bridge_sequence_runtime_metadata(
+        product_agent.runtime_recovery.get("active_bridge_sequence") or {}
+    )
+    product_agent._set_runtime_recovery(
+        message=str(product_agent.runtime_recovery.get("message") or "").strip(),
+        active_bridge_sequence=refreshed_sequence,
+    )
+
+    with patch.object(
+        ProductRecoveryController,
+        "_build_runtime_plant_state",
+        return_value={},
+    ), patch.object(
+        ProductRecoveryController,
+        "_event_guard_violations",
+        return_value=[],
+    ), patch.object(
+        ProductRecoveryController,
+        "_record_runtime_des_trace",
+        return_value=None,
+    ), patch.object(
+        ProductRecoveryController,
+        "_try_compile_controllable_repair",
+        return_value=None,
+    ), patch.object(
+        ProductRecoveryController,
+        "_mark_runtime_des_human_required",
+        return_value=None,
+    ):
+        next_node = product_agent._select_runtime_event()
+
+    assert isinstance(next_node, dict)
+    assert str(next_node.get("id") or "").strip() == "REQ_2_T5"
+    assert str(next_node.get("resource_jid") or "").strip() == "xarm6@localhost"
+
+
+def test_case3_archived_bridge_place_macros_use_snap_and_cartesian_retreat() -> None:
+    final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    accepted_program = list(final_output_payload.get("accepted_primitive_program") or [])
+    event_rows = {
+        str(row.get("event_name") or "").strip(): row
+        for row in accepted_program
+        if isinstance(row, dict)
+    }
+
+    stage_steps = [
+        str(step.get("primitive") or "").strip()
+        for step in list(event_rows["stage_mcp_to_prusa_mk4_2"].get("primitive_steps") or [])
+        if isinstance(step, dict)
+    ]
+    place_steps = [
+        str(step.get("primitive") or "").strip()
+        for step in list(event_rows["recover_place_LG_to_assembly_board-v1"].get("primitive_steps") or [])
+        if isinstance(step, dict)
+    ]
+
+    assert stage_steps[-3:] == ["release_part", "snap_part_to_slot", "move_cartesian"]
+    assert place_steps[-3:] == ["release_part", "snap_part_to_slot", "move_cartesian"]
+
+
+def test_case3_archived_bridge_does_not_inject_mcp_repick_step() -> None:
+    final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    accepted_program = list(final_output_payload.get("accepted_primitive_program") or [])
+    event_names = {
+        str(row.get("event_name") or "").strip()
+        for row in accepted_program
+        if isinstance(row, dict)
+    }
+
+    assert int(final_output_payload.get("accepted_trace_length") or 0) == 4
+    assert "recover_pick_MCP_from_prusa_mk4_2" not in event_names
+
+
 # ---------------------------------------------------------------------------
 # Main coroutine
 # ---------------------------------------------------------------------------
@@ -1933,6 +2589,8 @@ async def run_case3_bridge_dryrun(
     reasoning_mode: str = "multi_turn",
     stop_before_primitive_generation: bool = True,
     focus: str = "full",
+    resume_checkpoint: str | Path | None = None,
+    write_resume_checkpoints: bool = False,
 ) -> dict[str, Any]:
     """Run the Case 3 dry-run scenario through the bridge once."""
     _configure_dryrun_logging()
@@ -1944,6 +2602,10 @@ async def run_case3_bridge_dryrun(
     normalized_focus = str(focus or "full").strip().lower()
     if normalized_focus not in {"full", "primitive_generation"}:
         raise ValueError("focus must be 'full' or 'primitive_generation'")
+    checkpoint_path: Path | None = None
+    resume_payload: dict[str, Any] | None = None
+    if resume_checkpoint is not None:
+        checkpoint_path, resume_payload = _load_resume_checkpoint(resume_checkpoint)
     if normalized_focus == "primitive_generation":
         stop_before_primitive_generation = False
     _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
@@ -1951,16 +2613,101 @@ async def run_case3_bridge_dryrun(
         reasoning_mode=normalized_reasoning_mode,
     )
 
-    if write_debug:
-        debug_dir = Path(DEBUG_DIR)
-        if not debug_dir.is_absolute():
-            debug_dir = _repo_root() / debug_dir
+    if resume_payload is not None:
+        prepared_bridge_request = deepcopy(
+            resume_payload.get("prepared_bridge_request") or {}
+        )
+        if not isinstance(prepared_bridge_request, dict):
+            raise ValueError("resume checkpoint prepared_bridge_request is invalid")
+        _configure_resume_bridge_debug(
+            prepared_bridge_request=prepared_bridge_request,
+            write_debug=write_debug,
+            write_resume_checkpoints=write_resume_checkpoints,
+            checkpoint_path=checkpoint_path,
+        )
+    elif write_debug:
+        debug_dir = _allocate_dryrun_artifact_directory()
         bridge_debug_seed = dict(prepared_bridge_request.get("bridge_debug") or {})
+        bridge_debug_seed["artifact_directory"] = str(debug_dir)
         bridge_debug_seed["per_turn_debug_dir"] = str(debug_dir)
+        bridge_debug_seed["write_resume_checkpoints"] = bool(write_resume_checkpoints)
         prepared_bridge_request["bridge_debug"] = bridge_debug_seed
 
     proposal: dict[str, Any] | None = None
-    if normalized_focus == "primitive_generation":
+    if resume_payload is not None and str(resume_payload.get("kind") or "").strip() == "primitive_batch_resume_checkpoint":
+        resource_jid = str(resume_payload.get("resource_jid") or "").strip()
+        resource_agents = multi_turn_mode._resource_agent_map(planner)
+        llm_owner = resource_agents.get(resource_jid)
+        if not callable(getattr(llm_owner, "ask_llm_structured", None)):
+            llm_owner = product_agent
+        primitive_result = await generate_primitive_batch_with_llm_agent(
+            llm_agent=llm_owner,
+            prepared_bridge_request=prepared_bridge_request,
+            assigned_outline_events=[
+                deepcopy(row)
+                for row in (resume_payload.get("assigned_outline_events") or [])
+                if isinstance(row, dict)
+            ],
+            bridge_session_id=str(resume_payload.get("bridge_session_id") or "").strip(),
+            session_state=deepcopy(resume_payload.get("session_state") or {}),
+        )
+        primitive_session = deepcopy(primitive_result.get("session_state") or {})
+        latest_turn = {}
+        if isinstance(primitive_session.get("turns"), list) and primitive_session["turns"]:
+            latest_turn = dict(primitive_session["turns"][-1] or {})
+        primitive_bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        primitive_bridge_debug["status"] = str(primitive_result.get("decision") or "")
+        primitive_bridge_debug["multi_turn_session"] = deepcopy(primitive_session)
+        result = {
+            "scenario": "case3_lg_slippage",
+            "reasoning_mode": normalized_reasoning_mode,
+            "status": str(primitive_result.get("decision") or ""),
+            "proposal": deepcopy(primitive_result.get("bridge_proposal") or {}),
+            "bridge_debug": primitive_bridge_debug,
+            "prepared_bridge_request": prepared_bridge_request,
+            "context_summary": deepcopy(prepared_bridge_request.get("context_summary") or {}),
+            "llm_input": deepcopy(prepared_bridge_request.get("llm_input") or {}),
+            "multi_turn_session": primitive_session,
+            "turns": [
+                deepcopy(row)
+                for row in (primitive_session.get("turns") or [])
+                if isinstance(row, dict)
+            ],
+            "turn_log": deepcopy(product_agent.turn_log),
+            "resume_checkpoint_source_path": str(checkpoint_path or ""),
+            "prompt_artifact_path": str(
+                latest_turn.get("prompt_artifact_path") or ""
+            ) or None,
+            "latest_prompt_artifact_path": None,
+            "response_artifact_path": str(
+                latest_turn.get("response_artifact_path") or ""
+            ) or None,
+            "latest_response_artifact_path": None,
+            "session_transcript_artifact_path": None,
+            "latest_session_transcript_artifact_path": None,
+            "resume_checkpoint_artifact_path": None,
+            "latest_resume_checkpoint_artifact_path": None,
+            "primitive_resume_checkpoint_artifact_path": str(
+                latest_turn.get("primitive_resume_checkpoint_artifact_path") or ""
+            ) or None,
+            "latest_primitive_resume_checkpoint_artifact_path": str(
+                latest_turn.get("latest_primitive_resume_checkpoint_artifact_path") or ""
+            ) or None,
+        }
+        if write_debug:
+            artifact_paths = _write_debug_artifacts(result)
+            result.update(artifact_paths)
+        return result
+    if resume_payload is not None:
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+            execute_multi_turn_bridge as _resume_bridge,
+        )
+        proposal = await _resume_bridge(
+            planner,
+            prepared_bridge_request,
+            session_state=deepcopy(resume_payload.get("session_state") or {}),
+        )
+    elif normalized_focus == "primitive_generation":
         seed = deepcopy(
             prepared_bridge_request.get("multi_turn_session_seed")
             or multi_turn_mode.build_multi_turn_session_seed(prepared_bridge_request)
@@ -2088,6 +2835,7 @@ async def run_case3_bridge_dryrun(
     reasoning_mode = str(bridge_session.get("reasoning_mode") or "multi_turn").strip()
     multi_turn_session = dict((bridge_debug or {}).get("multi_turn_session") or {})
     turns = list(multi_turn_session.get("turns") or [])
+    latest_turn = dict(turns[-1] or {}) if turns else {}
 
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
@@ -2101,12 +2849,23 @@ async def run_case3_bridge_dryrun(
         "multi_turn_session": deepcopy(multi_turn_session),
         "turns": deepcopy(turns),
         "turn_log": deepcopy(product_agent.turn_log),
-        "prompt_artifact_path": None,
+        "resume_checkpoint_source_path": str(checkpoint_path or ""),
+        "prompt_artifact_path": str(latest_turn.get("prompt_artifact_path") or "") or None,
         "latest_prompt_artifact_path": None,
-        "response_artifact_path": None,
+        "response_artifact_path": str(latest_turn.get("response_artifact_path") or "") or None,
         "latest_response_artifact_path": None,
-        "session_transcript_artifact_path": None,
+        "session_transcript_artifact_path": str(
+            latest_turn.get("session_transcript_artifact_path") or ""
+        ) or None,
         "latest_session_transcript_artifact_path": None,
+        "resume_checkpoint_artifact_path": str(
+            latest_turn.get("resume_checkpoint_artifact_path") or ""
+        ) or None,
+        "latest_resume_checkpoint_artifact_path": str(
+            latest_turn.get("latest_resume_checkpoint_artifact_path") or ""
+        ) or None,
+        "primitive_resume_checkpoint_artifact_path": None,
+        "latest_primitive_resume_checkpoint_artifact_path": None,
     }
 
     if write_debug:
@@ -2121,15 +2880,15 @@ def _write_debug_artifacts(
     *,
     filename_prefix: str = "bridge_case3_slippage",
 ) -> dict[str, str]:
-    debug_dir = Path(DEBUG_DIR)
-    if not debug_dir.is_absolute():
-        debug_dir = _repo_root() / debug_dir
+    debug_dir = _payload_artifact_directory(payload)
+    debug_dir.mkdir(parents=True, exist_ok=True)
     return write_bridge_artifacts(
         payload,
         phase_label=filename_prefix,
         debug_dir=debug_dir,
         write_latest=False,
         write_session_transcript=True,
+        write_phase_prompt_response=False,
         filename_prefix=filename_prefix,
     )
 
@@ -2229,24 +2988,36 @@ def _print_prompt(prompt_text: str) -> None:
 
 
 def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
+    resume_checkpoint_source_path = result.get("resume_checkpoint_source_path")
     prompt_artifact_path = result.get("prompt_artifact_path")
     latest_prompt_artifact_path = result.get("latest_prompt_artifact_path")
     response_artifact_path = result.get("response_artifact_path")
     latest_response_artifact_path = result.get("latest_response_artifact_path")
     session_transcript_artifact_path = result.get("session_transcript_artifact_path")
     latest_session_transcript_artifact_path = result.get("latest_session_transcript_artifact_path")
+    resume_checkpoint_artifact_path = result.get("resume_checkpoint_artifact_path")
+    latest_resume_checkpoint_artifact_path = result.get("latest_resume_checkpoint_artifact_path")
+    primitive_resume_checkpoint_artifact_path = result.get("primitive_resume_checkpoint_artifact_path")
+    latest_primitive_resume_checkpoint_artifact_path = result.get("latest_primitive_resume_checkpoint_artifact_path")
     if not any(
         (
+            resume_checkpoint_source_path,
             prompt_artifact_path,
             latest_prompt_artifact_path,
             response_artifact_path,
             latest_response_artifact_path,
             session_transcript_artifact_path,
             latest_session_transcript_artifact_path,
+            resume_checkpoint_artifact_path,
+            latest_resume_checkpoint_artifact_path,
+            primitive_resume_checkpoint_artifact_path,
+            latest_primitive_resume_checkpoint_artifact_path,
         )
     ):
         return
     print()
+    if resume_checkpoint_source_path:
+        print("Resumed from checkpoint:", resume_checkpoint_source_path)
     if prompt_artifact_path:
         print("Prompt artifact:          ", prompt_artifact_path)
     if latest_prompt_artifact_path:
@@ -2259,6 +3030,14 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
         print("Session artifact:         ", session_transcript_artifact_path)
     if latest_session_transcript_artifact_path:
         print("Latest session artifact:  ", latest_session_transcript_artifact_path)
+    if resume_checkpoint_artifact_path:
+        print("Resume checkpoint:        ", resume_checkpoint_artifact_path)
+    if latest_resume_checkpoint_artifact_path:
+        print("Latest resume checkpoint: ", latest_resume_checkpoint_artifact_path)
+    if primitive_resume_checkpoint_artifact_path:
+        print("Primitive checkpoint:     ", primitive_resume_checkpoint_artifact_path)
+    if latest_primitive_resume_checkpoint_artifact_path:
+        print("Latest primitive checkpoint:", latest_primitive_resume_checkpoint_artifact_path)
 
 
 if __name__ == "__main__":
@@ -2297,6 +3076,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Print the first rendered multi-turn prompt",
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        help=(
+            "Resume from a saved multi_turn or primitive_generation checkpoint JSON. "
+            "You can also pass the sibling prompt/response artifact path."
+        ),
+    )
+    parser.add_argument(
+        "--write-resume-checkpoints",
+        action="store_true",
+        help="Write resume checkpoint JSON artifacts alongside the prompt/response debug files",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -2308,6 +3099,8 @@ if __name__ == "__main__":
             reasoning_mode=args.reasoning_mode,
             stop_before_primitive_generation=args.stop_before_primitive_generation,
             focus=args.focus,
+            resume_checkpoint=args.resume_checkpoint,
+            write_resume_checkpoints=args.write_resume_checkpoints,
         )
     )
 

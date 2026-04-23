@@ -27,6 +27,15 @@ from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
 _LEGACY_PROCEDURAL_DES_BRIDGE_MODE = "procedural" + "_des_v1"
+_ACK_PROGRESS_RANK = {
+    "pending": 0,
+    "dispatched": 1,
+    "accepted": 2,
+    "running": 3,
+    "completed": 4,
+    "finished": 4,
+    "blocked": 4,
+}
 
 
 def _env_flag_enabled(*names: str, default: bool = False) -> bool:
@@ -36,6 +45,29 @@ def _env_flag_enabled(*names: str, default: bool = False) -> bool:
             continue
         return token in {"1", "true", "yes", "on"}
     return bool(default)
+
+
+def _ack_status_rank(status: str) -> int:
+    normalized = str(status or "").strip().lower()
+    if normalized.startswith("failed"):
+        return 4
+    return int(_ACK_PROGRESS_RANK.get(normalized, -1))
+
+
+def _ack_status_is_regression(current_status: str, incoming_status: str) -> bool:
+    current_rank = _ack_status_rank(current_status)
+    incoming_rank = _ack_status_rank(incoming_status)
+    if current_rank < 0 or incoming_rank < 0:
+        return False
+    return incoming_rank < current_rank
+
+
+def _should_persist_ack_state(task_node: dict[str, Any] | None, status: str) -> bool:
+    if not isinstance(task_node, dict):
+        return True
+    if str(task_node.get("function_name") or "").strip() != "execute_recovery_macro":
+        return True
+    return str(status or "").strip().lower() not in {"accepted", "running", "dispatched"}
 
 
 class ProductAgent(LlmAgent):
@@ -971,6 +1003,15 @@ class ProductAgent(LlmAgent):
                     str(status or "").strip() or "<unknown>",
                 )
                 return
+            current_status = str((existing_task_node or {}).get("status") or "").strip()
+            if _ack_status_is_regression(current_status, str(status)):
+                agent.logger.warning(
+                    "[Product] Ignoring regressive ACK for %s: current_status=%s incoming_status=%s",
+                    task_id,
+                    current_status or "<unknown>",
+                    str(status or "").strip() or "<unknown>",
+                )
+                return
 
             # 1) Keep existing state map for UI/debug
             agent.task_states[task_id] = status
@@ -1023,7 +1064,7 @@ class ProductAgent(LlmAgent):
                     observations=observations,
                 )
 
-            if updated_node and not handled_bridge_ack:
+            if updated_node and not handled_bridge_ack and _should_persist_ack_state(task_node, str(status)):
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
                 await asyncio.to_thread(agent._persist_resource_state)
@@ -1266,6 +1307,127 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
 
+            async def _dispatch_task_node(task_node: dict[str, Any]) -> bool:
+                task_id = str(task_node.get("id") or "").strip()
+                planner_status = str(task_node.get("status") or "").strip().lower()
+                tracked_status = str(agent.task_states.get(task_id) or "").strip().lower()
+                current_sequence_for_guard = agent._active_bridge_sequence()
+                bridge_recorded_status = ""
+                if isinstance(current_sequence_for_guard, dict):
+                    completed_task_ids = set(
+                        agent._bridge_sequence_task_ids(
+                            current_sequence_for_guard.get("completed_bridge_task_ids") or []
+                        )
+                    )
+                    dispatched_task_ids = set(
+                        agent._bridge_sequence_task_ids(
+                            current_sequence_for_guard.get("dispatched_bridge_task_ids") or []
+                        )
+                    )
+                    if task_id in completed_task_ids:
+                        bridge_recorded_status = "completed"
+                    elif task_id in dispatched_task_ids:
+                        bridge_recorded_status = "dispatched"
+                effective_tracked_status = bridge_recorded_status or tracked_status
+                if planner_status == "pending" and effective_tracked_status in {
+                    "accepted",
+                    "running",
+                    "dispatched",
+                    "completed",
+                    "blocked",
+                }:
+                    task_node["status"] = effective_tracked_status
+                    agent.logger.warning(
+                        "[Product] Suppressing duplicate dispatch for %s: planner_status=pending tracked_status=%s",
+                        task_id,
+                        effective_tracked_status,
+                    )
+                    return False
+
+                # NEW: prefer resource_jid chosen by the planner (LLM)
+                to = task_node.get("resource_jid")
+                if not to:
+                    # Fallback: first configured resource JID
+                    to = agent.resource_jids[0]
+                    agent.logger.warning(
+                        "[Product] Task %s has no resource_jid, falling back to %s",
+                        task_node.get("id"),
+                        to,
+                    )
+
+                # Build the instruction for the RobotAgent from the DAG node.
+                # Recovery macro primitive steps own their destination intent.
+                params = agent._dispatch_params_for_task_node(task_node)
+
+                instruction = {
+                    "function_name": task_node.get("function_name"),
+                    "params": params,
+                }
+
+                msg = agent._compose_task_msg(
+                    to=to,
+                    task_id=task_id,
+                    instruction=instruction,
+                    phase_id=None,
+                )
+
+                # Mark as "dispatched" (still waiting for ACK to flip to "completed")
+                task_node["status"] = "dispatched"
+                agent.task_states[task_id] = "dispatched"
+
+                is_bridge_task = (
+                    str(task_node.get("function_name") or "").strip() == "execute_recovery_macro"
+                    and str(task_node.get("bridge_sequence_id") or "").strip()
+                )
+                if is_bridge_task:
+                    current_sequence = agent._active_bridge_sequence()
+                    if (
+                        isinstance(current_sequence, dict)
+                        and str(current_sequence.get("bridge_sequence_id") or "").strip()
+                        == str(task_node.get("bridge_sequence_id") or "").strip()
+                    ):
+                        repair_task_id = str(current_sequence.get("repair_task_id") or "").strip()
+                        repair_target_task_id = str(
+                            current_sequence.get("repair_target_task_id") or ""
+                        ).strip()
+                        if repair_task_id and repair_task_id == task_id:
+                            agent.logger.info(
+                                "[Product] Dispatching runtime DES repair %s before restored task %s.",
+                                task_id,
+                                repair_target_task_id or "<unknown>",
+                            )
+                        next_sequence = agent._bridge_sequence_with_dispatched_task(
+                            current_sequence,
+                            task_id=task_id,
+                        )
+                        if isinstance(next_sequence, dict):
+                            agent._set_runtime_recovery(
+                                message=str(agent.runtime_recovery.get("message", "") or "").strip(),
+                                active_bridge_sequence=next_sequence,
+                            )
+
+                await self.send(msg)
+                agent.logger.info(
+                    f"[Product] Dispatched DAG task {task_id} -> {to} ({instruction})"
+                )
+                return is_bridge_task
+
+            bridge_batch = agent._active_bridge_ready_tasks(
+                max_count=max(1, len(agent.resource_jids)),
+            )
+            if bridge_batch:
+                dispatched_bridge = False
+                for task_node in bridge_batch:
+                    dispatched_bridge = (
+                        await _dispatch_task_node(task_node) or dispatched_bridge
+                    )
+                if dispatched_bridge:
+                    await asyncio.to_thread(agent._persist_plan_snapshot)
+                    await asyncio.to_thread(agent._persist_product_state)
+                # Short sleep so we don't hammer the RA with a storm of tasks
+                await asyncio.sleep(0.1)
+                return
+
             # Prioritize active bridge sequences over nominal DAG work. The first
             # recovery macro may be anchored after the failed task, which is
             # intentionally not "completed" during runtime recovery.
@@ -1280,113 +1442,7 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
 
-            task_id = str(task_node.get("id") or "").strip()
-            planner_status = str(task_node.get("status") or "").strip().lower()
-            tracked_status = str(agent.task_states.get(task_id) or "").strip().lower()
-            current_sequence_for_guard = agent._active_bridge_sequence()
-            bridge_recorded_status = ""
-            if isinstance(current_sequence_for_guard, dict):
-                completed_task_ids = set(
-                    agent._bridge_sequence_task_ids(
-                        current_sequence_for_guard.get("completed_bridge_task_ids") or []
-                    )
-                )
-                dispatched_task_ids = set(
-                    agent._bridge_sequence_task_ids(
-                        current_sequence_for_guard.get("dispatched_bridge_task_ids") or []
-                    )
-                )
-                if task_id in completed_task_ids:
-                    bridge_recorded_status = "completed"
-                elif task_id in dispatched_task_ids:
-                    bridge_recorded_status = "dispatched"
-            effective_tracked_status = bridge_recorded_status or tracked_status
-            if planner_status == "pending" and effective_tracked_status in {
-                "accepted",
-                "running",
-                "dispatched",
-                "completed",
-                "blocked",
-            }:
-                task_node["status"] = effective_tracked_status
-                agent.logger.warning(
-                    "[Product] Suppressing duplicate dispatch for %s: planner_status=pending tracked_status=%s",
-                    task_id,
-                    effective_tracked_status,
-                )
-                if str(task_node.get("function_name") or "").strip() == "execute_recovery_macro":
-                    await asyncio.to_thread(agent._persist_plan_snapshot)
-                    await asyncio.to_thread(agent._persist_product_state)
-                await asyncio.sleep(0.05)
-                return
-
-            # NEW: prefer resource_jid chosen by the planner (LLM)
-            to = task_node.get("resource_jid")
-            if not to:
-                # Fallback: first configured resource JID
-                to = agent.resource_jids[0]
-                agent.logger.warning(
-                    "[Product] Task %s has no resource_jid, falling back to %s",
-                    task_node.get("id"),
-                    to,
-                )
-
-            # Build the instruction for the RobotAgent from the DAG node.
-            # Recovery macro primitive steps own their destination intent.
-            params = agent._dispatch_params_for_task_node(task_node)
-
-            instruction = {
-                "function_name": task_node.get("function_name"),
-                "params": params,
-            }
-
-            msg = agent._compose_task_msg(
-                to=to,
-                task_id=task_id,
-                instruction=instruction,
-                phase_id=None,
-            )
-
-            # Mark as "dispatched" (still waiting for ACK to flip to "completed")
-            task_node["status"] = "dispatched"
-            agent.task_states[task_id] = "dispatched"
-
-            is_bridge_task = (
-                str(task_node.get("function_name") or "").strip() == "execute_recovery_macro"
-                and str(task_node.get("bridge_sequence_id") or "").strip()
-            )
-            if is_bridge_task:
-                current_sequence = agent._active_bridge_sequence()
-                if (
-                    isinstance(current_sequence, dict)
-                    and str(current_sequence.get("bridge_sequence_id") or "").strip()
-                    == str(task_node.get("bridge_sequence_id") or "").strip()
-                ):
-                    repair_task_id = str(current_sequence.get("repair_task_id") or "").strip()
-                    repair_target_task_id = str(
-                        current_sequence.get("repair_target_task_id") or ""
-                    ).strip()
-                    if repair_task_id and repair_task_id == task_id:
-                        agent.logger.info(
-                            "[Product] Dispatching runtime DES repair %s before restored task %s.",
-                            task_id,
-                            repair_target_task_id or "<unknown>",
-                        )
-                    next_sequence = agent._bridge_sequence_with_dispatched_task(
-                        current_sequence,
-                        task_id=task_id,
-                    )
-                    if isinstance(next_sequence, dict):
-                        agent._set_runtime_recovery(
-                            message=str(agent.runtime_recovery.get("message", "") or "").strip(),
-                            active_bridge_sequence=next_sequence,
-                        )
-
-            await self.send(msg)
-            agent.logger.info(
-                f"[Product] Dispatched DAG task {task_id} -> {to} ({instruction})"
-            )
-
+            is_bridge_task = await _dispatch_task_node(task_node)
             if is_bridge_task:
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)

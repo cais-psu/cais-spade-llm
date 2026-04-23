@@ -9,26 +9,132 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
     validate_outline_macro_cca_constraints,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
+    BridgeEventProjection,
     BridgeEventInstance,
     BridgeValidationContext,
     BridgeValidationFinding,
     BridgeValidationResult,
+    ProcessSchema,
+    build_outline_task_row,
     build_bridge_validation_context,
-    normalize_surface_bridge_proposal,
     parse_bridge_event_instance,
-    parse_surface_bridge_proposal,
     validate_bridge_event_instance,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_state import (
     _apply_outline_task_effects,
     _build_outline_task_type_lookup,
     _infer_outline_macro_signature,
-    _outline_task_depends_on,
+    _outline_task_predecessors,
     _task_findings_block_projected_state,
 )
 
 
 ProgressEvaluator = Callable[..., tuple[int, dict[str, Any]]]
+
+_LIVE_EVENT_INSTANCE_KEYS = frozenset(
+    {
+        "outline_id",
+        "event_schema_id",
+        "resource_binding",
+        "object_bindings",
+        "parameters",
+        "rationale",
+    }
+)
+
+
+def _candidate_contract_findings(
+    candidate_task: dict[str, Any],
+) -> list[BridgeValidationFinding]:
+    raw = dict(candidate_task or {})
+    outline_id = str(raw.get("outline_id") or "").strip()
+    unexpected_fields = sorted(
+        key
+        for key in raw
+        if str(key or "").strip() and str(key or "").strip() not in _LIVE_EVENT_INSTANCE_KEYS
+    )
+    if unexpected_fields:
+        return [
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="unexpected_event_fields",
+                reason=(
+                    "candidate event rows must use only canonical fields: "
+                    f"{', '.join(sorted(_LIVE_EVENT_INSTANCE_KEYS))}; got "
+                    f"{', '.join(unexpected_fields)}"
+                ),
+                task_id=outline_id,
+                evidence={
+                    "unexpected_fields": unexpected_fields,
+                    "allowed_fields": sorted(_LIVE_EVENT_INSTANCE_KEYS),
+                },
+            )
+        ]
+
+    findings: list[BridgeValidationFinding] = []
+    if "object_bindings" not in raw:
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="missing_object_bindings",
+                reason="candidate must include object_bindings",
+                task_id=outline_id,
+                evidence={"field": "object_bindings"},
+            )
+        )
+    elif not isinstance(raw.get("object_bindings"), dict):
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="invalid_object_bindings_type",
+                reason="object_bindings must be an object",
+                task_id=outline_id,
+                evidence={"field": "object_bindings"},
+            )
+        )
+
+    if "parameters" not in raw:
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="missing_parameters",
+                reason="candidate must include parameters",
+                task_id=outline_id,
+                evidence={"field": "parameters"},
+            )
+        )
+    elif not isinstance(raw.get("parameters"), dict):
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="invalid_parameters_type",
+                reason="parameters must be an object",
+                task_id=outline_id,
+                evidence={"field": "parameters"},
+            )
+        )
+
+    if "rationale" not in raw:
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="missing_rationale",
+                reason="candidate must include rationale",
+                task_id=outline_id,
+                evidence={"field": "rationale"},
+            )
+        )
+    elif not isinstance(raw.get("rationale"), str):
+        findings.append(
+            BridgeValidationFinding(
+                stage="schema_grounding",
+                code="invalid_rationale_type",
+                reason="rationale must be a string",
+                task_id=outline_id,
+                evidence={"field": "rationale"},
+            )
+        )
+    return findings
 
 
 def projected_outline_validation_context(
@@ -126,6 +232,7 @@ def validate_bridge_candidate_task(
     prepared_bridge_request: dict[str, Any],
     progress_evaluator: ProgressEvaluator | None = None,
 ) -> BridgeValidationResult:
+    raw_candidate_task = deepcopy(dict(candidate_task or {}))
     resources_by_jid, parts_by_name = projected_outline_validation_context(
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
@@ -135,26 +242,23 @@ def validate_bridge_candidate_task(
         parts_by_name=parts_by_name,
         prepared_bridge_request=prepared_bridge_request,
     )
-    surface_proposal = parse_surface_bridge_proposal(
-        candidate_task,
-        outline_id=str(candidate_task.get("outline_id") or "").strip(),
-    )
-    normalized_event, normalization_findings = normalize_surface_bridge_proposal(
-        surface_proposal,
-        context=context,
-    )
-    if normalized_event is None:
+    contract_findings = _candidate_contract_findings(raw_candidate_task)
+    if contract_findings:
         return BridgeValidationResult(
             ok=False,
             event_instance=parse_bridge_event_instance(
-                candidate_task,
-                outline_id=str(candidate_task.get("outline_id") or "").strip(),
+                raw_candidate_task,
+                outline_id=str(raw_candidate_task.get("outline_id") or "").strip(),
             ),
-            findings=deepcopy(normalization_findings),
+            findings=deepcopy(contract_findings),
         )
+    event_instance = parse_bridge_event_instance(
+        raw_candidate_task,
+        outline_id=str(raw_candidate_task.get("outline_id") or "").strip(),
+    )
     return validate_bridge_candidate_event(
         planner=planner,
-        event_instance=normalized_event,
+        event_instance=event_instance,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
         progress_evaluator=progress_evaluator,
@@ -189,32 +293,31 @@ def validate_bridge_candidate_event(
     )
     if not semantic_result.ok:
         return semantic_result
-
-    normalized_task = deepcopy(dict(semantic_result.normalized_task or {}))
-    grounded_action = deepcopy(dict(semantic_result.grounded_action or {}))
-
-    resource_findings = _validate_outline_task_ra(
-        planner=planner,
-        task=normalized_task,
-        grounded_action=grounded_action,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-    )
-    if resource_findings:
+    schema = semantic_result.schema
+    projection = semantic_result.projection
+    if schema is None or projection is None:
         return _result_with_findings(
             semantic_result,
-            _translate_findings(
-                task=normalized_task,
-                findings=resource_findings,
-                stage="resource_realizability",
-                default_code="resource_realizability_rejected",
-                default_reason="resource realizability rejected the candidate event",
-            ),
+            [
+                BridgeValidationFinding(
+                    stage="schema_grounding",
+                    code="missing_semantic_projection",
+                    reason="validated bridge event did not expose schema/projection semantics",
+                    task_id=str(event_instance.outline_id or "").strip(),
+                    resource_jid=str(event_instance.resource_binding or "").strip(),
+                )
+            ],
         )
+    outline_task = build_outline_task_row(
+        instance=event_instance,
+        schema=schema,
+        projection=projection,
+    )
 
     cca_findings = _validate_outline_task_cca(
-        task=normalized_task,
-        grounded_action=grounded_action,
+        task=outline_task,
+        event_instance=event_instance,
+        projection=projection,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
         llm_input=dict(prepared_bridge_request.get("llm_input") or {}),
@@ -224,7 +327,7 @@ def validate_bridge_candidate_event(
         return _result_with_findings(
             semantic_result,
             _translate_findings(
-                task=normalized_task,
+                task=outline_task,
                 findings=cca_findings,
                 stage="supervisor_admissibility",
                 default_code="supervisor_blocked",
@@ -233,7 +336,9 @@ def validate_bridge_candidate_event(
         )
 
     progress_score, progress_detail = _evaluate_marked_progress(
-        normalized_task=normalized_task,
+        outline_task=outline_task,
+        event_instance=event_instance,
+        projection=projection,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
         progress_evaluator=progress_evaluator,
@@ -251,9 +356,9 @@ def validate_bridge_candidate_event(
                         "candidate event does not reduce the active recovery gap "
                         "toward a marked or continuation-ready state"
                     ),
-                    task_id=str(normalized_task.get("outline_id") or "").strip(),
-                    resource_jid=str(normalized_task.get("resource_jid") or "").strip(),
-                    part_name=str(normalized_task.get("part_name") or "").strip(),
+                    task_id=str(outline_task.get("outline_id") or "").strip(),
+                    resource_jid=str(outline_task.get("resource_jid") or "").strip(),
+                    part_name=str(outline_task.get("part_name") or "").strip(),
                     evidence=deepcopy(progress_detail),
                     retry_hint=(
                         "choose an enabled event that strictly reduces the active "
@@ -263,15 +368,12 @@ def validate_bridge_candidate_event(
             ],
         )
 
-    accepted_task = deepcopy(normalized_task)
-    accepted_task["marked_progress"] = deepcopy(progress_detail)
     return BridgeValidationResult(
         ok=True,
         event_instance=semantic_result.event_instance,
         findings=[],
         schema=semantic_result.schema,
-        normalized_task=accepted_task,
-        grounded_action=deepcopy(semantic_result.grounded_action or {}),
+        projection=projection,
         projected_resources=deepcopy(semantic_result.projected_resources or {}),
         projected_parts=deepcopy(semantic_result.projected_parts or {}),
     )
@@ -286,8 +388,7 @@ def _result_with_findings(
         event_instance=semantic_result.event_instance,
         findings=deepcopy(findings),
         schema=semantic_result.schema,
-        normalized_task=deepcopy(semantic_result.normalized_task),
-        grounded_action=deepcopy(semantic_result.grounded_action),
+        projection=deepcopy(semantic_result.projection),
         projected_resources=deepcopy(semantic_result.projected_resources or {}),
         projected_parts=deepcopy(semantic_result.projected_parts or {}),
     )
@@ -368,143 +469,11 @@ def _resource_constraint_finding(
     }
 
 
-def _resource_part_context(
-    *,
-    grounded_action: dict[str, Any],
-    resource_row: dict[str, Any],
-    parts_by_name: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    part_name = str(grounded_action.get("part_name") or "").strip()
-    action_target = dict(grounded_action.get("target") or {})
-    part_context = deepcopy(dict(parts_by_name.get(part_name) or {}))
-    part_context["target"] = deepcopy(action_target)
-    part_context["resource_held_part"] = (
-        str(resource_row.get("held_part") or "").strip() or None
-    )
-    part_context["resource_gripper_state"] = (
-        str(resource_row.get("gripper_state") or "").strip() or None
-    )
-    part_context["named_pose"] = (
-        str(action_target.get("named_pose") or "").strip() or None
-    )
-    if "pose" in action_target:
-        part_context["pose"] = deepcopy(action_target.get("pose"))
-    return part_context
-
-
-def _validate_outline_task_ra(
-    *,
-    planner: Any,
-    task: dict[str, Any],
-    grounded_action: dict[str, Any],
-    resources_by_jid: dict[str, dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    resource_jid = str(grounded_action.get("resource_jid") or "").strip()
-    part_name = str(grounded_action.get("part_name") or "").strip()
-    resource_row = dict(resources_by_jid.get(resource_jid) or {})
-    if not resource_jid or not resource_row:
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_unavailable",
-                reason=(
-                    f"resource '{resource_jid or 'unknown'}' is not available in "
-                    "current bridge state"
-                ),
-                resource_jid=resource_jid,
-                part_name=part_name,
-                guard={"kind": "resource_not_available", "resource_jid": resource_jid}
-                if resource_jid
-                else None,
-            )
-        ]
-
-    resource_agent = _resource_agent_map(planner).get(resource_jid)
-    oracle = getattr(resource_agent, "bridge_feasibility_oracle", None)
-    if not callable(oracle):
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_validation_unavailable",
-                reason=(
-                    f"resource '{resource_jid}' does not expose bridge_feasibility_oracle; "
-                    "live bridge outline validation fails closed without RA support"
-                ),
-                resource_jid=resource_jid,
-                part_name=part_name,
-                guard={"kind": "resource_validation_unavailable", "resource_jid": resource_jid},
-            )
-        ]
-
-    resource_snapshot = deepcopy(resource_row)
-    get_bridge_snapshot = getattr(resource_agent, "get_bridge_snapshot", None)
-    if callable(get_bridge_snapshot):
-        try:
-            maybe_snapshot = get_bridge_snapshot()
-        except Exception:
-            maybe_snapshot = {}
-        if isinstance(maybe_snapshot, dict):
-            for field_name in (
-                "workspace_bounds",
-                "available_named_poses",
-                "bridge_adapter",
-                "resource_type",
-                "role",
-            ):
-                if field_name not in resource_snapshot and field_name in maybe_snapshot:
-                    resource_snapshot[field_name] = deepcopy(maybe_snapshot.get(field_name))
-
-    try:
-        oracle_result = oracle(
-            operation_kind=str(grounded_action.get("operation_kind") or "").strip(),
-            part_name=part_name or None,
-            part_context=_resource_part_context(
-                grounded_action=grounded_action,
-                resource_row=resource_row,
-                parts_by_name=parts_by_name,
-            ),
-            bridge_snapshot=resource_snapshot,
-            grounded_action=deepcopy(grounded_action),
-        )
-    except Exception as exc:
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_unavailable",
-                reason=f"resource feasibility oracle failed: {exc}",
-                resource_jid=resource_jid,
-                part_name=part_name,
-            )
-        ]
-
-    result = dict(oracle_result or {})
-    if bool(result.get("allowed", True)):
-        return []
-
-    return [
-        _resource_constraint_finding(
-            task=task,
-            constraint_code=(
-                str(result.get("constraint_code") or "").strip()
-                or "resource_unavailable"
-            ),
-            reason=(
-                str(result.get("reason") or "").strip()
-                or "resource feasibility rejected the grounded action"
-            ),
-            resource_jid=resource_jid,
-            part_name=part_name,
-            evidence=dict(result.get("evidence") or {}),
-            guard=dict(result.get("guard") or {}),
-        )
-    ]
-
-
 def _validate_outline_task_cca(
     *,
     task: dict[str, Any],
-    grounded_action: dict[str, Any],
+    event_instance: BridgeEventInstance,
+    projection: BridgeEventProjection,
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
@@ -533,12 +502,14 @@ def _validate_outline_task_cca(
             resources_by_jid=projected_resources,
             parts_by_name=projected_parts,
             task_type=task_type,
-            grounded_action=grounded_action,
+            event_instance=event_instance,
+            projection=projection,
         )
 
     cca_result = validate_outline_macro_cca_constraints(
         task=deepcopy(task),
-        grounded_action=deepcopy(grounded_action),
+        event_instance=deepcopy(event_instance),
+        projection=deepcopy(projection),
         signature=deepcopy(signature),
         pre_resources=deepcopy(resources_by_jid),
         pre_parts=deepcopy(parts_by_name),
@@ -548,7 +519,7 @@ def _validate_outline_task_cca(
         outline_tasks=validation_trace,
         task_types_by_id=deepcopy(task_types_by_id),
         task_index_by_id={task_id: 0},
-        dependency_map={task_id: _outline_task_depends_on(task)},
+        dependency_map={task_id: _outline_task_predecessors(task)},
         previously_cleared_condition_ids=None,
     )
     return [
@@ -560,7 +531,9 @@ def _validate_outline_task_cca(
 
 def _evaluate_marked_progress(
     *,
-    normalized_task: dict[str, Any],
+    outline_task: dict[str, Any],
+    event_instance: BridgeEventInstance,
+    projection: BridgeEventProjection,
     session_state: dict[str, Any],
     prepared_bridge_request: dict[str, Any],
     progress_evaluator: ProgressEvaluator | None,
@@ -569,7 +542,7 @@ def _evaluate_marked_progress(
 ) -> tuple[int, dict[str, Any]]:
     if callable(progress_evaluator):
         return progress_evaluator(
-            task=deepcopy(normalized_task),
+            task=deepcopy(outline_task),
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
         )
@@ -597,7 +570,8 @@ def _evaluate_marked_progress(
 
     if callable(getattr(semantic_result.schema, "progress_policy", None)):
         return semantic_result.schema.progress_policy(
-            normalized_task=deepcopy(normalized_task),
+            event_instance=deepcopy(event_instance),
+            projection=deepcopy(projection),
             context=context,
             semantic_result=semantic_result,
             projected_satisfied=projected_satisfied,

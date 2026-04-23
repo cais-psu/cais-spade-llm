@@ -38,6 +38,54 @@ def _env_flag_enabled(*names: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _proposal_has_parallel_independent_roots(
+    macro_tasks: list[dict[str, Any]] | None,
+) -> bool:
+    root_resource_jids: list[str] = []
+    for task in macro_tasks or []:
+        if not isinstance(task, dict):
+            continue
+        predecessors = [
+            str(item).strip()
+            for item in (task.get("predecessors") or [])
+            if str(item).strip()
+        ]
+        if predecessors:
+            continue
+        resource_jid = str(task.get("resource_jid") or "").strip()
+        if not resource_jid:
+            return False
+        root_resource_jids.append(resource_jid)
+    return (
+        len(root_resource_jids) > 1
+        and len(set(root_resource_jids)) == len(root_resource_jids)
+    )
+
+
+def _bridge_nodes_have_parallel_root_tasks(
+    bridge_nodes: list[dict[str, Any]] | None,
+) -> bool:
+    root_resource_jids: list[str] = []
+    for node in bridge_nodes or []:
+        if not isinstance(node, dict):
+            continue
+        predecessor_outline_ids = [
+            str(item).strip()
+            for item in (node.get("predecessor_outline_ids") or [])
+            if str(item).strip()
+        ]
+        if predecessor_outline_ids:
+            continue
+        resource_jid = str(node.get("resource_jid") or "").strip()
+        if not resource_jid:
+            return False
+        root_resource_jids.append(resource_jid)
+    return (
+        len(root_resource_jids) > 1
+        and len(set(root_resource_jids)) == len(root_resource_jids)
+    )
+
+
 class ProductRecoveryController:
     EXPORTED_METHODS = (
         '_build_plan_safety_alert',
@@ -92,7 +140,7 @@ class ProductRecoveryController:
         '_reset_session_for_outline_retry',
         '_reset_session_for_primitive_retry',
         '_prepare_runtime_bridge_session_state',
-        '_bridge_normalized_proposal_from_debug',
+        '_bridge_proposal_from_debug',
         '_load_runtime_bridge_archive_bundle',
         '_run_multi_turn_bridge_until',
         '_set_kickoff_result',
@@ -119,6 +167,7 @@ class ProductRecoveryController:
         '_reconstruct_active_bridge_sequence_for_validation',
         '_active_bridge_blocks_nominal_dispatch',
         '_next_dispatchable_task_node',
+        '_active_bridge_ready_tasks',
         '_active_bridge_next_ready_task',
         '_bridge_task_predecessors_ready',
         '_select_runtime_event',
@@ -616,6 +665,135 @@ class ProductRecoveryController:
                 deduped.append(task_id)
         return deduped
 
+    def _bridge_resume_task_ids_by_resource(
+        self,
+        *,
+        planner_nodes_snapshot: list[dict[str, Any]],
+        prepared_bridge_request: dict[str, Any] | None = None,
+        modeled_gap: dict[str, Any] | None = None,
+        deleted_task_ids: list[str] | None = None,
+    ) -> dict[str, list[str]]:
+        deleted_task_id_set = {
+            str(task_id or "").strip()
+            for task_id in (deleted_task_ids or [])
+            if str(task_id or "").strip()
+        }
+        node_map = {
+            str(node.get("id") or "").strip(): node
+            for node in planner_nodes_snapshot or []
+            if isinstance(node, dict) and str(node.get("id") or "").strip()
+        }
+        normalized: dict[str, list[str]] = {}
+
+        bridge_resources = dict((prepared_bridge_request or {}).get("bridge_resources") or {})
+        for raw_resource_jid, raw_entry in bridge_resources.items():
+            if not isinstance(raw_entry, dict):
+                continue
+            resource_jid = str(raw_resource_jid or "").strip()
+            if not resource_jid:
+                continue
+            ordered_task_ids: list[str] = []
+            seen: set[str] = set()
+            for task in raw_entry.get("pending_tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if not task_id or task_id in seen or task_id in deleted_task_id_set:
+                    continue
+                node = node_map.get(task_id)
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("resource_jid") or "").strip() != resource_jid:
+                    continue
+                if str(node.get("status") or "").strip().lower() not in {"pending", "blocked"}:
+                    continue
+                ordered_task_ids.append(task_id)
+                seen.add(task_id)
+            if ordered_task_ids:
+                normalized[resource_jid] = ordered_task_ids
+
+        if normalized:
+            return normalized
+
+        for raw_task_id in (modeled_gap or {}).get("pending_nominal_task_ids") or []:
+            task_id = str(raw_task_id or "").strip()
+            if not task_id or task_id in deleted_task_id_set:
+                continue
+            node = node_map.get(task_id)
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("status") or "").strip().lower() not in {"pending", "blocked"}:
+                continue
+            resource_jid = str(node.get("resource_jid") or "").strip()
+            if not resource_jid:
+                continue
+            ordered_task_ids = normalized.setdefault(resource_jid, [])
+            if task_id not in ordered_task_ids:
+                ordered_task_ids.append(task_id)
+        return normalized
+
+    @staticmethod
+    def _bridge_sink_task_ids_by_resource(
+        bridge_tasks: list[dict[str, Any]] | None,
+    ) -> dict[str, list[str]]:
+        task_rows = [
+            dict(task)
+            for task in (bridge_tasks or [])
+            if isinstance(task, dict) and str(task.get("id") or "").strip()
+        ]
+        if not task_rows:
+            return {}
+        task_ids = {
+            str(task.get("id") or "").strip()
+            for task in task_rows
+            if str(task.get("id") or "").strip()
+        }
+        successors_by_task_id: dict[str, set[str]] = {task_id: set() for task_id in task_ids}
+        resource_by_task_id = {
+            str(task.get("id") or "").strip(): str(task.get("resource_jid") or "").strip()
+            for task in task_rows
+            if str(task.get("id") or "").strip()
+        }
+        for task in task_rows:
+            task_id = str(task.get("id") or "").strip()
+            for predecessor_id in (
+                str(pred or "").strip()
+                for pred in (task.get("predecessors") or [])
+                if str(pred or "").strip()
+            ):
+                if predecessor_id in successors_by_task_id:
+                    successors_by_task_id[predecessor_id].add(task_id)
+
+        descendant_cache: dict[str, set[str]] = {}
+
+        def _descendants(task_id: str) -> set[str]:
+            cached = descendant_cache.get(task_id)
+            if cached is not None:
+                return set(cached)
+            descendants: set[str] = set()
+            for successor_id in successors_by_task_id.get(task_id, set()):
+                descendants.add(successor_id)
+                descendants.update(_descendants(successor_id))
+            descendant_cache[task_id] = set(descendants)
+            return descendants
+
+        sink_task_ids_by_resource: dict[str, list[str]] = {}
+        for task in task_rows:
+            task_id = str(task.get("id") or "").strip()
+            resource_jid = resource_by_task_id.get(task_id) or ""
+            if not resource_jid:
+                continue
+            later_same_resource_descendant = any(
+                resource_by_task_id.get(descendant_id) == resource_jid
+                for descendant_id in _descendants(task_id)
+            )
+            if later_same_resource_descendant:
+                continue
+            sink_task_ids = sink_task_ids_by_resource.setdefault(resource_jid, [])
+            if task_id not in sink_task_ids:
+                sink_task_ids.append(task_id)
+        return sink_task_ids_by_resource
+
     def _bridge_sequence_nodes_for_ids(
         self,
         bridge_task_ids: list[str],
@@ -717,18 +895,20 @@ class ProductRecoveryController:
             }
         )
         execution_shape = str(next_sequence.get("execution_shape") or "").strip().lower()
-        if not execution_shape:
+        if _bridge_nodes_have_parallel_root_tasks(bridge_nodes):
+            execution_shape = "dag"
+        elif execution_shape not in {"serial", "dag"}:
             execution_shape = "serial"
             for node in bridge_nodes:
-                depends_on_outline_ids = [
+                predecessor_outline_ids = [
                     str(item).strip()
-                    for item in (node.get("depends_on_outline_ids") or [])
+                    for item in (node.get("predecessor_outline_ids") or [])
                     if str(item).strip()
                 ]
-                if len(depends_on_outline_ids) > 1:
+                if len(predecessor_outline_ids) > 1:
                     execution_shape = "dag"
                     break
-                if len(depends_on_outline_ids) == 1 and int(node.get("bridge_sequence_index") or 0) > 1:
+                if len(predecessor_outline_ids) == 1 and int(node.get("bridge_sequence_index") or 0) > 1:
                     previous_index = int(node.get("bridge_sequence_index") or 0) - 1
                     previous_node = next(
                         (
@@ -741,7 +921,7 @@ class ProductRecoveryController:
                     if (
                         not isinstance(previous_node, dict)
                         or str(previous_node.get("bridge_outline_id") or "").strip()
-                        != depends_on_outline_ids[0]
+                        != predecessor_outline_ids[0]
                     ):
                         execution_shape = "dag"
                         break
@@ -1492,7 +1672,7 @@ class ProductRecoveryController:
             raise ValueError(f"unsupported bridge stage reset: {stage}")
         prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
         bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        bridge_debug.pop("normalized_proposal", None)
+        bridge_debug.pop("bridge_proposal", None)
         bridge_debug.pop("final_output", None)
         bridge_debug.pop("final_output_adapter", None)
         bridge_debug["multi_turn_session"] = deepcopy(session_state)
@@ -1502,37 +1682,37 @@ class ProductRecoveryController:
         return prepared_bridge_request
 
     @staticmethod
-    def _bridge_normalized_proposal_from_debug(
+    def _bridge_proposal_from_debug(
         prepared_bridge_request: dict[str, Any],
     ) -> dict[str, Any] | None:
         bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
         adapter = dict(bridge_debug.get("final_output_adapter") or {})
-        normalized = adapter.get("normalized_proposal")
-        if isinstance(normalized, dict):
-            return deepcopy(normalized)
-        normalized = bridge_debug.get("normalized_proposal")
-        if isinstance(normalized, dict):
-            return deepcopy(normalized)
+        proposal = adapter.get("bridge_proposal")
+        if isinstance(proposal, dict):
+            return deepcopy(proposal)
+        proposal = bridge_debug.get("bridge_proposal")
+        if isinstance(proposal, dict):
+            return deepcopy(proposal)
         final_output = bridge_debug.get("final_output")
         if isinstance(final_output, dict):
             from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-                normalize_multi_turn_final_output_to_bridge_proposal,
+                build_multi_turn_bridge_proposal,
             )
 
-            adapter = normalize_multi_turn_final_output_to_bridge_proposal(
+            adapter = build_multi_turn_bridge_proposal(
                 final_output_payload=deepcopy(final_output),
                 prepared_bridge_request=prepared_bridge_request,
             )
-            normalized = adapter.get("normalized_proposal")
-            if isinstance(normalized, dict):
+            proposal = adapter.get("bridge_proposal")
+            if isinstance(proposal, dict):
                 bridge_debug["final_output_adapter"] = deepcopy(adapter)
-                bridge_debug["normalized_proposal"] = deepcopy(normalized)
+                bridge_debug["bridge_proposal"] = deepcopy(proposal)
                 prepared_bridge_request["bridge_debug"] = bridge_debug
-                return deepcopy(normalized)
+                return deepcopy(proposal)
         session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
-        normalized = session_state.get("proposal")
-        if isinstance(normalized, dict):
-            return deepcopy(normalized)
+        proposal = session_state.get("proposal")
+        if isinstance(proposal, dict):
+            return deepcopy(proposal)
         return None
 
     def _load_runtime_bridge_archive_bundle(
@@ -1559,18 +1739,18 @@ class ProductRecoveryController:
             raise RuntimeError("archived bridge run does not contain a complete primitive program")
 
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-            normalize_multi_turn_final_output_to_bridge_proposal,
+            build_multi_turn_bridge_proposal,
         )
 
-        adapter_result = normalize_multi_turn_final_output_to_bridge_proposal(
+        adapter_result = build_multi_turn_bridge_proposal(
             final_output_payload=deepcopy(final_output_payload),
             prepared_bridge_request=prepared_bridge_request,
         )
-        normalized = adapter_result.get("normalized_proposal")
-        if not isinstance(normalized, dict):
+        proposal = adapter_result.get("bridge_proposal")
+        if not isinstance(proposal, dict):
             raise RuntimeError(
-                str(adapter_result.get("reason") or "archived bridge run normalization failed").strip()
-                or "archived bridge run normalization failed"
+                str(adapter_result.get("reason") or "archived bridge run proposal build failed").strip()
+                or "archived bridge run proposal build failed"
             )
         return deepcopy(final_output_payload), deepcopy(adapter_result), resolved_path
 
@@ -2272,6 +2452,14 @@ class ProductRecoveryController:
             "pending_nominal_task_ids": deepcopy(
                 modeled_gap.get("pending_nominal_task_ids") or []
             ),
+            "pending_nominal_task_ids_by_resource": deepcopy(
+                self._bridge_resume_task_ids_by_resource(
+                    planner_nodes_snapshot=list(self.process_planner.nodes),
+                    prepared_bridge_request=prepared_bridge_request,
+                    modeled_gap=modeled_gap,
+                    deleted_task_ids=[],
+                )
+            ),
             "continuation_repair_attempts": 0,
             "source_mode": str(
                 bridge_debug.get("bridge_mode")
@@ -2347,51 +2535,38 @@ class ProductRecoveryController:
     def _next_dispatchable_task_node(self) -> dict[str, Any] | None:
         return self._select_runtime_event()
 
-    def _active_bridge_next_ready_task(self) -> dict[str, Any] | None:
-        """Return the next pending active bridge task, prioritizing recovery over nominal work."""
+    def _active_bridge_ready_tasks(
+        self,
+        *,
+        max_count: int | None = None,
+    ) -> list[dict[str, Any]]:
         active_bridge_sequence = self._active_bridge_sequence()
         if not active_bridge_sequence:
-            return None
-        sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
-        if not sequence_id:
-            return None
-        bridge_task_ids = [
-            str(task_id or "").strip()
-            for task_id in (active_bridge_sequence.get("bridge_task_ids") or [])
-            if str(task_id or "").strip()
-        ]
-        if not bridge_task_ids:
-            bridge_task_ids = [
-                str(node.get("id") or "").strip()
-                for node in self.process_planner._bridge_sequence_nodes(sequence_id)
-                if str(node.get("id") or "").strip()
-            ]
-        bridge_task_id_set = set(bridge_task_ids)
-        failed_task_id = str(
-            active_bridge_sequence.get("failed_task_id")
-            or self.runtime_recovery.get("failed_task_id")
-            or ""
-        ).strip()
-        inflight_resources = self._resources_with_inflight_tasks()
-
-        for task_id in bridge_task_ids:
+            return []
+        refreshed_sequence = self._refresh_bridge_sequence_runtime_metadata(
+            active_bridge_sequence
+        )
+        if isinstance(refreshed_sequence, dict):
+            active_bridge_sequence = refreshed_sequence
+            self._set_runtime_recovery(
+                message=str(self.runtime_recovery.get("message", "") or "").strip(),
+                active_bridge_sequence=active_bridge_sequence,
+            )
+        ready_task_ids = self._bridge_sequence_ready_task_ids(active_bridge_sequence)
+        ready_nodes: list[dict[str, Any]] = []
+        for task_id in ready_task_ids:
             node = self.process_planner._find_node(task_id)
             if not isinstance(node, dict):
                 continue
-            if str(node.get("bridge_sequence_id") or "").strip() != sequence_id:
-                continue
-            if str(node.get("status") or "").strip() != "pending":
-                continue
-            resource_jid = str(node.get("resource_jid") or "").strip()
-            if resource_jid and resource_jid in inflight_resources:
-                continue
-            if self._bridge_task_predecessors_ready(
-                node,
-                bridge_task_ids=bridge_task_id_set,
-                failed_task_id=failed_task_id,
-            ):
-                return node
-        return None
+            ready_nodes.append(node)
+            if max_count is not None and len(ready_nodes) >= max_count:
+                break
+        return ready_nodes
+
+    def _active_bridge_next_ready_task(self) -> dict[str, Any] | None:
+        """Return the next pending active bridge task, prioritizing recovery over nominal work."""
+        ready_nodes = self._active_bridge_ready_tasks(max_count=1)
+        return ready_nodes[0] if ready_nodes else None
 
     def _bridge_task_predecessors_ready(
         self,
@@ -3961,7 +4136,7 @@ class ProductRecoveryController:
         enabled: bool,
         bridge_debug: dict[str, Any] | None = None,
         prepared_bridge_request: dict[str, Any] | None = None,
-        normalized_proposal: dict[str, Any] | None = None,
+        bridge_proposal: dict[str, Any] | None = None,
         status: str = "disabled",
         reason: str = "",
         verification_result: dict[str, Any] | None = None,
@@ -3984,7 +4159,7 @@ class ProductRecoveryController:
                 or str(dict(artifacts.get("prepare") or {}).get("response_artifact_path") or "").strip()
             ),
             "source_turn_index": int(session.get("turn_index") or 0),
-            "normalized_proposal_available": isinstance(normalized_proposal, dict),
+            "bridge_proposal_available": isinstance(bridge_proposal, dict),
             "executed_macro_ids": [],
             "snapshot_match_details": [],
             "updated_at_utc": self._utc_now_iso(),
@@ -4036,8 +4211,8 @@ class ProductRecoveryController:
             "enabled": bool(payload.get("enabled")),
             "source_path": str(payload.get("source_path") or "").strip(),
             "load_status": str(payload.get("load_status") or "").strip(),
-            "normalization_status": str(
-                payload.get("normalization_status") or ""
+            "proposal_build_status": str(
+                payload.get("proposal_build_status") or ""
             ).strip(),
             "reason": str(payload.get("reason") or "").strip(),
         }
@@ -4051,7 +4226,7 @@ class ProductRecoveryController:
             "enabled": bool(fixture_path),
             "source_path": "",
             "load_status": "disabled",
-            "normalization_status": "disabled",
+            "proposal_build_status": "disabled",
             "reason": "",
             "final_output": None,
             "adapter_result": None,
@@ -4073,7 +4248,7 @@ class ProductRecoveryController:
 
         if reasoning_mode != "multi_turn":
             result["load_status"] = "skipped"
-            result["normalization_status"] = "skipped"
+            result["proposal_build_status"] = "skipped"
             result["reason"] = (
                 "runtime bridge fixture replay requires reasoning_mode=multi_turn"
             )
@@ -4081,7 +4256,7 @@ class ProductRecoveryController:
 
         if not resolved_path.exists():
             result["load_status"] = "missing"
-            result["normalization_status"] = "skipped"
+            result["proposal_build_status"] = "skipped"
             result["reason"] = (
                 f"fixture final_output artifact does not exist: {resolved_path}"
             )
@@ -4093,7 +4268,7 @@ class ProductRecoveryController:
             )
         except Exception as exc:
             result["load_status"] = "invalid_json"
-            result["normalization_status"] = "skipped"
+            result["proposal_build_status"] = "skipped"
             result["reason"] = (
                 f"failed to parse fixture final_output artifact: {exc}"
             )
@@ -4101,7 +4276,7 @@ class ProductRecoveryController:
 
         if not isinstance(final_output_payload, dict) or not final_output_payload:
             result["load_status"] = "loaded"
-            result["normalization_status"] = "rejected"
+            result["proposal_build_status"] = "rejected"
             result["reason"] = (
                 "fixture final_output artifact did not contain a JSON object"
             )
@@ -4111,25 +4286,25 @@ class ProductRecoveryController:
         result["load_status"] = "loaded"
 
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-            normalize_multi_turn_final_output_to_bridge_proposal,
+            build_multi_turn_bridge_proposal,
         )
 
-        adapter_result = normalize_multi_turn_final_output_to_bridge_proposal(
+        adapter_result = build_multi_turn_bridge_proposal(
             final_output_payload=final_output_payload,
             prepared_bridge_request=prepared_bridge_request,
         )
         result["adapter_result"] = deepcopy(adapter_result)
         if isinstance(adapter_result, dict) and adapter_result.get("accepted") is True:
-            result["normalization_status"] = "accepted"
+            result["proposal_build_status"] = "accepted"
             result["proposal"] = deepcopy(
-                adapter_result.get("normalized_proposal") or {}
+                adapter_result.get("bridge_proposal") or {}
             )
             return result
 
-        result["normalization_status"] = "rejected"
+        result["proposal_build_status"] = "rejected"
         result["reason"] = str(
             dict(adapter_result or {}).get("reason")
-            or "fixture final_output normalization failed"
+            or "fixture final_output proposal build failed"
         ).strip()
         return result
 
@@ -4161,7 +4336,7 @@ class ProductRecoveryController:
                     "bridge_sequence_index": int(node.get("bridge_sequence_index") or 0),
                     "bridge_sequence_length": int(node.get("bridge_sequence_length") or 0),
                     "bridge_outline_id": str(node.get("bridge_outline_id", "")).strip(),
-                    "depends_on_outline_ids": deepcopy(node.get("depends_on_outline_ids") or []),
+                    "predecessor_outline_ids": deepcopy(node.get("predecessor_outline_ids") or []),
                     "recovery_group_id": str(node.get("recovery_group_id", "")).strip(),
                     "recovery_parent_failure_id": str(node.get("recovery_parent_failure_id", "")).strip(),
                     "recovery_kind": str(node.get("recovery_kind", "")).strip(),
@@ -4275,6 +4450,7 @@ class ProductRecoveryController:
         *,
         actual_snapshot: dict[str, Any],
         projected_snapshot: dict[str, Any],
+        allow_missing_current_location: bool = False,
     ) -> str:
         from cais_spade_llm.resources.resource_profile import (
             get_resource_profile,
@@ -4303,6 +4479,23 @@ class ProductRecoveryController:
                 continue
             actual_value = resource_snapshot_field_value(actual_snapshot, key, profile=profile)
             projected_value = resource_snapshot_field_value(projected_snapshot, key, profile=profile)
+            if (
+                allow_missing_current_location
+                and key == "current_location"
+                and actual_value is None
+                and projected_value is not None
+            ):
+                continue
+            equivalence_resolver = getattr(profile, "snapshot_equivalence_resolver", None)
+            if callable(equivalence_resolver) and equivalence_resolver(
+                field=key,
+                actual_snapshot=actual_snapshot,
+                projected_snapshot=projected_snapshot,
+                actual_value=actual_value,
+                projected_value=projected_value,
+                profile=profile,
+            ):
+                continue
             if actual_value != projected_value:
                 return (
                     f"projected {key}={projected_value!r} "
@@ -4554,14 +4747,15 @@ class ProductRecoveryController:
             return True
 
         projected_snapshot = dict(task_node.get("projected_snapshot") or {})
+        part_name = str(self._tracked_part_name_for_task(task_node) or "").strip()
+        projected_part_entry = dict(task_node.get("projected_part_entry") or {})
         mismatch = ""
         if projected_snapshot:
             mismatch = self._bridge_snapshot_mismatch(
                 actual_snapshot=actual_snapshot,
                 projected_snapshot=projected_snapshot,
+                allow_missing_current_location=bool(projected_part_entry),
             )
-        part_name = str(self._tracked_part_name_for_task(task_node) or "").strip()
-        projected_part_entry = dict(task_node.get("projected_part_entry") or {})
         if not mismatch and part_name and projected_part_entry:
             mismatch = self._bridge_part_entry_mismatch(
                 part_name=part_name,
@@ -4813,6 +5007,24 @@ class ProductRecoveryController:
         repair_target_task_id = str(
             terminal_sequence.get("repair_target_task_id") or ""
         ).strip()
+        disabled_frontier = self._bridge_continuation_disabled_frontier(terminal_sequence)
+        if disabled_frontier:
+            self._record_runtime_des_trace(
+                graph_ready_event_ids=list(
+                    terminal_sequence.get("pending_nominal_task_ids") or []
+                ),
+                plant_enabled_event_ids=[],
+                disabled_frontier=disabled_frontier,
+            )
+            repair_node = self._try_compile_controllable_repair(
+                disabled_frontier=disabled_frontier,
+                trigger="bridge_continuation_guard",
+                active_bridge_sequence=terminal_sequence,
+            )
+            if repair_node:
+                await asyncio.to_thread(self._persist_plan_snapshot)
+                await asyncio.to_thread(self._persist_product_state)
+                return True
         validation_message = (
             f"Bridge macro '{macro_name}' completed the approved recovery bridge; "
             "validating updated plan."
@@ -5630,7 +5842,7 @@ class ProductRecoveryController:
                     fixture_replay.get("adapter_result") or {}
                 )
             if isinstance(fixture_replay.get("proposal"), dict):
-                bridge_debug["normalized_proposal"] = deepcopy(
+                bridge_debug["bridge_proposal"] = deepcopy(
                     fixture_replay.get("proposal") or {}
                 )
                 bridge_debug["status"] = "fixture_replay_ready"
@@ -5827,7 +6039,7 @@ class ProductRecoveryController:
                     enabled=verification_enabled,
                     bridge_debug=bridge_debug,
                     prepared_bridge_request=prepared_bridge_request,
-                    normalized_proposal=proposal if isinstance(proposal, dict) else None,
+                    bridge_proposal=proposal if isinstance(proposal, dict) else None,
                     status="ready" if isinstance(proposal, dict) else "generating",
                     reason=(
                         ""
@@ -6189,9 +6401,9 @@ class ProductRecoveryController:
             prepared_bridge_request=prepared_bridge_request,
             artifact_path=artifact_path,
         )
-        normalized = deepcopy(adapter_result.get("normalized_proposal") or {})
-        if not isinstance(normalized, dict) or not normalized:
-            raise RuntimeError("archived bridge run normalization did not produce a proposal")
+        proposal = deepcopy(adapter_result.get("bridge_proposal") or {})
+        if not isinstance(proposal, dict) or not proposal:
+            raise RuntimeError("archived bridge run proposal build did not produce a proposal")
 
         validation_policy = self._runtime_bridge_session_validation_policy()
         skip_runtime_plan_validation = validation_policy == "no_validation"
@@ -6206,7 +6418,7 @@ class ProductRecoveryController:
             "source_path": str(resolved_path),
             "selected_label": self._runtime_bridge_session_archive_label(),
             "load_status": "loaded",
-            "normalization_status": "accepted",
+            "proposal_build_status": "accepted",
             "validation_policy": validation_policy,
         }
         execution_policy = deepcopy(bridge_debug.get("execution_policy") or {})
@@ -6224,7 +6436,7 @@ class ProductRecoveryController:
         )
         bridge_debug["final_output"] = deepcopy(final_output_payload)
         bridge_debug["final_output_adapter"] = deepcopy(adapter_result)
-        bridge_debug["normalized_proposal"] = deepcopy(normalized)
+        bridge_debug["bridge_proposal"] = deepcopy(proposal)
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
             prepared_bridge_request
@@ -6249,7 +6461,7 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        bridge_summary = self.process_planner._bridge_summary(normalized)
+        bridge_summary = self.process_planner._bridge_summary(proposal)
         bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
         recovery = self._set_runtime_recovery(
             status="llm_bridge",
@@ -6264,7 +6476,7 @@ class ProductRecoveryController:
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
             used_llm_bridge=True,
-            bridge_proposal=normalized,
+            bridge_proposal=proposal,
             bridge_debug=bridge_debug if bridge_debug else None,
             bridge_approval_state="pending",
             bridge_stage="final",
@@ -6749,17 +6961,17 @@ class ProductRecoveryController:
         if not prepared_bridge_request:
             raise RuntimeError("no prepared bridge request is available")
 
-        normalized = self._bridge_normalized_proposal_from_debug(prepared_bridge_request)
-        if not isinstance(normalized, dict):
+        proposal = self._bridge_proposal_from_debug(prepared_bridge_request)
+        if not isinstance(proposal, dict):
             raise RuntimeError(
-                "completed primitive bridge output could not be normalized into a final proposal"
+                "completed primitive bridge output could not be built into a final proposal"
             )
         bridge_debug = deepcopy(
             prepared_bridge_request.get("bridge_debug")
             or self.process_planner.get_last_bridge_debug()
             or {}
         )
-        bridge_debug["normalized_proposal"] = deepcopy(normalized)
+        bridge_debug["bridge_proposal"] = deepcopy(proposal)
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
             prepared_bridge_request
@@ -6777,7 +6989,7 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        bridge_summary = self.process_planner._bridge_summary(normalized)
+        bridge_summary = self.process_planner._bridge_summary(proposal)
         bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
         recovery = self._set_runtime_recovery(
             status="llm_bridge",
@@ -6788,7 +7000,7 @@ class ProductRecoveryController:
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
             used_llm_bridge=True,
-            bridge_proposal=normalized,
+            bridge_proposal=proposal,
             bridge_debug=bridge_debug if bridge_debug else None,
             bridge_approval_state="pending",
             bridge_stage="final",
@@ -7356,18 +7568,35 @@ class ProductRecoveryController:
             for row in (proposal.get("macro_tasks") or [])
             if isinstance(row, dict)
         ]
+        proposal_has_parallel_roots = _proposal_has_parallel_independent_roots(
+            proposal_macro_tasks
+        )
         proposal_has_explicit_dependencies = any(
-            list(task.get("depends_on") or [])
+            list(task.get("predecessors") or [])
             for task in proposal_macro_tasks
         )
         execution_shape = str(
             execution_policy.get("execution_shape")
-            or ("dag" if proposal_has_explicit_dependencies else "serial")
-        ).strip().lower() or ("dag" if proposal_has_explicit_dependencies else "serial")
+            or proposal.get("execution_shape")
+            or (
+                "dag"
+                if proposal_has_explicit_dependencies or proposal_has_parallel_roots
+                else "serial"
+            )
+        ).strip().lower() or (
+            "dag"
+            if proposal_has_explicit_dependencies or proposal_has_parallel_roots
+            else "serial"
+        )
         if execution_shape not in {"serial", "dag"}:
-            execution_shape = "dag" if proposal_has_explicit_dependencies else "serial"
+            execution_shape = (
+                "dag"
+                if proposal_has_explicit_dependencies or proposal_has_parallel_roots
+                else "serial"
+            )
         start_safety_mode = str(
             execution_policy.get("start_safety_mode")
+            or proposal.get("start_safety_mode")
             or ("cca_check" if execution_shape == "dag" else "fast_path")
         ).strip().lower() or ("cca_check" if execution_shape == "dag" else "fast_path")
         if start_safety_mode not in {"cca_check", "fast_path"}:
@@ -7397,24 +7626,52 @@ class ProductRecoveryController:
         if failed_task_id and not verification_only_approval:
             deleted_task_ids = [failed_task_id]
 
-        resumable_task_ids = []
+        prepared_bridge_request = dict(
+            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        )
+        modeled_gap = dict(
+            dict(prepared_bridge_request.get("context_summary") or {}).get(
+                "modeled_continuation_gap"
+            )
+            or {}
+        )
+        resumable_task_ids_by_resource: dict[str, list[str]] = {}
+        resumable_task_ids: list[str] = []
         if not verification_only_approval:
-            affected_descendants = set(
-                self._collect_descendants_from_nodes(
-                    planner_nodes_snapshot,
-                    failed_task_id,
-                )
-            ) if failed_task_id else set()
+            resumable_task_ids_by_resource = self._bridge_resume_task_ids_by_resource(
+                planner_nodes_snapshot=planner_nodes_snapshot,
+                prepared_bridge_request=prepared_bridge_request,
+                modeled_gap=modeled_gap,
+                deleted_task_ids=deleted_task_ids,
+            )
+            if not resumable_task_ids_by_resource:
+                affected_descendants = set(
+                    self._collect_descendants_from_nodes(
+                        planner_nodes_snapshot,
+                        failed_task_id,
+                    )
+                ) if failed_task_id else set()
+                for node in planner_nodes_snapshot:
+                    if not isinstance(node, dict) or node.get("type") != "task":
+                        continue
+                    task_id = str(node.get("id", "")).strip()
+                    if (
+                        not task_id
+                        or task_id not in affected_descendants
+                        or task_id == failed_task_id
+                        or task_id in deleted_task_ids
+                        or str(node.get("status", "")).strip().lower()
+                        not in {"pending", "blocked"}
+                    ):
+                        continue
+                    resource_jid = str(node.get("resource_jid") or "").strip()
+                    if not resource_jid:
+                        continue
+                    resumable_task_ids_by_resource.setdefault(resource_jid, []).append(task_id)
             resumable_task_ids = [
-                str(node.get("id", "")).strip()
-                for node in planner_nodes_snapshot
-                if isinstance(node, dict)
-                and node.get("type") == "task"
-                and str(node.get("id", "")).strip()
-                and str(node.get("id", "")).strip() in affected_descendants
-                and str(node.get("id", "")).strip() != failed_task_id
-                and str(node.get("id", "")).strip() not in deleted_task_ids
-                and str(node.get("status", "")).strip().lower() in {"pending", "blocked"}
+                task_id
+                for task_ids in resumable_task_ids_by_resource.values()
+                for task_id in task_ids
             ]
         self.logger.info(
             "[Product] Bridge approval plan: anchor=%s verification_only=%s delete=%s resume=%s",
@@ -7427,23 +7684,14 @@ class ProductRecoveryController:
             tasks = self.process_planner.apply_bridge_macro_proposal(
                 proposal,
                 anchor_task_id=anchor_task_id,
+                resume_task_ids_by_resource=resumable_task_ids_by_resource,
             )
-            bridge_task_ids = [
+            bridge_task_ids = self._bridge_sequence_task_ids(
                 str(task.get("id", "")).strip()
                 for task in tasks
                 if str(task.get("id", "")).strip()
-            ]
-            bridge_task_id_set = set(bridge_task_ids)
-            bridge_sink_task_ids = [
-                task_id
-                for task_id in bridge_task_ids
-                if task_id not in {
-                    str(pred).strip()
-                    for task in tasks
-                    for pred in (task.get("predecessors") or [])
-                    if str(pred).strip() in bridge_task_id_set
-                }
-            ]
+            )
+            bridge_sink_task_ids_by_resource = self._bridge_sink_task_ids_by_resource(tasks)
             post_updates: list[dict[str, Any]] = []
             if deleted_task_ids:
                 post_updates.extend(
@@ -7475,7 +7723,7 @@ class ProductRecoveryController:
             if tasks and resumable_task_ids:
                 self.process_planner._gate_tasks_after_recovery_tail(
                     post_updates,
-                    tail_task_ids=bridge_sink_task_ids,
+                    tail_task_ids_by_resource=bridge_sink_task_ids_by_resource,
                     before_task_ids=resumable_task_ids,
                     deleted_task_ids=deleted_task_ids,
                     change_prefix="Approved bridge recovery",
@@ -7536,15 +7784,6 @@ class ProductRecoveryController:
         bridge_sequence_id = str(tasks[0].get("bridge_sequence_id", "")).strip() if tasks else ""
         active_bridge_sequence = None
         if bridge_sequence_id:
-            prepared_bridge_request = dict(
-                self._runtime_recovery_context.get("prepared_bridge_request") or {}
-            )
-            modeled_gap = dict(
-                dict(prepared_bridge_request.get("context_summary") or {}).get(
-                    "modeled_continuation_gap"
-                )
-                or {}
-            )
             archive_replay = dict(bridge_debug.get("archive_replay") or {}) if isinstance(bridge_debug, dict) else {}
             source_archive_path = str(
                 archive_replay.get("source_path")
@@ -7582,6 +7821,9 @@ class ProductRecoveryController:
                 "pending_nominal_task_ids": deepcopy(
                     modeled_gap.get("pending_nominal_task_ids") or []
                 ),
+                "pending_nominal_task_ids_by_resource": deepcopy(
+                    resumable_task_ids_by_resource
+                ),
                 "continuation_repair_attempts": 0,
                 "source_mode": self._runtime_bridge_session_mode(),
                 "validation_policy": self._runtime_bridge_session_validation_policy(),
@@ -7611,12 +7853,16 @@ class ProductRecoveryController:
             bridge_debug["approval"] = {
                 "approved_at_utc": self._utc_now_iso(),
                 "entry_task_ids": deepcopy(resumable_task_ids),
+                "entry_task_ids_by_resource": deepcopy(resumable_task_ids_by_resource),
                 "deleted_task_ids": deepcopy(deleted_task_ids),
                 "anchor_task_id": anchor_task_id,
                 "proposal_fingerprint": proposal_fingerprint,
                 "validation_policy": session_validation_policy,
                 "start_safety_mode": start_safety_mode,
                 "execution_shape": execution_shape,
+                "compiled_bridge_sink_task_ids_by_resource": deepcopy(
+                    bridge_sink_task_ids_by_resource
+                ),
                 "compiled_bridge_task_ids": (
                     deepcopy(active_bridge_sequence.get("bridge_task_ids") or [])
                     if isinstance(active_bridge_sequence, dict)

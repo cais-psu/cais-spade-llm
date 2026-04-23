@@ -6,13 +6,7 @@
     "domain": "localhost",
     "execution_mode": "simulation",
     "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly board.",
-    "functions": [
-      "pick_grasp",
-      "pick_approach",
-      "place_approach",
-      "place_insert",
-      "move_home"
-    ],
+    "functions": "auto",
     "failure_scenarios": [
       {
         "scenario_id": "lg_slippage",

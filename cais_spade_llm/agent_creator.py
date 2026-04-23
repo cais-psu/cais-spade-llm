@@ -120,6 +120,9 @@ def _jid_pw(meta: dict, default_domain="localhost", default_pw="none"):
 def _fn_names(meta: dict) -> list[str]:
     """Extract and deduplicate function names while preserving the author-defined order."""
     declared = meta.get("function_names", meta.get("functions", []))
+    if isinstance(declared, str):
+        token = declared.strip()
+        return [token] if token else []
     return list(dict.fromkeys(declared))
 
 
@@ -156,11 +159,20 @@ def create_resource_agents(
             kind = (meta.get("type") or "").lower()
             jid, pw = _jid_pw(meta)
 
-            fn_names = _fn_names(meta)
-            ALLOWED_FUNCS[name].update(fn_names)
-
             # Resolve environment-specific config (gazebo / real).
             env_block = meta.get(ROBOT_ENV, {})
+            fn_names = _fn_names(meta)
+            raw_declared = meta.get("function_names", meta.get("functions", None))
+            if kind == "robot" and (
+                raw_declared is None
+                or (isinstance(raw_declared, str) and raw_declared.strip().lower() == "auto")
+            ):
+                fn_names = RobotAgent.resolve_registered_function_names(
+                    static_capabilities=env_block.get("static_capabilities", meta.get("static_capabilities")) or {},
+                    named_positions=env_block.get("named_positions", {}) or {},
+                    controller_config=env_block.get("controller", {}) or {},
+                )
+            ALLOWED_FUNCS[name].update(fn_names)
 
             common = dict(
                 name=name,

@@ -8,7 +8,6 @@ from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_validation_service import (
     projected_outline_validation_context as _service_projected_outline_validation_context,
-    validate_bridge_candidate_task,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
     multi_turn as _shared,
@@ -60,33 +59,41 @@ async def _handle_outline_single_pass(
 
     derived_trace: list[dict[str, Any]] = []
     working_session_state = deepcopy(session_state)
-    for index, surface_event in enumerate(surface_trace):
-        outline_id = str(surface_event.get("outline_id") or "").strip() or f"RECOVERY_SEQ{index + 1}"
+    base_sequence_index = _shared._next_recovery_sequence_index(session_state)
+    for index, surface_event in enumerate(surface_trace, start=base_sequence_index):
         working_surface = deepcopy(dict(surface_event or {}))
-        working_surface["outline_id"] = outline_id
-        validation_result = validate_bridge_candidate_task(
-            planner=planner,
+        validated_task, schema_findings = _shared._derive_candidate_outline_task(
             candidate_task=working_surface,
             session_state=working_session_state,
             prepared_bridge_request=prepared_bridge_request,
-            progress_evaluator=_shared._candidate_progress_score,
         )
-        normalized_task = (
-            deepcopy(dict(validation_result.normalized_task or {}))
-            if validation_result.ok
-            else None
+        if schema_findings or not validated_task:
+            turn_entry["validation_findings"] = deepcopy(schema_findings)
+            session_state["outline_validation_findings"] = deepcopy(schema_findings)
+            session_state["status"] = "paused_after_outline_turn"
+            return "need_revision", turn_entry
+        findings, grounded_action = _shared._validate_single_outline_task(
+            planner=planner,
+            task=dict(validated_task or {}),
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
         )
-        findings = validation_result.finding_dicts()
-        grounded_action = deepcopy(dict(validation_result.grounded_action or {})) or None
-        if findings or not normalized_task:
+        if findings or not validated_task:
             turn_entry["validation_findings"] = deepcopy(findings)
-            if grounded_action:
-                turn_entry["grounded_action"] = deepcopy(grounded_action)
             session_state["outline_validation_findings"] = deepcopy(findings)
             session_state["status"] = "paused_after_outline_turn"
             return "need_revision", turn_entry
-        derived_trace.append(deepcopy(normalized_task))
-        _shared._apply_task_effects_to_symbolic_state(normalized_task, working_session_state)
+        if grounded_action:
+            turn_entry.setdefault("grounded_trace", []).append(deepcopy(grounded_action))
+        committed_task = _shared._commit_selected_candidate_task(
+            task=working_surface,
+            sequence_index=index,
+        )
+        derived_trace.append(deepcopy(committed_task))
+        _shared._apply_task_effects_to_symbolic_state(
+            committed_task,
+            working_session_state,
+        )
 
     session_state["accepted_outline_prefix"] = deepcopy(derived_trace)
     turn_entry["transition_trace"] = deepcopy(derived_trace)
@@ -129,58 +136,65 @@ async def _handle_outline_incremental(
         return "need_revision", turn_entry
 
     sequence_index = _shared._next_recovery_sequence_index(session_state)
-    outline_id = str(next_surface_transition.get("outline_id") or "").strip() or f"RECOVERY_SEQ{sequence_index}"
     surface_transition = deepcopy(dict(next_surface_transition or {}))
-    surface_transition["outline_id"] = outline_id
-    validation_result = validate_bridge_candidate_task(
-        planner=planner,
+    validated_task, schema_findings = _shared._derive_candidate_outline_task(
         candidate_task=surface_transition,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
-        progress_evaluator=_shared._candidate_progress_score,
     )
-    next_transition = (
-        deepcopy(dict(validation_result.normalized_task or {}))
-        if validation_result.ok
-        else None
+    if schema_findings or not validated_task:
+        turn_entry["validation_findings"] = deepcopy(schema_findings)
+        session_state["outline_validation_findings"] = deepcopy(schema_findings)
+        session_state["status"] = "paused_after_outline_turn"
+        return "need_revision", turn_entry
+    findings, grounded_action = _shared._validate_single_outline_task(
+        planner=planner,
+        task=dict(validated_task or {}),
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
     )
-    findings = validation_result.finding_dicts()
-    grounded_action = deepcopy(dict(validation_result.grounded_action or {})) or None
+    next_transition = deepcopy(surface_transition)
     if findings or not next_transition:
         turn_entry["validation_findings"] = deepcopy(findings)
-        if grounded_action:
-            turn_entry["grounded_action"] = deepcopy(grounded_action)
         session_state["outline_validation_findings"] = deepcopy(findings)
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
+    if grounded_action:
+        turn_entry["grounded_action"] = deepcopy(grounded_action)
+    next_transition = _shared._commit_selected_candidate_task(
+        task=surface_transition,
+        sequence_index=sequence_index,
+    )
 
     transition_suffix: list[dict[str, Any]] = []
     working_session_state = deepcopy(session_state)
     _shared._apply_task_effects_to_symbolic_state(next_transition, working_session_state)
     for index, raw_suffix in enumerate(transition_suffix_surface, start=1):
-        suffix_outline_id = (
-            str(raw_suffix.get("outline_id") or "").strip()
-            or f"RECOVERY_SEQ{sequence_index + index}"
-        )
         surface_suffix = deepcopy(dict(raw_suffix or {}))
-        surface_suffix["outline_id"] = suffix_outline_id
-        suffix_result = validate_bridge_candidate_task(
-            planner=planner,
+        validated_suffix, suffix_schema_findings = _shared._derive_candidate_outline_task(
             candidate_task=surface_suffix,
             session_state=working_session_state,
             prepared_bridge_request=prepared_bridge_request,
-            progress_evaluator=_shared._candidate_progress_score,
         )
-        normalized_suffix = (
-            deepcopy(dict(suffix_result.normalized_task or {}))
-            if suffix_result.ok
-            else None
-        )
-        suffix_findings = suffix_result.finding_dicts()
-        if suffix_findings or not normalized_suffix:
+        if suffix_schema_findings or not validated_suffix:
             break
-        transition_suffix.append(deepcopy(normalized_suffix))
-        _shared._apply_task_effects_to_symbolic_state(normalized_suffix, working_session_state)
+        suffix_findings, _suffix_grounded_action = _shared._validate_single_outline_task(
+            planner=planner,
+            task=dict(validated_suffix or {}),
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        if suffix_findings or not validated_suffix:
+            break
+        committed_suffix = _shared._commit_selected_candidate_task(
+            task=surface_suffix,
+            sequence_index=sequence_index + index,
+        )
+        transition_suffix.append(deepcopy(committed_suffix))
+        _shared._apply_task_effects_to_symbolic_state(
+            committed_suffix,
+            working_session_state,
+        )
 
     turn_entry["next_transition"] = deepcopy(next_transition)
     turn_entry["transition_suffix"] = deepcopy(transition_suffix)
@@ -240,25 +254,38 @@ async def _handle_outline_incremental_validated(
 
     sequence_index = _shared._next_recovery_sequence_index(session_state)
     surface_transition = deepcopy(dict(next_transition or {}))
-    surface_transition["outline_id"] = (
-        str(surface_transition.get("outline_id") or "").strip()
-        or f"RECOVERY_SEQ{sequence_index}"
-    )
-    validation_result = validate_bridge_candidate_task(
-        planner=planner,
+    validated_task, schema_findings = _shared._derive_candidate_outline_task(
         candidate_task=surface_transition,
         session_state=session_state,
         prepared_bridge_request=prepared_bridge_request,
-        progress_evaluator=_shared._candidate_progress_score,
     )
-    next_transition = (
-        deepcopy(dict(validation_result.normalized_task or {}))
-        if validation_result.ok
-        else None
+    if schema_findings or not validated_task:
+        turn_entry["next_transition"] = deepcopy(surface_transition)
+        turn_entry["validation_findings"] = deepcopy(schema_findings)
+        session_state["outline_validation_findings"] = _shared._merge_outline_validation_findings(
+            list(session_state.get("outline_validation_findings") or []),
+            schema_findings,
+        )
+        turn_entry["transition_validation"] = {
+            "status": "rejected",
+            "findings": deepcopy(schema_findings),
+        }
+        session_state["transition_validation"] = deepcopy(
+            turn_entry["transition_validation"]
+        )
+        session_state["status"] = "paused_after_outline_turn"
+        return "need_revision", turn_entry
+    findings, grounded_action = _shared._validate_single_outline_task(
+        planner=planner,
+        task=dict(validated_task or {}),
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
     )
-    findings = validation_result.finding_dicts()
-    grounded_action = deepcopy(dict(validation_result.grounded_action or {})) or None
-    turn_entry["next_transition"] = deepcopy(next_transition or surface_transition)
+    next_transition = _shared._commit_selected_candidate_task(
+        task=surface_transition,
+        sequence_index=sequence_index,
+    )
+    turn_entry["next_transition"] = deepcopy(next_transition)
     if grounded_action:
         turn_entry["grounded_action"] = deepcopy(grounded_action)
 
@@ -326,7 +353,7 @@ async def _handle_outline_incremental_candidates_validated(
     prepared_bridge_request: dict[str, Any],
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
-    """Incremental with multiple candidate next tasks and deterministic selection."""
+    """Incremental with multiple candidate next tasks and LLM-owned selection."""
     turn_entry: dict[str, Any] = {}
     sequence_index = _shared._next_recovery_sequence_index(session_state)
     session_state["outline_validation_findings"] = []
@@ -336,16 +363,10 @@ async def _handle_outline_incremental_candidates_validated(
     )
 
     candidate_events = [
-        _shared._normalize_candidate_task(
-            task=dict(row),
-            sequence_index=sequence_index,
-            candidate_index=candidate_index,
-        )
-        for candidate_index, row in enumerate(
-            _shared._parsed_response_rows(
-                parsed_response,
-                primary_key="candidate_events",
-            )
+        dict(row)
+        for row in _shared._parsed_response_rows(
+            parsed_response,
+            primary_key="candidate_events",
         )
     ]
     turn_entry["candidate_events"] = deepcopy(candidate_events)
@@ -366,8 +387,57 @@ async def _handle_outline_incremental_candidates_validated(
         )
         return "need_revision", turn_entry
 
+    selected_candidate_index_raw = parsed_response.get("selected_candidate_index")
+    if (
+        not isinstance(selected_candidate_index_raw, int)
+        or isinstance(selected_candidate_index_raw, bool)
+    ):
+        finding = _shared._candidate_schema_finding(
+            task={},
+            reason=(
+                "outline response must include integer selected_candidate_index "
+                "pointing at candidate_events"
+            ),
+            evidence={"field": "selected_candidate_index"},
+        )
+        turn_entry["validation_findings"] = [deepcopy(finding)]
+        turn_entry["transition_validation"] = {
+            "status": "rejected",
+            "findings": [deepcopy(finding)],
+        }
+        session_state["outline_validation_findings"] = [deepcopy(finding)]
+        session_state["transition_validation"] = deepcopy(
+            turn_entry["transition_validation"]
+        )
+        session_state["status"] = "paused_after_outline_turn"
+        return "need_revision", turn_entry
+    selected_candidate_index = int(selected_candidate_index_raw)
+    turn_entry["selected_candidate_index"] = selected_candidate_index
+    if not (0 <= selected_candidate_index < len(candidate_events)):
+        finding = _shared._candidate_schema_finding(
+            task={},
+            reason=(
+                "selected_candidate_index must reference an item in candidate_events"
+            ),
+            evidence={
+                "field": "selected_candidate_index",
+                "selected_candidate_index": selected_candidate_index,
+                "candidate_count": len(candidate_events),
+            },
+        )
+        turn_entry["validation_findings"] = [deepcopy(finding)]
+        turn_entry["transition_validation"] = {
+            "status": "rejected",
+            "findings": [deepcopy(finding)],
+        }
+        session_state["outline_validation_findings"] = [deepcopy(finding)]
+        session_state["transition_validation"] = deepcopy(
+            turn_entry["transition_validation"]
+        )
+        session_state["status"] = "paused_after_outline_turn"
+        return "need_revision", turn_entry
+
     candidate_evaluations: list[dict[str, Any]] = []
-    valid_candidates: list[dict[str, Any]] = []
     for candidate_index, task in enumerate(candidate_events):
         surface_task = deepcopy(task)
         working_task = deepcopy(task)
@@ -377,81 +447,75 @@ async def _handle_outline_incremental_candidates_validated(
             "task": deepcopy(working_task),
         }
 
-        validation_result = validate_bridge_candidate_task(
-            planner=planner,
+        validated_task, schema_findings = _shared._derive_candidate_outline_task(
             candidate_task=working_task,
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
-            progress_evaluator=_shared._candidate_progress_score,
         )
-        normalized_task = (
-            deepcopy(dict(validation_result.normalized_task or {}))
-            if validation_result.ok
-            else None
+        if schema_findings or not validated_task:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = deepcopy(schema_findings)
+            candidate_evaluations.append(evaluation)
+            continue
+        evaluation["validated_task"] = deepcopy(validated_task)
+
+        pruned_row = _shared._matching_active_pruned_action(
+            task=validated_task,
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
         )
-        findings = validation_result.finding_dicts()
-        grounded_action = deepcopy(dict(validation_result.grounded_action or {})) or None
-        evaluation["normalized_task"] = deepcopy(normalized_task)
-        pruned_row = None
-        if normalized_task:
-            pruned_row = _shared._matching_active_pruned_action(
-                task=normalized_task,
-                session_state=session_state,
-                prepared_bridge_request=prepared_bridge_request,
-            )
         if pruned_row is not None:
             evaluation["valid"] = False
             evaluation["validation_findings"] = [
                 _shared._retarget_candidate_finding_to_task(
                     dict(pruned_row.get("guard") or {}),
-                    dict(normalized_task or working_task),
+                    dict(validated_task or working_task),
                 )
             ]
             evaluation["pruned_match"] = True
             candidate_evaluations.append(evaluation)
             continue
-        evaluation["valid"] = bool(normalized_task) and not findings
+
+        findings, grounded_action = _shared._validate_single_outline_task(
+            planner=planner,
+            task=dict(validated_task or {}),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        evaluation["valid"] = bool(validated_task) and not findings
         evaluation["validation_findings"] = deepcopy(findings)
         if grounded_action:
             evaluation["grounded_action"] = deepcopy(grounded_action)
-        if findings or not normalized_task:
-            candidate_evaluations.append(evaluation)
-            continue
-
-        progress_score, progress_detail = _shared._candidate_progress_score(
-            task=dict(normalized_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-        evaluation["progress_score"] = progress_score
-        evaluation["progress_detail"] = deepcopy(progress_detail)
-        valid_candidates.append(evaluation)
         candidate_evaluations.append(evaluation)
 
-    progress_candidates = [
-        row for row in valid_candidates
-        if int(row.get("progress_score") or 0) > 0
-    ]
+    turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
+    _shared._promote_durable_candidate_rejections(
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        candidate_evaluations=candidate_evaluations,
+    )
 
-    if not progress_candidates:
-        for row in candidate_evaluations:
-            if not bool(row.get("valid")):
-                continue
-            row["valid"] = False
-            row["validation_findings"] = [
-                _shared._no_blocker_reduction_finding(task=dict(row.get("task") or {}))
-            ]
-        _shared._promote_durable_candidate_rejections(
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-            candidate_evaluations=candidate_evaluations,
+    selected = next(
+        (
+            row
+            for row in candidate_evaluations
+            if isinstance(row, dict)
+            and int(row.get("candidate_index", -1)) == selected_candidate_index
+        ),
+        None,
+    )
+    feedback_rows = _shared._candidate_feedback_rows(candidate_evaluations)
+    selected_valid = bool(selected and selected.get("valid"))
+    if not selected_valid:
+        accumulated_feedback = _shared._merge_candidate_rejection_feedback(
+            list(session_state.get("candidate_rejection_feedback") or []),
+            feedback_rows,
         )
-        turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
-        feedback_rows = _shared._candidate_feedback_rows(candidate_evaluations)
-        session_state["candidate_rejection_feedback"] = deepcopy(feedback_rows)
-        turn_entry["candidate_rejection_feedback"] = deepcopy(feedback_rows)
+        session_state["candidate_rejection_feedback"] = deepcopy(accumulated_feedback)
+        turn_entry["candidate_rejection_feedback"] = deepcopy(accumulated_feedback)
         turn_entry["transition_validation"] = {
             "status": "rejected",
+            "selected_candidate_index": selected_candidate_index,
             "findings": deepcopy(feedback_rows),
         }
         session_state["transition_validation"] = deepcopy(
@@ -461,8 +525,8 @@ async def _handle_outline_incremental_candidates_validated(
             parsed_response.get("thought") or ""
         ).strip()
         _logger.info(
-            "[MultiTurn] outline incremental_candidates_validated: rejected all %d candidates",
-            len(candidate_events),
+            "[MultiTurn] outline incremental_candidates_validated: rejected selected candidate %d",
+            selected_candidate_index + 1,
         )
         stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
         session_state["outline_stagnation_count"] = stagnation
@@ -500,26 +564,13 @@ async def _handle_outline_incremental_candidates_validated(
         )
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
-    turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
 
     session_state["outline_stagnation_count"] = 0
 
-    selected = max(
-        progress_candidates,
-        key=lambda row: (
-            int(dict(row.get("progress_detail") or {}).get("resolved_direct_blockers") or 0),
-            int(dict(row.get("progress_detail") or {}).get("blocker_part_acquired") or 0)
-            + int(dict(row.get("progress_detail") or {}).get("freed_resource_for_blocker") or 0),
-            int(dict(row.get("progress_detail") or {}).get("preparatory_transit") or 0),
-            -int(dict(row.get("progress_detail") or {}).get("remaining_blocked_issues") or 0),
-            -int(row.get("candidate_index") or 0),
-        ),
-    )
-    selected_candidate_index = int(selected.get("candidate_index") or 0)
     selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
-    selected_normalized_task = deepcopy(dict(selected.get("normalized_task") or {}))
+    selected_validated_task = deepcopy(dict(selected.get("validated_task") or {}))
     selected_transition = _shared._commit_selected_candidate_task(
-        task=selected_normalized_task,
+        task=selected_validated_task,
         sequence_index=sequence_index,
     )
     selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
@@ -528,6 +579,10 @@ async def _handle_outline_incremental_candidates_validated(
     turn_entry["selected_transition"] = deepcopy(selected_transition)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
     turn_entry["next_transition"] = deepcopy(selected_transition)
+    turn_entry["transition_validation"] = {
+        "status": "passed",
+        "selected_candidate_index": selected_candidate_index,
+    }
     if selected_grounded_action:
         turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
 
@@ -540,10 +595,7 @@ async def _handle_outline_incremental_candidates_validated(
     _shared._sync_des_recovery_aliases(
         session_state,
         turn_entry=turn_entry,
-        transition_validation={
-            "status": "passed",
-            "selected_candidate_index": selected_candidate_index,
-        },
+        transition_validation=turn_entry["transition_validation"],
     )
 
     _shared._apply_task_effects_to_symbolic_state(selected_transition, session_state)
@@ -561,11 +613,10 @@ async def _handle_outline_incremental_candidates_validated(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurn] outline incremental_candidates_validated: selected candidate %d (%s) "
-        "(progress=%d, prefix now %d events, complete=%s)",
+        "[MultiTurn] outline incremental_candidates_validated: accepted LLM-selected candidate %d (%s) "
+        "(prefix now %d events, complete=%s)",
         selected_candidate_index + 1,
         str(selected_transition.get("outline_id") or "").strip(),
-        int(selected.get("progress_score") or 0),
         len(accepted_prefix),
         outline_complete,
     )

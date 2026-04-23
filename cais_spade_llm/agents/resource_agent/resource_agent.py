@@ -155,18 +155,19 @@ class ResourceAgent(LlmAgent):
     def bridge_feasibility_oracle(
         self,
         *,
-        operation_kind: str = "",
-        part_name: str | None = None,
+        event_instance: Any | None = None,
+        schema: Any | None = None,
+        projection: Any | None = None,
         part_context: Dict[str, Any] | None = None,
         bridge_snapshot: Dict[str, Any] | None = None,
-        grounded_action: Dict[str, Any] | None = None,
+        **_compat_kwargs: Any,
     ) -> Dict[str, Any]:
         """Default permissive bridge feasibility oracle.
 
         Subclasses (RobotAgent, PrintingAgent) can override with
         resource-specific checks.
         """
-        del operation_kind, part_name, part_context, bridge_snapshot, grounded_action
+        del event_instance, schema, projection, part_context, bridge_snapshot
         return {"allowed": True, "reason": "default permissive oracle"}
 
     async def generate_bridge_primitives_batch(

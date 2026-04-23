@@ -351,7 +351,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
         "macro_tasks": [
             {
                 "outline_id": "clear_xarm6_zone",
-                "depends_on": [],
+                "predecessors": [],
                 "resource_jid": "xarm6@localhost",
                 "macro_name": "clear_xarm6_zone",
                 "description": "Retreat xarm6 to the recovery-clear pose to free the shared workspace.",
@@ -381,7 +381,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             },
             {
                 "outline_id": "return_mcp_to_printer",
-                "depends_on": [],
+                "predecessors": [],
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "return_mcp_to_printer",
                 "description": "Release MCP back to its printer origin so ur5e can recover LG first.",
@@ -445,7 +445,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             },
             {
                 "outline_id": "pick_lg",
-                "depends_on": [
+                "predecessors": [
                     "clear_xarm6_zone",
                     "return_mcp_to_printer",
                 ],
@@ -478,7 +478,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             },
             {
                 "outline_id": "insert_lg",
-                "depends_on": ["pick_lg"],
+                "predecessors": ["pick_lg"],
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "insert_lg",
                 "description": "Carry the recovered LG into the board with a normal vertical insertion.",
@@ -569,7 +569,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             },
             {
                 "outline_id": "resume_mcp_assembly",
-                "depends_on": ["insert_lg"],
+                "predecessors": ["insert_lg"],
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "resume_mcp_assembly",
                 "description": "Repick MCP into ur5e so the remaining MCP assembly tail can be completed inside the bridge.",
@@ -598,7 +598,7 @@ def _build_recover_lg_v1(prepared_bridge_request: dict[str, Any]) -> dict[str, A
             },
             {
                 "outline_id": "insert_mcp",
-                "depends_on": ["resume_mcp_assembly"],
+                "predecessors": ["resume_mcp_assembly"],
                 "resource_jid": "ur5e@localhost",
                 "macro_name": "insert_mcp",
                 "description": "Carry MCP into the assembly board and complete the remaining MCP insertion.",
