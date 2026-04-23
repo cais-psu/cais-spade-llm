@@ -2129,23 +2129,18 @@ def test_should_persist_ack_state_skips_transient_bridge_updates() -> None:
     assert _should_persist_ack_state(nominal_task, "running") is True
 
 
-def test_case3_archived_bridge_exposes_two_ready_roots_for_batch_dispatch(
+def test_case3_archived_bridge_selects_first_ready_task_for_serial_dispatch(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
 
     assert recovery["status"] == "resolved"
-    ready_nodes = product_agent._active_bridge_ready_tasks(max_count=2)
+    ready_node = product_agent._active_bridge_next_ready_task()
 
-    assert [str(node.get("bridge_outline_id") or "").strip() for node in ready_nodes] == [
-        "RECOVERY_SEQ1",
-        "RECOVERY_SEQ2",
-    ]
-    assert [str(node.get("resource_jid") or "").strip() for node in ready_nodes] == [
-        "xarm6@localhost",
-        "ur5e@localhost",
-    ]
-    assert all(str(node.get("status") or "").strip() == "pending" for node in ready_nodes)
+    assert isinstance(ready_node, dict)
+    assert str(ready_node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    assert str(ready_node.get("resource_jid") or "").strip() == "xarm6@localhost"
+    assert str(ready_node.get("status") or "").strip() == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -2334,8 +2329,6 @@ def _configure_runtime_bridge_approval_harness(
     product_agent._bridge_generation_mode = "auto"
     product_agent._runtime_bridge_mode = "pre_ran"
     product_agent._runtime_bridge_validation_policy = "no_validation"
-    product_agent._runtime_bridge_start_safety_mode = "cca_check"
-    product_agent._runtime_bridge_execution_shape = "dag"
     product_agent._runtime_bridge_archive_path = str(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
     product_agent._runtime_bridge_archive_label = CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name
     product_agent._orphaned_bridge_task_warning_ids = set()
@@ -2347,9 +2340,6 @@ def _configure_runtime_bridge_approval_harness(
     product_agent.resource_state_path = tmp_path / "case3_resource_state.json"
     product_agent.recovery_controller = ProductRecoveryController(product_agent)
     product_agent.recovery_controller.bind_methods()
-    product_agent._refresh_bridge_sequence_runtime_metadata = (
-        product_agent.recovery_controller._refresh_bridge_sequence_runtime_metadata
-    )
     product_agent.runtime_recovery = product_agent._empty_runtime_recovery()
     product_agent._runtime_recovery_context = {}
 
@@ -2384,8 +2374,6 @@ def _approve_case3_archived_bridge(
         },
         "execution_policy": {
             "complete_full_tail": True,
-            "execution_shape": "dag",
-            "start_safety_mode": "cca_check",
         },
     }
     violations = [
@@ -2426,15 +2414,15 @@ def _approve_case3_archived_bridge(
     return fixture, product_agent, planner, prepared_bridge_request, recovery
 
 
-def test_case3_archived_bridge_approval_compiles_per_resource_concurrency(
+def test_case3_archived_bridge_approval_compiles_serial_bridge_chain(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
 
     assert recovery["status"] == "resolved"
     active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
-    assert active_bridge_sequence["execution_shape"] == "dag"
-    assert active_bridge_sequence["start_safety_mode"] == "cca_check"
+    execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
+    assert execution_policy["complete_full_tail"] is True
 
     bridge_nodes_by_outline_id = {
         str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
@@ -2451,36 +2439,25 @@ def test_case3_archived_bridge_approval_compiles_per_resource_concurrency(
     req_1_t5 = dict(planner._find_node("REQ_1_T5") or {})
     req_2_t5 = dict(planner._find_node("REQ_2_T5") or {})
 
-    assert max(
-        int(seq2.get("sequence_index") or 0),
-        int(seq3.get("sequence_index") or 0),
-        int(seq4.get("sequence_index") or 0),
-    ) < min(
+    assert int(seq1.get("sequence_index") or 0) < int(seq2.get("sequence_index") or 0)
+    assert int(seq2.get("sequence_index") or 0) < int(seq3.get("sequence_index") or 0)
+    assert int(seq3.get("sequence_index") or 0) < int(seq4.get("sequence_index") or 0)
+    assert int(seq4.get("sequence_index") or 0) < min(
         int(req_1_t3.get("sequence_index") or 0),
         int(req_1_t4.get("sequence_index") or 0),
         int(req_1_t5.get("sequence_index") or 0),
     )
-    assert int(seq1.get("sequence_index") or 0) < int(req_2_t5.get("sequence_index") or 0)
+    assert list(seq1.get("predecessors") or []) == [ANCHOR_TASK_ID]
+    assert list(seq2.get("predecessors") or []) == [seq1["id"]]
+    assert list(seq3.get("predecessors") or []) == [seq2["id"]]
+    assert list(seq4.get("predecessors") or []) == [seq3["id"]]
     assert seq4["id"] in list(req_1_t3.get("predecessors") or [])
     assert seq1["id"] not in list(req_1_t3.get("predecessors") or [])
-    assert seq4["id"] not in list(req_2_t5.get("predecessors") or [])
-    assert seq1["id"] in list(req_2_t5.get("predecessors") or [])
-
-    transitions = list((planner.global_fsa or {}).get("A", {}).get("Tr", []) or [])
-    seq2_start_events = [
-        tr
-        for tr in transitions
-        if isinstance(tr, dict) and str(tr.get("task_id") or "").strip() == str(seq2.get("id") or "").strip()
-        and str(tr.get("event") or "").strip().endswith(".start")
-    ]
-    assert any(
-        str(tr.get("from") or "")
-        == "(ur5e@localhost=(k=2,idle),xarm6@localhost=(k=3,idle))"
-        for tr in seq2_start_events
-    )
+    assert seq4["id"] in list(req_2_t5.get("predecessors") or [])
+    assert seq1["id"] not in list(req_2_t5.get("predecessors") or [])
 
 
-def test_case3_archived_bridge_allows_xarm6_nominal_release_while_ur5e_bridge_active(
+def test_case3_archived_bridge_blocks_nominal_release_while_bridge_active(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, _ = _approve_case3_archived_bridge(tmp_path)
@@ -2503,14 +2480,6 @@ def test_case3_archived_bridge_allows_xarm6_nominal_release_while_ur5e_bridge_ac
     req_2_t5 = planner._find_node("REQ_2_T5")
     assert isinstance(req_2_t5, dict)
     req_2_t5["status"] = "pending"
-
-    refreshed_sequence = product_agent._refresh_bridge_sequence_runtime_metadata(
-        product_agent.runtime_recovery.get("active_bridge_sequence") or {}
-    )
-    product_agent._set_runtime_recovery(
-        message=str(product_agent.runtime_recovery.get("message") or "").strip(),
-        active_bridge_sequence=refreshed_sequence,
-    )
 
     with patch.object(
         ProductRecoveryController,
@@ -2535,9 +2504,7 @@ def test_case3_archived_bridge_allows_xarm6_nominal_release_while_ur5e_bridge_ac
     ):
         next_node = product_agent._select_runtime_event()
 
-    assert isinstance(next_node, dict)
-    assert str(next_node.get("id") or "").strip() == "REQ_2_T5"
-    assert str(next_node.get("resource_jid") or "").strip() == "xarm6@localhost"
+    assert next_node is None
 
 
 def test_case3_archived_bridge_place_macros_use_snap_and_cartesian_retreat() -> None:

@@ -171,29 +171,6 @@ def _task_description(task: dict[str, Any]) -> str:
     ).strip()
 
 
-def _has_parallel_independent_root_tasks(
-    tasks: list[dict[str, Any]] | None,
-) -> bool:
-    root_resource_jids: list[str] = []
-    for task in tasks or []:
-        if not isinstance(task, dict):
-            continue
-        predecessors = [
-            str(item).strip()
-            for item in (task.get("predecessors") or [])
-            if str(item).strip()
-        ]
-        if predecessors:
-            continue
-        resource_jid = _task_resource_jid(task)
-        if not resource_jid:
-            return False
-        root_resource_jids.append(resource_jid)
-    return (
-        len(root_resource_jids) > 1
-        and len(set(root_resource_jids)) == len(root_resource_jids)
-    )
-
 # ---------------------------------------------------------------------------
 # Phase transitions
 # ---------------------------------------------------------------------------
@@ -5093,9 +5070,6 @@ def build_multi_turn_bridge_proposal(
     }
     if primary_obligation:
         raw_proposal["primary_obligation"] = deepcopy(primary_obligation)
-    if _has_parallel_independent_root_tasks(macro_tasks):
-        raw_proposal["execution_shape"] = "dag"
-        raw_proposal["start_safety_mode"] = "cca_check"
     result["raw_proposal"] = deepcopy(raw_proposal)
 
     obligation_projection_error = _primary_obligation_projection_error(
@@ -5128,14 +5102,6 @@ def build_multi_turn_bridge_proposal(
     }
     if primary_obligation:
         bridge_proposal["primary_obligation"] = deepcopy(primary_obligation)
-    if str(raw_proposal.get("execution_shape") or "").strip():
-        bridge_proposal["execution_shape"] = str(
-            raw_proposal.get("execution_shape") or ""
-        ).strip()
-    if str(raw_proposal.get("start_safety_mode") or "").strip():
-        bridge_proposal["start_safety_mode"] = str(
-            raw_proposal.get("start_safety_mode") or ""
-        ).strip()
 
     result["accepted"] = True
     result["bridge_proposal"] = deepcopy(bridge_proposal)

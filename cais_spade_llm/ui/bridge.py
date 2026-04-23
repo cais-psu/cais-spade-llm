@@ -156,8 +156,6 @@ class SystemBridge:
         self.selected_safety_file: str = ""
         self.runtime_bridge_mode: str = "pre_ran"
         self.runtime_bridge_validation_policy: str = "validated"
-        self.runtime_bridge_start_safety_mode: str = ""
-        self.runtime_bridge_execution_shape: str = ""
         self.runtime_bridge_archive_path: str = ""
         self.runtime_bridge_archive_label: str = ""
         self._runtime_bridge_archive_cache_signature: tuple[Any, ...] | None = None
@@ -234,24 +232,6 @@ class SystemBridge:
             return "no_validation"
         return "validated"
 
-    @staticmethod
-    def _normalize_runtime_bridge_start_safety_mode(value: Any) -> str:
-        token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-        if token in {"cca_check", "fast_path"}:
-            return token
-        if token in {"cca", "checked"}:
-            return "cca_check"
-        if token in {"fast", "fastpath"}:
-            return "fast_path"
-        return ""
-
-    @staticmethod
-    def _normalize_runtime_bridge_execution_shape(value: Any) -> str:
-        token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-        if token in {"serial", "dag"}:
-            return token
-        return ""
-
     def _apply_runtime_bridge_session_settings(self) -> None:
         for agent in list(self.product_agents or []):
             setter = getattr(agent, "set_runtime_bridge_session_settings", None)
@@ -261,8 +241,6 @@ class SystemBridge:
                 setter(
                     mode=self.runtime_bridge_mode,
                     validation_policy=self.runtime_bridge_validation_policy,
-                    start_safety_mode=self.runtime_bridge_start_safety_mode,
-                    execution_shape=self.runtime_bridge_execution_shape,
                     selected_archive_path=self.runtime_bridge_archive_path,
                     selected_archive_label=self.runtime_bridge_archive_label,
                 )
@@ -299,12 +277,6 @@ class SystemBridge:
             "mode": self._normalize_runtime_bridge_mode(self.runtime_bridge_mode),
             "validation_policy": self._normalize_runtime_bridge_validation_policy(
                 self.runtime_bridge_validation_policy
-            ),
-            "start_safety_mode": self._normalize_runtime_bridge_start_safety_mode(
-                self.runtime_bridge_start_safety_mode
-            ),
-            "execution_shape": self._normalize_runtime_bridge_execution_shape(
-                self.runtime_bridge_execution_shape
             ),
             "selected_archive_path": str(self.runtime_bridge_archive_path or "").strip(),
             "selected_archive_label": str(self.runtime_bridge_archive_label or "").strip(),
@@ -344,26 +316,6 @@ class SystemBridge:
     ) -> dict[str, Any]:
         self.runtime_bridge_validation_policy = (
             self._normalize_runtime_bridge_validation_policy(validation_policy)
-        )
-        self._apply_runtime_bridge_session_settings()
-        return self.get_runtime_bridge_settings()
-
-    def set_runtime_bridge_start_safety_mode(
-        self,
-        start_safety_mode: str,
-    ) -> dict[str, Any]:
-        self.runtime_bridge_start_safety_mode = (
-            self._normalize_runtime_bridge_start_safety_mode(start_safety_mode)
-        )
-        self._apply_runtime_bridge_session_settings()
-        return self.get_runtime_bridge_settings()
-
-    def set_runtime_bridge_execution_shape(
-        self,
-        execution_shape: str,
-    ) -> dict[str, Any]:
-        self.runtime_bridge_execution_shape = (
-            self._normalize_runtime_bridge_execution_shape(execution_shape)
         )
         self._apply_runtime_bridge_session_settings()
         return self.get_runtime_bridge_settings()

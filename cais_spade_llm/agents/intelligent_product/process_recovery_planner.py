@@ -647,103 +647,6 @@ class ProcessRecoveryPlanner:
             self._apply_replan_patch(deletions)
         return deletions
 
-    def _bridge_resume_task_ids_by_resource(
-        self,
-        task_ids_by_resource: dict[str, list[str]] | None,
-    ) -> dict[str, list[str]]:
-        normalized: dict[str, list[str]] = {}
-        for raw_resource_jid, raw_task_ids in (task_ids_by_resource or {}).items():
-            resource_jid = str(raw_resource_jid or "").strip()
-            if not resource_jid:
-                continue
-            ordered_task_ids: list[str] = []
-            seen: set[str] = set()
-            for raw_task_id in raw_task_ids or []:
-                task_id = str(raw_task_id or "").strip()
-                if not task_id or task_id in seen:
-                    continue
-                node = self._find_node(task_id)
-                if not isinstance(node, dict):
-                    continue
-                if str(node.get("resource_jid") or "").strip() != resource_jid:
-                    continue
-                status = str(node.get("status") or "").strip().lower()
-                if status not in {"pending", "blocked"}:
-                    continue
-                ordered_task_ids.append(task_id)
-                seen.add(task_id)
-            if ordered_task_ids:
-                normalized[resource_jid] = ordered_task_ids
-        return normalized
-
-    def _bridge_insertion_sequence_base_by_resource(
-        self,
-        *,
-        bridge_resource_jids: list[str],
-        resume_task_ids_by_resource: dict[str, list[str]] | None = None,
-    ) -> dict[str, int]:
-        base_by_resource: dict[str, int] = {}
-        normalized_resume = self._bridge_resume_task_ids_by_resource(
-            resume_task_ids_by_resource
-        )
-        global_max_sequence_index = max(
-            (
-                int(node.get("sequence_index") or 0)
-                for node in self.nodes
-                if isinstance(node, dict)
-            ),
-            default=0,
-        )
-        for resource_jid in [
-            str(item or "").strip()
-            for item in bridge_resource_jids
-            if str(item or "").strip()
-        ]:
-            resume_task_ids = list(normalized_resume.get(resource_jid) or [])
-            target_task: dict[str, Any] | None = None
-            for task_id in resume_task_ids:
-                node = self._find_node(task_id)
-                if isinstance(node, dict):
-                    target_task = node
-                    break
-            if target_task is None:
-                candidate_nodes = sorted(
-                    [
-                        node
-                        for node in self.nodes
-                        if isinstance(node, dict)
-                        and str(node.get("type") or "").strip() == "task"
-                        and str(node.get("resource_jid") or "").strip() == resource_jid
-                        and str(node.get("status") or "").strip().lower() in {"pending", "blocked"}
-                    ],
-                    key=lambda node: (
-                        int(node.get("sequence_index") or 0),
-                        str(node.get("id") or ""),
-                    ),
-                )
-                if candidate_nodes:
-                    target_task = candidate_nodes[0]
-            if isinstance(target_task, dict):
-                try:
-                    base_by_resource[resource_jid] = int(
-                        target_task.get("sequence_index") or 0
-                    )
-                except (TypeError, ValueError):
-                    base_by_resource[resource_jid] = 0
-                continue
-
-            resource_max_sequence_index = max(
-                (
-                    int(node.get("sequence_index") or 0)
-                    for node in self.nodes
-                    if isinstance(node, dict)
-                    and str(node.get("resource_jid") or "").strip() == resource_jid
-                ),
-                default=global_max_sequence_index,
-            )
-            base_by_resource[resource_jid] = resource_max_sequence_index + 1
-        return base_by_resource
-
     def _path_to_recovery_tasks(
         self,
         path: list[dict[str, Any]],
@@ -801,25 +704,13 @@ class ProcessRecoveryPlanner:
         self,
         modified_tasks: list[dict[str, Any]],
         *,
-        tail_task_id: str = "",
-        tail_task_ids: list[str] | None = None,
-        tail_task_ids_by_resource: dict[str, list[str]] | None = None,
+        tail_task_id: str,
         before_task_ids: list[str] | None = None,
         deleted_task_ids: list[str] | None = None,
         change_prefix: str = "DES recovery",
         recovery_tasks: list[dict[str, Any]] | None = None,
     ) -> None:
-        gating_task_ids = [
-            str(task_id or "").strip()
-            for task_id in (tail_task_ids or [])
-            if str(task_id or "").strip()
-        ]
-        if tail_task_id and tail_task_id not in gating_task_ids:
-            gating_task_ids.append(str(tail_task_id).strip())
-        gating_task_ids_by_resource = self._bridge_resume_task_ids_by_resource(
-            tail_task_ids_by_resource
-        )
-        if not gating_task_ids and not gating_task_ids_by_resource:
+        if not tail_task_id:
             return
         deleted_task_id_set = {
             str(task_id or "").strip()
@@ -873,12 +764,6 @@ class ProcessRecoveryPlanner:
 
         for blocked_task_id in sorted(ordered_task_ids, key=_sort_key):
             existing = existing_by_id[blocked_task_id]
-            blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
-            resource_gating_task_ids = list(
-                gating_task_ids_by_resource.get(blocked_resource_jid) or gating_task_ids
-            )
-            if not resource_gating_task_ids:
-                continue
             existing_preds = [
                 str(pred).strip()
                 for pred in (existing.get("predecessors") or [])
@@ -889,13 +774,14 @@ class ProcessRecoveryPlanner:
             preds = (
                 list(existing_preds)
                 if gated_by_resume_chain
-                else list(dict.fromkeys(existing_preds + resource_gating_task_ids))
+                else list(dict.fromkeys(existing_preds + [tail_task_id]))
             )
+            blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
             mod: dict[str, Any] = {
                 "id": blocked_task_id,
                 "predecessors": preds,
                 "change_reason": (
-                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {resource_gating_task_ids}"
+                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
                 ),
             }
             if blocked_resource_jid in next_sequence_index_by_resource:
@@ -1169,7 +1055,6 @@ class ProcessRecoveryPlanner:
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
-        resume_task_ids_by_resource: dict[str, list[str]] | None = None,
     ) -> list[dict[str, Any]]:
         if not isinstance(proposal, dict):
             raise ValueError("bridge proposal is missing")
@@ -1180,7 +1065,6 @@ class ProcessRecoveryPlanner:
             return self._apply_primitive_bridge_proposal(
                 proposal,
                 anchor_task_id=anchor_task_id,
-                resume_task_ids_by_resource=resume_task_ids_by_resource,
             )
 
         # Legacy catalog-function-based proposal: compile into multiple task nodes.
@@ -1218,7 +1102,6 @@ class ProcessRecoveryPlanner:
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
-        resume_task_ids_by_resource: dict[str, list[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Compile one or more primitive-based bridge macro_tasks into ordered task nodes."""
         from uuid import uuid4
@@ -1231,23 +1114,13 @@ class ProcessRecoveryPlanner:
         total_tasks = len(macro_tasks)
         primary_obligation = deepcopy(proposal.get("primary_obligation") or {})
         bridge_sequence_id = f"BRIDGESEQ_{uuid4().hex[:8].upper()}"
-        anchor_predecessor = (
-            str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
-        )
-        sequence_base_by_resource = self._bridge_insertion_sequence_base_by_resource(
-            bridge_resource_jids=[
-                str((macro_task or {}).get("resource_jid") or proposal.get("resource_jid") or "").strip()
-                for macro_task in macro_tasks
-                if isinstance(macro_task, dict)
-            ],
-            resume_task_ids_by_resource=resume_task_ids_by_resource,
-        )
-        next_sequence_index_by_resource = dict(sequence_base_by_resource)
-        compiled_task_ids_by_outline_id: dict[str, str] = {}
-        previous_outline_id = ""
-        start_safety_mode = str(
-            proposal.get("start_safety_mode") or "fast_path"
-        ).strip().lower() or "fast_path"
+        max_si = 0
+        for n in self.nodes:
+            si = n.get("sequence_index")
+            if si is not None:
+                max_si = max(max_si, int(si))
+        base_si = max_si + 1000
+        predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
 
         for index, macro_task in enumerate(macro_tasks, start=1):
             macro_name = str(
@@ -1259,13 +1132,6 @@ class ProcessRecoveryPlanner:
                 macro_task.get("outline_id")
                 or f"bridge_outline_{index}"
             ).strip()
-            outline_predecessors = [
-                str(item).strip()
-                for item in (macro_task.get("predecessors") or [])
-                if str(item).strip()
-            ]
-            if "predecessors" not in macro_task and previous_outline_id:
-                outline_predecessors = [previous_outline_id]
             resource_jid = str(macro_task.get("resource_jid") or proposal.get("resource_jid") or "").strip()
             primitive_steps = list(macro_task.get("primitive_steps") or [])
             expected_start_state = str(
@@ -1299,10 +1165,8 @@ class ProcessRecoveryPlanner:
             params: dict[str, Any] = {
                 "macro_name": macro_name,
                 "outline_id": outline_id,
-                "predecessors": deepcopy(outline_predecessors),
                 "primitive_steps": primitive_steps,
                 "expected_start_state": expected_start_state,
-                "start_safety_mode": start_safety_mode,
                 "product_jid": str(self.product_agent.jid),
                 "task_id": task_id,
             }
@@ -1322,29 +1186,15 @@ class ProcessRecoveryPlanner:
             if len(primitive_steps) > 5:
                 step_summary += f", ... ({len(primitive_steps)} total)"
 
-            predecessors: list[str] = []
-            if outline_predecessors:
-                for dependency_outline_id in outline_predecessors:
-                    dependency_task_id = compiled_task_ids_by_outline_id.get(
-                        dependency_outline_id
-                    )
-                    if not dependency_task_id:
-                        raise ValueError(
-                            f"bridge macro_task {index} predecessors include unknown or later outline_id {dependency_outline_id!r}"
-                        )
-                    predecessors.append(dependency_task_id)
-            elif anchor_predecessor:
-                predecessors.append(anchor_predecessor)
-
             task_node: dict[str, Any] = {
                 "id": task_id,
                 "function_name": "execute_recovery_macro",
                 "params": params,
                 "resource_jid": resource_jid,
                 "status": "pending",
-                "predecessors": predecessors,
+                "predecessors": [predecessor] if predecessor else [],
                 "successors": [],
-                "sequence_index": next_sequence_index_by_resource.get(resource_jid, 0),
+                "sequence_index": base_si + index,
                 "change_reason": (
                     f"INSERTION: Approved bridge recovery macro '{macro_name}' "
                     f"step {index}/{total_tasks} ({len(primitive_steps)} primitives: {step_summary}) "
@@ -1354,7 +1204,6 @@ class ProcessRecoveryPlanner:
                 "bridge_sequence_index": index,
                 "bridge_sequence_length": total_tasks,
                 "bridge_outline_id": outline_id,
-                "predecessor_outline_ids": deepcopy(outline_predecessors),
                 "recovery_group_id": bridge_sequence_id,
                 "recovery_kind": "bridge_macro",
             }
@@ -1380,11 +1229,7 @@ class ProcessRecoveryPlanner:
                 task_node["primary_obligation"] = deepcopy(primary_obligation)
 
             compiled_nodes.append(task_node)
-            next_sequence_index_by_resource[resource_jid] = (
-                int(task_node.get("sequence_index") or 0) + 1
-            )
-            compiled_task_ids_by_outline_id[outline_id] = task_id
-            previous_outline_id = outline_id
+            predecessor = task_id
 
         self._apply_replan_patch(compiled_nodes)
         return compiled_nodes

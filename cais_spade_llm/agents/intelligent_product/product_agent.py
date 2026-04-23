@@ -171,8 +171,6 @@ class ProductAgent(LlmAgent):
         self._bridge_reasoning_mode = "multi_turn"
         self._runtime_bridge_mode = "pre_ran"
         self._runtime_bridge_validation_policy = "validated"
-        self._runtime_bridge_start_safety_mode = ""
-        self._runtime_bridge_execution_shape = ""
         self._runtime_bridge_archive_path = ""
         self._runtime_bridge_archive_label = ""
         self._orphaned_bridge_task_warning_ids: set[str] = set()
@@ -1407,31 +1405,15 @@ class ProductAgent(LlmAgent):
                             )
 
                 await self.send(msg)
-                agent.logger.info(
-                    f"[Product] Dispatched DAG task {task_id} -> {to} ({instruction})"
-                )
+                agent.logger.info(f"[Product] Dispatched task {task_id} -> {to} ({instruction})")
                 return is_bridge_task
-
-            bridge_batch = agent._active_bridge_ready_tasks(
-                max_count=max(1, len(agent.resource_jids)),
-            )
-            if bridge_batch:
-                dispatched_bridge = False
-                for task_node in bridge_batch:
-                    dispatched_bridge = (
-                        await _dispatch_task_node(task_node) or dispatched_bridge
-                    )
-                if dispatched_bridge:
-                    await asyncio.to_thread(agent._persist_plan_snapshot)
-                    await asyncio.to_thread(agent._persist_product_state)
-                # Short sleep so we don't hammer the RA with a storm of tasks
-                await asyncio.sleep(0.1)
-                return
 
             # Prioritize active bridge sequences over nominal DAG work. The first
             # recovery macro may be anchored after the failed task, which is
             # intentionally not "completed" during runtime recovery.
-            task_node = agent._next_dispatchable_task_node()
+            task_node = agent._active_bridge_next_ready_task()
+            if not task_node:
+                task_node = agent._next_dispatchable_task_node()
             if not task_node and agent._active_bridge_blocks_nominal_dispatch():
                 agent.logger.debug(
                     "[Product] Active bridge sequence is executing; suppressing nominal DAG dispatch."
