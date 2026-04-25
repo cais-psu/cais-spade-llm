@@ -16,6 +16,30 @@ load_dotenv()
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
 
 
+def _parse_structured_json_text(raw_text: str) -> Any:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        decoder = json.JSONDecoder()
+        for start_idx, ch in enumerate(text):
+            if ch not in "{[":
+                continue
+            try:
+                parsed, end_idx = decoder.raw_decode(text[start_idx:])
+            except json.JSONDecodeError:
+                continue
+            trailing = text[start_idx + end_idx :].strip()
+            if trailing:
+                logging.getLogger(__name__).warning(
+                    "Ignoring trailing text after structured JSON payload"
+                )
+            return parsed
+        raise exc
+
+
 def _default_model_name(*env_names: str, fallback: str) -> str:
     """Resolve a model slug from env vars, then fall back to a safe default."""
     for env_name in env_names:
@@ -432,7 +456,7 @@ class LlmAgent(Agent):
                     continue
 
                 # No tool calls — return the structured response.
-                return json.loads(choice.content or "{}")
+                return _parse_structured_json_text(choice.content or "{}")
 
             raise RuntimeError("Exceeded max tool rounds")
 

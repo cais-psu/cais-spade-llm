@@ -401,6 +401,10 @@ class SystemBridge:
         for artifact_path in artifact_paths:
             if not artifact_path.is_file():
                 continue
+            if artifact_path.parent.name != "recovery_final":
+                recovery_final_path = artifact_path.parent / "recovery_final" / artifact_path.name
+                if recovery_final_path.exists() and recovery_final_path.is_file():
+                    continue
             try:
                 payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             except Exception:

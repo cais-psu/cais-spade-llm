@@ -5,6 +5,7 @@ Run directly:
     python test/test_case3_bridge_dryrun.py --model gpt-5
     python test/test_case3_bridge_dryrun.py --reasoning-mode multi_turn
     python test/test_case3_bridge_dryrun.py --focus primitive_generation
+    python test/test_case3_bridge_dryrun.py --focus recovery_safety
     python test/test_case3_bridge_dryrun.py --show-llm-input
     python test/test_case3_bridge_dryrun.py --show-prompt
 """
@@ -16,10 +17,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from unittest.mock import patch
 
@@ -114,6 +117,12 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
     failure_context_from_scenario_config,
     load_failure_scenario_config,
 )
+from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
+    generate_recovery_safety_bundle,
+)
+from cais_spade_llm.agents.central_controller.online_safety_monitor import (
+    OnlineSafetyMonitor,
+)
 
 
 class ProcessPlannerPrepareTrace(ProcessPlanner):
@@ -149,25 +158,59 @@ CASE3_COMPLETED_TASK_IDS = (
     "REQ_2_T2",
     "REQ_2_T3",
 )
-CASE3_ARCHIVED_FINAL_OUTPUT_PATH = (
-    ROOT
-    / "cais_spade_llm"
-    / "agents"
-    / "intelligent_product"
-    / "replanner"
-    / "llm_bridge"
-    / "runtime_data"
-    / "imported"
-    / "worked"
-    / "1"
-    / "multi_turn_turn09_final_output_response_20260423T013259.txt"
-)
+
+
+def _resolve_case3_archived_final_output_path() -> Path:
+    base_path = (
+        ROOT
+        / "cais_spade_llm"
+        / "agents"
+        / "intelligent_product"
+        / "replanner"
+        / "llm_bridge"
+        / "runtime_data"
+        / "imported"
+        / "worked"
+        / "1"
+        / "multi_turn_turn09_final_output_response_20260423T013259.txt"
+    )
+    recovery_final_path = base_path.parent / "recovery_final" / base_path.name
+    if recovery_final_path.is_file():
+        return recovery_final_path
+    return base_path
+
+
+CASE3_ARCHIVED_FINAL_OUTPUT_PATH = _resolve_case3_archived_final_output_path()
 
 
 def _configure_dryrun_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
+
+
+def _parse_structured_json_text(raw_text: str) -> Any:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        decoder = json.JSONDecoder()
+        for start_idx, ch in enumerate(text):
+            if ch not in "{[":
+                continue
+            try:
+                parsed, end_idx = decoder.raw_decode(text[start_idx:])
+            except json.JSONDecodeError:
+                continue
+            trailing = text[start_idx + end_idx :].strip()
+            if trailing:
+                logging.getLogger("case3_bridge_dryrun").warning(
+                    "[DryRun] Ignoring trailing text after structured JSON payload"
+                )
+            return parsed
+        raise exc
 
 # ---------------------------------------------------------------------------
 # Loader helpers
@@ -209,8 +252,641 @@ def _payload_artifact_directory(payload: dict[str, Any] | None = None) -> Path:
     return _resolve_debug_root()
 
 
+def _build_dryrun_recovery_safety_generation_payload(
+    *,
+    prepared_bridge_request: dict[str, Any],
+    multi_turn_session: dict[str, Any] | None = None,
+    recovery_safety_scope_id: str = "dryrun_recovery_scope",
+) -> dict[str, Any]:
+    def _nominal_candidate_tasks(
+        *,
+        pending_nominal_tasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        pending_by_id = {
+            str(row.get("id") or row.get("task_id") or "").strip(): deepcopy(row)
+            for row in pending_nominal_tasks
+            if str(row.get("id") or row.get("task_id") or "").strip()
+        }
+        requirement_task_index = dict(prepared_bridge_request.get("requirement_task_index") or {})
+        task_requirement_map = dict(prepared_bridge_request.get("task_requirement_map") or {})
+        bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+        pending_task_rows_by_id: dict[str, dict[str, Any]] = {}
+        active_requirement_ids: set[str] = set()
+
+        for resource_entry in bridge_resources.values():
+            if not isinstance(resource_entry, dict):
+                continue
+            for task in (resource_entry.get("pending_tasks") or []):
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if not task_id:
+                    continue
+                pending_task_rows_by_id[task_id] = deepcopy(task)
+                requirement_id = str(
+                    task.get("requirement_id")
+                    or task_requirement_map.get(task_id)
+                    or ""
+                ).strip()
+                if requirement_id:
+                    active_requirement_ids.add(requirement_id)
+
+        for task_id in pending_by_id:
+            requirement_id = str(task_requirement_map.get(task_id) or "").strip()
+            if requirement_id:
+                active_requirement_ids.add(requirement_id)
+
+        candidate_rows: list[dict[str, Any]] = []
+        seen_task_ids: set[str] = set()
+        for requirement_id in sorted(active_requirement_ids):
+            for raw_task in (requirement_task_index.get(requirement_id) or []):
+                if not isinstance(raw_task, dict):
+                    continue
+                task_id = str(raw_task.get("task_id") or raw_task.get("id") or "").strip()
+                if not task_id or task_id in seen_task_ids:
+                    continue
+                seen_task_ids.add(task_id)
+                enriched = dict(pending_task_rows_by_id.get(task_id) or {})
+                pending_row = dict(pending_by_id.get(task_id) or {})
+                params = dict(
+                    enriched.get("params")
+                    or raw_task.get("params")
+                    or {}
+                )
+                product_jid = str(params.get("product_jid") or "").strip()
+                destination_location = str(params.get("destination_location") or "").strip()
+                candidate_rows.append(
+                    {
+                        "id": task_id,
+                        "function": str(
+                            raw_task.get("function_name")
+                            or enriched.get("function_name")
+                            or pending_row.get("function")
+                            or ""
+                        ).strip(),
+                        "resource": str(
+                            raw_task.get("resource_jid")
+                            or enriched.get("resource_jid")
+                            or pending_row.get("resource")
+                            or ""
+                        ).strip(),
+                        "part": str(
+                            raw_task.get("part_name")
+                            or params.get("part_name")
+                            or pending_row.get("part")
+                            or ""
+                        ).strip(),
+                        "status": str(
+                            raw_task.get("status")
+                            or enriched.get("status")
+                            or pending_row.get("status")
+                            or ""
+                        ).strip(),
+                        "requirement_id": requirement_id,
+                        "sequence_index": int(raw_task.get("sequence_index") or 0),
+                        "product_jid": product_jid,
+                        "destination_location": destination_location,
+                        "blocked_by_condition_ids": [
+                            str(token).strip()
+                            for token in (pending_row.get("blocked_by_condition_ids") or [])
+                            if str(token).strip()
+                        ],
+                        "expected_start_state": deepcopy(
+                            pending_row.get("expected_start_state") or {}
+                        ),
+                        "expected_end_state": deepcopy(
+                            pending_row.get("expected_end_state") or {}
+                        ),
+                        "projected_outline_state": deepcopy(
+                            pending_row.get("projected_outline_state") or {}
+                        ),
+                    }
+                )
+        return candidate_rows
+
+    session_state = _resolve_dryrun_multi_turn_session_state(
+        prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+        require_outline_trace=True,
+    )
+    accepted_outline_prefix = _dryrun_outline_trace_from_session_state(session_state)
+    if not accepted_outline_prefix:
+        return {}
+    projected_outline_state = (
+        deepcopy(accepted_outline_prefix[-1].get("projected_outline_state") or {})
+        if accepted_outline_prefix
+        else deepcopy(session_state.get("projected_outline_state") or {})
+    )
+    llm_input = dict(prepared_bridge_request.get("llm_input") or {})
+    modeled_continuation_gap = dict(llm_input.get("modeled_continuation_gap") or {})
+    pending_nominal_tasks = [
+        deepcopy(row)
+        for row in (modeled_continuation_gap.get("pending_nominal_tasks") or [])
+        if isinstance(row, dict)
+    ]
+    pending_nominal_task_ids = [
+        str(task_id).strip()
+        for task_id in (
+            modeled_continuation_gap.get("pending_nominal_task_ids")
+            or [row.get("task_id") or row.get("id") for row in pending_nominal_tasks]
+        )
+        if str(task_id).strip()
+    ]
+    nominal_candidate_tasks = _nominal_candidate_tasks(
+        pending_nominal_tasks=pending_nominal_tasks,
+    )
+    debug_root = _resolve_debug_root()
+    recovery_safety_dir = debug_root / "recovery_safety"
+    return {
+        "product_jid": "assembly_board-v1@localhost",
+        "recovery_safety_scope_id": str(recovery_safety_scope_id or "").strip(),
+        "accepted_outline_prefix": accepted_outline_prefix,
+        "projected_outline_state": projected_outline_state,
+        "pending_nominal_tasks": pending_nominal_tasks,
+        "pending_nominal_task_ids": pending_nominal_task_ids,
+        "nominal_candidate_tasks": nominal_candidate_tasks,
+        "nominal_candidate_task_ids": [
+            str(row.get("id") or "").strip()
+            for row in nominal_candidate_tasks
+            if str(row.get("id") or "").strip()
+        ],
+        "loaded_safety_rules": [
+            deepcopy(rule)
+            for rule in (prepared_bridge_request.get("loaded_safety_rules") or [])
+            if isinstance(rule, dict)
+        ],
+        "bridge_safety_context": deepcopy(
+            prepared_bridge_request.get("bridge_safety_context") or {}
+        ),
+        "recovery_safety_dir": str(recovery_safety_dir),
+        "recovery_plan_dir": str(recovery_safety_dir),
+        "recovery_safery_dir": str(recovery_safety_dir),
+    }
+
+
+def _dryrun_outline_trace_from_session_state(
+    session_state: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(session_state, dict):
+        return []
+    for rows in (
+        session_state.get("accepted_outline_prefix"),
+        session_state.get("transition_trace"),
+        dict(session_state.get("final_output") or {}).get("transition_trace"),
+    ):
+        trace = [deepcopy(row) for row in (rows or []) if isinstance(row, dict)]
+        if trace:
+            return trace
+    turns = [
+        dict(row)
+        for row in (session_state.get("turns") or [])
+        if isinstance(row, dict)
+    ]
+    for turn in reversed(turns):
+        if str(turn.get("phase") or "").strip().lower() != "final_output":
+            continue
+        if str(turn.get("final_output_stage") or "").strip() != "outline_ready":
+            continue
+        response_artifact_path = str(turn.get("response_artifact_path") or "").strip()
+        if not response_artifact_path:
+            continue
+        try:
+            artifact_payload = json.loads(
+                Path(response_artifact_path).read_text(encoding="utf-8")
+            )
+        except Exception:
+            continue
+        trace = [
+            deepcopy(row)
+            for row in (artifact_payload.get("transition_trace") or [])
+            if isinstance(row, dict)
+        ]
+        if trace:
+            return trace
+    return []
+
+
+def _resolve_dryrun_multi_turn_session_state(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    multi_turn_session: dict[str, Any] | None = None,
+    planner_bridge_debug: dict[str, Any] | None = None,
+    require_outline_trace: bool = False,
+) -> dict[str, Any]:
+    session_candidates = [
+        multi_turn_session,
+        dict(planner_bridge_debug or {}).get("multi_turn_session"),
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get("multi_turn_session"),
+        prepared_bridge_request.get("multi_turn_session_state"),
+        prepared_bridge_request.get("multi_turn_session_seed"),
+    ]
+    session_state: dict[str, Any] = {}
+    for candidate in session_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_state = dict(candidate or {})
+        if require_outline_trace and _dryrun_outline_trace_from_session_state(candidate_state):
+            return candidate_state
+        if not session_state:
+            session_state = candidate_state
+    if require_outline_trace:
+        artifact_directory = _payload_artifact_directory(
+            {"prepared_bridge_request": prepared_bridge_request}
+        )
+        recovery_outline_dir = artifact_directory / "recovery_outline"
+        if recovery_outline_dir.is_dir():
+            for artifact_path in sorted(
+                recovery_outline_dir.glob("multi_turn_turn*_final_output_response_*.txt"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            ):
+                try:
+                    artifact_payload = json.loads(
+                        artifact_path.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    continue
+                if (
+                    str(artifact_payload.get("final_output_stage") or "").strip()
+                    != "outline_ready"
+                ):
+                    continue
+                transition_trace = [
+                    deepcopy(row)
+                    for row in (artifact_payload.get("transition_trace") or [])
+                    if isinstance(row, dict)
+                ]
+                if not transition_trace:
+                    continue
+                return {
+                    "status": str(artifact_payload.get("status") or "").strip()
+                    or "ready_for_primitive_generation",
+                    "current_phase": str(
+                        artifact_payload.get("current_phase") or ""
+                    ).strip()
+                    or "primitive_generation",
+                    "accepted_outline_prefix": deepcopy(transition_trace),
+                    "transition_trace": deepcopy(transition_trace),
+                    "final_output": deepcopy(artifact_payload),
+                    "turns": [
+                        {
+                            "phase": "final_output",
+                            "final_output_stage": "outline_ready",
+                            "response_artifact_path": str(artifact_path),
+                        }
+                    ],
+                }
+    return session_state
+
+
+async def _generate_dryrun_recovery_safety_artifacts(
+    *,
+    product_agent: FakeProductAgent,
+    prepared_bridge_request: dict[str, Any],
+    multi_turn_session: dict[str, Any] | None = None,
+    recovery_safety_scope_id: str = "dryrun_recovery_scope",
+) -> dict[str, Any]:
+    payload = _build_dryrun_recovery_safety_generation_payload(
+        prepared_bridge_request=prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+        recovery_safety_scope_id=recovery_safety_scope_id,
+    )
+    if not payload:
+        return {}
+    return await generate_recovery_safety_bundle(product_agent, payload)
+
+
+def _fake_case3_recovery_safety_grounding_response(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    accepted_outline_prefix = [
+        deepcopy(row)
+        for row in (payload.get("accepted_outline_prefix") or [])
+        if isinstance(row, dict)
+    ]
+    accepted_by_outline_id = {
+        str(row.get("outline_id") or "").strip(): dict(row)
+        for row in accepted_outline_prefix
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    recovery_seq3 = dict(accepted_by_outline_id.get("RECOVERY_SEQ3") or {})
+    recovery_seq4 = dict(accepted_by_outline_id.get("RECOVERY_SEQ4") or {})
+    selector_rules: list[dict[str, Any]] = []
+    for rule in (payload.get("loaded_safety_rules") or []):
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
+        if rule_id == "SAFE_1":
+            selector_rules.append(
+                {
+                    "rule_id": rule_id,
+                    "status": "selected",
+                    "reason": (
+                        "RECOVERY_SEQ3 and RECOVERY_SEQ4 are the LG recovery rows in scope."
+                    ),
+                    "selected_recovery_outline_ids": [
+                        str(recovery_seq3.get("outline_id") or "").strip(),
+                        str(recovery_seq4.get("outline_id") or "").strip(),
+                    ],
+                }
+            )
+            continue
+        if rule_id == "SAFE_2":
+            selector_rules.append(
+                {
+                    "rule_id": rule_id,
+                    "status": "selected",
+                    "reason": (
+                        "RECOVERY_SEQ4 is the ur5e recovery move into assembly_board-v1."
+                    ),
+                    "selected_recovery_outline_ids": [
+                        str(recovery_seq4.get("outline_id") or "").strip(),
+                    ],
+                }
+            )
+            continue
+        selector_rules.append(
+            {
+                "rule_id": rule_id,
+                "status": "not_involved",
+                "reason": "",
+                "selected_recovery_outline_ids": [],
+            }
+        )
+    return {"rules": selector_rules}
+
+
+def _dryrun_recovery_safety_status_from_result(
+    result: dict[str, Any] | None,
+) -> str:
+    payload = dict(result or {})
+    status = str(payload.get("recovery_safety_status") or "").strip().lower()
+    if status:
+        return status
+    if payload:
+        return "ready"
+    return "none"
+
+
+def _dryrun_outline_approval_reached(
+    session_state: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(session_state, dict):
+        return False
+    outline_trace = _dryrun_outline_trace_from_session_state(session_state)
+    if not outline_trace:
+        return False
+    current_phase = str(session_state.get("current_phase") or "").strip().lower()
+    if current_phase == "primitive_generation":
+        return True
+    final_output = dict(session_state.get("final_output") or {})
+    if (
+        final_output
+        and str(final_output.get("final_output_stage") or "").strip() == "outline_ready"
+        and bool(list(final_output.get("transition_trace") or []))
+    ):
+        return True
+    turns = [
+        dict(row)
+        for row in (session_state.get("turns") or [])
+        if isinstance(row, dict)
+    ]
+    for turn in reversed(turns):
+        if str(turn.get("phase") or "").strip().lower() != "final_output":
+            continue
+        if str(turn.get("final_output_stage") or "").strip() == "outline_ready":
+            return True
+    return False
+
+
+def _dryrun_primitive_program_ready_payload(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    multi_turn_session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    session_candidates = [
+        multi_turn_session,
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get("multi_turn_session"),
+        prepared_bridge_request.get("multi_turn_session_state"),
+    ]
+    for candidate in session_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        final_output = dict(candidate.get("final_output") or {})
+        if (
+            final_output
+            and str(final_output.get("final_output_stage") or "").strip()
+            == "primitive_program_ready"
+            and bool(final_output.get("primitive_program_complete"))
+        ):
+            return deepcopy(final_output)
+    bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+    final_output = dict(bridge_debug.get("final_output") or {})
+    if (
+        final_output
+        and str(final_output.get("final_output_stage") or "").strip()
+        == "primitive_program_ready"
+        and bool(final_output.get("primitive_program_complete"))
+    ):
+        return deepcopy(final_output)
+    return {}
+
+
+def _dryrun_primitive_program_ready_source_path(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    multi_turn_session: dict[str, Any] | None = None,
+) -> str:
+    session_candidates = [
+        multi_turn_session,
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get("multi_turn_session"),
+        prepared_bridge_request.get("multi_turn_session_state"),
+    ]
+    for candidate in session_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        turns = [
+            dict(row)
+            for row in (candidate.get("turns") or [])
+            if isinstance(row, dict)
+        ]
+        for turn in reversed(turns):
+            if str(turn.get("phase") or "").strip().lower() != "final_output":
+                continue
+            if str(turn.get("final_output_stage") or "").strip() != "primitive_program_ready":
+                continue
+            candidate_path = str(turn.get("response_artifact_path") or "").strip()
+            if candidate_path:
+                return candidate_path
+    return ""
+
+
+def _dryrun_primitive_program_ready_turn_index(
+    prepared_bridge_request: dict[str, Any],
+    *,
+    multi_turn_session: dict[str, Any] | None = None,
+) -> int:
+    session_candidates = [
+        multi_turn_session,
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get("multi_turn_session"),
+        prepared_bridge_request.get("multi_turn_session_state"),
+    ]
+    for candidate in session_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        turns = [
+            dict(row)
+            for row in (candidate.get("turns") or [])
+            if isinstance(row, dict)
+        ]
+        for turn in reversed(turns):
+            if str(turn.get("phase") or "").strip().lower() != "final_output":
+                continue
+            if str(turn.get("final_output_stage") or "").strip() != "primitive_program_ready":
+                continue
+            return int(turn.get("turn_index") or 0)
+    return 0
+
+
+def _write_dryrun_recovery_final_bundle(
+    *,
+    prepared_bridge_request: dict[str, Any],
+    multi_turn_session: dict[str, Any] | None = None,
+    recovery_safety_generation: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    if not isinstance(recovery_safety_generation, dict) or not bool(
+        recovery_safety_generation.get("ok")
+    ):
+        return {}
+    final_output_payload = _dryrun_primitive_program_ready_payload(
+        prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+    )
+    if not final_output_payload:
+        return {}
+    recovery_safety_logic_json = str(
+        recovery_safety_generation.get("recovery_safety_logic_json") or ""
+    ).strip()
+    if not recovery_safety_logic_json:
+        return {}
+    recovery_safety_logic_path = Path(recovery_safety_logic_json)
+    if not recovery_safety_logic_path.exists():
+        return {}
+
+    recovery_final_dir = _resolve_debug_root() / "recovery_final"
+    recovery_final_dir.mkdir(parents=True, exist_ok=True)
+    source_final_output_path = _dryrun_primitive_program_ready_source_path(
+        prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+    )
+    final_output_turn_index = _dryrun_primitive_program_ready_turn_index(
+        prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+    )
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    if source_final_output_path:
+        source_path = Path(source_final_output_path)
+        target_final_output_path = recovery_final_dir / source_path.name
+        if source_path.exists() and source_path.resolve() != target_final_output_path.resolve():
+            shutil.copy2(source_path, target_final_output_path)
+        elif source_path.exists():
+            target_final_output_path = source_path
+        else:
+            target_final_output_path.write_text(
+                json.dumps(final_output_payload, indent=2, ensure_ascii=True),
+                encoding="utf-8",
+            )
+    else:
+        target_final_output_path = recovery_final_dir / (
+            f"multi_turn_turn{max(final_output_turn_index, 1):02d}_"
+            f"final_output_response_{timestamp}.txt"
+        )
+        target_final_output_path.write_text(
+            json.dumps(final_output_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    target_logic_path = recovery_final_dir / "cca_safety_logic.json"
+    target_logic_tmp_path = recovery_final_dir / "cca_safety_logic.json.tmp"
+    shutil.copy2(recovery_safety_logic_path, target_logic_tmp_path)
+    target_logic_tmp_path.replace(target_logic_path)
+    for stale_dfa_path in sorted(recovery_final_dir.glob("*_dfa.dot")):
+        stale_dfa_path.unlink(missing_ok=True)
+    for source_dfa_path in sorted(recovery_safety_logic_path.parent.glob("*_dfa.dot")):
+        shutil.copy2(source_dfa_path, recovery_final_dir / source_dfa_path.name)
+
+    bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+    bridge_debug["recovery_safety_logic_json"] = str(target_logic_path.resolve())
+    bridge_debug["recovery_final_safety_logic_json"] = str(target_logic_path.resolve())
+    bridge_debug["recovery_final_dir"] = str(recovery_final_dir)
+    bridge_debug["recovery_final_output_path"] = str(target_final_output_path.resolve())
+    prepared_bridge_request["bridge_debug"] = bridge_debug
+    return {
+        "recovery_safety_logic_json": str(target_logic_path.resolve()),
+        "recovery_final_dir": str(recovery_final_dir),
+        "recovery_final_output_path": str(target_final_output_path.resolve()),
+        "recovery_final_safety_logic_json": str(target_logic_path.resolve()),
+    }
+
+
 def _load_json(path: Path) -> dict[str, Any] | list[Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _case3_archived_transition_trace() -> list[dict[str, Any]]:
+    final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    if not isinstance(final_output_payload, dict):
+        raise TypeError("case3 archived final output did not decode to an object")
+    for key in ("executable_recovery_trace", "transition_trace"):
+        trace = [
+            deepcopy(row)
+            for row in (final_output_payload.get(key) or [])
+            if isinstance(row, dict)
+        ]
+        if trace:
+            return trace
+    raise ValueError("case3 archived final output is missing transition_trace")
+
+
+def _case3_archived_projected_outline_state() -> dict[str, Any]:
+    final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
+    if not isinstance(final_output_payload, dict):
+        raise TypeError("case3 archived final output did not decode to an object")
+    accepted_program = [
+        deepcopy(row)
+        for row in (final_output_payload.get("accepted_primitive_program") or [])
+        if isinstance(row, dict)
+    ]
+    if accepted_program:
+        return deepcopy(dict(accepted_program[-1].get("projected_outline_state") or {}))
+    return {}
+
+
+def _case3_archived_outline_ready_session() -> dict[str, Any]:
+    transition_trace = _case3_archived_transition_trace()
+    return {
+        "status": "ready_for_primitive_generation",
+        "current_phase": "primitive_generation",
+        "accepted_outline_prefix": deepcopy(transition_trace),
+        "transition_trace": deepcopy(transition_trace),
+        "final_output": {
+            "engine": "multi_turn",
+            "decision": "final_output_ready",
+            "final_output_stage": "outline_ready",
+            "status": "ready_for_primitive_generation",
+            "current_phase": "primitive_generation",
+            "accepted_trace_length": len(transition_trace),
+            "transition_trace": deepcopy(transition_trace),
+            "primitive_program_complete": False,
+        },
+        "turns": [
+            {
+                "turn_index": 6,
+                "phase": "final_output",
+                "final_output_stage": "outline_ready",
+            }
+        ],
+    }
 
 
 def _resolve_resume_checkpoint_path(path_raw: str | Path) -> Path:
@@ -473,7 +1149,7 @@ class FakeProductAgent:
                             "content": json.dumps(result, default=str),
                         })
                     continue
-                return json.loads(choice.content or "{}")
+                return _parse_structured_json_text(choice.content or "{}")
             raise RuntimeError("Exceeded max tool rounds")
 
         parsed = await asyncio.to_thread(_call)
@@ -1817,198 +2493,10 @@ def _configure_live_bridge_session(
     prepared_bridge_request["bridge_session"] = bridge_session
 
 
-def _case3_known_accepted_outline_prefix() -> list[dict[str, Any]]:
-    return [
-        {
-            "outline_id": "RECOVERY_SEQ1",
-            "event_name": "recover_to_home_idle",
-            "resource_jid": "xarm6@localhost",
-            "rationale": (
-                "Enabled because xarm6 is currently failed and has a grounded named pose "
-                "home. This directly advances the open guard requiring xarm6@localhost "
-                "to reach idle and reduces coordination risk before LG/MCP recovery "
-                "continues."
-            ),
-            "description": (
-                "Enabled because xarm6 is currently failed and has a grounded named pose "
-                "home. This directly advances the open guard requiring xarm6@localhost "
-                "to reach idle and reduces coordination risk before LG/MCP recovery "
-                "continues."
-            ),
-            "predecessors": [],
-            "expected_start_state": {
-                "resource_state": "failed",
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "resource_location": "home",
-            },
-        },
-        {
-            "outline_id": "RECOVERY_SEQ2",
-            "event_name": "stage_mcp_to_prusa_mk4_2",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "MCP",
-            "target_ref": "prusa-mk4-2",
-            "rationale": (
-                "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded "
-                "reachable location for ur5e. This clears ur5e's gripper so it can "
-                "recover LG first, which is required before any MCP place approach at "
-                "assembly_board-v1."
-            ),
-            "description": (
-                "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded "
-                "reachable location for ur5e. This clears ur5e's gripper so it can "
-                "recover LG first, which is required before any MCP place approach at "
-                "assembly_board-v1."
-            ),
-            "predecessors": [],
-            "expected_start_state": {
-                "resource_state": "picked",
-                "held_part": "MCP",
-                "part_state": "in_gripper",
-                "part_location": "ur5e@localhost_gripper",
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_state": "placed",
-                "part_location": "prusa-mk4-2",
-            },
-        },
-        {
-            "outline_id": "RECOVERY_SEQ3",
-            "event_name": "recover_pick_LG_from_observed_pose",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "LG",
-            "rationale": (
-                "Enabled because ur5e@localhost is idle, not holding any part, and LG "
-                "is misplaced and unheld at an observed pose within ur5e's reachable "
-                "workspace. This is the necessary next recovery step to clear the "
-                "blocker on LG and move toward satisfying REQ_2, which must be "
-                "completed before MCP can safely proceed to the assembly station."
-            ),
-            "description": (
-                "Enabled because ur5e@localhost is idle, not holding any part, and LG "
-                "is misplaced and unheld at an observed pose within ur5e's reachable "
-                "workspace. This is the necessary next recovery step to clear the "
-                "blocker on LG and move toward satisfying REQ_2, which must be "
-                "completed before MCP can safely proceed to the assembly station."
-            ),
-            "predecessors": ["RECOVERY_SEQ2"],
-            "expected_start_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_state": "misplaced",
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": "LG",
-                "part_state": "held",
-            },
-        },
-        {
-            "outline_id": "RECOVERY_SEQ4",
-            "event_name": "recover_place_LG_to_assembly_board-v1",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "LG",
-            "target_ref": "assembly_board-v1",
-            "rationale": (
-                "Enabled now because ur5e is idle, currently holding LG, and can reach "
-                "assembly_board-v1. This directly satisfies REQ_2 and clears the "
-                "explicit guard that LG must be placed at assembly_board-v1 before MCP "
-                "can proceed toward assembly placement."
-            ),
-            "description": (
-                "Enabled now because ur5e is idle, currently holding LG, and can reach "
-                "assembly_board-v1. This directly satisfies REQ_2 and clears the "
-                "explicit guard that LG must be placed at assembly_board-v1 before MCP "
-                "can proceed toward assembly placement."
-            ),
-            "predecessors": ["RECOVERY_SEQ3"],
-            "expected_start_state": {
-                "resource_state": "idle",
-                "held_part": "LG",
-                "part_state": "held",
-            },
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": None,
-                "part_state": "placed",
-                "part_location": "assembly_board-v1",
-            },
-        },
-    ]
-
-
-def _seed_case3_primitive_generation_focus(session_state: dict[str, Any]) -> dict[str, Any]:
-    seeded = deepcopy(session_state)
-    seeded["current_phase"] = "primitive_generation"
-    seeded["status"] = "pending"
-    seeded["turn_index"] = 7
-    seeded["accepted_outline_prefix"] = _case3_known_accepted_outline_prefix()
-    seeded["primitive_generation_cursor"] = 0
-    seeded["accepted_primitive_program"] = []
-    seeded["primitive_rejection_feedback"] = []
-    seeded["candidate_rejection_feedback"] = []
-    seeded["outline_validation_findings"] = []
-    seeded["observation_store"] = {
-        "observed_pose_LG": {
-            "part_name": "LG",
-            "x": 0.0,
-            "y": 0.2,
-            "z": 1.035,
-            "pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-        }
+def test_case3_archived_primitive_context_uses_event_local_start_state_for_seq2() -> None:
+    session_state = {
+        "accepted_outline_prefix": _case3_archived_transition_trace(),
     }
-    resources = seeded.setdefault("symbolic_resources", {})
-    resources.setdefault("xarm6@localhost", {"resource_jid": "xarm6@localhost"})
-    resources.setdefault("ur5e@localhost", {"resource_jid": "ur5e@localhost"})
-    resources["xarm6@localhost"].update({
-        "current_state": "failed",
-        "held_part": None,
-        "gripper_state": "open",
-    })
-    resources["ur5e@localhost"].update({
-        "current_state": "picked",
-        "current_location": "prusa-mk4-2",
-        "held_part": "MCP",
-        "gripper_state": "closed",
-    })
-    parts = seeded.setdefault("symbolic_parts", {})
-    parts.setdefault("LG", {"part_name": "LG"})
-    parts.setdefault("MCP", {"part_name": "MCP"})
-    parts["LG"].update({
-        "current_state": "misplaced",
-        "current_location": None,
-        "observed_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
-        "current_holder_resource_jid": None,
-    })
-    parts["MCP"].update({
-        "current_state": "in_gripper",
-        "current_location": "ur5e@localhost_gripper",
-        "current_holder_resource_jid": "ur5e@localhost",
-    })
-    return seeded
-
-
-def test_case3_seeded_primitive_focus_seed_starts_with_xarm6_seq1() -> None:
-    session_state = _seed_case3_primitive_generation_focus({})
-    first_event = deepcopy(session_state["accepted_outline_prefix"][0])
-    second_event = deepcopy(session_state["accepted_outline_prefix"][1])
-
-    assert first_event["outline_id"] == "RECOVERY_SEQ1"
-    assert first_event["resource_jid"] == "xarm6@localhost"
-    assert first_event["event_name"] == "recover_to_home_idle"
-    assert second_event["outline_id"] == "RECOVERY_SEQ2"
-    assert second_event["resource_jid"] == "ur5e@localhost"
-    assert second_event["event_name"] == "stage_mcp_to_prusa_mk4_2"
-    assert first_event["predecessors"] == []
-    assert second_event["predecessors"] == []
-
-
-def test_case3_seeded_primitive_context_uses_event_local_start_state_for_seq2() -> None:
-    session_state = _seed_case3_primitive_generation_focus({})
     outline_event = deepcopy(session_state["accepted_outline_prefix"][1])
     prepared_bridge_request = {
         "bridge_resources": {
@@ -2129,12 +2617,20 @@ def test_should_persist_ack_state_skips_transient_bridge_updates() -> None:
     assert _should_persist_ack_state(nominal_task, "running") is True
 
 
+def test_parse_structured_json_text_ignores_trailing_extra_data() -> None:
+    parsed = _parse_structured_json_text(
+        '{"decision":"accept","items":[1,2]}\n{"debug":"extra"}'
+    )
+
+    assert parsed == {"decision": "accept", "items": [1, 2]}
+
+
 def test_case3_archived_bridge_selects_first_ready_task_for_serial_dispatch(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
 
-    assert recovery["status"] == "resolved"
+    assert recovery["status"] == "validating"
     ready_node = product_agent._active_bridge_next_ready_task()
 
     assert isinstance(ready_node, dict)
@@ -2293,6 +2789,8 @@ def _configure_runtime_bridge_approval_harness(
     planner: ProcessPlanner,
     fixture: dict[str, Any],
     tmp_path: Path,
+    bridge_mode: str = "pre_ran",
+    validation_policy: str = "no_validation",
 ) -> None:
     product_agent._utc_now_iso = staticmethod(
         lambda: datetime.now(timezone.utc).isoformat()
@@ -2327,8 +2825,10 @@ def _configure_runtime_bridge_approval_harness(
     product_agent._runtime_repair_fail_streak = 0
     product_agent._runtime_repair_max_attempts = 3
     product_agent._bridge_generation_mode = "auto"
-    product_agent._runtime_bridge_mode = "pre_ran"
-    product_agent._runtime_bridge_validation_policy = "no_validation"
+    product_agent._runtime_bridge_mode = str(bridge_mode or "pre_ran")
+    product_agent._runtime_bridge_validation_policy = str(
+        validation_policy or "no_validation"
+    )
     product_agent._runtime_bridge_archive_path = str(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
     product_agent._runtime_bridge_archive_label = CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name
     product_agent._orphaned_bridge_task_warning_ids = set()
@@ -2338,6 +2838,27 @@ def _configure_runtime_bridge_approval_harness(
     product_agent.global_fsa_path = tmp_path / "case3_global_fsa.json"
     product_agent.product_state_path = tmp_path / "case3_product_state.json"
     product_agent.resource_state_path = tmp_path / "case3_resource_state.json"
+    product_agent.dispatched_agent_messages = []
+    product_agent._build_plan_validation_payload = lambda **kwargs: (
+        ProductAgent._build_plan_validation_payload(product_agent, **kwargs)
+    )
+    product_agent._build_runtime_plan_context = lambda: (
+        ProductAgent._build_runtime_plan_context(product_agent)
+    )
+    product_agent._ensure_plan_result_inbox = lambda: None
+    product_agent._dispatch_agent_message_sync = (
+        lambda msg, trace_category="": product_agent.dispatched_agent_messages.append(
+            {
+                "to": str(getattr(msg, "to", "") or "").strip(),
+                "metadata": dict(getattr(msg, "metadata", {}) or {}),
+                "body": json.loads(str(getattr(msg, "body", "") or "{}")),
+                "trace_category": str(trace_category or "").strip(),
+            }
+        )
+    )
+    product_agent._run_callable_on_agent_loop_sync = (
+        lambda func, timeout_sec=10.0, operation_name="": func()
+    )
     product_agent.recovery_controller = ProductRecoveryController(product_agent)
     product_agent.recovery_controller.bind_methods()
     product_agent.runtime_recovery = product_agent._empty_runtime_recovery()
@@ -2346,6 +2867,13 @@ def _configure_runtime_bridge_approval_harness(
 
 def _approve_case3_archived_bridge(
     tmp_path: Path,
+    *,
+    bridge_source: str = "archived_final_output",
+    bridge_mode: str = "pre_ran",
+    validation_policy: str = "no_validation",
+    verification_only: bool = False,
+    recovery_safety_scope_id: str = "",
+    recovery_safety_status: str = "none",
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any], dict[str, Any]]:
     fixture, product_agent, planner, prepared_bridge_request = asyncio.run(
         _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
@@ -2355,6 +2883,8 @@ def _approve_case3_archived_bridge(
         planner=planner,
         fixture=fixture,
         tmp_path=tmp_path,
+        bridge_mode=bridge_mode,
+        validation_policy=validation_policy,
     )
 
     final_output_payload = _load_json(CASE3_ARCHIVED_FINAL_OUTPUT_PATH)
@@ -2366,16 +2896,22 @@ def _approve_case3_archived_bridge(
     )
     assert proposal_result["accepted"] is True
     bridge_proposal = deepcopy(proposal_result.get("bridge_proposal") or {})
+    execution_policy = {
+        "complete_full_tail": not verification_only,
+    }
+    if verification_only:
+        execution_policy["verification_only"] = True
+        execution_policy["pause_after_verification"] = True
     bridge_debug = {
-        "source": "archived_final_output",
-        "archive_replay": {
+        "execution_policy": execution_policy,
+    }
+    if bridge_source:
+        bridge_debug["source"] = str(bridge_source)
+    if bridge_source == "archived_final_output":
+        bridge_debug["archive_replay"] = {
             "source_path": str(CASE3_ARCHIVED_FINAL_OUTPUT_PATH),
             "source_label": CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name,
-        },
-        "execution_policy": {
-            "complete_full_tail": True,
-        },
-    }
+        }
     violations = [
         {
             "failed_task_id": FAILED_TASK_ID,
@@ -2404,6 +2940,22 @@ def _approve_case3_archived_bridge(
         bridge_proposal=bridge_proposal,
         bridge_debug=bridge_debug,
         bridge_approval_state="pending",
+        recovery_safety_scope_id=recovery_safety_scope_id,
+        recovery_safety_status=recovery_safety_status,
+        recovery_safety_logic_json=(
+            str(tmp_path / "recovery_safety" / "cca_safety_logic.json")
+            if recovery_safety_scope_id and recovery_safety_status == "ready"
+            else ""
+        ),
+        recovery_safety_dir=(
+            str(tmp_path / "recovery_safety") if recovery_safety_scope_id else ""
+        ),
+        recovery_plan_dir=(
+            str(tmp_path / "recovery_safety") if recovery_safety_scope_id else ""
+        ),
+        recovery_safery_dir=(
+            str(tmp_path / "recovery_safety") if recovery_safety_scope_id else ""
+        ),
         violations=violations,
     )
     with patch(
@@ -2414,12 +2966,12 @@ def _approve_case3_archived_bridge(
     return fixture, product_agent, planner, prepared_bridge_request, recovery
 
 
-def test_case3_archived_bridge_approval_compiles_serial_bridge_chain(
+def test_case3_archived_bridge_approval_prunes_redundant_xarm6_move_home_after_home_idle_bridge(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
 
-    assert recovery["status"] == "resolved"
+    assert recovery["status"] == "validating"
     active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
     execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
     assert execution_policy["complete_full_tail"] is True
@@ -2431,33 +2983,69 @@ def test_case3_archived_bridge_approval_compiles_serial_bridge_chain(
         and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
     }
     seq1 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ1"])
+    approval_debug = dict(
+        dict(product_agent.runtime_recovery.get("bridge_debug") or {}).get("approval") or {}
+    )
+
+    assert list(seq1.get("predecessors") or []) == [ANCHOR_TASK_ID]
+    assert str(seq1.get("resource_jid") or "").strip() == "xarm6@localhost"
+    assert str(seq1.get("requirement_id") or "").strip() == "REQ_2"
+    assert planner._find_node("REQ_2_T5") is None
+    assert "REQ_2_T5" not in list(approval_debug.get("entry_task_ids") or [])
+    assert "REQ_2_T5" in list(approval_debug.get("deleted_task_ids") or [])
+
+
+def test_case3_archived_bridge_approval_splices_ur5e_bridge_before_remaining_nominal_chain(
+    tmp_path: Path,
+) -> None:
+    _, _, planner, _, _ = _approve_case3_archived_bridge(tmp_path)
+
+    bridge_nodes_by_outline_id = {
+        str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+    }
+    seq1 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ1"])
     seq2 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ2"])
     seq3 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ3"])
     seq4 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ4"])
+    acquire_entity = next(
+        (
+            dict(node)
+            for node in planner.nodes
+            if isinstance(node, dict)
+            and str(node.get("repair_operator") or "").strip() == "acquire_entity"
+            and str(node.get("restores_event_id") or "").strip() == "REQ_1_T3"
+        ),
+        {},
+    )
+    req_1_t2 = dict(planner._find_node("REQ_1_T2") or {})
     req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
     req_1_t4 = dict(planner._find_node("REQ_1_T4") or {})
     req_1_t5 = dict(planner._find_node("REQ_1_T5") or {})
-    req_2_t5 = dict(planner._find_node("REQ_2_T5") or {})
 
-    assert int(seq1.get("sequence_index") or 0) < int(seq2.get("sequence_index") or 0)
+    assert str(seq2.get("resource_jid") or "").strip() == "ur5e@localhost"
+    assert str(seq3.get("resource_jid") or "").strip() == "ur5e@localhost"
+    assert str(seq4.get("resource_jid") or "").strip() == "ur5e@localhost"
+    assert str(seq2.get("requirement_id") or "").strip() == "REQ_1"
+    assert str(seq3.get("requirement_id") or "").strip() == "REQ_1"
+    assert str(seq4.get("requirement_id") or "").strip() == "REQ_1"
     assert int(seq2.get("sequence_index") or 0) < int(seq3.get("sequence_index") or 0)
     assert int(seq3.get("sequence_index") or 0) < int(seq4.get("sequence_index") or 0)
-    assert int(seq4.get("sequence_index") or 0) < min(
-        int(req_1_t3.get("sequence_index") or 0),
-        int(req_1_t4.get("sequence_index") or 0),
-        int(req_1_t5.get("sequence_index") or 0),
-    )
-    assert list(seq1.get("predecessors") or []) == [ANCHOR_TASK_ID]
-    assert list(seq2.get("predecessors") or []) == [seq1["id"]]
+    assert int(seq4.get("sequence_index") or 0) < int(req_1_t3.get("sequence_index") or 0)
+    assert acquire_entity
+    assert set(seq2.get("predecessors") or []) == {ANCHOR_TASK_ID, req_1_t2["id"]}
+    assert seq1["id"] not in list(seq2.get("predecessors") or [])
     assert list(seq3.get("predecessors") or []) == [seq2["id"]]
     assert list(seq4.get("predecessors") or []) == [seq3["id"]]
-    assert seq4["id"] in list(req_1_t3.get("predecessors") or [])
-    assert seq1["id"] not in list(req_1_t3.get("predecessors") or [])
-    assert seq4["id"] in list(req_2_t5.get("predecessors") or [])
-    assert seq1["id"] not in list(req_2_t5.get("predecessors") or [])
+    assert list(acquire_entity.get("predecessors") or []) == [seq4["id"]]
+    assert list(req_1_t3.get("predecessors") or []) == [acquire_entity["id"]]
+    assert list(req_1_t4.get("predecessors") or []) == ["REQ_1_T3"]
+    assert list(req_1_t5.get("predecessors") or []) == ["REQ_1_T4"]
 
 
-def test_case3_archived_bridge_blocks_nominal_release_while_bridge_active(
+def test_case3_archived_bridge_ready_scan_skips_blocked_pending_non_root(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, _ = _approve_case3_archived_bridge(tmp_path)
@@ -2473,38 +3061,2372 @@ def test_case3_archived_bridge_blocks_nominal_release_while_bridge_active(
     seq3 = bridge_nodes_by_outline_id["RECOVERY_SEQ3"]
     seq4 = bridge_nodes_by_outline_id["RECOVERY_SEQ4"]
 
-    seq1["status"] = "completed"
-    seq2["status"] = "running"
+    seq1["status"] = "pending"
+    seq2["status"] = "pending"
     seq3["status"] = "pending"
     seq4["status"] = "pending"
-    req_2_t5 = planner._find_node("REQ_2_T5")
-    assert isinstance(req_2_t5, dict)
-    req_2_t5["status"] = "pending"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    active_bridge_sequence["bridge_task_ids"] = [
+        seq3["id"],
+        seq1["id"],
+        seq2["id"],
+        seq4["id"],
+    ]
+    product_agent.runtime_recovery["active_bridge_sequence"] = active_bridge_sequence
+
+    ready_node = product_agent._active_bridge_next_ready_task()
+
+    assert isinstance(ready_node, dict)
+    assert str(ready_node.get("id") or "").strip() == seq1["id"]
+
+
+def test_case3_prune_redundant_xarm6_move_home_retarges_resume_entry_to_next_nominal_task() -> None:
+    class _FakePlanner:
+        def __init__(self) -> None:
+            self.nodes = [
+                {
+                    "id": "REQ_3_T5",
+                    "type": "task",
+                    "function_name": "move_home",
+                    "resource_jid": "xarm6@localhost",
+                    "sequence_index": 5,
+                    "predecessors": ["RECOVERY_BRIDGE_HOME"],
+                    "successors": ["REQ_4_T1"],
+                },
+                {
+                    "id": "REQ_4_T1",
+                    "type": "task",
+                    "function_name": "pick_approach",
+                    "resource_jid": "xarm6@localhost",
+                    "sequence_index": 6,
+                    "predecessors": ["REQ_3_T5"],
+                    "successors": [],
+                },
+            ]
+
+        def _find_node(self, node_id: str) -> dict[str, Any] | None:
+            for node in self.nodes:
+                if str(node.get("id") or "").strip() == str(node_id or "").strip():
+                    return node
+            return None
+
+        @staticmethod
+        def _task_sequence_index_key(value: Any) -> int:
+            return int(value) if value is not None else 10**9
+
+        def _apply_replan_patch(self, modified_tasks: list[dict[str, Any]]) -> None:
+            deleted_ids = {
+                str(task.get("id") or "").strip()
+                for task in modified_tasks
+                if task.get("delete") is True and str(task.get("id") or "").strip()
+            }
+            self.nodes = [
+                node
+                for node in self.nodes
+                if str(node.get("id") or "").strip() not in deleted_ids
+            ]
+            for node in self.nodes:
+                node["predecessors"] = [
+                    pred_id
+                    for pred_id in (node.get("predecessors") or [])
+                    if str(pred_id or "").strip() not in deleted_ids
+                ]
+                node["successors"] = [
+                    succ_id
+                    for succ_id in (node.get("successors") or [])
+                    if str(succ_id or "").strip() not in deleted_ids
+                ]
+
+    fake_controller = SimpleNamespace(
+        process_planner=_FakePlanner(),
+        _bridge_projected_plant_state_for_resource=lambda **kwargs: {
+            "resources": {
+                "xarm6@localhost": {
+                    "current_state": "idle",
+                    "current_pose_ref": "home",
+                }
+            }
+        },
+        _plant_resource_field=lambda plant_state, resource_jid, field: (
+            ProductRecoveryController._plant_resource_field(
+                plant_state,
+                resource_jid,
+                field,
+            )
+        ),
+    )
+    resumable_task_ids = ["REQ_3_T5", "REQ_4_T1"]
+    resumable_task_ids_by_resource = {"xarm6@localhost": ["REQ_3_T5", "REQ_4_T1"]}
+    resume_entry_task_ids_by_resource = {"xarm6@localhost": "REQ_3_T5"}
+    deleted_task_ids: list[str] = []
+    tasks = [{"id": "RECOVERY_BRIDGE_HOME", "resource_jid": "xarm6@localhost"}]
+
+    ProductRecoveryController._prune_redundant_bridge_resume_move_home_if_satisfied(
+        fake_controller,
+        tasks=tasks,
+        resumable_task_ids=resumable_task_ids,
+        resumable_task_ids_by_resource=resumable_task_ids_by_resource,
+        resume_entry_task_ids_by_resource=resume_entry_task_ids_by_resource,
+        deleted_task_ids=deleted_task_ids,
+    )
+
+    assert fake_controller.process_planner._find_node("REQ_3_T5") is None
+    assert resumable_task_ids == ["REQ_4_T1"]
+    assert resumable_task_ids_by_resource == {"xarm6@localhost": ["REQ_4_T1"]}
+    assert resume_entry_task_ids_by_resource == {"xarm6@localhost": "REQ_4_T1"}
+    assert deleted_task_ids == ["REQ_3_T5"]
+
+
+def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bridge_shortcut() -> None:
+    sent_messages: list[dict[str, Any]] = []
+    nominal_node = {
+        "id": "REQ_2_T5",
+        "status": "pending",
+        "function_name": "move_home",
+        "resource_jid": "xarm6@localhost",
+        "params": {},
+    }
+    bridge_node = {
+        "id": "RECOVERY_BRIDGE_UR5E",
+        "status": "pending",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {},
+    }
+    fake_agent = SimpleNamespace(
+        resource_jids=["xarm6@localhost", "ur5e@localhost"],
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        task_states={},
+        runtime_recovery={},
+        _runtime_recovery_blocks_execution=lambda: False,
+        _next_dispatchable_task_node=lambda: nominal_node,
+        _active_bridge_next_ready_task=lambda: bridge_node,
+        _active_bridge_blocks_nominal_dispatch=lambda: False,
+        _active_bridge_sequence=lambda: None,
+        _bridge_sequence_task_ids=lambda ids: list(ids or []),
+        _set_runtime_recovery=lambda **kwargs: None,
+        _compose_task_msg=lambda **kwargs: dict(kwargs),
+        _dispatch_params_for_task_node=lambda task_node: dict(task_node.get("params") or {}),
+    )
+    executor = ProductAgent._PlanExecutor()
+    executor.agent = fake_agent  # type: ignore[attr-defined]
+
+    async def _fake_send(msg: dict[str, Any]) -> None:
+        sent_messages.append(dict(msg))
+
+    executor.send = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(executor.run())
+
+    assert sent_messages
+    assert str(sent_messages[0].get("task_id") or "").strip() == "REQ_2_T5"
+    assert str(nominal_node.get("status") or "").strip() == "dispatched"
+    assert str(fake_agent.task_states.get("REQ_2_T5") or "").strip() == "dispatched"
+
+
+def test_case3_no_validation_active_bridge_dispatch_params_do_not_force_fast_path_for_bridge_and_nominal_tasks(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+    )
+
+    assert recovery["status"] == "validating"
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+    req_4_t1 = dict(planner._find_node("REQ_4_T1") or {})
+    req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
+
+    seq1_params = product_agent._dispatch_params_for_task_node(seq1)
+    req_4_t1_params = product_agent._dispatch_params_for_task_node(req_4_t1)
+    req_1_t3_params = product_agent._dispatch_params_for_task_node(req_1_t3)
+
+    assert "start_safety_mode" not in seq1_params
+    assert "start_safety_mode" not in req_4_t1_params
+    assert "start_safety_mode" not in req_1_t3_params
+
+
+def test_case3_archived_bridge_approval_waits_for_recovery_safety_ready(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            bridge_source="live_multi_turn",
+            bridge_mode="auto",
+            validation_policy="validated",
+            recovery_safety_scope_id="recovery_scope_case3",
+            recovery_safety_status="generating",
+        )
+
+    assert str(recovery.get("status") or "").strip() == "llm_bridge"
+    assert dict(recovery.get("action_feedback") or {}).get("kind") == "warning"
+    assert "still generating" in str(
+        dict(recovery.get("action_feedback") or {}).get("text") or ""
+    )
+    assert product_agent.runtime_recovery.get("active_bridge_sequence") is None
+    mocked_validation.assert_not_called()
+
+
+def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_and_nominal_tasks(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        bridge_source="live_multi_turn",
+        bridge_mode="auto",
+        validation_policy="validated",
+        recovery_safety_scope_id="recovery_scope_case3",
+        recovery_safety_status="ready",
+    )
+
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+    req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
+
+    assert "REQ_1_T3" in list(active_bridge_sequence.get("recovery_enforced_task_ids") or [])
+
+    seq1_params = product_agent._dispatch_params_for_task_node(seq1)
+    req_1_t3_params = product_agent._dispatch_params_for_task_node(req_1_t3)
+
+    assert str(seq1_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
+    assert str(req_1_t3_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
+    assert str(seq1_params.get("start_safety_mode") or "").strip() == "cca_check"
+    assert str(req_1_t3_params.get("start_safety_mode") or "").strip() == "cca_check"
+
+
+def test_case3_no_validation_recovery_scope_dispatch_params_do_not_route_scoped_recovery_safety_runtime_check(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        bridge_source="live_multi_turn",
+        bridge_mode="auto",
+        validation_policy="no_validation",
+        recovery_safety_scope_id="recovery_scope_case3",
+        recovery_safety_status="ready",
+    )
+
+    assert recovery["status"] == "validating"
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+    req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
+
+    seq1_params = product_agent._dispatch_params_for_task_node(seq1)
+    req_1_t3_params = product_agent._dispatch_params_for_task_node(req_1_t3)
+
+    assert "recovery_safety_scope_id" not in seq1_params
+    assert "recovery_safety_scope_id" not in req_1_t3_params
+    assert "start_safety_mode" not in seq1_params
+    assert "start_safety_mode" not in req_1_t3_params
+
+
+def test_case3_recovery_scope_dispatch_params_include_recovery_outline_grounding_metadata() -> None:
+    fake_agent = SimpleNamespace()
+    fake_agent.runtime_recovery = {
+        "recovery_safety_scope_id": "recovery_scope_case3",
+        "recovery_enforced_task_ids": ["RECOVERY_BRIDGE_SEQ4"],
+    }
+    fake_agent._runtime_recovery_context = {}
+    fake_agent._geometry_for_part = lambda part_name: {}
+    fake_agent._enrich_observed_pose_recovery_params = lambda params: dict(params)
+    fake_agent._active_bridge_sequence = lambda: {
+        "recovery_safety_scope_id": "recovery_scope_case3",
+        "recovery_enforced_task_ids": ["RECOVERY_BRIDGE_SEQ4"],
+    }
+    fake_agent._bridge_sequence_is_live = lambda _: False
+    fake_agent._runtime_bridge_session_validation_policy = lambda: "validated"
+
+    task_node = {
+        "id": "RECOVERY_BRIDGE_SEQ4",
+        "function_name": "execute_recovery_macro",
+        "bridge_outline_id": "RECOVERY_SEQ4",
+        "llm_outline_id": "recovery_ur5e_lg_place_004",
+        "event_name": "recover_place_LG_to_assembly_board-v1",
+        "projected_outline_state": {
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": "placed",
+            "part_location": "assembly_board-v1",
+        },
+        "params": {
+            "macro_name": "recover_place_LG_to_assembly_board-v1",
+            "outline_id": "RECOVERY_SEQ4",
+            "expected_start_state": "picked",
+            "outline_expected_start_state": {
+                "resource_state": "picked",
+                "held_part": "LG",
+                "part_state": "held",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "placed",
+                "part_location": "assembly_board-v1",
+            },
+            "part_name": "LG",
+        },
+    }
+
+    params = ProductRecoveryController._dispatch_params_for_task_node(fake_agent, task_node)
+
+    assert str(params.get("task_id") or "").strip() == "RECOVERY_BRIDGE_SEQ4"
+    assert str(params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
+    assert str(params.get("start_safety_mode") or "").strip() == "cca_check"
+    assert str(params.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ4"
+    assert str(params.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
+    assert str(params.get("llm_outline_id") or "").strip() == "recovery_ur5e_lg_place_004"
+    assert str(params.get("event_name") or "").strip() == "recover_place_LG_to_assembly_board-v1"
+    assert dict(params.get("outline_expected_start_state") or {}).get("held_part") == "LG"
+    assert dict(params.get("expected_end_state") or {}).get("part_location") == "assembly_board-v1"
+    assert dict(params.get("projected_outline_state") or {}).get("part_state") == "placed"
+
+
+def test_case3_dryrun_recovery_safety_generation_writes_debug_artifacts(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        multi_turn_session = {
+            "accepted_outline_prefix": _case3_archived_transition_trace(),
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        payload = _build_dryrun_recovery_safety_generation_payload(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=multi_turn_session,
+            recovery_safety_scope_id="dryrun_recovery_scope_case3",
+        )
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del tools, tool_executor, max_tool_rounds
+            assert "\"outline_id\": \"RECOVERY_SEQ4\"" in prompt
+            assert "\"nominal_candidate_tasks\"" not in prompt
+            assert "\"nominal_candidate_task_ids\"" not in prompt
+            assert "\"recovery_safety_scope_id\"" not in prompt
+            assert "dryrun_recovery_scope_case3" not in prompt
+            assert "Use the supplied recovery outline row fields" in prompt
+            assert "Copy only supplied outline_id values" in prompt
+            assert "selected_nominal_task_ids" not in prompt
+            assert "selected_nominal_state_tokens" not in prompt
+            assert "selected_recovery_state_tokens" not in prompt
+            assert "Do not select nominal task rows." in prompt
+            assert "Use only the supplied row ids and supplied state_tokens." not in prompt
+            assert "return rule_id, status, reason, and selected_recovery_outline_ids" in prompt
+            assert "Do not generate aps." not in prompt
+            assert "Do not generate ltlf." not in prompt
+            assert "generated_aps" not in prompt
+            assert "\"ltlf\"" not in prompt
+            assert "Do not adapt one resource to another resource." in prompt
+            prompt_payload = json.loads(prompt.split("\n\n", 1)[1])
+            assert "nominal_candidate_tasks" not in prompt_payload
+            response_schema = json.dumps(response_format, sort_keys=True)
+            assert "selected_recovery_outline_ids" in response_schema
+            assert "selected_nominal_task_ids" not in response_schema
+            assert "selected_nominal_state_tokens" not in response_schema
+            assert "selected_recovery_state_tokens" not in response_schema
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=multi_turn_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is True
+    assert Path(str(result.get("recovery_safety_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_plan_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_safery_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_safety_dir") or "")).is_dir()
+    assert not (tmp_path / "recovery_plan").exists()
+    assert Path(str(result.get("snapshot_artifact_path") or "")).is_file()
+    assert Path(str(result.get("grounding_prompt_artifact_path") or "")).is_file()
+    assert Path(str(result.get("latest_grounding_prompt_artifact_path") or "")).is_file()
+    assert Path(str(result.get("grounding_response_artifact_path") or "")).is_file()
+    assert Path(str(result.get("latest_grounding_response_artifact_path") or "")).is_file()
+    assert Path(str(result.get("grounding_llm_response_artifact_path") or "")).is_file()
+    assert Path(
+        str(result.get("latest_grounding_llm_response_artifact_path") or "")
+    ).is_file()
+    assert Path(str(result.get("recovery_safety_logic_json") or "")).is_file()
+    assert list(result.get("rule_ids") or []) == ["SAFE_2"]
+    assert Path(str(result.get("recovery_safety_dir") or "")).joinpath(
+        "SAFE_2_dfa.dot"
+    ).is_file()
+    assert not Path(str(result.get("recovery_safety_dir") or "")).joinpath(
+        "SAFE_1_dfa.dot"
+    ).exists()
+    all_rule_results = {
+        str(row.get("rule_id") or "").strip(): dict(row)
+        for row in (result.get("all_rule_results") or [])
+        if isinstance(row, dict)
+    }
+    assert len(result.get("accepted_outline_prefix") or []) == 4
+    assert len(result.get("pending_nominal_tasks") or []) >= 1
+    assert any(
+        str(row.get("id") or "").strip() == "REQ_2_T3"
+        for row in (result.get("nominal_candidate_tasks") or [])
+        if isinstance(row, dict)
+    )
+    nominal_by_id = {
+        str(row.get("id") or "").strip(): dict(row)
+        for row in (result.get("nominal_candidate_tasks") or [])
+        if isinstance(row, dict)
+    }
+    assert str(nominal_by_id["REQ_2_T3"].get("destination_location") or "").strip() == (
+        "Assembly Station"
+    )
+    assert str(nominal_by_id["REQ_2_T4"].get("destination_location") or "").strip() == (
+        "Assembly Station"
+    )
+    for task_id in ("REQ_1_T5", "REQ_2_T1", "REQ_2_T2", "REQ_2_T5"):
+        assert str(nominal_by_id[task_id].get("destination_location") or "").strip() == ""
+    assert str(all_rule_results["SAFE_1"].get("status") or "").strip() == "not_involved"
+    assert str(all_rule_results["SAFE_2"].get("status") or "").strip() == "grounded"
+    assert list(all_rule_results["SAFE_1"].get("selected_recovery_outline_ids") or []) == [
+        "RECOVERY_SEQ3",
+        "RECOVERY_SEQ4",
+    ]
+    assert list(all_rule_results["SAFE_1"].get("selected_nominal_task_ids") or []) == []
+    assert list(all_rule_results["SAFE_2"].get("selected_nominal_task_ids") or []) == [
+        "REQ_2_T3",
+        "REQ_2_T4",
+    ]
+    raw_grounding_response_payload = json.loads(
+        Path(
+            str(result.get("latest_grounding_llm_response_artifact_path") or "")
+        ).read_text(encoding="utf-8")
+    )
+    raw_safe_2 = next(
+        row
+        for row in (raw_grounding_response_payload.get("rules") or [])
+        if isinstance(row, dict) and str(row.get("rule_id") or "").strip() == "SAFE_2"
+    )
+    assert list(raw_safe_2.get("selected_recovery_outline_ids") or []) == [
+        "RECOVERY_SEQ4",
+    ]
+    assert "selected_nominal_task_ids" not in raw_safe_2
+    grounding_response_payload = json.loads(
+        Path(str(result.get("latest_grounding_response_artifact_path") or "")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "accepted_outline_prefix" not in grounding_response_payload
+    assert "pending_nominal_tasks" not in grounding_response_payload
+    selected_safe_2 = next(
+        row
+        for row in (grounding_response_payload.get("rules") or [])
+        if isinstance(row, dict) and str(row.get("rule_id") or "").strip() == "SAFE_2"
+    )
+    assert list(selected_safe_2.get("selected_recovery_outline_ids") or []) == [
+        "RECOVERY_SEQ4",
+    ]
+    assert list(selected_safe_2.get("selected_nominal_task_ids") or []) == [
+        "REQ_2_T3",
+        "REQ_2_T4",
+    ]
+    rules = [dict(row) for row in (result.get("rules") or []) if isinstance(row, dict)]
+    aps = list(rules[0].get("aps") or [])
+    assert any(
+        "execute_recovery_macro" in str(ap.get("full") or "")
+        for ap in aps
+    )
+    assert any(
+        "task_id=REQ_2_T3" in str(ap.get("full") or "")
+        for ap in aps
+    )
+    assert not any(
+        "recover_place_LG_to_assembly_board-v1" in str(ap.get("full") or "")
+        for ap in aps
+    )
+
+
+def test_case3_recovery_safety_grounding_does_not_treat_product_jid_as_destination(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        multi_turn_session = {
+            "accepted_outline_prefix": _case3_archived_transition_trace(),
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        payload = _build_dryrun_recovery_safety_generation_payload(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=multi_turn_session,
+            recovery_safety_scope_id="dryrun_recovery_scope_case3",
+        )
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            rules: list[dict[str, Any]] = []
+            for rule in (payload.get("loaded_safety_rules") or []):
+                rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
+                if rule_id == "SAFE_2":
+                    rules.append(
+                        {
+                            "rule_id": rule_id,
+                            "status": "selected",
+                            "reason": "Includes ignored nominal ids with the recovery outline.",
+                            "selected_recovery_outline_ids": ["RECOVERY_SEQ4"],
+                            "selected_nominal_task_ids": [
+                                "REQ_2_T1",
+                                "REQ_2_T2",
+                                "REQ_2_T5",
+                                "REQ_2_T3",
+                                "REQ_2_T4",
+                                "REQ_1_T5",
+                            ],
+                        }
+                    )
+                else:
+                    rules.append(
+                        {
+                            "rule_id": rule_id,
+                            "status": "not_involved",
+                            "reason": "",
+                            "selected_recovery_outline_ids": [],
+                        }
+                    )
+            return {"rules": rules}
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=multi_turn_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+    all_rule_results = {
+        str(row.get("rule_id") or "").strip(): dict(row)
+        for row in (result.get("all_rule_results") or [])
+        if isinstance(row, dict)
+    }
+    selected_safe_2 = all_rule_results["SAFE_2"]
+    assert str(selected_safe_2.get("status") or "").strip() == "grounded"
+    assert list(selected_safe_2.get("selected_nominal_task_ids") or []) == [
+        "REQ_2_T3",
+        "REQ_2_T4",
+    ]
+    assert [
+        str(row.get("id") or "").strip()
+        for row in (selected_safe_2.get("grounded_nominal_events") or [])
+        if isinstance(row, dict)
+    ] == ["REQ_2_T3"]
+    assert list(
+        dict(selected_safe_2.get("grounded_bindings") or {}).get("nominal_task_ids")
+        or []
+    ) == ["REQ_2_T3"]
+
+
+def test_case3_dryrun_recovery_safety_generation_falls_back_to_prepared_session_state(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        fallback_session_state = {
+            "accepted_outline_prefix": _case3_archived_transition_trace(),
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(fallback_session_state)
+        empty_final_session = {
+            "status": "paused_after_primitive_generation",
+            "turns": [],
+        }
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            payload = _build_dryrun_recovery_safety_generation_payload(
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=empty_final_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=empty_final_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is True
+    assert Path(str(result.get("recovery_safety_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_plan_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_safery_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_safety_dir") or "")).is_dir()
+    assert not (tmp_path / "recovery_plan").exists()
+    assert Path(str(result.get("recovery_safety_logic_json") or "")).is_file()
+    assert list(result.get("rule_ids") or []) == ["SAFE_2"]
+
+
+def test_case3_dryrun_recovery_safety_generation_uses_transition_trace_outline_ready_shape(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        transition_trace_only_session = {
+            "status": "ready_for_primitive_generation",
+            "current_phase": "primitive_generation",
+            "transition_trace": _case3_archived_transition_trace(),
+            "turns": [
+                {
+                    "turn_index": 7,
+                    "phase": "final_output",
+                    "final_output_stage": "outline_ready",
+                }
+            ],
+            "final_output": {
+                "engine": "multi_turn",
+                "decision": "final_output_ready",
+                "final_output_stage": "outline_ready",
+                "status": "ready_for_primitive_generation",
+                "current_phase": "primitive_generation",
+                "accepted_trace_length": 4,
+                "transition_trace": _case3_archived_transition_trace(),
+                "primitive_program_complete": False,
+            },
+        }
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            payload = _build_dryrun_recovery_safety_generation_payload(
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=transition_trace_only_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+            assert len(payload.get("accepted_outline_prefix") or []) == 4
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=transition_trace_only_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is True
+    assert Path(str(result.get("recovery_safety_dir") or "")) == tmp_path / "recovery_safety"
+    assert Path(str(result.get("recovery_safety_dir") or "")).is_dir()
+    assert list(result.get("rule_ids") or []) == ["SAFE_2"]
+
+
+def test_case3_dryrun_recovery_safety_generation_uses_outline_ready_response_artifact_trace(
+    tmp_path: Path,
+) -> None:
+    outline_ready_response_path = (
+        tmp_path / "multi_turn_turn07_final_output_response_20260424T024717.txt"
+    )
+    outline_ready_response_path.write_text(
+        json.dumps(
+            {
+                "engine": "multi_turn",
+                "decision": "final_output_ready",
+                "final_output_stage": "outline_ready",
+                "status": "ready_for_primitive_generation",
+                "current_phase": "primitive_generation",
+                "accepted_trace_length": 4,
+                "transition_trace": _case3_archived_transition_trace(),
+                "primitive_program_complete": False,
+            },
+            indent=2,
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        artifact_only_session = {
+            "status": "paused_after_primitive_turn",
+            "current_phase": "primitive_generation",
+            "transition_trace": [],
+            "turns": [
+                {
+                    "turn_index": 7,
+                    "phase": "final_output",
+                    "final_output_stage": "outline_ready",
+                    "response_artifact_path": str(outline_ready_response_path),
+                }
+            ],
+        }
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            payload = _build_dryrun_recovery_safety_generation_payload(
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=artifact_only_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+            assert len(payload.get("accepted_outline_prefix") or []) == 4
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=artifact_only_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is True
+    assert Path(str(result.get("recovery_safety_dir") or "")).is_dir()
+    assert list(result.get("rule_ids") or []) == ["SAFE_2"]
+
+
+def test_case3_recovery_safety_monitor_uses_generated_recovery_grounded_aps(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        multi_turn_session = {
+            "accepted_outline_prefix": _case3_archived_transition_trace(),
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        payload = _build_dryrun_recovery_safety_generation_payload(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=multi_turn_session,
+            recovery_safety_scope_id="dryrun_recovery_scope_case3",
+        )
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            assert [
+                str(row.get("outline_id") or "").strip()
+                for row in (payload.get("accepted_outline_prefix") or [])
+            ] == [
+                "RECOVERY_SEQ1",
+                "RECOVERY_SEQ2",
+                "RECOVERY_SEQ3",
+                "RECOVERY_SEQ4",
+            ]
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=multi_turn_session,
+                recovery_safety_scope_id="dryrun_recovery_scope_case3",
+            )
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is True
+    monitor = OnlineSafetyMonitor(
+        dict(result.get("rule_dfas") or {}),
+        list(result.get("rules") or []),
+        tools_catalog=[],
+    )
+    safe_2_rule = next(
+        rule
+        for rule in (result.get("rules") or [])
+        if isinstance(rule, dict) and str(rule.get("id") or "").strip() == "SAFE_2"
+    )
+    recovery_label = next(
+        str(ap.get("label") or "").strip()
+        for ap in (safe_2_rule.get("aps") or [])
+        if "outline_id=RECOVERY_SEQ4" in str(ap.get("full") or "")
+    )
+    nominal_label = next(
+        str(ap.get("label") or "").strip()
+        for ap in (safe_2_rule.get("aps") or [])
+        if "task_id=REQ_2_T3" in str(ap.get("full") or "")
+    )
+
+    nominal_first_allowed, nominal_first_info = monitor.process_start_event(
+        {
+            "task_id": "REQ_2_T3",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "place_approach",
+            "params": {
+                "task_id": "REQ_2_T3",
+                "part_name": "LG",
+            },
+        }
+    )
+    assert nominal_first_allowed is True
+    assert nominal_label in set(monitor.running_aps)
+
+    recovery_allowed, recovery_info = monitor.process_start_event(
+        {
+            "task_id": "RECOVERY_BRIDGE_SEQ4",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "execute_recovery_macro",
+            "params": {
+                "task_id": "RECOVERY_BRIDGE_SEQ4",
+                "bridge_outline_id": "RECOVERY_SEQ4",
+                "outline_id": "RECOVERY_SEQ4",
+                "event_name": "recover_place_LG_to_assembly_board-v1",
+                "part_name": "LG",
+                "projected_outline_state": {
+                    "part_location": "assembly_board-v1",
+                    "part_state": "placed",
+                },
+                "expected_end_state": {
+                    "part_location": "assembly_board-v1",
+                    "part_state": "placed",
+                },
+            },
+        }
+    )
+    assert recovery_allowed is False
+    assert str(recovery_info.get("violated_rule") or "").strip() == "SAFE_2"
+
+    monitor.process_finish_event(
+        {
+            "task_id": "REQ_2_T3",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "place_approach",
+            "current_state": "positioned",
+            "params": {
+                "part_name": "LG",
+                "task_id": "REQ_2_T3",
+            },
+        }
+    )
+
+    recovery_after_allowed, _ = monitor.process_start_event(
+        {
+            "resource_jid": "ur5e@localhost",
+            "function_name": "execute_recovery_macro",
+            "params": {
+                "task_id": "RECOVERY_BRIDGE_SEQ4",
+                "bridge_outline_id": "RECOVERY_SEQ4",
+                "outline_id": "RECOVERY_SEQ4",
+                "event_name": "recover_place_LG_to_assembly_board-v1",
+                "part_name": "LG",
+                "projected_outline_state": {
+                    "part_location": "assembly_board-v1",
+                    "part_state": "placed",
+                },
+                "expected_end_state": {
+                    "part_location": "assembly_board-v1",
+                    "part_state": "placed",
+                },
+            },
+        }
+    )
+    assert recovery_after_allowed is True
+    assert recovery_label in set(monitor.running_aps)
+
+
+def test_case3_multi_turn_artifacts_route_into_recovery_outline_and_recovery_primitves(
+    tmp_path: Path,
+) -> None:
+    grounding_artifacts = write_bridge_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "prepared_bridge_request": {
+                "bridge_debug": {
+                    "multi_turn_session": {
+                        "session_id": "case3",
+                        "turn_index": 1,
+                        "current_phase": "grounding",
+                    }
+                }
+            },
+            "multi_turn_current_turn": {
+                "turn_index": 1,
+                "phase": "grounding",
+                "prompt_text": "grounding prompt",
+                "raw_response": {"decision": "need_grounding_context"},
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
+        write_latest=False,
+    )
+    assert Path(str(grounding_artifacts.get("prompt_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+    assert Path(str(grounding_artifacts.get("response_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+
+    outline_artifacts = write_bridge_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "prepared_bridge_request": {
+                "bridge_debug": {
+                    "multi_turn_session": {
+                        "session_id": "case3",
+                        "turn_index": 4,
+                        "current_phase": "outline",
+                    }
+                }
+            },
+            "multi_turn_current_turn": {
+                "turn_index": 4,
+                "phase": "outline",
+                "prompt_text": "outline prompt",
+                "raw_response": {"decision": "revise_outline"},
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
+        write_latest=False,
+    )
+    assert Path(str(outline_artifacts.get("prompt_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+    assert Path(str(outline_artifacts.get("response_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+
+    final_output_artifacts = write_bridge_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "prepared_bridge_request": {
+                "bridge_debug": {
+                    "multi_turn_session": {
+                        "session_id": "case3",
+                        "turn_index": 9,
+                        "current_phase": "final_output",
+                    }
+                }
+            },
+            "multi_turn_current_turn": {
+                "turn_index": 9,
+                "phase": "final_output",
+                "prompt_text": "",
+                "phase_result": {
+                    "decision": "final_output_ready",
+                    "final_output_stage": "primitive_program_ready",
+                },
+                "raw_response": {
+                    "decision": "final_output_ready",
+                    "final_output_stage": "primitive_program_ready",
+                    "primitive_program_complete": True,
+                },
+                "report_text": "final output report",
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
+        write_latest=False,
+    )
+    assert Path(str(final_output_artifacts.get("report_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+    assert Path(str(final_output_artifacts.get("result_artifact_path") or "")).parent == (
+        tmp_path / "recovery_outline"
+    )
+
+    primitive_artifacts = write_bridge_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "prepared_bridge_request": {
+                "bridge_debug": {
+                    "multi_turn_session": {
+                        "session_id": "case3",
+                        "turn_index": 7,
+                        "current_phase": "primitive_generation",
+                    }
+                }
+            },
+            "multi_turn_current_turn": {
+                "turn_index": 7,
+                "phase": "primitive_generation",
+                "primitive_substream_turns": [
+                    {
+                        "outline_id": "RECOVERY_SEQ1",
+                        "resource_jid": "ur5e@localhost",
+                        "primitive_local_turn_index": 1,
+                        "prompt_text": "primitive prompt",
+                        "raw_response": {"decision": "need_context"},
+                    }
+                ],
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
+        write_latest=False,
+    )
+    primitive_rows = json.loads(
+        str(primitive_artifacts.get("primitive_substream_artifact_paths") or "[]")
+    )
+    assert isinstance(primitive_rows, list) and primitive_rows
+    assert Path(str(primitive_rows[0].get("prompt_artifact_path") or "")).parent == (
+        tmp_path / "recovery_primitves"
+    )
+    assert Path(str(primitive_rows[0].get("response_artifact_path") or "")).parent == (
+        tmp_path / "recovery_primitves"
+    )
+
+
+def test_case3_dryrun_outline_checkpoint_generates_recovery_safety_before_primitive_generation(
+    tmp_path: Path,
+) -> None:
+    session_state = {
+        "status": "ready_for_primitive_generation",
+        "current_phase": "primitive_generation",
+        "transition_trace": _case3_archived_transition_trace(),
+        "turns": [
+            {
+                "turn_index": 6,
+                "phase": "final_output",
+                "final_output_stage": "outline_ready",
+            }
+        ],
+        "final_output": {
+            "engine": "multi_turn",
+            "decision": "final_output_ready",
+            "final_output_stage": "outline_ready",
+            "status": "ready_for_primitive_generation",
+            "current_phase": "primitive_generation",
+            "accepted_trace_length": 4,
+            "transition_trace": _case3_archived_transition_trace(),
+            "primitive_program_complete": False,
+        },
+    }
+
+    class _FakePlanner:
+        async def execute_prepared_bridge_request(
+            self,
+            prepared_bridge_request: dict[str, Any],
+        ) -> dict[str, Any]:
+            prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
+            bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+            bridge_debug["multi_turn_session"] = deepcopy(session_state)
+            bridge_debug["status"] = "ready_for_primitive_generation"
+            prepared_bridge_request["bridge_debug"] = bridge_debug
+            return {}
+
+        def get_last_bridge_debug(self) -> dict[str, Any]:
+            return {
+                "status": "ready_for_primitive_generation",
+                "multi_turn_session": deepcopy(session_state),
+            }
+
+    async def _fake_prepare(
+        *,
+        llm_model: str | None = None,
+        reasoning_mode: str = "multi_turn",
+    ) -> tuple[dict[str, Any], Any, Any, dict[str, Any]]:
+        del llm_model, reasoning_mode
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 1},
+            "bridge_debug": {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            },
+            "llm_input": {"modeled_continuation_gap": {}},
+            "loaded_safety_rules": [],
+        }
+        return {}, SimpleNamespace(turn_log=[]), _FakePlanner(), prepared_bridge_request
+
+    calls: list[str] = []
+
+    async def _fake_generate(
+        *,
+        product_agent: FakeProductAgent,
+        prepared_bridge_request: dict[str, Any],
+        multi_turn_session: dict[str, Any] | None = None,
+        recovery_safety_scope_id: str = "dryrun_recovery_scope",
+    ) -> dict[str, Any]:
+        del product_agent, prepared_bridge_request, recovery_safety_scope_id
+        calls.append(str(dict(multi_turn_session or {}).get("current_phase") or ""))
+        return {
+            "ok": True,
+            "recovery_safety_dir": str(tmp_path / "recovery_safety"),
+            "recovery_plan_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safery_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safety_logic_json": str(
+                tmp_path / "recovery_safety" / "cca_safety_logic.json"
+            ),
+        }
+
+    with patch(
+        "test.test_case3_bridge_dryrun._prepare_bridge_dryrun_harness",
+        new=_fake_prepare,
+    ), patch(
+        "test.test_case3_bridge_dryrun._generate_dryrun_recovery_safety_artifacts",
+        new=_fake_generate,
+    ):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=False,
+                stop_before_primitive_generation=True,
+            )
+        )
+
+    assert calls == ["primitive_generation"]
+    assert str(result.get("recovery_safety_status") or "").strip() == "ready"
+    assert str(result.get("recovery_safety_dir") or "").endswith("/recovery_safety")
+    assert not str(result.get("recovery_final_dir") or "").strip()
+
+
+def test_case3_dryrun_primitive_generation_focus_starts_recovery_safety_before_first_primitive_resume(
+    tmp_path: Path,
+) -> None:
+    source_final_output_path = (
+        tmp_path / "multi_turn_turn09_final_output_response_20260424T010101.txt"
+    )
+    final_output_payload = {
+        "engine": "multi_turn",
+        "decision": "final_output_ready",
+        "final_output_stage": "primitive_program_ready",
+        "status": "paused_after_primitive_generation",
+        "current_phase": "finalize",
+        "accepted_trace_length": 4,
+        "transition_trace": _case3_archived_transition_trace(),
+        "accepted_primitive_program": [],
+        "executable_recovery_trace": [],
+        "primitive_program_complete": True,
+    }
+    source_final_output_path.write_text(
+        json.dumps(final_output_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    outline_session_state = {
+        "status": "ready_for_primitive_generation",
+        "current_phase": "primitive_generation",
+        "transition_trace": _case3_archived_transition_trace(),
+        "turns": [
+            {
+                "turn_index": 6,
+                "phase": "final_output",
+                "final_output_stage": "outline_ready",
+            }
+        ],
+    }
+    completed_session_state = {
+        "status": "completed",
+        "current_phase": "primitive_generation",
+        "transition_trace": _case3_archived_transition_trace(),
+        "final_output": deepcopy(final_output_payload),
+        "turns": [
+            {
+                "turn_index": 9,
+                "phase": "final_output",
+                "final_output_stage": "primitive_program_ready",
+                "response_artifact_path": str(source_final_output_path),
+            }
+        ],
+    }
+
+    class _FakePlanner:
+        def __init__(self) -> None:
+            self._last_bridge_debug: dict[str, Any] = {}
+
+        async def execute_prepared_bridge_request(
+            self,
+            prepared_bridge_request: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert (
+                str(prepared_bridge_request.get("_stop_after_multi_turn_phase") or "")
+                == "outline"
+            )
+            prepared_bridge_request["multi_turn_session_state"] = deepcopy(
+                outline_session_state
+            )
+            self._last_bridge_debug = {
+                "status": "ready_for_primitive_generation",
+                "multi_turn_session": deepcopy(outline_session_state),
+            }
+            prepared_bridge_request["bridge_debug"] = deepcopy(self._last_bridge_debug)
+            return {}
+
+        def get_last_bridge_debug(self) -> dict[str, Any]:
+            return deepcopy(self._last_bridge_debug)
+
+    async def _fake_prepare(
+        *,
+        llm_model: str | None = None,
+        reasoning_mode: str = "multi_turn",
+    ) -> tuple[dict[str, Any], Any, Any, dict[str, Any]]:
+        del llm_model, reasoning_mode
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 3},
+            "bridge_debug": {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            },
+            "llm_input": {"modeled_continuation_gap": {}},
+            "loaded_safety_rules": [],
+        }
+        return {}, SimpleNamespace(turn_log=[]), _FakePlanner(), prepared_bridge_request
+
+    safety_started = asyncio.Event()
+    resume_called = asyncio.Event()
+
+    async def _fake_generate(
+        *,
+        product_agent: FakeProductAgent,
+        prepared_bridge_request: dict[str, Any],
+        multi_turn_session: dict[str, Any] | None = None,
+        recovery_safety_scope_id: str = "dryrun_recovery_scope",
+    ) -> dict[str, Any]:
+        del product_agent, prepared_bridge_request, multi_turn_session, recovery_safety_scope_id
+        safety_started.set()
+        await resume_called.wait()
+        recovery_safety_dir = tmp_path / "recovery_safety"
+        recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+        (recovery_safety_dir / "cca_safety_logic.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (recovery_safety_dir / "SAFE_2_dfa.dot").write_text(
+            "digraph G {}",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "recovery_safety_dir": str(recovery_safety_dir),
+            "recovery_plan_dir": str(recovery_safety_dir),
+            "recovery_safery_dir": str(recovery_safety_dir),
+            "recovery_safety_logic_json": str(
+                recovery_safety_dir / "cca_safety_logic.json"
+            ),
+        }
+
+    async def _fake_resume_bridge(
+        planner: Any,
+        prepared_bridge_request: dict[str, Any],
+        session_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del session_state
+        assert safety_started.is_set()
+        resume_called.set()
+        planner._last_bridge_debug = {
+            "status": "completed",
+            "multi_turn_session": deepcopy(completed_session_state),
+        }
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(
+            completed_session_state
+        )
+        prepared_bridge_request["bridge_debug"] = deepcopy(planner._last_bridge_debug)
+        return {}
+
+    with patch(
+        "test.test_case3_bridge_dryrun._prepare_bridge_dryrun_harness",
+        new=_fake_prepare,
+    ), patch(
+        "test.test_case3_bridge_dryrun._generate_dryrun_recovery_safety_artifacts",
+        new=_fake_generate,
+    ), patch(
+        "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+        new=_fake_resume_bridge,
+    ), patch(
+        "test.test_case3_bridge_dryrun.DEBUG_DIR",
+        tmp_path,
+    ):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=False,
+                focus="primitive_generation",
+            )
+        )
+
+    assert str(result.get("recovery_safety_status") or "").strip() == "ready"
+    assert resume_called.is_set()
+    assert str(result.get("recovery_safety_logic_json") or "").strip() == str(
+        (tmp_path / "recovery_final" / "cca_safety_logic.json").resolve()
+    )
+    assert str(result.get("recovery_final_dir") or "").strip() == str(
+        (tmp_path / "recovery_final").resolve()
+    )
+
+
+def test_case3_dryrun_recovery_safety_focus_runs_only_safety_from_known_outline(
+    tmp_path: Path,
+) -> None:
+    class _FakePlanner:
+        async def execute_prepared_bridge_request(
+            self,
+            prepared_bridge_request: dict[str, Any],
+        ) -> dict[str, Any]:
+            del prepared_bridge_request
+            raise AssertionError("recovery_safety focus should not execute the bridge planner")
+
+        def get_last_bridge_debug(self) -> dict[str, Any]:
+            return {}
+
+    async def _fake_prepare(
+        *,
+        llm_model: str | None = None,
+        reasoning_mode: str = "multi_turn",
+    ) -> tuple[dict[str, Any], Any, Any, dict[str, Any]]:
+        del llm_model, reasoning_mode
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 1},
+            "bridge_debug": {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            },
+            "llm_input": {"modeled_continuation_gap": {}},
+            "loaded_safety_rules": [],
+        }
+        return {}, SimpleNamespace(turn_log=[]), _FakePlanner(), prepared_bridge_request
+
+    calls: list[list[str]] = []
+
+    async def _fake_generate(
+        *,
+        product_agent: FakeProductAgent,
+        prepared_bridge_request: dict[str, Any],
+        multi_turn_session: dict[str, Any] | None = None,
+        recovery_safety_scope_id: str = "dryrun_recovery_scope",
+    ) -> dict[str, Any]:
+        del product_agent, prepared_bridge_request, recovery_safety_scope_id
+        accepted_outline_prefix = [
+            deepcopy(row)
+            for row in (dict(multi_turn_session or {}).get("accepted_outline_prefix") or [])
+            if isinstance(row, dict)
+        ]
+        calls.append(
+            [
+                str(row.get("outline_id") or "").strip()
+                for row in accepted_outline_prefix
+                if str(row.get("outline_id") or "").strip()
+            ]
+        )
+        recovery_safety_dir = tmp_path / "recovery_safety"
+        recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+        (recovery_safety_dir / "cca_safety_logic.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (recovery_safety_dir / "SAFE_2_dfa.dot").write_text(
+            "digraph G {}",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "recovery_safety_dir": str(recovery_safety_dir),
+            "recovery_plan_dir": str(recovery_safety_dir),
+            "recovery_safery_dir": str(recovery_safety_dir),
+            "recovery_safety_logic_json": str(
+                recovery_safety_dir / "cca_safety_logic.json"
+            ),
+        }
+
+    with patch(
+        "test.test_case3_bridge_dryrun._prepare_bridge_dryrun_harness",
+        new=_fake_prepare,
+    ), patch(
+        "test.test_case3_bridge_dryrun._generate_dryrun_recovery_safety_artifacts",
+        new=_fake_generate,
+    ), patch(
+        "test.test_case3_bridge_dryrun.DEBUG_DIR",
+        tmp_path,
+    ):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=False,
+                focus="recovery_safety",
+            )
+        )
+
+    assert calls == [["RECOVERY_SEQ1", "RECOVERY_SEQ2", "RECOVERY_SEQ3", "RECOVERY_SEQ4"]]
+    assert str(result.get("status") or "").strip() == "ready_for_primitive_generation"
+    assert str(result.get("recovery_safety_status") or "").strip() == "ready"
+    assert str(result.get("recovery_safety_dir") or "").strip() == str(
+        (tmp_path / "recovery_safety").resolve()
+    )
+    assert str(result.get("recovery_safety_logic_json") or "").strip() == str(
+        (tmp_path / "recovery_safety" / "cca_safety_logic.json").resolve()
+    )
+    assert not str(result.get("recovery_final_dir") or "").strip()
+    assert not str(result.get("recovery_final_output_path") or "").strip()
+
+
+def test_case3_dryrun_starts_recovery_safety_from_recovery_outline_artifact_when_session_state_is_stale(
+    tmp_path: Path,
+) -> None:
+    outline_ready_payload = {
+        "engine": "multi_turn",
+        "decision": "final_output_ready",
+        "final_output_stage": "outline_ready",
+        "status": "ready_for_primitive_generation",
+        "current_phase": "primitive_generation",
+        "accepted_trace_length": 4,
+        "primitive_program_complete": False,
+        "transition_trace": _case3_archived_transition_trace(),
+    }
+
+    class _FakePlanner:
+        def __init__(self) -> None:
+            self._last_bridge_debug: dict[str, Any] = {}
+
+        async def execute_prepared_bridge_request(
+            self,
+            prepared_bridge_request: dict[str, Any],
+        ) -> dict[str, Any]:
+            recovery_outline_dir = tmp_path / "recovery_outline"
+            recovery_outline_dir.mkdir(parents=True, exist_ok=True)
+            outline_path = (
+                recovery_outline_dir
+                / "multi_turn_turn06_final_output_response_20260424T000000.txt"
+            )
+            outline_path.write_text(
+                json.dumps(outline_ready_payload, indent=2),
+                encoding="utf-8",
+            )
+            self._last_bridge_debug = {
+                "status": "ready_for_primitive_generation",
+                "multi_turn_session": {},
+            }
+            prepared_bridge_request["bridge_debug"] = {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            }
+            return {}
+
+        def get_last_bridge_debug(self) -> dict[str, Any]:
+            return deepcopy(self._last_bridge_debug)
+
+    async def _fake_prepare(
+        *,
+        llm_model: str | None = None,
+        reasoning_mode: str = "multi_turn",
+    ) -> tuple[dict[str, Any], Any, Any, dict[str, Any]]:
+        del llm_model, reasoning_mode
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 1},
+            "bridge_debug": {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            },
+            "llm_input": {"modeled_continuation_gap": {}},
+            "loaded_safety_rules": [],
+        }
+        return {}, SimpleNamespace(turn_log=[]), _FakePlanner(), prepared_bridge_request
+
+    calls: list[str] = []
+
+    async def _fake_generate(
+        *,
+        product_agent: FakeProductAgent,
+        prepared_bridge_request: dict[str, Any],
+        multi_turn_session: dict[str, Any] | None = None,
+        recovery_safety_scope_id: str = "dryrun_recovery_scope",
+    ) -> dict[str, Any]:
+        del product_agent, prepared_bridge_request, recovery_safety_scope_id
+        accepted_outline_prefix = list(
+            dict(multi_turn_session or {}).get("accepted_outline_prefix") or []
+        )
+        calls.append(str((accepted_outline_prefix[0] or {}).get("outline_id") or ""))
+        return {
+            "ok": True,
+            "recovery_safety_dir": str(tmp_path / "recovery_safety"),
+            "recovery_plan_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safery_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safety_logic_json": str(
+                tmp_path / "recovery_safety" / "cca_safety_logic.json"
+            ),
+        }
+
+    with patch(
+        "test.test_case3_bridge_dryrun._prepare_bridge_dryrun_harness",
+        new=_fake_prepare,
+    ), patch(
+        "test.test_case3_bridge_dryrun._generate_dryrun_recovery_safety_artifacts",
+        new=_fake_generate,
+    ):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=False,
+                stop_before_primitive_generation=True,
+            )
+        )
+
+    assert calls == ["RECOVERY_SEQ1"]
+    assert str(result.get("recovery_safety_status") or "").strip() == "ready"
+    assert str(result.get("recovery_safety_dir") or "").endswith("/recovery_safety")
+
+
+def test_case3_dryrun_starts_only_one_recovery_safety_task_per_run(
+    tmp_path: Path,
+) -> None:
+    outline_session_state = {
+        "status": "ready_for_primitive_generation",
+        "current_phase": "primitive_generation",
+        "accepted_outline_prefix": _case3_archived_transition_trace(),
+        "turns": [
+            {
+                "turn_index": 6,
+                "phase": "final_output",
+                "final_output_stage": "outline_ready",
+            }
+        ],
+    }
+    paused_primitive_session_state = {
+        "status": "paused_after_primitive_turn",
+        "current_phase": "primitive_generation",
+        "accepted_outline_prefix": _case3_archived_transition_trace(),
+        "turns": [],
+    }
+    completed_session_state = {
+        "status": "completed",
+        "current_phase": "primitive_generation",
+        "accepted_outline_prefix": _case3_archived_transition_trace(),
+        "turns": [],
+    }
+
+    class _FakePlanner:
+        def __init__(self) -> None:
+            self._last_bridge_debug: dict[str, Any] = {}
+
+        async def execute_prepared_bridge_request(
+            self,
+            prepared_bridge_request: dict[str, Any],
+        ) -> dict[str, Any]:
+            prepared_bridge_request["multi_turn_session_state"] = deepcopy(
+                outline_session_state
+            )
+            self._last_bridge_debug = {
+                "status": "ready_for_primitive_generation",
+                "multi_turn_session": deepcopy(outline_session_state),
+            }
+            prepared_bridge_request["bridge_debug"] = deepcopy(self._last_bridge_debug)
+            return {}
+
+        def get_last_bridge_debug(self) -> dict[str, Any]:
+            return deepcopy(self._last_bridge_debug)
+
+    async def _fake_prepare(
+        *,
+        llm_model: str | None = None,
+        reasoning_mode: str = "multi_turn",
+    ) -> tuple[dict[str, Any], Any, Any, dict[str, Any]]:
+        del llm_model, reasoning_mode
+        prepared_bridge_request = {
+            "bridge_session": {"reasoning_mode": "multi_turn", "max_turns": 3},
+            "bridge_debug": {
+                "artifact_directory": str(tmp_path),
+                "per_turn_debug_dir": str(tmp_path),
+            },
+            "llm_input": {"modeled_continuation_gap": {}},
+            "loaded_safety_rules": [],
+        }
+        return {}, SimpleNamespace(turn_log=[]), _FakePlanner(), prepared_bridge_request
+
+    calls = 0
+    resume_count = 0
+
+    async def _fake_generate(
+        *,
+        product_agent: FakeProductAgent,
+        prepared_bridge_request: dict[str, Any],
+        multi_turn_session: dict[str, Any] | None = None,
+        recovery_safety_scope_id: str = "dryrun_recovery_scope",
+    ) -> dict[str, Any]:
+        nonlocal calls
+        del product_agent, prepared_bridge_request, multi_turn_session, recovery_safety_scope_id
+        calls += 1
+        return {
+            "ok": True,
+            "recovery_safety_dir": str(tmp_path / "recovery_safety"),
+            "recovery_plan_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safery_dir": str(tmp_path / "recovery_safety"),
+            "recovery_safety_logic_json": str(
+                tmp_path / "recovery_safety" / "cca_safety_logic.json"
+            ),
+        }
+
+    async def _fake_resume_bridge(
+        planner: Any,
+        prepared_bridge_request: dict[str, Any],
+        session_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal resume_count
+        del session_state
+        resume_count += 1
+        next_state = (
+            paused_primitive_session_state if resume_count == 1 else completed_session_state
+        )
+        planner._last_bridge_debug = {
+            "status": str(next_state.get("status") or ""),
+            "multi_turn_session": deepcopy(next_state),
+        }
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(next_state)
+        prepared_bridge_request["bridge_debug"] = deepcopy(planner._last_bridge_debug)
+        return {}
+
+    with patch(
+        "test.test_case3_bridge_dryrun._prepare_bridge_dryrun_harness",
+        new=_fake_prepare,
+    ), patch(
+        "test.test_case3_bridge_dryrun._generate_dryrun_recovery_safety_artifacts",
+        new=_fake_generate,
+    ), patch(
+        "cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.execute_multi_turn_bridge",
+        new=_fake_resume_bridge,
+    ):
+        result = asyncio.run(
+            run_case3_bridge_dryrun(
+                write_debug=False,
+                focus="primitive_generation",
+            )
+        )
+
+    assert calls == 1
+    assert resume_count == 2
+    assert str(result.get("recovery_safety_status") or "").strip() == "ready"
+
+
+def test_case3_dryrun_recovery_final_bundle_writes_runtime_used_files(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_final_output_path = (
+        source_dir / "multi_turn_turn09_final_output_response_20260424T010101.txt"
+    )
+    final_output_payload = {
+        "engine": "multi_turn",
+        "decision": "final_output_ready",
+        "final_output_stage": "primitive_program_ready",
+        "status": "paused_after_primitive_generation",
+        "current_phase": "finalize",
+        "accepted_trace_length": 4,
+        "transition_trace": _case3_archived_transition_trace(),
+        "accepted_primitive_program": [],
+        "executable_recovery_trace": [],
+        "primitive_program_complete": True,
+    }
+    source_final_output_path.write_text(
+        json.dumps(final_output_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    recovery_safety_dir = tmp_path / "recovery_safety"
+    recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+    (recovery_safety_dir / "cca_safety_logic.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    (recovery_safety_dir / "SAFE_2_dfa.dot").write_text(
+        "digraph G {}",
+        encoding="utf-8",
+    )
+    (recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt").write_text(
+        "prompt",
+        encoding="utf-8",
+    )
+    (recovery_safety_dir / "recovery_safety_grounding_response_latest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    recovery_final_dir = tmp_path / "recovery_final"
+    recovery_final_dir.mkdir(parents=True, exist_ok=True)
+    (recovery_final_dir / "SAFE_1_dfa.dot").write_text(
+        "digraph STALE {}",
+        encoding="utf-8",
+    )
+    prepared_bridge_request = {
+        "bridge_debug": {
+            "final_output": deepcopy(final_output_payload),
+            "multi_turn_session": {
+                "final_output": deepcopy(final_output_payload),
+                "turns": [
+                    {
+                        "turn_index": 9,
+                        "phase": "final_output",
+                        "final_output_stage": "primitive_program_ready",
+                        "response_artifact_path": str(source_final_output_path),
+                    }
+                ],
+            },
+        }
+    }
+
+    with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", tmp_path):
+        bundle = _write_dryrun_recovery_final_bundle(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=dict(
+                dict(prepared_bridge_request.get("bridge_debug") or {}).get(
+                    "multi_turn_session"
+                )
+                or {}
+            ),
+            recovery_safety_generation={
+                "ok": True,
+                "recovery_safety_logic_json": str(
+                    recovery_safety_dir / "cca_safety_logic.json"
+                ),
+            },
+        )
+
+    assert Path(str(bundle.get("recovery_final_dir") or "")) == tmp_path / "recovery_final"
+    assert Path(str(bundle.get("recovery_final_output_path") or "")).is_file()
+    assert str(bundle.get("recovery_safety_logic_json") or "").strip() == str(
+        (tmp_path / "recovery_final" / "cca_safety_logic.json").resolve()
+    )
+    assert (tmp_path / "recovery_final" / "cca_safety_logic.json").is_file()
+    assert (tmp_path / "recovery_final" / "SAFE_2_dfa.dot").is_file()
+    assert not (tmp_path / "recovery_final" / "SAFE_1_dfa.dot").exists()
+    assert not (tmp_path / "recovery_final" / "recovery_safety_grounding_prompt_latest.txt").exists()
+    assert not (tmp_path / "recovery_final" / "recovery_safety_grounding_response_latest.json").exists()
+
+
+def test_case3_live_runtime_reuses_worked_dir_for_recovery_outline_primitves_and_safety(
+    tmp_path: Path,
+) -> None:
+    live_root = tmp_path / "worked"
+
+    async def _run() -> tuple[dict[str, Any], dict[str, str]]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        product_agent.recovery_controller = ProductRecoveryController(product_agent)
+        product_agent.recovery_controller.bind_methods()
+        product_agent.runtime_recovery = {}
+        product_agent._runtime_recovery_context = {}
+        with patch.object(
+            ProductRecoveryController,
+            "_runtime_recovery_safety_live_root",
+            return_value=live_root,
+        ):
+            bridge_debug = product_agent._ensure_live_bridge_per_turn_debug_dir(
+                prepared_bridge_request
+            )
+            dirs = product_agent._recovery_safety_generation_dirs()
+            return bridge_debug, dirs
+
+    bridge_debug, dirs = asyncio.run(_run())
+
+    assert Path(str(bridge_debug.get("artifact_directory") or "")) == live_root / "1"
+    assert Path(str(dirs.get("recovery_safety_dir") or "")) == (
+        live_root / "1" / "recovery_safety"
+    )
+    assert Path(str(dirs.get("recovery_plan_dir") or "")) == (
+        live_root / "1" / "recovery_safety"
+    )
+    assert Path(str(dirs.get("recovery_safery_dir") or "")) == (
+        live_root / "1" / "recovery_safety"
+    )
+
+
+def test_case3_live_runtime_recovery_safety_generation_writes_prompt_response_and_logic_into_recovery_safety(
+    tmp_path: Path,
+) -> None:
+    live_root = tmp_path / "worked"
+
+    async def _run() -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        controller = ProductRecoveryController(product_agent)
+        product_agent.recovery_controller = controller
+        controller.bind_methods()
+        product_agent.runtime_recovery = {}
+        product_agent._runtime_recovery_context = {}
+        prepared_bridge_request["multi_turn_session_state"] = {
+            "accepted_outline_prefix": _case3_archived_transition_trace(),
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        with patch.object(
+            ProductRecoveryController,
+            "_runtime_recovery_safety_live_root",
+            return_value=live_root,
+        ):
+            dirs = controller._recovery_safety_generation_dirs()
+            payload = controller._build_recovery_safety_generation_payload(
+                prepared_bridge_request=prepared_bridge_request,
+                recovery_safety_scope_id="live_recovery_scope_case3",
+                request_id="live_recovery_safety_generate_case3",
+                recovery_safety_dir=str(dirs.get("recovery_safety_dir") or "").strip(),
+                recovery_plan_dir=str(dirs.get("recovery_plan_dir") or "").strip(),
+                recovery_safery_dir=str(dirs.get("recovery_safery_dir") or "").strip(),
+            )
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        return await generate_recovery_safety_bundle(product_agent, payload)
+
+    result = asyncio.run(_run())
+
+    recovery_safety_dir = live_root / "1" / "recovery_safety"
+    assert result["ok"] is True
+    assert Path(str(result.get("recovery_safety_dir") or "")) == recovery_safety_dir
+    assert (recovery_safety_dir / "recovery_safety_input_snapshot.json").is_file()
+    assert (recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt").is_file()
+    assert (recovery_safety_dir / "recovery_safety_grounding_response_latest.json").is_file()
+    assert (recovery_safety_dir / "recovery_safety_generation_result.json").is_file()
+    assert (recovery_safety_dir / "cca_safety_logic.json").is_file()
+    assert (recovery_safety_dir / "SAFE_2_dfa.dot").is_file()
+    assert not (recovery_safety_dir / "SAFE_1_dfa.dot").exists()
+    assert not (live_root / "1" / "recovery_final").exists()
+
+
+def test_case3_live_runtime_writes_recovery_final_bundle_from_exact_final_output(
+    tmp_path: Path,
+) -> None:
+    live_root = tmp_path / "worked"
+
+    async def _run() -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        controller = ProductRecoveryController(product_agent)
+        product_agent.recovery_controller = controller
+        controller.bind_methods()
+        product_agent.agent_name = "assembly_board-v1"
+        product_agent._utc_now_iso = staticmethod(
+            lambda: datetime.now(timezone.utc).isoformat()
+        )
+        product_agent._runtime_repair_max_attempts = 3
+        product_agent._runtime_bridge_mode = "pre_ran"
+        product_agent._runtime_bridge_validation_policy = "validated"
+        product_agent._runtime_bridge_archive_path = ""
+        product_agent._runtime_bridge_archive_label = ""
+        product_agent.runtime_recovery = {
+            "recovery_safety_status": "ready",
+            "recovery_safety_logic_json": str(
+                live_root / "1" / "recovery_safety" / "cca_safety_logic.json"
+            ),
+            "recovery_safety_dir": str(live_root / "1" / "recovery_safety"),
+            "recovery_plan_dir": str(live_root / "1" / "recovery_safety"),
+            "recovery_safery_dir": str(live_root / "1" / "recovery_safety"),
+            "bridge_debug": None,
+            "history": [],
+        }
+        product_agent._runtime_recovery_context = {}
+
+        recovery_safety_dir = live_root / "1" / "recovery_safety"
+        recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+        (recovery_safety_dir / "cca_safety_logic.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (recovery_safety_dir / "SAFE_2_dfa.dot").write_text(
+            "digraph G {}",
+            encoding="utf-8",
+        )
+        (recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt").write_text(
+            "prompt",
+            encoding="utf-8",
+        )
+        (recovery_safety_dir / "recovery_safety_grounding_response_latest.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        source_final_output_path = (
+            live_root / "1" / "multi_turn_turn09_final_output_response_20260424T010101.txt"
+        )
+        final_output_payload = {
+            "engine": "multi_turn",
+            "decision": "final_output_ready",
+            "final_output_stage": "primitive_program_ready",
+            "status": "paused_after_primitive_generation",
+            "current_phase": "finalize",
+            "accepted_trace_length": 4,
+            "transition_trace": _case3_archived_transition_trace(),
+            "accepted_primitive_program": [],
+            "executable_recovery_trace": [],
+            "primitive_program_complete": True,
+        }
+        source_final_output_path.write_text(
+            json.dumps(final_output_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        prepared_bridge_request["bridge_debug"] = {
+            "artifact_directory": str(live_root / "1"),
+            "multi_turn_session": {
+                "final_output": deepcopy(final_output_payload),
+                "turns": [
+                    {
+                        "turn_index": 9,
+                        "phase": "final_output",
+                        "final_output_stage": "primitive_program_ready",
+                        "response_artifact_path": str(source_final_output_path),
+                    }
+                ],
+            },
+            "final_output": deepcopy(final_output_payload),
+        }
+
+        with patch.object(
+            ProductRecoveryController,
+            "_runtime_recovery_safety_live_root",
+            return_value=live_root,
+        ):
+            bundle = controller._maybe_write_recovery_final_bundle(
+                prepared_bridge_request=prepared_bridge_request,
+            )
+        return bundle, prepared_bridge_request, deepcopy(product_agent.runtime_recovery)
+
+    bundle, prepared_bridge_request, runtime_recovery = asyncio.run(_run())
+
+    assert Path(str(bundle.get("recovery_final_dir") or "")) == live_root / "1" / "recovery_final"
+    assert Path(str(bundle.get("recovery_final_output_path") or "")).is_file()
+    assert str(bundle.get("recovery_safety_logic_json") or "").strip() == str(
+        (live_root / "1" / "recovery_final" / "cca_safety_logic.json").resolve()
+    )
+    assert (live_root / "1" / "recovery_final" / "cca_safety_logic.json").is_file()
+    assert (live_root / "1" / "recovery_final" / "SAFE_2_dfa.dot").is_file()
+    assert not (live_root / "1" / "recovery_final" / "recovery_safety_grounding_prompt_latest.txt").exists()
+    assert not (live_root / "1" / "recovery_final" / "recovery_safety_grounding_response_latest.json").exists()
+    assert str(runtime_recovery.get("recovery_safety_logic_json") or "").strip() == str(
+        (live_root / "1" / "recovery_final" / "cca_safety_logic.json").resolve()
+    )
+    assert str(runtime_recovery.get("recovery_safety_dir") or "").strip() == str(
+        live_root / "1" / "recovery_safety"
+    )
+    assert str(
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get(
+            "recovery_safety_logic_json"
+        )
+        or ""
+    ).strip() == str(bundle.get("recovery_safety_logic_json") or "")
+    assert str(
+        dict(prepared_bridge_request.get("bridge_debug") or {}).get(
+            "recovery_final_output_path"
+        )
+        or ""
+    ).strip() == str(bundle.get("recovery_final_output_path") or "")
+
+
+def test_case3_dispatch_params_stop_force_fast_path_after_bridge_session_resolves(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+    )
+
+    assert recovery["status"] == "validating"
+    product_agent.runtime_recovery["active_bridge_sequence"] = None
+
+    req_4_t1 = dict(planner._find_node("REQ_4_T1") or {})
+    params = product_agent._dispatch_params_for_task_node(req_4_t1)
+
+    assert "start_safety_mode" not in params
+
+
+def test_case3_archived_bridge_approval_fails_when_resume_acquire_entity_cannot_compile(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_resource_can_reach_location",
+        return_value=False,
+    ):
+        _, _, planner, _, recovery = _approve_case3_archived_bridge(tmp_path)
+
+    assert recovery["status"] == "human_required"
+    assert "could not be compiled" in str(recovery.get("message") or "")
+    assert not any(
+        isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+        for node in planner.nodes
+    )
+
+
+def test_case3_archived_bridge_approval_validated_dispatches_runtime_safety_check(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            validation_policy="validated",
+        )
+
+    assert recovery["status"] == "validating"
+    assert str(recovery.get("validation_policy") or "").strip() == "validated"
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
+
+
+def test_case3_archived_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            validation_policy="no_validation",
+        )
+
+    assert recovery["status"] == "validating"
+    assert str(recovery.get("validation_policy") or "").strip() == "no_validation"
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
+
+
+def test_case3_archived_bridge_approval_no_validation_dispatches_skip_revalidation_payload(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+    )
+
+    assert recovery["status"] == "validating"
+    dispatched_payloads = [
+        row
+        for row in list(getattr(product_agent, "dispatched_agent_messages", []) or [])
+        if str(dict(row.get("metadata") or {}).get("type") or "").strip()
+        == "plan_safety_check"
+    ]
+
+    assert dispatched_payloads
+    assert all(
+        not bool(dict(row.get("body") or {}).get("skip_revalidation"))
+        for row in dispatched_payloads
+    )
+
+
+def test_case3_no_validation_ignores_late_runtime_safety_result(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+    )
+
+    assert recovery["status"] == "validating"
+    product_agent._runtime_recovery_context = {}
+    product_agent.runtime_recovery["status"] = "idle"
+    violations = [
+        {
+            "violated_rule_id": "SAFE_2",
+            "witness_task_ids": ["REQ_2_T5"],
+        }
+    ]
+    with patch.object(
+        ProductRecoveryController,
+        "_run_des_runtime_recovery_attempt",
+        autospec=True,
+        side_effect=AssertionError("late runtime validation result should be ignored"),
+    ):
+        handled = asyncio.run(
+            product_agent._handle_runtime_plan_validation_result(
+                ok=False,
+                violations=violations,
+                request_id="runtime_plan_validation_stale_case3",
+            )
+        )
+
+    assert handled is True
+    assert str(product_agent.runtime_recovery.get("status") or "").strip() == "idle"
+    assert str(product_agent.runtime_recovery.get("validation_policy") or "").strip() == "no_validation"
+
+
+def test_case3_no_validation_terminal_bridge_completion_still_dispatches_runtime_plan_validation(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+    )
+
+    assert recovery["status"] == "validating"
+    bridge_nodes_by_outline_id = {
+        str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+    }
+    seq1 = bridge_nodes_by_outline_id["RECOVERY_SEQ1"]
+    seq2 = bridge_nodes_by_outline_id["RECOVERY_SEQ2"]
+    seq3 = bridge_nodes_by_outline_id["RECOVERY_SEQ3"]
+    seq4 = bridge_nodes_by_outline_id["RECOVERY_SEQ4"]
+    acquire_entity = next(
+        (
+            node
+            for node in planner.nodes
+            if isinstance(node, dict)
+            and str(node.get("repair_operator") or "").strip() == "acquire_entity"
+            and str(node.get("restores_event_id") or "").strip() == "REQ_1_T3"
+        ),
+        None,
+    )
+    assert isinstance(acquire_entity, dict)
+
+    for node in (seq1, seq2, seq3, seq4, acquire_entity):
+        node["status"] = "completed"
+
+    async def _inline_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
 
     with patch.object(
         ProductRecoveryController,
-        "_build_runtime_plant_state",
-        return_value={},
+        "_refresh_bridge_snapshot",
+        autospec=True,
+        return_value=deepcopy(dict(acquire_entity.get("projected_snapshot") or {})),
     ), patch.object(
         ProductRecoveryController,
-        "_event_guard_violations",
+        "_bridge_snapshot_mismatch",
+        autospec=True,
+        return_value="",
+    ), patch.object(
+        ProductRecoveryController,
+        "_bridge_part_entry_mismatch",
+        autospec=True,
+        return_value="",
+    ), patch.object(
+        ProductRecoveryController,
+        "_bridge_sequence_tail_task_ids",
+        autospec=True,
         return_value=[],
     ), patch.object(
         ProductRecoveryController,
-        "_record_runtime_des_trace",
+        "_system_coordination_state_with_bridge_snapshot",
+        autospec=True,
+        return_value={},
+    ), patch.object(
+        ProductRecoveryController,
+        "_bridge_continuation_disabled_frontier",
+        autospec=True,
+        return_value=[],
+    ), patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation, patch.object(
+        ProductRecoveryController,
+        "_persist_plan_snapshot",
+        autospec=True,
         return_value=None,
     ), patch.object(
         ProductRecoveryController,
-        "_try_compile_controllable_repair",
+        "_persist_product_state",
+        autospec=True,
         return_value=None,
     ), patch.object(
         ProductRecoveryController,
-        "_mark_runtime_des_human_required",
+        "_persist_resource_state",
+        autospec=True,
         return_value=None,
+    ), patch.object(
+        asyncio,
+        "to_thread",
+        new=_inline_to_thread,
     ):
-        next_node = product_agent._select_runtime_event()
+        handled = asyncio.run(
+            product_agent._handle_bridge_macro_ack(
+                task_node=acquire_entity,
+                status="completed",
+            )
+        )
 
-    assert next_node is None
+    mocked_validation.assert_called_once_with(product_agent.recovery_controller)
+    assert handled is True
+    assert str(product_agent.runtime_recovery.get("status") or "").strip() == "validating"
+    assert product_agent.runtime_recovery.get("active_bridge_sequence") is None
+    assert product_agent._runtime_recovery_blocks_execution() is True
+
+
+def test_case3_live_bridge_approval_validated_dispatches_runtime_safety_check(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            bridge_source="live_multi_turn",
+            bridge_mode="auto",
+            validation_policy="validated",
+        )
+
+    assert recovery["status"] == "validating"
+    assert str(recovery.get("validation_policy") or "").strip() == "validated"
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
+
+
+def test_case3_live_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            bridge_source="live_multi_turn",
+            bridge_mode="auto",
+            validation_policy="no_validation",
+        )
+
+    assert recovery["status"] == "validating"
+    assert str(recovery.get("validation_policy") or "").strip() == "no_validation"
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
+
+
+def test_case3_verification_only_bridge_approval_validated_dispatches_runtime_safety_check(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            bridge_source="live_multi_turn",
+            bridge_mode="auto",
+            validation_policy="validated",
+            verification_only=True,
+        )
+
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
+    assert execution_policy["verification_only"] is True
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
+
+
+def test_case3_verification_only_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
+            tmp_path,
+            bridge_source="live_multi_turn",
+            bridge_mode="auto",
+            validation_policy="no_validation",
+            verification_only=True,
+        )
+
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
+    assert execution_policy["verification_only"] is True
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_revalidation=False,
+    )
 
 
 def test_case3_archived_bridge_place_macros_use_snap_and_cartesian_retreat() -> None:
@@ -2567,13 +5489,13 @@ async def run_case3_bridge_dryrun(
     if normalized_reasoning_mode != "multi_turn":
         normalized_reasoning_mode = "multi_turn"
     normalized_focus = str(focus or "full").strip().lower()
-    if normalized_focus not in {"full", "primitive_generation"}:
-        raise ValueError("focus must be 'full' or 'primitive_generation'")
+    if normalized_focus not in {"full", "primitive_generation", "recovery_safety"}:
+        raise ValueError("focus must be 'full', 'primitive_generation', or 'recovery_safety'")
     checkpoint_path: Path | None = None
     resume_payload: dict[str, Any] | None = None
     if resume_checkpoint is not None:
         checkpoint_path, resume_payload = _load_resume_checkpoint(resume_checkpoint)
-    if normalized_focus == "primitive_generation":
+    if normalized_focus in {"primitive_generation", "recovery_safety"}:
         stop_before_primitive_generation = False
     _, product_agent, planner, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
         llm_model=llm_model,
@@ -2601,7 +5523,143 @@ async def run_case3_bridge_dryrun(
         prepared_bridge_request["bridge_debug"] = bridge_debug_seed
 
     proposal: dict[str, Any] | None = None
+    recovery_safety_generation: dict[str, Any] = {}
+    recovery_safety_status = "none"
+    recovery_safety_task: asyncio.Task[dict[str, Any]] | None = None
+
+    def _recovery_safety_started() -> bool:
+        return recovery_safety_task is not None or bool(recovery_safety_generation)
+
+    def _start_dryrun_recovery_safety_generation(
+        session_state: dict[str, Any] | None,
+    ) -> None:
+        nonlocal recovery_safety_status, recovery_safety_task
+        if _recovery_safety_started():
+            return
+        planner_bridge_debug = {}
+        if callable(getattr(planner, "get_last_bridge_debug", None)):
+            planner_bridge_debug = dict(planner.get_last_bridge_debug() or {})
+        resolved_session_state = _resolve_dryrun_multi_turn_session_state(
+            prepared_bridge_request,
+            multi_turn_session=session_state,
+            planner_bridge_debug=planner_bridge_debug,
+            require_outline_trace=True,
+        )
+        if not _dryrun_outline_approval_reached(resolved_session_state):
+            return
+        payload = _build_dryrun_recovery_safety_generation_payload(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=resolved_session_state,
+        )
+        if not payload:
+            return
+        Path(str(payload.get("recovery_safety_dir") or "")).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        recovery_safety_status = "generating"
+        recovery_safety_task = asyncio.create_task(
+            _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=deepcopy(resolved_session_state),
+            )
+        )
+
+    async def _collect_dryrun_recovery_safety_generation(
+        *,
+        wait: bool = False,
+    ) -> dict[str, Any]:
+        nonlocal recovery_safety_generation, recovery_safety_status, recovery_safety_task
+        task = recovery_safety_task
+        if task is None:
+            return recovery_safety_generation
+        if not wait and not task.done():
+            await asyncio.sleep(0)
+            if not task.done():
+                return recovery_safety_generation
+        recovery_safety_task = None
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            recovery_safety_status = "none"
+            raise
+        recovery_safety_generation = deepcopy(dict(result or {}))
+        recovery_safety_status = _dryrun_recovery_safety_status_from_result(
+            recovery_safety_generation
+        )
+        return recovery_safety_generation
+    if normalized_focus == "recovery_safety":
+        recovery_safety_session = (
+            deepcopy(resume_payload.get("session_state") or {})
+            if isinstance(resume_payload, dict)
+            else {}
+        )
+        if not _dryrun_outline_approval_reached(recovery_safety_session):
+            recovery_safety_session = _case3_archived_outline_ready_session()
+        prepared_bridge_request["multi_turn_session_state"] = deepcopy(
+            recovery_safety_session
+        )
+        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        bridge_debug["status"] = str(
+            recovery_safety_session.get("status") or "ready_for_primitive_generation"
+        ).strip()
+        bridge_debug["multi_turn_session"] = deepcopy(recovery_safety_session)
+        prepared_bridge_request["bridge_debug"] = bridge_debug
+        _start_dryrun_recovery_safety_generation(recovery_safety_session)
+        await _collect_dryrun_recovery_safety_generation(wait=True)
+
+        result: dict[str, Any] = {
+            "scenario": "case3_lg_slippage",
+            "reasoning_mode": normalized_reasoning_mode,
+            "status": str(bridge_debug.get("status") or ""),
+            "proposal": None,
+            "bridge_debug": deepcopy(bridge_debug),
+            "prepared_bridge_request": prepared_bridge_request,
+            "context_summary": deepcopy(prepared_bridge_request.get("context_summary") or {}),
+            "llm_input": deepcopy(prepared_bridge_request.get("llm_input") or {}),
+            "multi_turn_session": deepcopy(recovery_safety_session),
+            "turns": [
+                deepcopy(row)
+                for row in (recovery_safety_session.get("turns") or [])
+                if isinstance(row, dict)
+            ],
+            "turn_log": deepcopy(product_agent.turn_log),
+            "resume_checkpoint_source_path": str(checkpoint_path or ""),
+            "prompt_artifact_path": None,
+            "latest_prompt_artifact_path": None,
+            "response_artifact_path": None,
+            "latest_response_artifact_path": None,
+            "session_transcript_artifact_path": None,
+            "latest_session_transcript_artifact_path": None,
+            "resume_checkpoint_artifact_path": None,
+            "latest_resume_checkpoint_artifact_path": None,
+            "primitive_resume_checkpoint_artifact_path": None,
+            "latest_primitive_resume_checkpoint_artifact_path": None,
+            "recovery_safety_status": recovery_safety_status,
+        }
+        if recovery_safety_generation:
+            result["recovery_safety_generation"] = deepcopy(recovery_safety_generation)
+            result["recovery_safety_dir"] = str(
+                recovery_safety_generation.get("recovery_safety_dir") or ""
+            ).strip()
+            result["recovery_plan_dir"] = str(
+                recovery_safety_generation.get("recovery_plan_dir") or ""
+            ).strip()
+            result["recovery_safery_dir"] = str(
+                recovery_safety_generation.get("recovery_safery_dir") or ""
+            ).strip()
+            result["recovery_safety_logic_json"] = str(
+                recovery_safety_generation.get("recovery_safety_logic_json") or ""
+            ).strip()
+        if write_debug:
+            artifact_paths = _write_debug_artifacts(result)
+            result.update(artifact_paths)
+        return result
     if resume_payload is not None and str(resume_payload.get("kind") or "").strip() == "primitive_batch_resume_checkpoint":
+        resume_session_state = deepcopy(resume_payload.get("session_state") or {})
+        if _dryrun_outline_approval_reached(resume_session_state):
+            _start_dryrun_recovery_safety_generation(resume_session_state)
         resource_jid = str(resume_payload.get("resource_jid") or "").strip()
         resource_agents = multi_turn_mode._resource_agent_map(planner)
         llm_owner = resource_agents.get(resource_jid)
@@ -2619,6 +5677,12 @@ async def run_case3_bridge_dryrun(
             session_state=deepcopy(resume_payload.get("session_state") or {}),
         )
         primitive_session = deepcopy(primitive_result.get("session_state") or {})
+        await _collect_dryrun_recovery_safety_generation(wait=False)
+        if _dryrun_primitive_program_ready_payload(
+            prepared_bridge_request,
+            multi_turn_session=primitive_session,
+        ):
+            await _collect_dryrun_recovery_safety_generation(wait=True)
         latest_turn = {}
         if isinstance(primitive_session.get("turns"), list) and primitive_session["turns"]:
             latest_turn = dict(primitive_session["turns"][-1] or {})
@@ -2660,7 +5724,40 @@ async def run_case3_bridge_dryrun(
             "latest_primitive_resume_checkpoint_artifact_path": str(
                 latest_turn.get("latest_primitive_resume_checkpoint_artifact_path") or ""
             ) or None,
+            "recovery_safety_status": recovery_safety_status,
         }
+        if recovery_safety_generation:
+            result["recovery_safety_generation"] = deepcopy(recovery_safety_generation)
+            result["recovery_safety_dir"] = str(
+                recovery_safety_generation.get("recovery_safety_dir") or ""
+            ).strip()
+            result["recovery_plan_dir"] = str(
+                recovery_safety_generation.get("recovery_plan_dir") or ""
+            ).strip()
+            result["recovery_safery_dir"] = str(
+                recovery_safety_generation.get("recovery_safery_dir") or ""
+            ).strip()
+            result["recovery_safety_logic_json"] = str(
+                recovery_safety_generation.get("recovery_safety_logic_json") or ""
+            ).strip()
+        recovery_final = _write_dryrun_recovery_final_bundle(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=primitive_session,
+            recovery_safety_generation=recovery_safety_generation,
+        )
+        if recovery_final:
+            result["recovery_safety_logic_json"] = str(
+                recovery_final.get("recovery_safety_logic_json")
+                or recovery_final.get("recovery_final_safety_logic_json")
+                or result.get("recovery_safety_logic_json")
+                or ""
+            ).strip()
+            result["recovery_final_dir"] = str(
+                recovery_final.get("recovery_final_dir") or ""
+            ).strip()
+            result["recovery_final_output_path"] = str(
+                recovery_final.get("recovery_final_output_path") or ""
+            ).strip()
         if write_debug:
             artifact_paths = _write_debug_artifacts(result)
             result.update(artifact_paths)
@@ -2669,31 +5766,29 @@ async def run_case3_bridge_dryrun(
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
             execute_multi_turn_bridge as _resume_bridge,
         )
+        resume_session_state = deepcopy(resume_payload.get("session_state") or {})
+        _start_dryrun_recovery_safety_generation(resume_session_state)
         proposal = await _resume_bridge(
             planner,
             prepared_bridge_request,
-            session_state=deepcopy(resume_payload.get("session_state") or {}),
-        )
-    elif normalized_focus == "primitive_generation":
-        seed = deepcopy(
-            prepared_bridge_request.get("multi_turn_session_seed")
-            or multi_turn_mode.build_multi_turn_session_seed(prepared_bridge_request)
-        )
-        seed = _seed_case3_primitive_generation_focus(seed)
-        prepared_bridge_request["multi_turn_session_seed"] = deepcopy(seed)
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-            execute_multi_turn_bridge as _resume_bridge,
-        )
-        proposal = await _resume_bridge(
-            planner,
-            prepared_bridge_request,
-            session_state=seed,
+            session_state=resume_session_state,
         )
     else:
-        # First run: grounding + first outline task
-        if stop_before_primitive_generation:
+        # First run: stop at outline approval so dryrun can start recovery_safety
+        if normalized_reasoning_mode == "multi_turn":
             prepared_bridge_request["_stop_after_multi_turn_phase"] = "outline"
         proposal = await planner.execute_prepared_bridge_request(prepared_bridge_request)
+        _start_dryrun_recovery_safety_generation(
+            _resolve_dryrun_multi_turn_session_state(
+                prepared_bridge_request,
+                planner_bridge_debug=(
+                    dict(planner.get_last_bridge_debug() or {})
+                    if callable(getattr(planner, "get_last_bridge_debug", None))
+                    else {}
+                ),
+            )
+        )
+        await _collect_dryrun_recovery_safety_generation(wait=False)
         prepared_bridge_request["_stop_after_multi_turn_phase"] = ""
 
     effective_reasoning_mode = str(
@@ -2716,7 +5811,16 @@ async def run_case3_bridge_dryrun(
         )
         post_validation_resume_budget = 0
         for _resume_i in range(max_resume):
-            ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+            ss = _resolve_dryrun_multi_turn_session_state(
+                prepared_bridge_request,
+                planner_bridge_debug=(
+                    dict(planner.get_last_bridge_debug() or {})
+                    if callable(getattr(planner, "get_last_bridge_debug", None))
+                    else {}
+                ),
+            )
+            _start_dryrun_recovery_safety_generation(ss)
+            await _collect_dryrun_recovery_safety_generation(wait=False)
             current_status = str(ss.get("status") or "")
             if current_status in {
                 "paused_after_primitive_stuck",
@@ -2782,9 +5886,17 @@ async def run_case3_bridge_dryrun(
             proposal = await _resume_bridge(
                 planner, prepared_bridge_request, session_state=ss,
             )
+            await _collect_dryrun_recovery_safety_generation(wait=False)
             if post_validation_resume_budget > 0:
                 post_validation_resume_budget -= 1
-                next_ss = prepared_bridge_request.get("multi_turn_session_state") or {}
+                next_ss = _resolve_dryrun_multi_turn_session_state(
+                    prepared_bridge_request,
+                    planner_bridge_debug=(
+                        dict(planner.get_last_bridge_debug() or {})
+                        if callable(getattr(planner, "get_last_bridge_debug", None))
+                        else {}
+                    ),
+                )
                 if (
                     post_validation_resume_budget == 0
                     and next_ss.get("status") in {
@@ -2803,6 +5915,18 @@ async def run_case3_bridge_dryrun(
     multi_turn_session = dict((bridge_debug or {}).get("multi_turn_session") or {})
     turns = list(multi_turn_session.get("turns") or [])
     latest_turn = dict(turns[-1] or {}) if turns else {}
+
+    if stop_before_primitive_generation and _dryrun_outline_approval_reached(
+        multi_turn_session
+    ):
+        await _collect_dryrun_recovery_safety_generation(wait=True)
+    elif _dryrun_primitive_program_ready_payload(
+        prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+    ):
+        await _collect_dryrun_recovery_safety_generation(wait=True)
+    else:
+        await _collect_dryrun_recovery_safety_generation(wait=False)
 
     result: dict[str, Any] = {
         "scenario": "case3_lg_slippage",
@@ -2833,7 +5957,41 @@ async def run_case3_bridge_dryrun(
         ) or None,
         "primitive_resume_checkpoint_artifact_path": None,
         "latest_primitive_resume_checkpoint_artifact_path": None,
+        "recovery_safety_status": recovery_safety_status,
     }
+
+    if recovery_safety_generation:
+        result["recovery_safety_generation"] = deepcopy(recovery_safety_generation)
+        result["recovery_safety_dir"] = str(
+            recovery_safety_generation.get("recovery_safety_dir") or ""
+        ).strip()
+        result["recovery_plan_dir"] = str(
+            recovery_safety_generation.get("recovery_plan_dir") or ""
+        ).strip()
+        result["recovery_safery_dir"] = str(
+            recovery_safety_generation.get("recovery_safery_dir") or ""
+        ).strip()
+        result["recovery_safety_logic_json"] = str(
+            recovery_safety_generation.get("recovery_safety_logic_json") or ""
+        ).strip()
+    recovery_final = _write_dryrun_recovery_final_bundle(
+        prepared_bridge_request=prepared_bridge_request,
+        multi_turn_session=multi_turn_session,
+        recovery_safety_generation=recovery_safety_generation,
+    )
+    if recovery_final:
+        result["recovery_safety_logic_json"] = str(
+            recovery_final.get("recovery_safety_logic_json")
+            or recovery_final.get("recovery_final_safety_logic_json")
+            or result.get("recovery_safety_logic_json")
+            or ""
+        ).strip()
+        result["recovery_final_dir"] = str(
+            recovery_final.get("recovery_final_dir") or ""
+        ).strip()
+        result["recovery_final_output_path"] = str(
+            recovery_final.get("recovery_final_output_path") or ""
+        ).strip()
 
     if write_debug:
         artifact_paths = _write_debug_artifacts(result)
@@ -2966,6 +6124,13 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
     latest_resume_checkpoint_artifact_path = result.get("latest_resume_checkpoint_artifact_path")
     primitive_resume_checkpoint_artifact_path = result.get("primitive_resume_checkpoint_artifact_path")
     latest_primitive_resume_checkpoint_artifact_path = result.get("latest_primitive_resume_checkpoint_artifact_path")
+    recovery_safety_dir = result.get("recovery_safety_dir")
+    recovery_plan_dir = result.get("recovery_plan_dir")
+    recovery_safery_dir = result.get("recovery_safery_dir")
+    recovery_safety_dir = recovery_safety_dir or recovery_safery_dir or recovery_plan_dir
+    recovery_safety_logic_json = result.get("recovery_safety_logic_json")
+    recovery_final_dir = result.get("recovery_final_dir")
+    recovery_final_output_path = result.get("recovery_final_output_path")
     if not any(
         (
             resume_checkpoint_source_path,
@@ -2979,6 +6144,12 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
             latest_resume_checkpoint_artifact_path,
             primitive_resume_checkpoint_artifact_path,
             latest_primitive_resume_checkpoint_artifact_path,
+            recovery_safety_dir,
+            recovery_plan_dir,
+            recovery_safery_dir,
+            recovery_safety_logic_json,
+            recovery_final_dir,
+            recovery_final_output_path,
         )
     ):
         return
@@ -3005,6 +6176,14 @@ def _print_debug_artifact_paths(result: dict[str, Any]) -> None:
         print("Primitive checkpoint:     ", primitive_resume_checkpoint_artifact_path)
     if latest_primitive_resume_checkpoint_artifact_path:
         print("Latest primitive checkpoint:", latest_primitive_resume_checkpoint_artifact_path)
+    if recovery_safety_dir:
+        print("Recovery safety dir:      ", recovery_safety_dir)
+    if recovery_safety_logic_json:
+        print("Recovery safety logic:    ", recovery_safety_logic_json)
+    if recovery_final_dir:
+        print("Recovery final dir:       ", recovery_final_dir)
+    if recovery_final_output_path:
+        print("Recovery final output:    ", recovery_final_output_path)
 
 
 if __name__ == "__main__":
@@ -3021,8 +6200,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--focus",
         default="full",
-        choices=("full", "primitive_generation"),
-        help="Run the full harness or start directly from the known Case 3 primitive-generation outline",
+        choices=("full", "primitive_generation", "recovery_safety"),
+        help=(
+            "Run the full harness, start directly from the known Case 3 "
+            "primitive-generation outline, or run only recovery_safety from that outline"
+        ),
     )
     parser.add_argument(
         "--stop-before-primitive-generation",

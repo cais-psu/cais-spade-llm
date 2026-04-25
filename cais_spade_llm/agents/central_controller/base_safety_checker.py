@@ -57,10 +57,106 @@ class BaseSafetyChecker:
     def _task_product_name(params: dict[str, Any]) -> str:
         product = (
             params.get("part_name")
+            or params.get("part")
             or params.get("product")
             or "any"
         )
         return str(product).lower()
+
+    @staticmethod
+    def _fixed_state_fields() -> tuple[str, ...]:
+        return (
+            "resource_state",
+            "resource_location",
+            "held_part",
+            "part_state",
+            "part_location",
+        )
+
+    @classmethod
+    def _task_event_tokens(cls, function_name: str, params: dict[str, Any]) -> set[str]:
+        tokens = {
+            str(function_name or "").strip(),
+            str(params.get("event_name") or "").strip(),
+            str(params.get("function") or "").strip(),
+            str(params.get("function_name") or "").strip(),
+        }
+        return {token for token in tokens if token}
+
+    @classmethod
+    def _task_id_tokens(cls, params: dict[str, Any]) -> set[str]:
+        tokens = {
+            str(params.get("task_id") or "").strip(),
+            str(params.get("bridge_outline_id") or "").strip(),
+            str(params.get("outline_id") or "").strip(),
+            str(params.get("llm_outline_id") or "").strip(),
+        }
+        return {token for token in tokens if token}
+
+    @classmethod
+    def _state_surface_from_runtime(
+        cls,
+        current_state: str,
+        params: dict[str, Any],
+    ) -> dict[str, str]:
+        surface: dict[str, str] = {}
+        current_state_token = str(current_state or "").strip()
+        if current_state_token:
+            surface["resource_state"] = current_state_token
+        for source in (
+            params,
+            params.get("projected_outline_state"),
+            params.get("expected_end_state"),
+            params.get("outline_expected_start_state"),
+        ):
+            if not isinstance(source, dict):
+                continue
+            for field in cls._fixed_state_fields():
+                if field not in source:
+                    continue
+                value = cls._context_scalar_text(source.get(field))
+                if value:
+                    surface[field] = value
+        return surface
+
+    def _state_surface_from_prediction(self, params: dict[str, Any]) -> dict[str, str]:
+        surface: dict[str, str] = {}
+        for source in (
+            params.get("expected_end_state"),
+            params.get("projected_outline_state"),
+        ):
+            if not isinstance(source, dict):
+                continue
+            for field in self._fixed_state_fields():
+                if field not in source:
+                    continue
+                value = self._context_scalar_text(source.get(field))
+                if value:
+                    surface[field] = value
+        return surface
+
+    @staticmethod
+    def _state_surface_tokens(surface: dict[str, str]) -> set[str]:
+        return {
+            f"{str(field).strip()}={str(value).strip()}"
+            for field, value in (surface or {}).items()
+            if str(field).strip() and str(value).strip()
+        }
+
+    @classmethod
+    def _ap_requires_source_task_ids(
+        cls,
+        ap: dict[str, Any],
+        params: dict[str, Any],
+    ) -> bool:
+        source_task_ids = {
+            str(token).strip()
+            for token in (ap.get("source_task_ids") or [])
+            if str(token).strip()
+        }
+        if not source_task_ids:
+            return True
+        return bool(source_task_ids & cls._task_id_tokens(params))
 
     @staticmethod
     def _parse_ap_descriptor(full: str) -> Optional[Dict[str, str]]:
@@ -120,6 +216,7 @@ class BaseSafetyChecker:
 
         # Task-level fields
         task_product = self._task_product_name(params)
+        event_tokens = self._task_event_tokens(function_name, params)
 
         # Normalize all param values to strings for comparison
         param_value_strings = {
@@ -153,11 +250,20 @@ class BaseSafetyChecker:
                     continue
 
                 # 2) Event / function name match
-                if ap_event != function_name:
+                expected_event = str(
+                    ap.get("event_name")
+                    or ap.get("function")
+                    or ap_event
+                    or ""
+                ).strip()
+                if expected_event not in event_tokens:
                     continue
 
                 # 3) Product match (MCP vs SG, etc.)
                 if ap_product != "any" and str(ap_product).lower() != task_product:
+                    continue
+
+                if not self._ap_requires_source_task_ids(ap, params):
                     continue
 
                 # 4) Context match (supports composite serialized context segments)
@@ -183,9 +289,21 @@ class BaseSafetyChecker:
           - only matches ap_state/sp prefixes
           - compares the AP event/state segment against current_state
         """
+        surface = self._state_surface_from_runtime(current_state, params)
+        return self._map_state_surface_to_aps(resource_jid, surface, params)
+
+    def _map_state_surface_to_aps(
+        self,
+        resource_jid: str,
+        surface: dict[str, str],
+        params: dict[str, Any],
+    ) -> List[str]:
+        """Maps a structured state surface to matching state AP labels."""
         labels: List[str] = []
         res_short = self._resource_short_name(resource_jid)
         task_product = self._task_product_name(params)
+        state_tokens = self._state_surface_tokens(surface)
+        current_state = str(surface.get("resource_state") or "").strip()
 
         param_value_strings = {
             self._context_scalar_text(v) for v in params.values() if v is not None
@@ -214,10 +332,20 @@ class BaseSafetyChecker:
                 if ap_resource not in ("any", "robot") and ap_resource != res_short:
                     continue
 
-                if ap_state != current_state:
+                field_name = str(ap.get("field") or "").strip()
+                field_value = str(ap.get("value") or "").strip()
+                expected_state = f"{field_name}={field_value}" if field_name and field_value else str(ap_state)
+                if "=" in expected_state:
+                    token = expected_state.strip()
+                    if token not in state_tokens:
+                        continue
+                elif ap_state != current_state:
                     continue
 
                 if ap_product != "any" and str(ap_product).lower() != task_product:
+                    continue
+
+                if not self._ap_requires_source_task_ids(ap, params):
                     continue
 
                 if not self._context_matches(
@@ -286,6 +414,11 @@ class BaseSafetyChecker:
             if not out_state or out_state.lower() == "any":
                 continue
             predicted.extend(self._map_state_to_aps(resource_jid, out_state, params))
+        projected_surface = self._state_surface_from_prediction(params)
+        if projected_surface:
+            predicted.extend(
+                self._map_state_surface_to_aps(resource_jid, projected_surface, params)
+            )
         deduped: List[str] = []
         seen: set[str] = set()
         for label in predicted:

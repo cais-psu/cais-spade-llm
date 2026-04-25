@@ -5014,8 +5014,10 @@ def build_multi_turn_bridge_proposal(
         macro_tasks.append(
             {
                 "outline_id": outline_id,
+                "llm_outline_id": str(transition_event.get("llm_outline_id") or "").strip(),
                 "predecessors": predecessors,
                 "resource_jid": resource_jid,
+                "event_name": str(transition_event.get("event_name") or "").strip(),
                 "macro_name": str(
                     primitive_row.get("event_name")
                     or transition_event.get("action_name")
@@ -5027,10 +5029,12 @@ def build_multi_turn_bridge_proposal(
                     or description
                     or ""
                 ).strip(),
-                "expected_start_state": str(
-                    dict(transition_event.get("expected_start_state") or {}).get("resource_state")
-                    or ""
-                ).strip(),
+                "expected_start_state": deepcopy(
+                    transition_event.get("expected_start_state") or {}
+                ),
+                "expected_end_state": deepcopy(
+                    transition_event.get("expected_end_state") or {}
+                ),
                 "expected_snapshot": expected_snapshot_from_bridge_snapshot(
                     dict(start_snapshot or {}),
                     resource_type=str(

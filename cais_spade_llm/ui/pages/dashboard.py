@@ -29,8 +29,8 @@ _BRIDGE_MODE_OPTIONS = {
     "pre_ran": "Pre-ran",
 }
 _BRIDGE_VALIDATION_POLICY_OPTIONS = {
-    "validated": "Validated",
-    "no_validation": "No Validation",
+    "validated": "Recovery Safety Check",
+    "no_validation": "No Recovery Safety Check",
 }
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ def render(bridge: SystemBridge) -> None:
                         str(runtime_bridge_settings.get("validation_policy") or "validated").strip()
                         or "validated"
                     ),
-                    label="Pre-ran Validation",
+                    label="Recovery Safety Mode",
                 ).classes("w-52")
                 bridge_archive_select = ui.select(
                     {},
@@ -244,18 +244,12 @@ def render(bridge: SystemBridge) -> None:
                         current_value = str(bridge_archive_select.value or "").strip()
                         if current_value != str(resolved_value or ""):
                             bridge_archive_select.value = resolved_value
-                        bridge_validation_select.set_enabled(selected_mode == "pre_ran")
-                        bridge_validation_select.style(
-                            "display:block;" if selected_mode == "pre_ran" else "display:none;"
-                        )
+                        bridge_validation_select.set_enabled(True)
+                        bridge_validation_select.style("display:block;")
                         bridge_archive_select.set_enabled(selected_mode == "pre_ran")
                         bridge_mode_status.text = (
                             f"Runtime bridge mode: {_BRIDGE_MODE_OPTIONS.get(selected_mode, selected_mode)}"
-                            + (
-                                f" ({_BRIDGE_VALIDATION_POLICY_OPTIONS.get(validation_policy, validation_policy.replace('_', ' '))})."
-                                if selected_mode == "pre_ran"
-                                else "."
-                            )
+                            + f" ({_BRIDGE_VALIDATION_POLICY_OPTIONS.get(validation_policy, validation_policy.replace('_', ' '))})."
                         )
                         if fixture_replay_path:
                             bridge_fixture_status.text = (
@@ -283,18 +277,18 @@ def render(bridge: SystemBridge) -> None:
                                 bridge_archive_hint.text = (
                                     f"Selected archived bridge run: {label}{extra}. "
                                     + (
-                                        "It will auto-load, validate, and then execute after a bridge-required failure."
+                                        "It will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep Recovery Safety Check enabled for recovery_safety runtime enforcement."
                                         if validation_policy == "validated"
-                                        else "It will auto-load and execute immediately after a bridge-required failure without runtime plan validation."
+                                        else "It will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep No Recovery Safety Check for recovery_safety runtime enforcement."
                                     )
                                 )
                             elif bridge_archive_options:
                                 bridge_archive_hint.text = (
                                     f"{len(bridge_archive_options)} archived primitive-program bridge outputs are available. "
                                     + (
-                                        "Choose one to enable validated pre-ran auto-start after a bridge-required failure."
+                                        "Choose one to enable archived auto-start with Recovery Safety Check enabled for recovery_safety runtime enforcement."
                                         if validation_policy == "validated"
-                                        else "Choose one to enable no-validation pre-ran auto-start after a bridge-required failure."
+                                        else "Choose one to enable archived auto-start with No Recovery Safety Check for recovery_safety runtime enforcement."
                                     )
                                 )
                             else:
@@ -303,7 +297,7 @@ def render(bridge: SystemBridge) -> None:
                                 )
                         else:
                             bridge_archive_hint.text = (
-                                "Archived Bridge Run is enabled only in Pre-ran mode."
+                                "Recovery Safety Mode controls whether recovery_safety runtime enforcement runs for tasks carrying recovery_safety_scope_id after the approved bridge passes ordinary CCA runtime plan validation. Archived Bridge Run is enabled only in Pre-ran mode."
                             )
                     finally:
                         bridge_control_refreshing["value"] = False
@@ -1804,10 +1798,9 @@ def render(bridge: SystemBridge) -> None:
                                     ui.badge(
                                         f"Mode {_bridge_mode_label(bridge_mode)}"
                                     ).props("color=blue-grey")
-                                    if bridge_mode == "pre_ran":
-                                        ui.badge(
-                                            f"Validation {_bridge_validation_policy_label(validation_policy)}"
-                                        ).props("color=deep-orange")
+                                    ui.badge(
+                                        f"Recovery Safety {_bridge_validation_policy_label(validation_policy)}"
+                                    ).props("color=deep-orange")
                                     if bridge_stage not in {"", "none"}:
                                         ui.badge(
                                             f"Stage {bridge_stage.replace('_', ' ')}"
@@ -1820,10 +1813,9 @@ def render(bridge: SystemBridge) -> None:
                             with ui.row().classes("items-center gap-2 flex-wrap text-xs text-slate-600"):
                                 ui.label(f"Trigger: {str(recovery.get('trigger', '') or 'n/a')}")
                                 ui.label(f"Failed task: {str(recovery.get('failed_task_id', '') or 'n/a')}")
-                                if bridge_mode == "pre_ran":
-                                    ui.label(
-                                        f"Validation: {_bridge_validation_policy_label(validation_policy)}"
-                                    )
+                                ui.label(
+                                    f"Recovery Safety: {_bridge_validation_policy_label(validation_policy)}"
+                                )
                                 if selected_archive_label:
                                     ui.label(f"Archived run: {selected_archive_label}")
                                 elif bridge_mode == "pre_ran" and selected_archive_path:
@@ -1867,9 +1859,9 @@ def render(bridge: SystemBridge) -> None:
                                 ).strip()
                                 if archive_path:
                                     status_line += f" | Archive source: {archive_path}"
-                                if bridge_mode == "pre_ran" and sequence_validation_policy:
+                                if sequence_validation_policy:
                                     status_line += (
-                                        " | Validation: "
+                                        " | Recovery Safety: "
                                         f"{_bridge_validation_policy_label(sequence_validation_policy)}"
                                     )
                                 ui.label(status_line).classes("text-xs text-slate-600 mt-1")
@@ -1899,9 +1891,9 @@ def render(bridge: SystemBridge) -> None:
                                 if bridge_mode == "pre_ran":
                                     ui.label(
                                         (
-                                            "Pre-ran mode is selected. If a valid archived run is selected, it will auto-load, validate, and then execute after a bridge-required failure. Use the button below only to reload it manually while paused."
+                                            "Pre-ran mode is selected. If a valid archived run is selected, it will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep Recovery Safety Check enabled for recovery_safety runtime enforcement. Use the button below only to reload it manually while paused."
                                             if validation_policy == "validated"
-                                            else "Pre-ran mode is selected with no runtime plan validation. If a valid archived run is selected, it will auto-load and execute immediately after a bridge-required failure. Use the button below only to reload it manually while paused."
+                                            else "Pre-ran mode is selected with No Recovery Safety Check. If a valid archived run is selected, it will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep recovery_safety runtime enforcement disabled. Use the button below only to reload it manually while paused."
                                         )
                                     ).classes("text-xs text-orange-700 mt-2")
                                     if selected_archive_label:

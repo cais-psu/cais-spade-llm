@@ -39,6 +39,7 @@ class ProcessRecoveryPlanner:
         '_path_to_recovery_tasks',
         '_gate_tasks_after_recovery_tail',
         '_splice_runtime_des_repair_before_task',
+        '_splice_bridge_chain_before_task',
         'apply_bridge_macro_proposal',
         '_apply_primitive_bridge_proposal',
         'replan_with_feedback_offline',
@@ -705,6 +706,7 @@ class ProcessRecoveryPlanner:
         modified_tasks: list[dict[str, Any]],
         *,
         tail_task_id: str,
+        tail_task_ids_by_resource: dict[str, str] | None = None,
         before_task_ids: list[str] | None = None,
         deleted_task_ids: list[str] | None = None,
         change_prefix: str = "DES recovery",
@@ -764,6 +766,12 @@ class ProcessRecoveryPlanner:
 
         for blocked_task_id in sorted(ordered_task_ids, key=_sort_key):
             existing = existing_by_id[blocked_task_id]
+            blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
+            resource_tail_task_id = str(
+                dict(tail_task_ids_by_resource or {}).get(blocked_resource_jid) or tail_task_id
+            ).strip()
+            if not resource_tail_task_id:
+                continue
             existing_preds = [
                 str(pred).strip()
                 for pred in (existing.get("predecessors") or [])
@@ -774,14 +782,13 @@ class ProcessRecoveryPlanner:
             preds = (
                 list(existing_preds)
                 if gated_by_resume_chain
-                else list(dict.fromkeys(existing_preds + [tail_task_id]))
+                else list(dict.fromkeys(existing_preds + [resource_tail_task_id]))
             )
-            blocked_resource_jid = str(existing.get("resource_jid", "")).strip()
             mod: dict[str, Any] = {
                 "id": blocked_task_id,
                 "predecessors": preds,
                 "change_reason": (
-                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {tail_task_id}"
+                    f"MODIFICATION: {change_prefix} — gate {blocked_task_id} after {resource_tail_task_id}"
                 ),
             }
             if blocked_resource_jid in next_sequence_index_by_resource:
@@ -1050,11 +1057,259 @@ class ProcessRecoveryPlanner:
                 new_sequence_index,
             )
 
+    def _splice_bridge_chain_before_task(
+        self,
+        modified_tasks: list[dict[str, Any]],
+        *,
+        repair_tasks: list[dict[str, Any]],
+        target_task_id: str,
+        change_prefix: str = "Approved bridge recovery",
+    ) -> None:
+        if not repair_tasks:
+            raise ValueError("repair task chain is required")
+
+        first_repair_task = deepcopy(repair_tasks[0])
+        first_repair_task_id = str(first_repair_task.get("id") or "").strip()
+        tail_task_id = str((repair_tasks[-1] or {}).get("id") or "").strip()
+        target_task_id = str(target_task_id or "").strip()
+        if not first_repair_task_id:
+            raise ValueError("first bridge task id is required")
+        if not tail_task_id:
+            raise ValueError("bridge tail task id is required")
+        if not target_task_id:
+            raise ValueError("target task id is required")
+
+        target_task = self._find_node(target_task_id)
+        if not isinstance(target_task, dict):
+            raise ValueError(
+                f"target task '{target_task_id}' was not found for bridge splice"
+            )
+
+        repair_resource_jid = str(first_repair_task.get("resource_jid") or "").strip()
+        target_resource_jid = str(target_task.get("resource_jid") or "").strip()
+        if not repair_resource_jid:
+            raise ValueError(
+                f"bridge task '{first_repair_task_id}' is missing resource_jid"
+            )
+        if not target_resource_jid:
+            raise ValueError(
+                f"target task '{target_task_id}' is missing resource_jid"
+            )
+        if repair_resource_jid != target_resource_jid:
+            raise ValueError(
+                f"bridge task '{first_repair_task_id}' resource '{repair_resource_jid}' "
+                f"does not match target task '{target_task_id}' resource '{target_resource_jid}'"
+            )
+
+        try:
+            target_sequence_index = int(target_task.get("sequence_index") or 0)
+        except (TypeError, ValueError):
+            target_sequence_index = 0
+
+        target_predecessors = [
+            str(pred).strip()
+            for pred in (target_task.get("predecessors") or [])
+            if str(pred or "").strip()
+        ]
+        live_target_predecessors: list[str] = []
+        skipped_completed_predecessors: list[str] = []
+        for predecessor_task_id in target_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            predecessor_status = (
+                str((predecessor_task or {}).get("status") or "").strip().lower()
+            )
+            if predecessor_task is not None and predecessor_status in {"completed", "finished"}:
+                skipped_completed_predecessors.append(predecessor_task_id)
+                continue
+            live_target_predecessors.append(predecessor_task_id)
+
+        target_requirement_id = str(target_task.get("requirement_id") or "").strip()
+        first_existing_predecessors = [
+            str(pred).strip()
+            for pred in (first_repair_task.get("predecessors") or [])
+            if str(pred or "").strip()
+        ]
+        first_repair_task["predecessors"] = list(
+            dict.fromkeys(live_target_predecessors + first_existing_predecessors)
+        )
+        first_repair_task["sequence_index"] = target_sequence_index
+        if target_requirement_id:
+            first_repair_task["requirement_id"] = target_requirement_id
+        first_repair_task["change_reason"] = (
+            f"INSERTION: {change_prefix} — splice bridge chain starting at "
+            f"{first_repair_task_id} before {target_task_id}"
+        )
+        modified_tasks.append(first_repair_task)
+
+        for index, repair_task in enumerate(repair_tasks[1:], start=1):
+            repair_patch = deepcopy(repair_task)
+            repair_patch["sequence_index"] = target_sequence_index + index
+            if target_requirement_id:
+                repair_patch["requirement_id"] = target_requirement_id
+            modified_tasks.append(repair_patch)
+
+        predecessor_rewire_logs: list[tuple[str, list[str], list[str]]] = []
+        for predecessor_task_id in live_target_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            if not isinstance(predecessor_task, dict):
+                continue
+            old_successors = [
+                str(succ).strip()
+                for succ in (predecessor_task.get("successors") or [])
+                if str(succ or "").strip()
+            ]
+            new_successors = [
+                succ for succ in old_successors if succ != target_task_id
+            ]
+            if first_repair_task_id not in new_successors:
+                new_successors.append(first_repair_task_id)
+            modified_tasks.append(
+                {
+                    "id": predecessor_task_id,
+                    "successors": new_successors,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — reroute {predecessor_task_id} "
+                        f"through {first_repair_task_id} before {target_task_id}"
+                    ),
+                }
+            )
+            predecessor_rewire_logs.append(
+                (predecessor_task_id, old_successors, list(new_successors))
+            )
+
+        historical_edge_removal_logs: list[tuple[str, list[str], list[str]]] = []
+        for predecessor_task_id in skipped_completed_predecessors:
+            predecessor_task = self._find_node(predecessor_task_id)
+            if not isinstance(predecessor_task, dict):
+                continue
+            old_successors = [
+                str(succ).strip()
+                for succ in (predecessor_task.get("successors") or [])
+                if str(succ or "").strip()
+            ]
+            if target_task_id not in old_successors:
+                continue
+            new_successors = [
+                succ for succ in old_successors if succ != target_task_id
+            ]
+            modified_tasks.append(
+                {
+                    "id": predecessor_task_id,
+                    "successors": new_successors,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — remove historical edge "
+                        f"{predecessor_task_id} -> {target_task_id} after inserting {first_repair_task_id}"
+                    ),
+                }
+            )
+            historical_edge_removal_logs.append(
+                (predecessor_task_id, old_successors, list(new_successors))
+            )
+
+        target_sort_key = (target_sequence_index, target_task_id)
+        tasks_to_shift: list[tuple[tuple[int, str], dict[str, Any]]] = []
+        for node in self.nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id") or "").strip()
+            if not node_id or node_id == target_task_id:
+                continue
+            if str(node.get("resource_jid") or "").strip() != target_resource_jid:
+                continue
+            try:
+                node_sequence_index = int(node.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                node_sequence_index = 0
+            status = str(node.get("status") or "").strip().lower()
+            node_sort_key = (node_sequence_index, node_id)
+            if status in {"pending", "blocked"} and node_sort_key >= target_sort_key:
+                tasks_to_shift.append((node_sort_key, node))
+
+        tasks_to_shift.sort(key=lambda row: row[0])
+        next_sequence_index = target_sequence_index + len(repair_tasks)
+        sequence_shift_logs: list[tuple[str, int, int]] = []
+        target_patch: dict[str, Any] = {
+            "id": target_task_id,
+            "sequence_index": next_sequence_index,
+            "predecessors": [tail_task_id],
+            "change_reason": (
+                f"MODIFICATION: {change_prefix} — gate {target_task_id} after {tail_task_id}"
+            ),
+        }
+        modified_tasks.append(target_patch)
+        sequence_shift_logs.append(
+            (
+                target_task_id,
+                target_sequence_index,
+                next_sequence_index,
+            )
+        )
+        next_sequence_index += 1
+
+        for _sort_key, node in tasks_to_shift:
+            node_id = str(node.get("id") or "").strip()
+            if node_id == target_task_id:
+                continue
+            try:
+                old_sequence_index = int(node.get("sequence_index") or 0)
+            except (TypeError, ValueError):
+                old_sequence_index = 0
+            modified_tasks.append(
+                {
+                    "id": node_id,
+                    "sequence_index": next_sequence_index,
+                    "change_reason": (
+                        f"MODIFICATION: {change_prefix} — shift {node_id} after inserted bridge tail {tail_task_id}"
+                    ),
+                }
+            )
+            sequence_shift_logs.append(
+                (node_id, old_sequence_index, next_sequence_index)
+            )
+            next_sequence_index += 1
+
+        self.logger.info(
+            "[Planner] %s spliced bridge chain [%s -> %s] on %s before %s",
+            change_prefix,
+            first_repair_task_id,
+            tail_task_id,
+            target_resource_jid,
+            target_task_id,
+        )
+        for predecessor_task_id, old_successors, new_successors in predecessor_rewire_logs:
+            self.logger.info(
+                "[Planner] %s rewired predecessor %s successors: %s -> %s",
+                change_prefix,
+                predecessor_task_id,
+                old_successors,
+                new_successors,
+            )
+        for predecessor_task_id, old_successors, new_successors in historical_edge_removal_logs:
+            self.logger.info(
+                "[Planner] %s removed historical successor edge from completed predecessor %s: %s -> %s",
+                change_prefix,
+                predecessor_task_id,
+                old_successors,
+                new_successors,
+            )
+        for node_id, old_sequence_index, new_sequence_index in sequence_shift_logs:
+            if old_sequence_index == new_sequence_index:
+                continue
+            self.logger.info(
+                "[Planner] %s shifted %s on %s: sequence_index %d -> %d",
+                change_prefix,
+                node_id,
+                target_resource_jid,
+                old_sequence_index,
+                new_sequence_index,
+            )
+
     def apply_bridge_macro_proposal(
         self,
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
+        splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         if not isinstance(proposal, dict):
             raise ValueError("bridge proposal is missing")
@@ -1065,6 +1320,7 @@ class ProcessRecoveryPlanner:
             return self._apply_primitive_bridge_proposal(
                 proposal,
                 anchor_task_id=anchor_task_id,
+                splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
             )
 
         # Legacy catalog-function-based proposal: compile into multiple task nodes.
@@ -1094,14 +1350,45 @@ class ProcessRecoveryPlanner:
             change_prefix="Approved bridge recovery",
             macro_name=proposal_name,
         )
-        self._apply_replan_patch(tasks)
-        return tasks
+        task_groups_by_resource: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            resource_jid = str(task.get("resource_jid") or "").strip()
+            if resource_jid:
+                task_groups_by_resource.setdefault(resource_jid, []).append(task)
+        patch_rows: list[dict[str, Any]] = []
+        spliced_task_ids: set[str] = set()
+        for resource_jid, target_task_id in dict(
+            splice_before_task_ids_by_resource or {}
+        ).items():
+            repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
+            if not repair_tasks:
+                continue
+            self._splice_bridge_chain_before_task(
+                patch_rows,
+                repair_tasks=repair_tasks,
+                target_task_id=str(target_task_id or "").strip(),
+                change_prefix="Approved bridge recovery",
+            )
+            spliced_task_ids.update(
+                str(task.get("id") or "").strip() for task in repair_tasks if str(task.get("id") or "").strip()
+            )
+        for task in tasks:
+            task_id = str(task.get("id") or "").strip()
+            if task_id and task_id in spliced_task_ids:
+                continue
+            patch_rows.append(task)
+        self._apply_replan_patch(patch_rows)
+        return [
+            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
+            for task in tasks
+        ]
 
     def _apply_primitive_bridge_proposal(
         self,
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
+        splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Compile one or more primitive-based bridge macro_tasks into ordered task nodes."""
         from uuid import uuid4
@@ -1120,7 +1407,10 @@ class ProcessRecoveryPlanner:
             if si is not None:
                 max_si = max(max_si, int(si))
         base_si = max_si + 1000
-        predecessor = str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
+        anchor_predecessor = (
+            str(anchor_task_id).strip() if self._node_exists(anchor_task_id) else ""
+        )
+        compiled_outline_to_task_id: dict[str, str] = {}
 
         for index, macro_task in enumerate(macro_tasks, start=1):
             macro_name = str(
@@ -1132,11 +1422,21 @@ class ProcessRecoveryPlanner:
                 macro_task.get("outline_id")
                 or f"bridge_outline_{index}"
             ).strip()
+            llm_outline_id = str(macro_task.get("llm_outline_id") or "").strip()
             resource_jid = str(macro_task.get("resource_jid") or proposal.get("resource_jid") or "").strip()
             primitive_steps = list(macro_task.get("primitive_steps") or [])
-            expected_start_state = str(
-                macro_task.get("expected_start_state") or proposal.get("expected_start_state") or ""
-            ).strip()
+            expected_start_state_payload = macro_task.get("expected_start_state")
+            if isinstance(expected_start_state_payload, dict):
+                expected_start_state = str(
+                    dict(expected_start_state_payload).get("resource_state") or ""
+                ).strip()
+            else:
+                expected_start_state = str(
+                    expected_start_state_payload or proposal.get("expected_start_state") or ""
+                ).strip()
+            expected_end_state = deepcopy(macro_task.get("expected_end_state") or {})
+            projected_outline_state = deepcopy(macro_task.get("projected_outline_state") or {})
+            outline_semantics = deepcopy(macro_task.get("outline_semantics") or {})
             part_name = str(
                 macro_task.get("part_name")
                 or macro_task.get("touched_part")
@@ -1162,23 +1462,66 @@ class ProcessRecoveryPlanner:
                 raise ValueError(f"bridge macro_task {index} has no primitive_steps")
 
             task_id = f"RECOVERY_BRIDGE_{uuid4().hex[:6].upper()}"
+            predecessor_outline_ids = [
+                str(pred).strip()
+                for pred in (macro_task.get("predecessors") or [])
+                if str(pred or "").strip()
+            ]
+            missing_predecessor_outline_ids = [
+                pred_outline_id
+                for pred_outline_id in predecessor_outline_ids
+                if pred_outline_id not in compiled_outline_to_task_id
+            ]
+            if missing_predecessor_outline_ids:
+                raise ValueError(
+                    "bridge macro_task "
+                    f"{index} references unresolved predecessor outline ids: "
+                    + ", ".join(missing_predecessor_outline_ids)
+                )
             params: dict[str, Any] = {
                 "macro_name": macro_name,
                 "outline_id": outline_id,
+                "bridge_outline_id": outline_id,
                 "primitive_steps": primitive_steps,
                 "expected_start_state": expected_start_state,
                 "product_jid": str(self.product_agent.jid),
                 "task_id": task_id,
             }
+            if llm_outline_id:
+                params["llm_outline_id"] = llm_outline_id
             if isinstance(task_params, dict):
                 for key, value in task_params.items():
                     params[str(key)] = deepcopy(value)
             if part_name:
                 params["part_name"] = part_name
+            if isinstance(expected_start_state_payload, dict) and expected_start_state_payload:
+                params["outline_expected_start_state"] = deepcopy(expected_start_state_payload)
+            if isinstance(expected_end_state, dict) and expected_end_state:
+                params["expected_end_state"] = deepcopy(expected_end_state)
+            if isinstance(projected_outline_state, dict) and projected_outline_state:
+                params["projected_outline_state"] = deepcopy(projected_outline_state)
+            if isinstance(outline_semantics, dict):
+                event_name = str(outline_semantics.get("event_name") or "").strip()
+                if event_name:
+                    params["event_name"] = event_name
+                semantic_resource_jid = str(outline_semantics.get("resource_jid") or "").strip()
+                if semantic_resource_jid:
+                    params["outline_resource_jid"] = semantic_resource_jid
+                semantic_part_name = str(outline_semantics.get("part_name") or "").strip()
+                if semantic_part_name:
+                    params["outline_part_name"] = semantic_part_name
             if isinstance(expected_snapshot, dict) and expected_snapshot:
                 params["expected_snapshot"] = dict(expected_snapshot)
             if isinstance(task_metadata, dict) and task_metadata.get("out_state"):
                 params["out_state"] = str(task_metadata["out_state"])
+
+            predecessor_task_ids = [
+                compiled_outline_to_task_id[pred_outline_id]
+                for pred_outline_id in predecessor_outline_ids
+                if pred_outline_id in compiled_outline_to_task_id
+            ]
+            if not predecessor_task_ids and anchor_predecessor:
+                predecessor_task_ids = [anchor_predecessor]
 
             step_summary = ", ".join(
                 str(step.get("primitive", "?")) for step in primitive_steps[:5] if isinstance(step, dict)
@@ -1192,7 +1535,7 @@ class ProcessRecoveryPlanner:
                 "params": params,
                 "resource_jid": resource_jid,
                 "status": "pending",
-                "predecessors": [predecessor] if predecessor else [],
+                "predecessors": predecessor_task_ids,
                 "successors": [],
                 "sequence_index": base_si + index,
                 "change_reason": (
@@ -1204,9 +1547,17 @@ class ProcessRecoveryPlanner:
                 "bridge_sequence_index": index,
                 "bridge_sequence_length": total_tasks,
                 "bridge_outline_id": outline_id,
+                "predecessor_outline_ids": list(predecessor_outline_ids),
                 "recovery_group_id": bridge_sequence_id,
                 "recovery_kind": "bridge_macro",
             }
+            if llm_outline_id:
+                task_node["llm_outline_id"] = llm_outline_id
+            event_name = str(
+                dict(outline_semantics or {}).get("event_name") or ""
+            ).strip()
+            if event_name:
+                task_node["event_name"] = event_name
 
             if isinstance(task_metadata, dict):
                 if task_metadata.get("in_state"):
@@ -1223,16 +1574,48 @@ class ProcessRecoveryPlanner:
                 task_node["part_name"] = part_name
             if isinstance(projected_snapshot, dict) and projected_snapshot:
                 task_node["projected_snapshot"] = deepcopy(projected_snapshot)
+            if isinstance(projected_outline_state, dict) and projected_outline_state:
+                task_node["projected_outline_state"] = deepcopy(projected_outline_state)
             if isinstance(projected_part_entry, dict) and projected_part_entry:
                 task_node["projected_part_entry"] = deepcopy(projected_part_entry)
             if primary_obligation:
                 task_node["primary_obligation"] = deepcopy(primary_obligation)
 
             compiled_nodes.append(task_node)
-            predecessor = task_id
+            compiled_outline_to_task_id[outline_id] = task_id
 
-        self._apply_replan_patch(compiled_nodes)
-        return compiled_nodes
+        task_groups_by_resource: dict[str, list[dict[str, Any]]] = {}
+        for task in compiled_nodes:
+            resource_jid = str(task.get("resource_jid") or "").strip()
+            if resource_jid:
+                task_groups_by_resource.setdefault(resource_jid, []).append(task)
+        patch_rows: list[dict[str, Any]] = []
+        spliced_task_ids: set[str] = set()
+        for resource_jid, target_task_id in dict(
+            splice_before_task_ids_by_resource or {}
+        ).items():
+            repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
+            if not repair_tasks:
+                continue
+            self._splice_bridge_chain_before_task(
+                patch_rows,
+                repair_tasks=repair_tasks,
+                target_task_id=str(target_task_id or "").strip(),
+                change_prefix="Approved bridge recovery",
+            )
+            spliced_task_ids.update(
+                str(task.get("id") or "").strip() for task in repair_tasks if str(task.get("id") or "").strip()
+            )
+        for task in compiled_nodes:
+            task_id = str(task.get("id") or "").strip()
+            if task_id and task_id in spliced_task_ids:
+                continue
+            patch_rows.append(task)
+        self._apply_replan_patch(patch_rows)
+        return [
+            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
+            for task in compiled_nodes
+        ]
 
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
@@ -1866,6 +2249,7 @@ class ProcessRecoveryPlanner:
             if "params" in t: target["params"] = params
             if "resource_jid" in t: target["resource_jid"] = t["resource_jid"]
             if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
+            if "requirement_id" in t: target["requirement_id"] = deepcopy(t["requirement_id"])
 
             if "predecessors" in t:
                 target["predecessors"] = t["predecessors"]
@@ -1895,6 +2279,12 @@ class ProcessRecoveryPlanner:
                 "recovery_kind",
                 "projected_snapshot",
                 "projected_part_entry",
+                "repair_operator",
+                "repair_intent",
+                "restores_event_id",
+                "guard_violations",
+                "producer_semantics",
+                "disabled_event",
             ):
                 if extra_key in t:
                     target[extra_key] = deepcopy(t[extra_key])
@@ -1903,6 +2293,7 @@ class ProcessRecoveryPlanner:
 
         tentative_nodes = list(node_map.values())
         self._ensure_graph_consistency(tentative_nodes)
+        self._normalize_same_resource_chains(tentative_nodes)
         self._validate_task_graph(tentative_nodes)
 
         self.nodes = tentative_nodes

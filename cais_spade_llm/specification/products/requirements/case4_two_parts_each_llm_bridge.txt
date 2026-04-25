@@ -1,0 +1,5 @@
+[Product Requirements]
+- ur5e assemble MCP from prusa-mk4-2 to the Assembly Station.
+- ur5e assemble MG from prusa-mk4-2 to the Assembly Station.
+- xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.
+- xarm6 Assemble LCP from prusa-mk4-1 to the Assembly Station.

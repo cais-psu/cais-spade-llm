@@ -8,10 +8,33 @@ from pathlib import Path
 
 from nicegui import ui
 
+from cais_spade_llm.bundles.models import is_runtime_only_safety_fallback_manifest
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
 from cais_spade_llm.ui.components.fsa_graph import fsa_state_index_text, fsa_to_mermaid
+
+
+def _bundle_uses_runtime_only_safety_fallback(manifest: dict | None) -> bool:
+    return is_runtime_only_safety_fallback_manifest(manifest or {})
+
+
+def _runtime_only_safety_fallback_message(manifest: dict | None) -> str:
+    if not _bundle_uses_runtime_only_safety_fallback(manifest):
+        return ""
+    validation = manifest.get("validation_summary", {}) if isinstance(manifest, dict) else {}
+    compile_error = (
+        str(validation.get("compile_error", "")).strip()
+        if isinstance(validation, dict)
+        else ""
+    )
+    message = (
+        "Offline planning ignored the selected safety requirement after the initial "
+        "`global_fsa` compile failed. Use `User Verify Plan` if you accept runtime-only safety enforcement."
+    )
+    if compile_error:
+        message += f" Initial compile error: {compile_error}"
+    return message
 
 
 def render(bridge: SystemBridge) -> None:
@@ -431,7 +454,18 @@ def render(bridge: SystemBridge) -> None:
                 if isinstance(selected_manifest, dict)
                 else {}
             )
-            validation_ok = bool(validation.get("ok", False))
+            runtime_only_safety_fallback = _bundle_uses_runtime_only_safety_fallback(
+                selected_manifest if isinstance(selected_manifest, dict) else None
+            )
+            if runtime_only_safety_fallback:
+                _set_generation_banner(
+                    "warning",
+                    _runtime_only_safety_fallback_message(
+                        selected_manifest if isinstance(selected_manifest, dict) else None
+                    ),
+                )
+            else:
+                _set_generation_banner(None)
             auto_replans_used, auto_replan_max = _auto_replan_limits(
                 selected_manifest if isinstance(selected_manifest, dict) else {}
             )
@@ -441,16 +475,34 @@ def render(bridge: SystemBridge) -> None:
                 else ""
             )
             retry_summary = f"auto-replans={auto_replans_used}/{auto_replan_max}"
-            replan_count_label.text = (
-                f"Offline Replans Used: {auto_replans_used} / {auto_replan_max}"
-            )
-            replan_count_label.classes(replace="text-sm text-slate-600")
+            if runtime_only_safety_fallback:
+                replan_count_label.text = (
+                    "Offline Validation: skipped (runtime-only safety fallback)"
+                )
+                replan_count_label.classes(replace="text-sm text-amber-700")
+            else:
+                replan_count_label.text = (
+                    f"Offline Replans Used: {auto_replans_used} / {auto_replan_max}"
+                )
+                replan_count_label.classes(replace="text-sm text-slate-600")
 
             if selected_eval:
                 status = str(selected_eval.get("status", "")).lower()
                 ok = bool(selected_eval.get("ok", False))
                 reasons = selected_eval.get("reasons", [])
-                if status == "verified" and ok:
+                if runtime_only_safety_fallback and status == "verified" and ok:
+                    status_label.text = (
+                        "Status: VERIFIED (runtime-only safety fallback bundle) "
+                        f"| id={selected_id}"
+                    )
+                    status_label.classes(replace="text-sm text-amber-700")
+                elif runtime_only_safety_fallback and status == "draft":
+                    status_label.text = (
+                        "Status: DRAFT (runtime-only safety fallback; needs `User Verify Plan`) "
+                        f"| id={selected_id}"
+                    )
+                    status_label.classes(replace="text-sm text-amber-700")
+                elif status == "verified" and ok:
                     status_label.text = f"Status: VERIFIED (compatible) | {retry_summary} | id={selected_id}"
                     status_label.classes(replace="text-sm text-green-700")
                 elif status == "invalid":
@@ -480,6 +532,7 @@ def render(bridge: SystemBridge) -> None:
                         "manifest_path": summary.get("manifest_path", ""),
                         "requirement_file": manifest.get("product_spec_file", ""),
                         "safety_file": manifest.get("safety_file", ""),
+                        "plan_generation_mode": manifest.get("plan_generation_mode", ""),
                         "parent_bundle_id": manifest.get("parent_bundle_id", ""),
                         "refinement_feedback": manifest.get("refinement_feedback", ""),
                         "source_hashes": manifest.get("source_hashes", {}),
@@ -687,7 +740,18 @@ def render(bridge: SystemBridge) -> None:
                 status = str(summary.get("status", "")).upper() or "UNKNOWN"
                 retries_used, retries_max = _auto_replan_limits(manifest)
                 stop_reason = str(validation.get("stop_reason", "")).strip()
-                if status == "INVALID":
+                runtime_only_safety_fallback = _bundle_uses_runtime_only_safety_fallback(manifest)
+                if runtime_only_safety_fallback:
+                    _set_generation_banner(
+                        "warning",
+                        _runtime_only_safety_fallback_message(manifest),
+                    )
+                    ui.notify(
+                        f"Plan set {'regenerated' if use_feedback else 'generated'}: "
+                        f"{bid} ({status}) runtime-only safety fallback",
+                        type="warning",
+                    )
+                elif status == "INVALID":
                     _set_generation_banner(
                         "error",
                         "Plan set remains INVALID after auto-replan "

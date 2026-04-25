@@ -13,6 +13,8 @@ BUNDLE_STATUS_DRAFT = "draft"
 BUNDLE_STATUS_VERIFIED = "verified"
 BUNDLE_STATUS_STALE = "stale"
 BUNDLE_STATUS_INVALID = "invalid"
+BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK = "runtime_only_safety_fallback"
+BUNDLE_VALIDATION_FALLBACK_TRIGGER_GLOBAL_FSA_COMPILE_FAILED = "global_fsa_compile_failed"
 
 INDEX_SCHEMA_VERSION = 1
 
@@ -54,3 +56,21 @@ def atomic_json_write(path: Path | str, payload: Any) -> None:
         json.dump(payload, f, indent=2)
     os.replace(tmp, p)
 
+
+def is_runtime_only_safety_fallback_manifest(manifest: Any) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    if (
+        str(manifest.get("plan_generation_mode", "")).strip()
+        == BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
+    ):
+        return True
+    validation = manifest.get("validation_summary", {})
+    if not isinstance(validation, dict):
+        return False
+    if (
+        str(validation.get("stop_reason", "")).strip()
+        == BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
+    ):
+        return True
+    return bool(validation.get("offline_validation_skipped", False))

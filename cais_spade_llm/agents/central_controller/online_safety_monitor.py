@@ -176,11 +176,15 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         completion (process_finish_event) so that a failed task does not
         prematurely satisfy ordering requirements.
         """
+        event_params = dict(event.get("params") or {})
+        task_id = str(event.get("task_id") or "").strip()
+        if task_id:
+            event_params.setdefault("task_id", task_id)
         candidate_aps = self._map_task_to_aps(
-            event["resource_jid"], event["function_name"], event["params"]
+            event["resource_jid"], event["function_name"], event_params
         )
         predicted_state_aps = self._predict_state_aps(
-            event["resource_jid"], event["function_name"], event["params"]
+            event["resource_jid"], event["function_name"], event_params
         )
         allowed, info = self.online_safety_validation(
             candidate_aps,
@@ -203,8 +207,12 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         and advance the DFA using the original function's APs (not .done).
         Only successful completion should satisfy ordering requirements.
         """
+        event_params = dict(event.get("params") or {})
+        task_id = str(event.get("task_id") or "").strip()
+        if task_id:
+            event_params.setdefault("task_id", task_id)
         finished_aps = self._map_task_to_aps(
-            event["resource_jid"], event["function_name"], event["params"]
+            event["resource_jid"], event["function_name"], event_params
         )
         for ap in finished_aps:
             self.running_aps.discard(ap)
@@ -214,7 +222,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,
-                params=event.get("params") or {},
+                params=event_params,
             )
 
         # Advance DFA with the original APs to mark this action as completed.
@@ -236,8 +244,12 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         Since the action did not complete, the DFA stays in the
         pre-completion state, so dependent actions remain blocked.
         """
+        event_params = dict(event.get("params") or {})
+        task_id = str(event.get("task_id") or "").strip()
+        if task_id:
+            event_params.setdefault("task_id", task_id)
         failed_aps = self._map_task_to_aps(
-            event["resource_jid"], event["function_name"], event["params"]
+            event["resource_jid"], event["function_name"], event_params
         )
         for ap in failed_aps:
             self.running_aps.discard(ap)
@@ -247,5 +259,5 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,
-                params=event.get("params") or {},
+                params=event_params,
             )

@@ -148,6 +148,7 @@ class BridgeSessionMixin:
                     "function_name": str(task.get("function_name") or "").strip(),
                     "resource_jid": str(task.get("resource_jid") or "").strip(),
                     "part_name": str((task.get("params") or {}).get("part_name") or "").strip(),
+                    "params": deepcopy(task.get("params") or {}),
                     "status": deepcopy(task.get("status")),
                     "sequence_index": deepcopy(task.get("sequence_index")),
                 }

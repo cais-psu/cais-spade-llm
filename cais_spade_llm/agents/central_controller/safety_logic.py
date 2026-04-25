@@ -2307,13 +2307,27 @@ class SafetyLogic:
             raw_aps = raw_logic.get("aps", [])
             raw_ltlf = raw_logic.get("ltlf", "")
             raw_formula_ast = raw_logic.get("formula_ast")
+            ap_details_by_full: Dict[str, Dict[str, Any]] = {}
+            for detail in raw_logic.get("ap_details", []) or []:
+                if not isinstance(detail, dict):
+                    continue
+                full = str(detail.get("full") or "").strip()
+                if not full:
+                    continue
+                ap_details_by_full[full] = deepcopy(detail)
 
             # Build list of {label, full}
-            labeled_aps = [
-                {"label": ap_reverse[a], "full": a}
-                for a in raw_aps
-                if a in ap_reverse
-            ]
+            labeled_aps = []
+            for a in raw_aps:
+                if a not in ap_reverse:
+                    continue
+                entry = {"label": ap_reverse[a], "full": a}
+                if a in ap_details_by_full:
+                    for key, value in ap_details_by_full[a].items():
+                        if key == "label":
+                            continue
+                        entry[key] = deepcopy(value)
+                labeled_aps.append(entry)
 
             # Replace full AP strings by labels in formula
             formula = raw_ltlf

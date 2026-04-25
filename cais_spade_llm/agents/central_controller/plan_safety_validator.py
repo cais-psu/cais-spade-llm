@@ -67,6 +67,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         fsa: Dict[str, Any],
         plan: Optional[Dict[str, Any]] = None,
         product_jid: str | None = None,
+        runtime_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
         Validate a compiled FSA against all DFA safety rules.
@@ -100,7 +101,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         task_meta_lookup = self._build_transition_task_lookup(enabled, task_lookup)
         initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
-
         all_violations: List[Dict[str, Any]] = []
 
         for rule in self.safety_rules:
@@ -115,17 +115,30 @@ class PlanSafetyValidator(BaseSafetyChecker):
             aps_for_rule: Set[str] = set(dfa.get("ap_symbols", []))
             if not aps_for_rule:
                 continue
+            start_plan_state, start_q, start_resource_states = (
+                self._restore_runtime_rule_start(
+                    rule_id=rule_id,
+                    aps_for_rule=aps_for_rule,
+                    enabled=enabled,
+                    x0=x0,
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    initial_resource_states=initial_resource_states,
+                    runtime_context=runtime_context,
+                )
+            )
 
             violations = self._check_rule_on_fsa_product(
                 rule_id=rule_id,
                 rule=rule,
-                x0=x0,
+                x0=start_plan_state,
+                initial_q=start_q,
                 Xm=Xm,
                 enabled=enabled,
                 aps_for_rule=aps_for_rule,
                 task_lookup=task_lookup,
                 task_meta_lookup=task_meta_lookup,
-                initial_resource_states=initial_resource_states,
+                initial_resource_states=start_resource_states,
             )
 
             # Keep only ONE witness per rule
@@ -139,8 +152,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
         fsa: Dict[str, Any],
         plan: Optional[Dict[str, Any]] = None,
         product_jid: str | None = None,
+        runtime_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[Dict[str, Any]]]:
-        return self.validate_plan_fsa(fsa=fsa, plan=plan, product_jid=product_jid)
+        return self.validate_plan_fsa(
+            fsa=fsa,
+            plan=plan,
+            product_jid=product_jid,
+            runtime_context=runtime_context,
+        )
 
     # ------------------------------------------------------------------ #
     # INDEXING
@@ -472,6 +491,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         self,
         fsa: Dict[str, Any],
         plan: Optional[Dict[str, Any]] = None,
+        runtime_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the reachable joint product graph and compute its winning set.
@@ -507,10 +527,25 @@ class PlanSafetyValidator(BaseSafetyChecker):
             rule_id: set(self.dfas.get(rule_id, {}).get("ap_symbols", []))
             for rule_id in rule_ids
         }
-        q0_vec = tuple(str(self.dfas.get(rule_id, {}).get("initial") or "1") for rule_id in rule_ids)
+        start_plan_state, start_q_vec, start_resource_states = (
+            self._restore_runtime_joint_start(
+                rule_ids=rule_ids,
+                rule_ap_sets=rule_ap_sets,
+                enabled=enabled,
+                x0=x0,
+                task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                initial_resource_states=initial_resource_states,
+                runtime_context=runtime_context,
+            )
+        )
 
-        start_payload = deepcopy(initial_resource_states)
-        start_state = (x0, q0_vec, self._resource_state_signature(start_payload))
+        start_payload = deepcopy(start_resource_states)
+        start_state = (
+            start_plan_state,
+            start_q_vec,
+            self._resource_state_signature(start_payload),
+        )
 
         state_payloads: Dict[
             Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]],
@@ -529,8 +564,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
             Dict[str, Any],
         ] = {
             start_state: {
-                "plan_state": x0,
-                "q_vec": q0_vec,
+                "plan_state": start_plan_state,
+                "q_vec": start_q_vec,
                 "resource_states": deepcopy(start_payload),
             }
         }
@@ -637,8 +672,181 @@ class PlanSafetyValidator(BaseSafetyChecker):
             "state_meta": state_meta,
             "rule_ids": rule_ids,
             "initial_state": start_state,
-            "initial_resource_states": initial_resource_states,
+            "initial_resource_states": start_resource_states,
         }
+
+    def _runtime_progress_task_ids(
+        self,
+        runtime_context: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        if not isinstance(runtime_context, dict):
+            return [], [], []
+        completed_task_ids = [
+            str(task_id).strip()
+            for task_id in (runtime_context.get("completed_task_ids") or [])
+            if str(task_id).strip()
+        ]
+        running_task_ids = [
+            str(task_id).strip()
+            for task_id in (runtime_context.get("running_task_ids") or [])
+            if str(task_id).strip()
+        ]
+        failed_task_ids = [
+            str(task_id).strip()
+            for task_id in (runtime_context.get("failed_task_ids") or [])
+            if str(task_id).strip()
+        ]
+        return completed_task_ids, running_task_ids, failed_task_ids
+
+    def _restore_runtime_rule_start(
+        self,
+        *,
+        rule_id: str,
+        aps_for_rule: Set[str],
+        enabled: Dict[str, List[Dict[str, Any]]],
+        x0: str,
+        task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+        initial_resource_states: Dict[str, Dict[str, Any]],
+        runtime_context: Optional[Dict[str, Any]],
+    ) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+        completed_task_ids, running_task_ids, failed_task_ids = (
+            self._runtime_progress_task_ids(runtime_context)
+        )
+        if not completed_task_ids and not running_task_ids and not failed_task_ids:
+            return (
+                str(x0),
+                str(self.dfas.get(rule_id, {}).get("initial") or "1"),
+                deepcopy(initial_resource_states),
+            )
+
+        current_state = str(x0)
+        current_q = str(self.dfas.get(rule_id, {}).get("initial") or "1")
+        current_resource_states = deepcopy(initial_resource_states)
+        completed_set = set(completed_task_ids)
+
+        def _apply_event(task_id: str, suffix: str) -> bool:
+            nonlocal current_state, current_q, current_resource_states
+            event_label = f"{task_id}.{suffix}"
+            transition = next(
+                (
+                    candidate
+                    for candidate in enabled.get(current_state, [])
+                    if str(candidate.get("event") or "").strip() == event_label
+                ),
+                None,
+            )
+            if not isinstance(transition, dict):
+                return False
+            checked_q, committed_q, next_resource_states, _sigma = (
+                self._transition_successor(
+                    rule_id=rule_id,
+                    q=current_q,
+                    x=current_state,
+                    transition=transition,
+                    aps_for_rule=aps_for_rule,
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    resource_states=current_resource_states,
+                )
+            )
+            del checked_q, _sigma
+            current_state = str(transition.get("to") or current_state).strip() or current_state
+            current_q = committed_q
+            current_resource_states = next_resource_states
+            return True
+
+        for task_id in completed_task_ids:
+            _apply_event(task_id, "start")
+            _apply_event(task_id, "done")
+
+        for task_id in running_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_event(task_id, "start")
+
+        for task_id in failed_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_event(task_id, "start")
+            _apply_event(task_id, "fail")
+
+        return current_state, current_q, current_resource_states
+
+    def _restore_runtime_joint_start(
+        self,
+        *,
+        rule_ids: List[str],
+        rule_ap_sets: Dict[str, Set[str]],
+        enabled: Dict[str, List[Dict[str, Any]]],
+        x0: str,
+        task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+        initial_resource_states: Dict[str, Dict[str, Any]],
+        runtime_context: Optional[Dict[str, Any]],
+    ) -> Tuple[str, Tuple[str, ...], Dict[str, Dict[str, Any]]]:
+        completed_task_ids, running_task_ids, failed_task_ids = (
+            self._runtime_progress_task_ids(runtime_context)
+        )
+        q0_vec = tuple(
+            str(self.dfas.get(rule_id, {}).get("initial") or "1")
+            for rule_id in rule_ids
+        )
+        if not completed_task_ids and not running_task_ids and not failed_task_ids:
+            return str(x0), q0_vec, deepcopy(initial_resource_states)
+
+        current_state = str(x0)
+        current_q_vec = q0_vec
+        current_resource_states = deepcopy(initial_resource_states)
+        completed_set = set(completed_task_ids)
+
+        def _apply_event(task_id: str, suffix: str) -> bool:
+            nonlocal current_state, current_q_vec, current_resource_states
+            event_label = f"{task_id}.{suffix}"
+            transition = next(
+                (
+                    candidate
+                    for candidate in enabled.get(current_state, [])
+                    if str(candidate.get("event") or "").strip() == event_label
+                ),
+                None,
+            )
+            if not isinstance(transition, dict):
+                return False
+            checked_vec, committed_vec, next_resource_states, _sigma_by_rule = (
+                self._joint_transition_successor(
+                    x=current_state,
+                    q_vec=current_q_vec,
+                    rule_ids=rule_ids,
+                    rule_ap_sets=rule_ap_sets,
+                    transition=transition,
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    resource_states=current_resource_states,
+                )
+            )
+            del checked_vec, _sigma_by_rule
+            current_state = str(transition.get("to") or current_state).strip() or current_state
+            current_q_vec = committed_vec
+            current_resource_states = next_resource_states
+            return True
+
+        for task_id in completed_task_ids:
+            _apply_event(task_id, "start")
+            _apply_event(task_id, "done")
+
+        for task_id in running_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_event(task_id, "start")
+
+        for task_id in failed_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_event(task_id, "start")
+            _apply_event(task_id, "fail")
+
+        return current_state, current_q_vec, current_resource_states
 
     def _transition_successor(
         self,
@@ -719,6 +927,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         rule_id: str,
         rule: Dict[str, Any],
         x0: str,
+        initial_q: str | None,
         Xm: Set[str],
         enabled: Dict[str, List[Dict[str, Any]]],
         aps_for_rule: Set[str],
@@ -730,7 +939,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         Explore reachable (x,q) states and detect any violation.
         """
         dfa = self.dfas[rule_id]
-        q0: str = dfa["initial"]
+        q0: str = str(initial_q or dfa["initial"])
         violation_state: str | None = dfa.get("violation_state")
 
         rule_info = self.rule_lookup.get(rule_id, {})

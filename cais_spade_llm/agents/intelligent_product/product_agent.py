@@ -242,6 +242,7 @@ class ProductAgent(LlmAgent):
         *,
         skip_revalidation: bool = False,
         skip_offline_validation: bool | None = None,
+        request_id: str | None = None,
     ):
         """Package plan + FSA for plan validation by the CCA."""
         if skip_offline_validation is not None:
@@ -259,6 +260,7 @@ class ProductAgent(LlmAgent):
             "plan": {"nodes": nodes},
             "runtime_context": self._build_runtime_plan_context(),
             "skip_revalidation": bool(skip_revalidation),
+            "request_id": str(request_id or "").strip(),
         }
 
     def _build_runtime_plan_context(self) -> dict[str, Any]:
@@ -474,6 +476,10 @@ class ProductAgent(LlmAgent):
         t_retry_ready = Template()
         t_retry_ready.set_metadata("type", "task_retry_ready")
         self.add_behaviour(self._TaskRetryReadyInbox(), t_retry_ready)
+
+        t_recovery_safety = Template()
+        t_recovery_safety.set_metadata("type", "recovery_safety_generated")
+        self.add_behaviour(self._RecoverySafetyGeneratedInbox(), t_recovery_safety)
 
         # Plan executor (runs cycles, dispatches DAG tasks)
         # self.add_behaviour(self._PlanExecutor())
@@ -1146,10 +1152,12 @@ class ProductAgent(LlmAgent):
             violations = payload.get("violations")
             if not isinstance(violations, list):
                 violations = []
+            request_id = str(payload.get("request_id") or "").strip()
 
             if await agent._handle_runtime_plan_validation_result(
                 ok=ok,
                 violations=violations,
+                request_id=request_id,
             ):
                 return
 
@@ -1288,6 +1296,23 @@ class ProductAgent(LlmAgent):
             await asyncio.to_thread(agent._persist_product_state)
             await asyncio.to_thread(agent._persist_resource_state)
 
+    class _RecoverySafetyGeneratedInbox(CyclicBehaviour):
+        """Handle recovery_safety_generated replies from CCA."""
+
+        async def run(self):
+            agent: "ProductAgent" = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning("[Product] Malformed recovery_safety_generated body.")
+                return
+
+            await agent._handle_recovery_safety_generated_result(payload)
+
     class _PlanExecutor(CyclicBehaviour):
         """
         Periodically checks the DAG for the next ready task and dispatches it
@@ -1408,12 +1433,7 @@ class ProductAgent(LlmAgent):
                 agent.logger.info(f"[Product] Dispatched task {task_id} -> {to} ({instruction})")
                 return is_bridge_task
 
-            # Prioritize active bridge sequences over nominal DAG work. The first
-            # recovery macro may be anchored after the failed task, which is
-            # intentionally not "completed" during runtime recovery.
-            task_node = agent._active_bridge_next_ready_task()
-            if not task_node:
-                task_node = agent._next_dispatchable_task_node()
+            task_node = agent._next_dispatchable_task_node()
             if not task_node and agent._active_bridge_blocks_nominal_dispatch():
                 agent.logger.debug(
                     "[Product] Active bridge sequence is executing; suppressing nominal DAG dispatch."
@@ -1429,8 +1449,8 @@ class ProductAgent(LlmAgent):
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
 
-            # Short sleep so we don't hammer the RA with a storm of tasks
-            await asyncio.sleep(0.1)
+            # Keep the loop responsive in Gazebo without busy-spinning.
+            await asyncio.sleep(0.01)
 
     @staticmethod
     def _match_resource_objects(

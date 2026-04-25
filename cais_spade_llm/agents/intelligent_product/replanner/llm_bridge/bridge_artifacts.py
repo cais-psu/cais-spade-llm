@@ -23,6 +23,19 @@ def _resolve_debug_dir(debug_dir: str | Path | None) -> Path:
     return candidate if str(candidate).strip() else DEFAULT_BRIDGE_DEBUG_DIR
 
 
+def _multi_turn_phase_directory(
+    target_dir: Path,
+    *,
+    phase: str,
+) -> Path:
+    phase_token = _artifact_token(phase, fallback="")
+    if phase_token in {"grounding", "outline", "final_output"}:
+        return target_dir / "recovery_outline"
+    if phase_token == "primitive_generation":
+        return target_dir / "recovery_primitves"
+    return target_dir
+
+
 def _artifact_token(value: Any, *, fallback: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
@@ -877,8 +890,8 @@ def write_bridge_artifacts(
     """Write bridge prompt/response artifacts."""
     del phase_label, filename_prefix
     normalized_payload = payload if isinstance(payload, dict) else {"payload": payload}
-    target_dir = _resolve_debug_dir(debug_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    base_target_dir = _resolve_debug_dir(debug_dir)
+    base_target_dir.mkdir(parents=True, exist_ok=True)
 
     reasoning_mode = _resolve_reasoning_mode(normalized_payload)
     if write_session_transcript is None:
@@ -887,6 +900,11 @@ def write_bridge_artifacts(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     if reasoning_mode == "multi_turn":
         multi_turn_ctx = _multi_turn_artifact_context(normalized_payload)
+        target_dir = _multi_turn_phase_directory(
+            base_target_dir,
+            phase=str(multi_turn_ctx["phase"] or ""),
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
         suppress_phase_prompt_response = multi_turn_ctx["phase"] == "primitive_generation"
         prompt_artifact_name = (
             f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
@@ -918,6 +936,8 @@ def write_bridge_artifacts(
             "multi_turn_resume_checkpoint_latest.json"
         )
     else:
+        target_dir = base_target_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
         suppress_phase_prompt_response = False
         prompt_artifact_name = f"{reasoning_mode}_prompt_{timestamp}.txt"
         response_artifact_name = f"{reasoning_mode}_response_{timestamp}.txt"

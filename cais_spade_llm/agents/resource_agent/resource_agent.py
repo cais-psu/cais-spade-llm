@@ -667,13 +667,15 @@ class ResourceAgent(LlmAgent):
                 return
 
             start_safety_mode = str(
-                fn_args.get("start_safety_mode") or "fast_path"
-            ).strip().lower() or "fast_path"
-            # Recovery bridge macros can still request the legacy fast path, but
-            # DAG-mode recovery defaults to full per-macro CCA start checks.
+                fn_args.get("start_safety_mode") or ""
+            ).strip().lower()
+            # Recovery bridge macros keep the legacy default fast path unless
+            # they explicitly request cca_check. Any task can now opt into the
+            # same bypass with start_safety_mode=fast_path.
             is_recovery_macro = fn_name == "execute_recovery_macro"
-            use_recovery_fast_path = (
-                is_recovery_macro and start_safety_mode != "cca_check"
+            use_fast_path = bool(
+                start_safety_mode == "fast_path"
+                or (is_recovery_macro and start_safety_mode != "cca_check")
             )
 
             # ----- plumb routing/context ----- #
@@ -694,13 +696,14 @@ class ResourceAgent(LlmAgent):
                 )
                 return
 
-            if use_recovery_fast_path:
+            if use_fast_path:
                 # Fast path: self-allow, log, and proceed directly to execution.
                 # Skip the safety_check round-trip but still notify CCA of
                 # the running state so the plan FSA can track .start events.
                 agent.logger.info(
-                    "[Resource] Fast-path recovery macro %s (skipping safety round-trip)",
+                    "[Resource] Fast-path task %s fn=%s (skipping safety round-trip)",
                     task_id,
+                    fn_name,
                 )
                 agent._safety_decisions[task_id] = "allow"
                 try:
@@ -716,7 +719,7 @@ class ResourceAgent(LlmAgent):
                     await self.send(running_msg)
                 except Exception:
                     agent.logger.exception(
-                        "[Resource] Failed to send running event for recovery macro %s (ignored).",
+                        "[Resource] Failed to send running event for fast-path task %s (ignored).",
                         task_id,
                     )
             else:
@@ -746,7 +749,7 @@ class ResourceAgent(LlmAgent):
                 await self._ack(msg, task_id=task_id, status="blocked")
                 return
 
-            if not use_recovery_fast_path:
+            if not use_fast_path:
                 # ---------------------------
                 #  SAFETY PASSED → RUNNING
                 # ---------------------------

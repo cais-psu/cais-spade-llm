@@ -13,8 +13,10 @@ from typing import Any
 
 from .bundle_store import BundleStore
 from .models import (
+    BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK,
     BUNDLE_STATUS_DRAFT,
     BUNDLE_STATUS_INVALID,
+    BUNDLE_VALIDATION_FALLBACK_TRIGGER_GLOBAL_FSA_COMPILE_FAILED,
     sha256_file,
     sha256_text,
     slug,
@@ -266,6 +268,24 @@ class BundleCompiler:
         }
 
     @classmethod
+    def build_runtime_only_safety_fallback_validation_payload(
+        cls,
+        *,
+        compile_error: str,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "violations": [],
+            "violated_rules": [],
+            "witness_count": 0,
+            "auto_replans_used": 0,
+            "stop_reason": BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK,
+            "fallback_trigger": BUNDLE_VALIDATION_FALLBACK_TRIGGER_GLOBAL_FSA_COMPILE_FAILED,
+            "compile_error": str(compile_error or "").strip(),
+            "offline_validation_skipped": True,
+        }
+
+    @classmethod
     async def run_offline_repair_loop(
         cls,
         *,
@@ -512,62 +532,104 @@ class BundleCompiler:
                     )
                     safety_rules = list(safety_logic.rules or [])
 
-                await product_agent.process_planner.build_high_level(
-                    requirement_text,
-                    refinement_feedback=refinement_feedback,
-                    previous_preview_requirements=previous_preview_requirements,
-                )
                 requirements_path = plan_dir / f"{product_stem}_requirements.json"
-                await asyncio.to_thread(product_agent.process_planner.save, requirements_path)
-
-                await product_agent.process_planner.expand_requirements_to_tasks(
-                    safety_text=safety_text,
-                    refinement_feedback=refinement_feedback,
-                    previous_preview_requirements=previous_preview_requirements,
-                    previous_preview_tasks=previous_preview_tasks,
-                )
                 plan_path = plan_dir / f"{product_stem}_plan.json"
-                await asyncio.to_thread(product_agent.process_planner.save, plan_path)
-
                 global_fsa_path = plan_dir / f"{product_stem}_global_fsa.json"
-                await asyncio.to_thread(
-                    product_agent.process_planner.save_global_fsa,
-                    global_fsa_path,
-                )
-
-                validator = PlanSafetyValidator(
-                    rules=safety_rules,
-                    dfa_map=dfa_map,
-                    tools_catalog=getattr(product_agent, "tools_catalog", []),
-                )
-                validation_payload = await self.run_offline_repair_loop(
-                    product_agent=product_agent,
-                    validator=validator,
-                    product_jid=str(product_agent.jid),
-                    auto_replan_max_attempts=auto_replan_max_attempts,
-                )
-                await asyncio.to_thread(product_agent.process_planner.save, plan_path)
-                await asyncio.to_thread(
-                    product_agent.process_planner.save_global_fsa,
-                    global_fsa_path,
-                )
                 validation_path = validation_dir / "plan_validation.json"
+
+                async def _build_plan_artifacts(planning_safety_text: str) -> None:
+                    await product_agent.process_planner.build_high_level(
+                        requirement_text,
+                        refinement_feedback=refinement_feedback,
+                        previous_preview_requirements=previous_preview_requirements,
+                    )
+                    await asyncio.to_thread(product_agent.process_planner.save, requirements_path)
+                    await product_agent.process_planner.expand_requirements_to_tasks(
+                        safety_text=planning_safety_text,
+                        refinement_feedback=refinement_feedback,
+                        previous_preview_requirements=previous_preview_requirements,
+                        previous_preview_tasks=previous_preview_tasks,
+                    )
+                    await asyncio.to_thread(product_agent.process_planner.save, plan_path)
+
+                await _build_plan_artifacts(safety_text)
+
+                plan_generation_mode = ""
+                try:
+                    await asyncio.to_thread(
+                        product_agent.process_planner.save_global_fsa,
+                        global_fsa_path,
+                    )
+                except Exception as exc:
+                    initial_compile_error = str(exc or "").strip() or exc.__class__.__name__
+                    plan_generation_mode = (
+                        BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
+                    )
+                    log.warning(
+                        "Initial global_fsa compile failed for bundle %s; retrying without offline safety constraints: %s",
+                        bundle_id,
+                        initial_compile_error,
+                    )
+                    await _build_plan_artifacts("")
+                    try:
+                        await asyncio.to_thread(
+                            product_agent.process_planner.save_global_fsa,
+                            global_fsa_path,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Runtime-only safety fallback failed for bundle %s after initial global_fsa compile error.",
+                            bundle_id,
+                        )
+                        raise
+                    validation_payload = self.build_runtime_only_safety_fallback_validation_payload(
+                        compile_error=initial_compile_error,
+                    )
+                else:
+                    validator = PlanSafetyValidator(
+                        rules=safety_rules,
+                        dfa_map=dfa_map,
+                        tools_catalog=getattr(product_agent, "tools_catalog", []),
+                    )
+                    validation_payload = await self.run_offline_repair_loop(
+                        product_agent=product_agent,
+                        validator=validator,
+                        product_jid=str(product_agent.jid),
+                        auto_replan_max_attempts=auto_replan_max_attempts,
+                    )
+                    await asyncio.to_thread(product_agent.process_planner.save, plan_path)
+                    await asyncio.to_thread(
+                        product_agent.process_planner.save_global_fsa,
+                        global_fsa_path,
+                    )
+
                 with validation_path.open("w", encoding="utf-8") as f:
                     json.dump(validation_payload, f, indent=2)
 
                 dot_files = sorted(p.name for p in safety_dir.glob("SAFE_*_dfa.dot"))
                 png_files = sorted(p.name for p in safety_dir.glob("SAFE_*_dfa.png"))
-                ok = bool(validation_payload.get("ok", False))
                 violated_rules = list(validation_payload.get("violated_rules", []))
                 witness_count = int(validation_payload.get("witness_count", 0))
                 auto_replans_used = int(validation_payload.get("auto_replans_used", 0))
                 stop_reason = str(validation_payload.get("stop_reason", "max_attempts_reached"))
-                status = BUNDLE_STATUS_DRAFT if ok else BUNDLE_STATUS_INVALID
+                fallback_trigger = str(validation_payload.get("fallback_trigger", "")).strip()
+                compile_error = str(validation_payload.get("compile_error", "")).strip()
+                offline_validation_skipped = bool(
+                    validation_payload.get("offline_validation_skipped", False)
+                )
+                ok = bool(validation_payload.get("ok", False))
+                status = (
+                    BUNDLE_STATUS_DRAFT
+                    if plan_generation_mode == BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
+                    or ok
+                    else BUNDLE_STATUS_INVALID
+                )
+                status_label = "draft" if status == BUNDLE_STATUS_DRAFT else "invalid"
                 manifest = {
                     "bundle_id": bundle_id,
                     "display_name": (
                         f"{product_name} | {execution_mode}/{robot_env} | "
-                        f"{'draft' if ok else 'invalid'} | {stamp}"
+                        f"{status_label} | {stamp}"
                     ),
                     "created_at_utc": utc_now_iso(),
                     "status": status,
@@ -586,6 +648,7 @@ class BundleCompiler:
                         "auto_replan_max_attempts": auto_replan_max_attempts,
                     },
                     "safety_source": safety_source,
+                    "plan_generation_mode": plan_generation_mode,
                     "parent_bundle_id": parent_bundle_id,
                     "refinement_feedback": refinement_feedback,
                     "artifacts": {
@@ -605,6 +668,9 @@ class BundleCompiler:
                         "witness_count": witness_count,
                         "auto_replans_used": auto_replans_used,
                         "stop_reason": stop_reason,
+                        "fallback_trigger": fallback_trigger,
+                        "compile_error": compile_error,
+                        "offline_validation_skipped": offline_validation_skipped,
                     },
                 }
 
@@ -621,6 +687,7 @@ class BundleCompiler:
                     "safety_file": safety_file,
                     "execution_mode": execution_mode,
                     "robot_env": robot_env,
+                    "plan_generation_mode": plan_generation_mode,
                     "parent_bundle_id": parent_bundle_id,
                     "refinement_feedback": refinement_feedback,
                     "manifest_path": str(final_dir / "bundle_manifest.json"),

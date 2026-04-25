@@ -14,6 +14,9 @@ from spade.message import Message
 from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
+    generate_recovery_safety_bundle,
+)
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 # Import the updated monitor
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
@@ -68,6 +71,7 @@ class CentralControllerAgent(LlmAgent):
         # NOTE: self.running_aps is removed; the monitor tracks it now.
         
         self.blocked_tasks: dict[str, dict[str, Any]] = {}
+        self.recovery_safety_scopes: dict[str, dict[str, Any]] = {}
         # Stores the most recent task failure event so plan_block replans can
         # include the root-cause failure context, not just the blocked task's event.
         self.last_failure_event: Optional[dict[str, Any]] = None
@@ -89,6 +93,10 @@ class CentralControllerAgent(LlmAgent):
         t_plan = Template()
         t_plan.set_metadata("type", "plan_safety_check")
         self.add_behaviour(self._PlanValidation(), t_plan)
+
+        t_recovery = Template()
+        t_recovery.set_metadata("type", "recovery_safety_generate")
+        self.add_behaviour(self._RecoverySafetyGeneration(), t_recovery)
 
     def _collect_system_coordination_state(self) -> dict[str, Any]:
         """
@@ -158,6 +166,31 @@ class CentralControllerAgent(LlmAgent):
             coord_state["safety_supervisor"] = None
 
         return coord_state
+
+    @staticmethod
+    def _recovery_safety_scope_id_from_event(event: dict[str, Any]) -> str:
+        return str((event.get("params") or {}).get("recovery_safety_scope_id") or "").strip()
+
+    def _recovery_safety_scope_entry(
+        self,
+        recovery_safety_scope_id: str,
+    ) -> dict[str, Any] | None:
+        scope_id = str(recovery_safety_scope_id or "").strip()
+        if not scope_id:
+            return None
+        entry = self.recovery_safety_scopes.get(scope_id)
+        return deepcopy(entry) if isinstance(entry, dict) else None
+
+    def _recovery_safety_monitor_for_scope(
+        self,
+        recovery_safety_scope_id: str,
+    ) -> Optional[OnlineSafetyMonitor]:
+        scope_id = str(recovery_safety_scope_id or "").strip()
+        if not scope_id:
+            return None
+        entry = self.recovery_safety_scopes.get(scope_id)
+        monitor = entry.get("monitor") if isinstance(entry, dict) else None
+        return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
 
     @staticmethod
     def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -262,7 +295,11 @@ class CentralControllerAgent(LlmAgent):
 
         winning_set_data: Optional[Dict[str, Any]] = None
         if supervisor_mode != "truly_reactive":
-            winning_set_data = validator.compute_winning_set(fsa=fsa, plan=plan)
+            winning_set_data = validator.compute_winning_set(
+                fsa=fsa,
+                plan=plan,
+                runtime_context=runtime_context,
+            )
 
         self.runtime_supervisor_mode = supervisor_mode
         self.online_supervisor = OnlineSafetySupervisor(
@@ -1054,6 +1091,7 @@ class CentralControllerAgent(LlmAgent):
             resource_jid = event["resource_jid"]
             function_name = event["function_name"]
             product_jid = (event.get("params") or {}).get("product_jid")
+            recovery_safety_scope_id = agent._recovery_safety_scope_id_from_event(event)
 
             # 2. HANDLE 'SAFETY_CHECK' (Start Event)
             if status == "safety_check":
@@ -1062,6 +1100,7 @@ class CentralControllerAgent(LlmAgent):
                     task_id=task_id,
                     resource_jid=resource_jid,
                     product_jid=product_jid,
+                    recovery_safety_scope_id=recovery_safety_scope_id,
                 )
                 return
 
@@ -1072,6 +1111,7 @@ class CentralControllerAgent(LlmAgent):
                 resource_jid=resource_jid,
                 function_name=function_name,
                 product_jid=product_jid,
+                recovery_safety_scope_id=recovery_safety_scope_id,
             )
 
         async def _handle_safety_check(
@@ -1081,8 +1121,22 @@ class CentralControllerAgent(LlmAgent):
             task_id: str,
             resource_jid: str,
             product_jid: Optional[str],
+            recovery_safety_scope_id: str,
         ) -> None:
             agent: "CentralControllerAgent" = self.agent  # type: ignore
+            monitor = (
+                agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
+                if recovery_safety_scope_id
+                else agent.safety_monitor
+            )
+            if recovery_safety_scope_id and monitor is None:
+                agent.logger.warning(
+                    "[CCA] RECOVERY SAFETY BLOCK: task=%s scope=%s has no ready recovery safety bundle.",
+                    task_id,
+                    recovery_safety_scope_id,
+                )
+                await self._send_decision(resource_jid, task_id, "block")
+                return
 
             # --- FSA check: is this task enabled given the current plan state? ---
             # If a predecessor failed, the FSA is stuck and this task won't be enabled.
@@ -1113,17 +1167,17 @@ class CentralControllerAgent(LlmAgent):
                         await self.send(replan_msg)
                     return
 
-            candidate_aps = agent.safety_monitor._map_task_to_aps(
+            candidate_aps = monitor._map_task_to_aps(
                 event["resource_jid"],
                 event["function_name"],
                 event.get("params") or {},
             )
-            predicted_state_aps = agent.safety_monitor._predict_state_aps(
+            predicted_state_aps = monitor._predict_state_aps(
                 event["resource_jid"],
                 event["function_name"],
                 event.get("params") or {},
             )
-            allowed, info = agent.safety_monitor.online_safety_validation(
+            allowed, info = monitor.online_safety_validation(
                 candidate_aps,
                 predicted_state_aps=predicted_state_aps,
             )
@@ -1140,7 +1194,7 @@ class CentralControllerAgent(LlmAgent):
                 # Queue the task to retry later
                 agent.blocked_tasks[task_id] = {
                     "event": event,
-                    "violated_rule": violated_rule
+                    "violated_rule": violated_rule,
                 }
 
                 agent.logger.info(
@@ -1149,7 +1203,7 @@ class CentralControllerAgent(LlmAgent):
 
                 await self._send_decision(resource_jid, task_id, "block")
 
-                if product_jid:
+                if product_jid and not recovery_safety_scope_id:
                     # Forward-simulate the composite FSA to check if the
                     # violation will naturally resolve without replanning.
                     will_resolve = agent._will_violation_resolve(
@@ -1177,7 +1231,7 @@ class CentralControllerAgent(LlmAgent):
                         await self.send(replan_msg)
                 return
 
-            if agent.online_supervisor:
+            if agent.online_supervisor and not recovery_safety_scope_id:
                 allowed_by_supervisor, diagnosis = agent.online_supervisor.check_candidate(event)
                 if not allowed_by_supervisor:
                     agent.logger.warning(
@@ -1213,7 +1267,7 @@ class CentralControllerAgent(LlmAgent):
                         diagnosis.get("reason"),
                     )
 
-            allowed, info = agent.safety_monitor.process_start_event(event)
+            allowed, info = monitor.process_start_event(event)
             if not allowed:
                 agent.logger.warning(
                     "[CCA] Safety state changed before task=%s could be committed; blocking start.",
@@ -1235,8 +1289,16 @@ class CentralControllerAgent(LlmAgent):
             resource_jid: str,
             function_name: str,
             product_jid: Optional[str],
+            recovery_safety_scope_id: str,
         ) -> None:
             agent: "CentralControllerAgent" = self.agent  # type: ignore
+            monitor = (
+                agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
+                if recovery_safety_scope_id
+                else agent.safety_monitor
+            )
+            if monitor is None:
+                return
 
             # ----- PLAN FSA TRACE: START EVENT ----- #
             if status == "running" and agent.plan_fsa_monitor:
@@ -1263,17 +1325,17 @@ class CentralControllerAgent(LlmAgent):
                         status=status,
                     )
                 if is_failed:
-                    agent.safety_monitor.process_fail_event(event)
+                    monitor.process_fail_event(event)
                     agent.last_failure_event = event
                     agent.logger.info("[CCA] Task %s failed. State updated.", task_id)
                 else:
-                    agent.safety_monitor.process_finish_event(event)
+                    monitor.process_finish_event(event)
                     agent.logger.info("[CCA] Task %s finished. State updated.", task_id)
 
                 # Retry any blocked tasks now that state has changed
                 await self._retry_blocked_tasks()
 
-                if agent.online_supervisor and product_jid:
+                if agent.online_supervisor and product_jid and not recovery_safety_scope_id:
                     diagnosis = agent.online_supervisor.classify(
                         event_kind=("fail" if is_failed else "done")
                     )
@@ -1348,24 +1410,32 @@ class CentralControllerAgent(LlmAgent):
             # Check all blocked tasks against the NEW state.
             for task_id, data in agent.blocked_tasks.items():
                 event = data["event"]
+                recovery_safety_scope_id = agent._recovery_safety_scope_id_from_event(event)
+                monitor = (
+                    agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
+                    if recovery_safety_scope_id
+                    else agent.safety_monitor
+                )
+                if monitor is None:
+                    continue
                 
                 # Re-check safety status WITHOUT mutating running_aps/current DFA state.
                 try:
-                    candidate_aps = agent.safety_monitor._map_task_to_aps(
+                    candidate_aps = monitor._map_task_to_aps(
                         event["resource_jid"],
                         event["function_name"],
                         event.get("params") or {},
                     )
-                    predicted_state_aps = agent.safety_monitor._predict_state_aps(
+                    predicted_state_aps = monitor._predict_state_aps(
                         event["resource_jid"],
                         event["function_name"],
                         event.get("params") or {},
                     )
-                    allowed, _ = agent.safety_monitor.online_safety_validation(
+                    allowed, _ = monitor.online_safety_validation(
                         candidate_aps,
                         predicted_state_aps=predicted_state_aps,
                     )
-                    if allowed and agent.online_supervisor:
+                    if allowed and agent.online_supervisor and not recovery_safety_scope_id:
                         allowed, _ = agent.online_supervisor.check_candidate(event)
                 except Exception:
                     agent.logger.exception(
@@ -1414,6 +1484,82 @@ class CentralControllerAgent(LlmAgent):
             msg.set_metadata("type", "safety_decision")
             msg.body = json.dumps({"task_id": task_id, "decision": decision})
             await self.send(msg)
+
+    class _RecoverySafetyGeneration(CyclicBehaviour):
+        async def run(self) -> None:
+            agent: "CentralControllerAgent" = self.agent  # type: ignore
+
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+
+            try:
+                payload = json.loads(msg.body or "{}")
+            except Exception:
+                agent.logger.exception("[CCA] Malformed recovery_safety_generate body.")
+                return
+
+            request_id = str(payload.get("request_id") or "").strip()
+            product_jid = str(payload.get("product_jid") or msg.sender or "").strip()
+            recovery_safety_scope_id = str(
+                payload.get("recovery_safety_scope_id") or ""
+            ).strip()
+            result: dict[str, Any]
+            try:
+                result = await generate_recovery_safety_bundle(agent, payload)
+            except Exception as exc:
+                agent.logger.exception(
+                    "[CCA] Recovery safety generation failed for scope=%s.",
+                    recovery_safety_scope_id or "<missing>",
+                )
+                result = {
+                    "ok": False,
+                    "recovery_safety_scope_id": recovery_safety_scope_id,
+                    "recovery_safety_status": "failed",
+                    "recovery_plan_dir": str(payload.get("recovery_plan_dir") or "").strip(),
+                    "recovery_safery_dir": str(payload.get("recovery_safery_dir") or "").strip(),
+                    "recovery_safety_logic_json": "",
+                    "dfa_dot_files": [],
+                    "rule_ids": [],
+                    "failure_reason": str(exc),
+                }
+
+            if recovery_safety_scope_id:
+                if result.get("ok"):
+                    agent.recovery_safety_scopes[recovery_safety_scope_id] = {
+                        "status": "ready",
+                        "rules": deepcopy(result.get("rules") or []),
+                        "rule_dfas": deepcopy(result.get("rule_dfas") or {}),
+                        "recovery_safety_logic_json": str(
+                            result.get("recovery_safety_logic_json") or ""
+                        ).strip(),
+                        "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
+                        "recovery_safery_dir": str(result.get("recovery_safery_dir") or "").strip(),
+                        "monitor": OnlineSafetyMonitor(
+                            deepcopy(result.get("rule_dfas") or {}),
+                            deepcopy(result.get("rules") or []),
+                            tools_catalog=getattr(agent, "tools_catalog", []),
+                        ),
+                    }
+                else:
+                    agent.recovery_safety_scopes[recovery_safety_scope_id] = {
+                        "status": "failed",
+                        "failure_reason": str(result.get("failure_reason") or "").strip(),
+                        "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
+                        "recovery_safery_dir": str(result.get("recovery_safery_dir") or "").strip(),
+                    }
+
+            if not product_jid:
+                return
+            reply = Message(to=product_jid)
+            reply.set_metadata("type", "recovery_safety_generated")
+            reply.body = json.dumps(
+                {
+                    "request_id": request_id,
+                    **deepcopy(result),
+                }
+            )
+            await self.send(reply)
 
 
     class _InitCCA(OneShotBehaviour):
@@ -1533,6 +1679,7 @@ class CentralControllerAgent(LlmAgent):
                 plan = data.get("plan")          # OPTIONAL (semantic AP mapping)
                 product_jid = data.get("product_jid")
                 runtime_context = data.get("runtime_context") or {}
+                request_id = str(data.get("request_id") or "").strip()
                 skip_revalidation = bool(
                     data.get("skip_revalidation", data.get("skip_offline_validation", False))
                 )
@@ -1628,7 +1775,8 @@ class CentralControllerAgent(LlmAgent):
                     ok, violations = validator.validate_plan_fsa(
                         fsa=fsa,
                         plan=plan,
-                        product_jid=product_jid
+                        product_jid=product_jid,
+                        runtime_context=runtime_context,
                     )
                 try:
                     agent._initialize_online_supervisor(
@@ -1710,7 +1858,8 @@ class CentralControllerAgent(LlmAgent):
                 reply.set_metadata("type", "plan_safety_result")
                 reply.body = json.dumps({
                     "ok": ok,
-                    "violations": violations
+                    "violations": violations,
+                    "request_id": request_id,
                 })
                 await self.send(reply)
             except Exception:

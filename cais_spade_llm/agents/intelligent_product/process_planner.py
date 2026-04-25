@@ -278,6 +278,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 prev["successors"].append(nxt["id"])
                 nxt["predecessors"].append(prev["id"])
 
+        self._normalize_same_resource_chains(new_nodes)
         self.nodes = new_nodes
         self.logger.info(
             "[Planner] Expanded to %d LLM-generated task node(s).",
@@ -415,6 +416,168 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     s_node = node_map[sid]
                     if nid not in s_node.get("predecessors", []):
                         s_node.setdefault("predecessors", []).append(nid)
+
+    @staticmethod
+    def _requirement_order_key(requirement_id: Any) -> tuple[int, str]:
+        token = str(requirement_id or "").strip()
+        if token.startswith("REQ_"):
+            suffix = token[4:]
+            if suffix.isdigit():
+                return (int(suffix), token)
+        return (10**9, token)
+
+    @staticmethod
+    def _task_sequence_index_key(value: Any) -> int:
+        if value is None:
+            return 10**9
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 10**9
+
+    def _task_order_key_within_requirement(self, node: Dict[str, Any]) -> tuple[int, str]:
+        return (
+            self._task_sequence_index_key(node.get("sequence_index")),
+            str(node.get("id", "")),
+        )
+
+    def _ordered_requirement_resource_tasks(
+        self,
+        tasks: List[Dict[str, Any]],
+        node_map: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if len(tasks) <= 1:
+            return list(tasks)
+
+        task_ids = {str(task.get("id", "")) for task in tasks if task.get("id")}
+        local_successors: Dict[str, List[str]] = {tid: [] for tid in task_ids}
+        indegree: Dict[str, int] = {tid: 0 for tid in task_ids}
+
+        for task in tasks:
+            tid = str(task.get("id", ""))
+            for sid in task.get("successors", []) or []:
+                if sid not in task_ids or sid == tid:
+                    continue
+                if sid not in local_successors[tid]:
+                    local_successors[tid].append(sid)
+                    indegree[sid] += 1
+            for pid in task.get("predecessors", []) or []:
+                if pid not in task_ids or pid == tid:
+                    continue
+                if tid not in local_successors[pid]:
+                    local_successors[pid].append(tid)
+                    indegree[tid] += 1
+
+        ready = sorted(
+            [tid for tid, degree in indegree.items() if degree == 0],
+            key=lambda tid: self._task_order_key_within_requirement(node_map[tid]),
+        )
+        ordered_ids: List[str] = []
+
+        while ready:
+            tid = ready.pop(0)
+            ordered_ids.append(tid)
+            for sid in sorted(
+                local_successors.get(tid, []),
+                key=lambda task_id: self._task_order_key_within_requirement(node_map[task_id]),
+            ):
+                indegree[sid] -= 1
+                if indegree[sid] == 0:
+                    ready.append(sid)
+                    ready.sort(
+                        key=lambda task_id: self._task_order_key_within_requirement(
+                            node_map[task_id]
+                        )
+                    )
+
+        if len(ordered_ids) != len(task_ids):
+            return sorted(tasks, key=self._task_order_key_within_requirement)
+        return [node_map[tid] for tid in ordered_ids]
+
+    def _normalize_same_resource_chains(
+        self,
+        nodes: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """
+        Rewrite tasks sharing the same resource_jid into one strict local chain.
+
+        Cross-resource predecessors/successors are preserved exactly as-is.
+        """
+        working_nodes = nodes if nodes is not None else self.nodes
+        task_nodes = [n for n in working_nodes if n.get("type") == "task"]
+        if not task_nodes:
+            return
+
+        self._ensure_graph_consistency(working_nodes)
+
+        node_map = {
+            str(node.get("id", "")): node
+            for node in task_nodes
+            if str(node.get("id", "")).strip()
+        }
+
+        if not node_map:
+            return
+
+        resource_to_requirements: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
+        for task in task_nodes:
+            resource_jid = str(task.get("resource_jid", "")).strip()
+            if not resource_jid:
+                continue
+            requirement_id = str(task.get("requirement_id", "")).strip()
+            requirement_tasks = resource_to_requirements[resource_jid].setdefault(
+                requirement_id, []
+            )
+            requirement_tasks.append(task)
+
+        for resource_jid, requirement_groups in resource_to_requirements.items():
+            ordered_requirements = sorted(
+                requirement_groups.items(),
+                key=lambda item: self._requirement_order_key(item[0]),
+            )
+            local_chain: List[Dict[str, Any]] = []
+            local_task_ids: Set[str] = set()
+
+            for _requirement_id, requirement_tasks in ordered_requirements:
+                ordered_tasks = self._ordered_requirement_resource_tasks(
+                    requirement_tasks,
+                    node_map,
+                )
+                local_chain.extend(ordered_tasks)
+                local_task_ids.update(
+                    str(task.get("id", "")) for task in ordered_tasks if task.get("id")
+                )
+
+            if not local_chain:
+                continue
+
+            for task in local_chain:
+                tid = str(task.get("id", ""))
+                preserved_predecessors = [
+                    pid
+                    for pid in task.get("predecessors", []) or []
+                    if pid not in local_task_ids or node_map.get(pid, {}).get("resource_jid") != resource_jid
+                ]
+                preserved_successors = [
+                    sid
+                    for sid in task.get("successors", []) or []
+                    if sid not in local_task_ids or node_map.get(sid, {}).get("resource_jid") != resource_jid
+                ]
+                task["predecessors"] = list(dict.fromkeys(preserved_predecessors))
+                task["successors"] = list(dict.fromkeys(preserved_successors))
+
+            for index, task in enumerate(local_chain):
+                if index > 0:
+                    prev_id = str(local_chain[index - 1].get("id", ""))
+                    task.setdefault("predecessors", []).append(prev_id)
+                if index + 1 < len(local_chain):
+                    next_id = str(local_chain[index + 1].get("id", ""))
+                    task.setdefault("successors", []).append(next_id)
+                task["predecessors"] = list(dict.fromkeys(task.get("predecessors", []) or []))
+                task["successors"] = list(dict.fromkeys(task.get("successors", []) or []))
+                task["sequence_index"] = index
+
+        self._ensure_graph_consistency(working_nodes)
 
     def _validate_task_graph(self, nodes: Optional[List[Dict[str, Any]]] = None) -> None:
         """Reject invalid task graphs before FSA compilation or execution."""
@@ -841,4 +1004,3 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
     # ------------------------------------------------------------------ #
     # v2 Universal Repair — apply validated program to live graph
     # ------------------------------------------------------------------ #
-
