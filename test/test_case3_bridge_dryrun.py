@@ -96,6 +96,9 @@ from cais_spade_llm.agents.intelligent_product.product_agent import (
 from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
     ProductRecoveryController,
 )
+from cais_spade_llm.agents.central_controller.central_controller_agent import (
+    CentralControllerAgent,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
     snapshot_matches_expected,
 )
@@ -119,6 +122,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
 )
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
+    _validate_grounded_rule_result,
 )
 from cais_spade_llm.agents.central_controller.online_safety_monitor import (
     OnlineSafetyMonitor,
@@ -161,7 +165,8 @@ CASE3_COMPLETED_TASK_IDS = (
 
 
 def _resolve_case3_archived_final_output_path() -> Path:
-    base_path = (
+    filename = "multi_turn_turn09_final_output_response_20260423T013259.txt"
+    worked_root = (
         ROOT
         / "cais_spade_llm"
         / "agents"
@@ -171,12 +176,20 @@ def _resolve_case3_archived_final_output_path() -> Path:
         / "runtime_data"
         / "imported"
         / "worked"
-        / "1"
-        / "multi_turn_turn09_final_output_response_20260423T013259.txt"
     )
-    recovery_final_path = base_path.parent / "recovery_final" / base_path.name
-    if recovery_final_path.is_file():
-        return recovery_final_path
+    base_path = (
+        worked_root
+        / "1"
+        / filename
+    )
+    candidate_paths = [
+        base_path.parent / "recovery_final" / base_path.name,
+        base_path,
+        *sorted(worked_root.glob(f"*/recovery_final/{filename}")),
+    ]
+    for candidate_path in candidate_paths:
+        if candidate_path.is_file():
+            return candidate_path
     return base_path
 
 
@@ -340,6 +353,18 @@ def _build_dryrun_recovery_safety_generation_payload(
                             raw_task.get("status")
                             or enriched.get("status")
                             or pending_row.get("status")
+                            or ""
+                        ).strip(),
+                        "in_state": str(
+                            raw_task.get("in_state")
+                            or enriched.get("in_state")
+                            or pending_row.get("in_state")
+                            or ""
+                        ).strip(),
+                        "out_state": str(
+                            raw_task.get("out_state")
+                            or enriched.get("out_state")
+                            or pending_row.get("out_state")
                             or ""
                         ).strip(),
                         "requirement_id": requirement_id,
@@ -2625,6 +2650,49 @@ def test_parse_structured_json_text_ignores_trailing_extra_data() -> None:
     assert parsed == {"decision": "accept", "items": [1, 2]}
 
 
+def test_case3_recovery_safety_filter_preserves_nominal_only_cca_violations() -> None:
+    plan = {
+        "nodes": [
+            {
+                "type": "task",
+                "id": "RECOVERY_BRIDGE_123456",
+                "function_name": "execute_recovery_macro",
+            },
+            {
+                "type": "task",
+                "id": "RECOVERY_BRIDGE_ABCDEF",
+                "function_name": "execute_recovery_macro",
+            },
+            {"type": "task", "id": "REQ_1_T3", "function_name": "place_approach"},
+            {"type": "task", "id": "REQ_4_T3", "function_name": "place_approach"},
+        ]
+    }
+    violations = [
+        {
+            "violated_rule_id": "SAFE_2",
+            "witness_task_ids": ["RECOVERY_BRIDGE_123456", "REQ_1_T3"],
+        },
+        {
+            "violated_rule_id": "SAFE_2",
+            "witness_task_ids": ["RECOVERY_BRIDGE_123456", "RECOVERY_BRIDGE_ABCDEF"],
+        },
+        {
+            "violated_rule_id": "SAFE_2",
+            "witness_task_ids": ["REQ_1_T3", "REQ_4_T3"],
+        },
+    ]
+
+    filtered, suppressed = (
+        CentralControllerAgent._filter_recovery_safety_validation_violations(
+            violations,
+            plan,
+        )
+    )
+
+    assert suppressed == 2
+    assert filtered == [violations[2]]
+
+
 def test_case3_archived_bridge_selects_first_ready_task_for_serial_dispatch(
     tmp_path: Path,
 ) -> None:
@@ -2781,6 +2849,10 @@ class _ImmediateThread:
     def join(self, timeout: float | None = None) -> None:
         del timeout
         return None
+
+
+async def _immediate_to_thread(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    return func(*args, **kwargs)
 
 
 def _configure_runtime_bridge_approval_harness(
@@ -2964,6 +3036,40 @@ def _approve_case3_archived_bridge(
     ):
         recovery = product_agent.approve_runtime_bridge_proposal_sync()
     return fixture, product_agent, planner, prepared_bridge_request, recovery
+
+
+def _copy_case3_archive_with_recovery_safety(
+    tmp_path: Path,
+    *,
+    include_recovery_safety: bool,
+) -> Path:
+    worked_dir = tmp_path / "worked" / "1"
+    recovery_final_dir = worked_dir / "recovery_final"
+    recovery_final_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = recovery_final_dir / CASE3_ARCHIVED_FINAL_OUTPUT_PATH.name
+    shutil.copyfile(CASE3_ARCHIVED_FINAL_OUTPUT_PATH, archive_path)
+    if include_recovery_safety:
+        recovery_safety_dir = worked_dir / "recovery_safety"
+        recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+        logic_path = recovery_safety_dir / "cca_safety_logic.json"
+        logic_path.write_text(json.dumps({"rules": []}), encoding="utf-8")
+        result = {
+            "ok": True,
+            "recovery_safety_scope_id": "archive_recovery_scope_case3",
+            "recovery_safety_status": "ready",
+            "recovery_safety_dir": str(recovery_safety_dir),
+            "recovery_plan_dir": str(recovery_safety_dir),
+            "recovery_safery_dir": str(recovery_safety_dir),
+            "recovery_safety_logic_json": str(logic_path),
+            "rule_ids": [],
+            "rules": [],
+            "rule_dfas": {},
+        }
+        (recovery_safety_dir / "recovery_safety_generation_result.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+    return archive_path
 
 
 def test_case3_archived_bridge_approval_prunes_redundant_xarm6_move_home_after_home_idle_bridge(
@@ -3177,6 +3283,60 @@ def test_case3_prune_redundant_xarm6_move_home_retarges_resume_entry_to_next_nom
     assert deleted_task_ids == ["REQ_3_T5"]
 
 
+def test_case3_cca_validation_witness_ordering_repair_uses_only_witness_task_ids(tmp_path: Path) -> None:
+    product_agent = SimpleNamespace(
+        jid="assembly_board-v1@localhost",
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        global_fsa_path=tmp_path / "global_fsa.json",
+    )
+    planner = ProcessPlanner(product_agent, [])
+    planner.nodes = [
+        {
+            "id": "TASK_BLOCKER",
+            "type": "task",
+            "status": "pending",
+            "function_name": "alpha",
+            "resource_jid": "resource-A",
+            "sequence_index": 0,
+            "predecessors": [],
+            "successors": [],
+            "params": {},
+        },
+        {
+            "id": "TASK_TARGET",
+            "type": "task",
+            "status": "pending",
+            "function_name": "beta",
+            "resource_jid": "resource-B",
+            "sequence_index": 0,
+            "predecessors": [],
+            "successors": [],
+            "params": {},
+        },
+    ]
+    violations = [
+        {
+            "violated_rule_id": "SAFE_SYMBOL",
+            "witness_transitions": [
+                {
+                    "from": "(resource-A=(k=0,run=TASK_BLOCKER:alpha),resource-B=(k=0,idle))",
+                    "event": "TASK_TARGET.start",
+                    "task_id": "TASK_TARGET",
+                    "_sigma": ["ap-left", "ap-right"],
+                }
+            ],
+        }
+    ]
+
+    repaired = planner.apply_validation_witness_ordering_repairs(violations)
+
+    assert repaired is True
+    blocker = next(node for node in planner.nodes if node["id"] == "TASK_BLOCKER")
+    target = next(node for node in planner.nodes if node["id"] == "TASK_TARGET")
+    assert target["predecessors"] == ["TASK_BLOCKER"]
+    assert "TASK_TARGET" in blocker["successors"]
+
+
 def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bridge_shortcut() -> None:
     sent_messages: list[dict[str, Any]] = []
     nominal_node = {
@@ -3190,7 +3350,7 @@ def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bri
         "id": "RECOVERY_BRIDGE_UR5E",
         "status": "pending",
         "function_name": "execute_recovery_macro",
-        "resource_jid": "ur5e@localhost",
+        "resource_jid": "xarm6@localhost",
         "bridge_sequence_id": "BRIDGE_SEQ",
         "params": {},
     }
@@ -3204,6 +3364,7 @@ def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bri
         _active_bridge_next_ready_task=lambda: bridge_node,
         _active_bridge_blocks_nominal_dispatch=lambda: False,
         _active_bridge_sequence=lambda: None,
+        _reconstruct_active_bridge_sequence_for_validation=lambda: None,
         _bridge_sequence_task_ids=lambda ids: list(ids or []),
         _set_runtime_recovery=lambda **kwargs: None,
         _compose_task_msg=lambda **kwargs: dict(kwargs),
@@ -3223,6 +3384,371 @@ def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bri
     assert str(sent_messages[0].get("task_id") or "").strip() == "REQ_2_T5"
     assert str(nominal_node.get("status") or "").strip() == "dispatched"
     assert str(fake_agent.task_states.get("REQ_2_T5") or "").strip() == "dispatched"
+
+
+def test_case3_plan_executor_dispatch_guard_allows_different_resource_active_task() -> None:
+    sent_messages: list[dict[str, Any]] = []
+    nominal_node = {
+        "id": "REQ_4_T2",
+        "status": "pending",
+        "function_name": "pick_grasp",
+        "resource_jid": "xarm6@localhost",
+        "params": {"part_name": "LCP"},
+    }
+    recovery_node = {
+        "id": "RECOVERY_BRIDGE_ACTIVE",
+        "status": "running",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {
+            "destination_location": "assembly_board-v1",
+            "primitive_steps": [
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0, "dy": 0, "dz": 0.05},
+                }
+            ]
+        },
+    }
+    active_bridge_sequence = {
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "bridge_task_ids": ["RECOVERY_BRIDGE_ACTIVE"],
+        "dispatched_bridge_task_ids": ["RECOVERY_BRIDGE_ACTIVE"],
+        "completed_bridge_task_ids": [],
+        "state": "executing",
+    }
+    fake_agent = SimpleNamespace(
+        resource_jids=["xarm6@localhost", "ur5e@localhost"],
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        task_states={},
+        runtime_recovery={"active_bridge_sequence": active_bridge_sequence},
+        process_planner=SimpleNamespace(nodes=[recovery_node, nominal_node]),
+        _runtime_recovery_blocks_execution=lambda: False,
+        _next_dispatchable_task_node=lambda: nominal_node,
+        _active_bridge_blocks_nominal_dispatch=lambda: False,
+        _active_bridge_sequence=lambda: active_bridge_sequence,
+        _reconstruct_active_bridge_sequence_for_validation=lambda: None,
+        _bridge_sequence_task_ids=lambda ids: list(ids or []),
+        _set_runtime_recovery=lambda **kwargs: None,
+        _compose_task_msg=lambda **kwargs: dict(kwargs),
+        _dispatch_params_for_task_node=lambda task_node: dict(task_node.get("params") or {}),
+    )
+    executor = ProductAgent._PlanExecutor()
+    executor.agent = fake_agent  # type: ignore[attr-defined]
+
+    async def _fake_send(msg: dict[str, Any]) -> None:
+        sent_messages.append(dict(msg))
+
+    executor.send = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(executor.run())
+
+    assert sent_messages
+    assert str(sent_messages[0].get("task_id") or "").strip() == "REQ_4_T2"
+    assert str(nominal_node.get("status") or "").strip() == "dispatched"
+    assert str(fake_agent.task_states.get("REQ_4_T2") or "").strip() == "dispatched"
+
+
+def test_case3_plan_executor_dispatch_guard_suppresses_same_resource_active_task() -> None:
+    sent_messages: list[dict[str, Any]] = []
+    active_node = {
+        "id": "RECOVERY_BRIDGE_ACTIVE",
+        "status": "running",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {
+            "primitive_steps": [
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0, "dy": 0, "dz": 0.05},
+                }
+            ]
+        },
+    }
+    nominal_node = {
+        "id": "REQ_4_T2",
+        "status": "pending",
+        "function_name": "pick_grasp",
+        "resource_jid": "ur5e@localhost",
+        "params": {"part_name": "LCP"},
+    }
+    active_bridge_sequence = {
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "bridge_task_ids": ["RECOVERY_BRIDGE_ACTIVE"],
+        "dispatched_bridge_task_ids": ["RECOVERY_BRIDGE_ACTIVE"],
+        "completed_bridge_task_ids": [],
+        "state": "executing",
+    }
+    fake_agent = SimpleNamespace(
+        resource_jids=["xarm6@localhost", "ur5e@localhost"],
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        task_states={},
+        runtime_recovery={"active_bridge_sequence": active_bridge_sequence},
+        process_planner=SimpleNamespace(nodes=[active_node, nominal_node]),
+        _runtime_recovery_blocks_execution=lambda: False,
+        _next_dispatchable_task_node=lambda: nominal_node,
+        _active_bridge_blocks_nominal_dispatch=lambda: False,
+        _active_bridge_sequence=lambda: active_bridge_sequence,
+        _reconstruct_active_bridge_sequence_for_validation=lambda: None,
+        _bridge_sequence_task_ids=lambda ids: list(ids or []),
+        _set_runtime_recovery=lambda **kwargs: None,
+        _compose_task_msg=lambda **kwargs: dict(kwargs),
+        _dispatch_params_for_task_node=lambda task_node: dict(task_node.get("params") or {}),
+    )
+    executor = ProductAgent._PlanExecutor()
+    executor.agent = fake_agent  # type: ignore[attr-defined]
+
+    async def _fake_send(msg: dict[str, Any]) -> None:
+        sent_messages.append(dict(msg))
+
+    executor.send = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(executor.run())
+
+    assert sent_messages == []
+    assert str(nominal_node.get("status") or "").strip() == "pending"
+    assert "REQ_4_T2" not in fake_agent.task_states
+
+
+class _RuntimeInterlockPlanner:
+    def __init__(self, nodes: list[dict[str, Any]], ready_ids: list[str]) -> None:
+        self.nodes = nodes
+        self.ready_ids = ready_ids
+
+    def _find_node(self, task_id: str) -> dict[str, Any] | None:
+        for node in self.nodes:
+            if str(node.get("id") or "").strip() == str(task_id or "").strip():
+                return node
+        return None
+
+    def _bridge_sequence_nodes(self, bridge_sequence_id: str) -> list[dict[str, Any]]:
+        return [
+            node
+            for node in self.nodes
+            if str(node.get("bridge_sequence_id") or "").strip()
+            == str(bridge_sequence_id or "").strip()
+        ]
+
+    def graph_ready_task_nodes(self) -> list[dict[str, Any]]:
+        return [
+            node
+            for task_id in self.ready_ids
+            for node in [self._find_node(task_id)]
+            if isinstance(node, dict)
+        ]
+
+    def next_ready_task(self) -> dict[str, Any] | None:
+        ready = self.graph_ready_task_nodes()
+        return ready[0] if ready else None
+
+    def _tool_row_for_task(
+        self,
+        *,
+        resource_jid: str,
+        function_name: str,
+        tools_catalog: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del resource_jid, function_name, tools_catalog
+        return {}
+
+    def _resource_by_jid(self, resource_jid: str) -> Any:
+        del resource_jid
+        return None
+
+    def _extract_resource_states(self, system_state: dict[str, Any]) -> dict[str, Any]:
+        return dict((system_state or {}).get("resource_states") or {})
+
+
+def _runtime_interlock_product(
+    *,
+    bridge_node: dict[str, Any],
+    nominal_nodes: list[dict[str, Any]],
+    ready_ids: list[str],
+    validation_policy: str = "no_validation",
+) -> Any:
+    active_bridge_sequence = {
+        "bridge_sequence_id": str(bridge_node.get("bridge_sequence_id") or "").strip(),
+        "bridge_task_ids": [str(bridge_node.get("id") or "").strip()],
+        "dispatched_bridge_task_ids": [str(bridge_node.get("id") or "").strip()],
+        "completed_bridge_task_ids": [],
+        "state": "executing",
+        "validation_policy": validation_policy,
+        "execution_policy": {"validation_policy": validation_policy},
+    }
+    product = SimpleNamespace(
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        process_planner=_RuntimeInterlockPlanner(
+            [bridge_node] + list(nominal_nodes),
+            ready_ids,
+        ),
+        runtime_recovery={
+            "active_bridge_sequence": active_bridge_sequence,
+            "validation_policy": validation_policy,
+        },
+        _runtime_recovery_context={"validation_policy": validation_policy},
+        _runtime_bridge_validation_policy=validation_policy,
+        _orphaned_bridge_task_warning_ids=set(),
+        tools_catalog=[],
+        part_tracker={},
+        resource_states={},
+        task_states={},
+        _utc_now_iso=lambda: "2026-04-26T00:00:00+00:00",
+    )
+    controller = ProductRecoveryController(product)
+    controller.bind_methods()
+    return product
+
+
+def test_case3_product_selection_does_not_inspect_destination_location_for_recovery_safety_blocking() -> None:
+    bridge_node = {
+        "id": "RECOVERY_BRIDGE_ACTIVE",
+        "type": "task",
+        "status": "running",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {
+            "destination_location": "assembly_board-v1",
+            "primitive_steps": [
+                {
+                    "primitive": "compute_place_targets",
+                    "params": {"destination_location": "assembly_board-v1"},
+                }
+            ],
+        },
+    }
+    nominal_node = {
+        "id": "REQ_4_T3",
+        "type": "task",
+        "status": "pending",
+        "function_name": "place_approach",
+        "resource_jid": "xarm6@localhost",
+        "params": {"destination_location": "assembly_board-v1"},
+    }
+    product = _runtime_interlock_product(
+        bridge_node=bridge_node,
+        nominal_nodes=[nominal_node],
+        ready_ids=["REQ_4_T3"],
+    )
+
+    selected = product._select_runtime_event()
+
+    assert isinstance(selected, dict)
+    assert str(selected.get("id") or "").strip() == "REQ_4_T3"
+
+
+def test_case3_product_selection_allows_xarm6_lcp_pick_tasks_while_ur5e_recovery_active() -> None:
+    for task_id, function_name in (
+        ("REQ_4_T1", "pick_approach"),
+        ("REQ_4_T2", "pick_grasp"),
+    ):
+        bridge_node = {
+            "id": "RECOVERY_BRIDGE_ACTIVE",
+            "type": "task",
+            "status": "running",
+            "function_name": "execute_recovery_macro",
+            "resource_jid": "ur5e@localhost",
+            "bridge_sequence_id": "BRIDGE_SEQ",
+            "params": {
+                "destination_location": "assembly_board-v1",
+                "primitive_steps": [
+                    {
+                        "primitive": "move_relative",
+                        "params": {"dx": 0, "dy": 0, "dz": 0.05},
+                    }
+                ],
+            },
+        }
+        nominal_node = {
+            "id": task_id,
+            "type": "task",
+            "status": "pending",
+            "function_name": function_name,
+            "resource_jid": "xarm6@localhost",
+            "params": {"part_name": "LCP"},
+        }
+        product = _runtime_interlock_product(
+            bridge_node=bridge_node,
+            nominal_nodes=[nominal_node],
+            ready_ids=[task_id],
+            validation_policy="validated",
+        )
+
+        selected = product._select_runtime_event()
+
+        assert isinstance(selected, dict)
+        assert str(selected.get("id") or "").strip() == task_id
+
+
+def test_case3_product_selection_does_not_inspect_recovery_primitive_steps_for_safety_blocking() -> None:
+    bridge_node = {
+        "id": "RECOVERY_BRIDGE_ACTIVE",
+        "type": "task",
+        "status": "running",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {
+            "primitive_steps": [
+                {
+                    "primitive": "move_relative",
+                    "params": {"dx": 0, "dy": 0, "dz": 0.05},
+                }
+            ],
+        },
+    }
+    nominal_node = {
+        "id": "REQ_4_T2",
+        "type": "task",
+        "status": "pending",
+        "function_name": "pick_grasp",
+        "resource_jid": "xarm6@localhost",
+        "params": {"part_name": "LCP"},
+    }
+    product = _runtime_interlock_product(
+        bridge_node=bridge_node,
+        nominal_nodes=[nominal_node],
+        ready_ids=["REQ_4_T2"],
+        validation_policy="validated",
+    )
+
+    selected = product._select_runtime_event()
+
+    assert isinstance(selected, dict)
+    assert str(selected.get("id") or "").strip() == "REQ_4_T2"
+
+
+def test_case3_product_selection_does_not_inspect_missing_primitive_steps_for_safety_blocking() -> None:
+    bridge_node = {
+        "id": "RECOVERY_BRIDGE_ACTIVE",
+        "type": "task",
+        "status": "running",
+        "function_name": "execute_recovery_macro",
+        "resource_jid": "ur5e@localhost",
+        "bridge_sequence_id": "BRIDGE_SEQ",
+        "params": {"macro_name": "recover_to_home_idle"},
+    }
+    nominal_node = {
+        "id": "REQ_4_T3",
+        "type": "task",
+        "status": "pending",
+        "function_name": "place_approach",
+        "resource_jid": "xarm6@localhost",
+        "params": {"destination_location": "assembly_board-v1"},
+    }
+    product = _runtime_interlock_product(
+        bridge_node=bridge_node,
+        nominal_nodes=[nominal_node],
+        ready_ids=["REQ_4_T3"],
+        validation_policy="validated",
+    )
+
+    selected = product._select_runtime_event()
+
+    assert isinstance(selected, dict)
+    assert str(selected.get("id") or "").strip() == "REQ_4_T3"
 
 
 def test_case3_no_validation_active_bridge_dispatch_params_do_not_force_fast_path_for_bridge_and_nominal_tasks(
@@ -3279,6 +3805,195 @@ def test_case3_archived_bridge_approval_waits_for_recovery_safety_ready(
     mocked_validation.assert_not_called()
 
 
+def test_case3_validated_archive_loads_sibling_recovery_safety_result(
+    tmp_path: Path,
+) -> None:
+    fixture, product_agent, planner, prepared_bridge_request = asyncio.run(
+        _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
+    )
+    archive_path = _copy_case3_archive_with_recovery_safety(
+        tmp_path,
+        include_recovery_safety=True,
+    )
+    _configure_runtime_bridge_approval_harness(
+        product_agent=product_agent,
+        planner=planner,
+        fixture=fixture,
+        tmp_path=tmp_path,
+        bridge_mode="pre_ran",
+        validation_policy="validated",
+    )
+    product_agent._runtime_bridge_archive_path = str(archive_path)
+    product_agent._runtime_bridge_archive_label = archive_path.name
+    product_agent._runtime_bridge_data_root = lambda: tmp_path
+    product_agent._persist_product_state = lambda: None
+    product_agent._persist_plan_snapshot = lambda: None
+    product_agent._persist_resource_state = lambda: None
+    violations = [
+        {
+            "failed_task_id": FAILED_TASK_ID,
+            "task_id": FAILED_TASK_ID,
+            "resource_jid": "xarm6@localhost",
+            "failure_context": deepcopy(fixture.get("failure_context") or {}),
+        }
+    ]
+    product_agent._runtime_recovery_context = {
+        "trigger": "runtime_des_replan",
+        "failed_task_id": FAILED_TASK_ID,
+        "violations": deepcopy(violations),
+        "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        "system_coordination_state": {
+            "resource_states": deepcopy(fixture.get("resource_states") or {})
+        },
+    }
+    product_agent._set_runtime_recovery(
+        reset=True,
+        status="bridge_ready",
+        trigger="runtime_des_replan",
+        failed_task_id=FAILED_TASK_ID,
+        message="Awaiting archived bridge load.",
+        bridge_debug=deepcopy(prepared_bridge_request.get("bridge_debug") or {}),
+        bridge_approval_state="ready",
+        violations=violations,
+    )
+
+    with patch.object(
+        ProductRecoveryController,
+        "_runtime_bridge_data_root",
+        autospec=True,
+        return_value=tmp_path,
+    ), patch(
+        "cais_spade_llm.agents.intelligent_product.product_recovery_controller.asyncio.to_thread",
+        new=_immediate_to_thread,
+    ):
+        recovery = asyncio.run(
+            product_agent.load_runtime_bridge_archive_proposal(str(archive_path))
+        )
+
+    assert str(recovery.get("recovery_safety_scope_id") or "").strip() == "archive_recovery_scope_case3"
+    assert str(recovery.get("recovery_safety_status") or "").strip() == "ready"
+
+    with patch(
+        "cais_spade_llm.agents.intelligent_product.product_recovery_controller.threading.Thread",
+        new=_ImmediateThread,
+    ):
+        recovery = product_agent.approve_runtime_bridge_proposal_sync()
+
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(
+        product_agent.runtime_recovery.get("active_bridge_sequence") or {}
+    )
+    assert str(active_bridge_sequence.get("recovery_safety_scope_id") or "").strip() == "archive_recovery_scope_case3"
+    plan_safety_checks = [
+        dict(row.get("body") or {})
+        for row in product_agent.dispatched_agent_messages
+        if dict(row.get("metadata") or {}).get("type") == "plan_safety_check"
+    ]
+    assert plan_safety_checks
+    assert str(
+        dict(plan_safety_checks[-1].get("recovery_safety_result") or {}).get(
+            "recovery_safety_scope_id"
+        )
+        or ""
+    ).strip() == "archive_recovery_scope_case3"
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+    seq1_params = product_agent._dispatch_params_for_task_node(seq1)
+    assert str(seq1_params.get("recovery_safety_scope_id") or "").strip() == "archive_recovery_scope_case3"
+    assert str(seq1_params.get("start_safety_mode") or "").strip() == "cca_check"
+
+
+def test_case3_validated_archive_without_recovery_safety_result_defers_approval(
+    tmp_path: Path,
+) -> None:
+    fixture, product_agent, planner, prepared_bridge_request = asyncio.run(
+        _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
+    )
+    archive_path = _copy_case3_archive_with_recovery_safety(
+        tmp_path,
+        include_recovery_safety=False,
+    )
+    _configure_runtime_bridge_approval_harness(
+        product_agent=product_agent,
+        planner=planner,
+        fixture=fixture,
+        tmp_path=tmp_path,
+        bridge_mode="pre_ran",
+        validation_policy="validated",
+    )
+    product_agent._runtime_bridge_archive_path = str(archive_path)
+    product_agent._runtime_bridge_archive_label = archive_path.name
+    product_agent._runtime_bridge_data_root = lambda: tmp_path
+    product_agent._persist_product_state = lambda: None
+    product_agent._persist_plan_snapshot = lambda: None
+    product_agent._persist_resource_state = lambda: None
+    violations = [
+        {
+            "failed_task_id": FAILED_TASK_ID,
+            "task_id": FAILED_TASK_ID,
+            "resource_jid": "xarm6@localhost",
+            "failure_context": deepcopy(fixture.get("failure_context") or {}),
+        }
+    ]
+    product_agent._runtime_recovery_context = {
+        "trigger": "runtime_des_replan",
+        "failed_task_id": FAILED_TASK_ID,
+        "violations": deepcopy(violations),
+        "prepared_bridge_request": deepcopy(prepared_bridge_request),
+        "system_coordination_state": {
+            "resource_states": deepcopy(fixture.get("resource_states") or {})
+        },
+    }
+    product_agent._set_runtime_recovery(
+        reset=True,
+        status="bridge_ready",
+        trigger="runtime_des_replan",
+        failed_task_id=FAILED_TASK_ID,
+        message="Awaiting archived bridge load.",
+        bridge_debug=deepcopy(prepared_bridge_request.get("bridge_debug") or {}),
+        bridge_approval_state="ready",
+        violations=violations,
+    )
+
+    with patch.object(
+        ProductRecoveryController,
+        "_runtime_bridge_data_root",
+        autospec=True,
+        return_value=tmp_path,
+    ), patch(
+        "cais_spade_llm.agents.intelligent_product.product_recovery_controller.asyncio.to_thread",
+        new=_immediate_to_thread,
+    ):
+        recovery = asyncio.run(
+            product_agent.load_runtime_bridge_archive_proposal(str(archive_path))
+        )
+
+    assert str(recovery.get("recovery_safety_scope_id") or "").strip()
+    assert str(recovery.get("recovery_safety_status") or "").strip() == "generating"
+    assert any(
+        dict(row.get("metadata") or {}).get("type") == "recovery_safety_generate"
+        for row in product_agent.dispatched_agent_messages
+    )
+    with patch.object(
+        ProductRecoveryController,
+        "_send_runtime_plan_validation_check_sync",
+        autospec=True,
+        return_value=None,
+    ) as mocked_validation:
+        recovery = product_agent.approve_runtime_bridge_proposal_sync()
+
+    mocked_validation.assert_not_called()
+    assert str(recovery.get("status") or "").strip() == "llm_bridge"
+    assert dict(recovery.get("action_feedback") or {}).get("kind") == "warning"
+    assert "still generating" in str(
+        dict(recovery.get("action_feedback") or {}).get("text") or ""
+    )
+
+
 def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_and_nominal_tasks(
     tmp_path: Path,
 ) -> None:
@@ -3310,6 +4025,89 @@ def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_and_nom
     assert str(req_1_t3_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
     assert str(seq1_params.get("start_safety_mode") or "").strip() == "cca_check"
     assert str(req_1_t3_params.get("start_safety_mode") or "").strip() == "cca_check"
+
+
+def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_task_even_if_enforced_list_is_stale(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        bridge_source="live_multi_turn",
+        bridge_mode="auto",
+        validation_policy="validated",
+        recovery_safety_scope_id="recovery_scope_case3",
+        recovery_safety_status="ready",
+    )
+
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
+    active_bridge_sequence["recovery_enforced_task_ids"] = []
+    active_bridge_sequence["bridge_task_ids"] = []
+    active_bridge_sequence["dispatched_bridge_task_ids"] = []
+    product_agent.runtime_recovery["active_bridge_sequence"] = active_bridge_sequence
+    product_agent.runtime_recovery["recovery_enforced_task_ids"] = []
+
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+
+    seq1_params = product_agent._dispatch_params_for_task_node(seq1)
+
+    assert str(seq1_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
+    assert str(seq1_params.get("start_safety_mode") or "").strip() == "cca_check"
+
+
+def test_case3_recovery_scope_dispatch_params_block_validated_recovery_task_without_scope(
+    tmp_path: Path,
+) -> None:
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        bridge_source="live_multi_turn",
+        bridge_mode="auto",
+        validation_policy="validated",
+    )
+
+    assert recovery["status"] == "llm_bridge"
+    assert dict(recovery.get("action_feedback") or {}).get("kind") == "warning"
+    assert "no recovery_safety_scope_id" in str(
+        dict(recovery.get("action_feedback") or {}).get("text") or ""
+    )
+    assert product_agent.runtime_recovery.get("active_bridge_sequence") is None
+
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        bridge_source="live_multi_turn",
+        bridge_mode="auto",
+        validation_policy="validated",
+        recovery_safety_scope_id="recovery_scope_case3",
+        recovery_safety_status="ready",
+    )
+    assert recovery["status"] == "validating"
+    active_bridge_sequence = dict(
+        product_agent.runtime_recovery.get("active_bridge_sequence") or {}
+    )
+    active_bridge_sequence["recovery_safety_scope_id"] = ""
+    product_agent.runtime_recovery["active_bridge_sequence"] = active_bridge_sequence
+    product_agent.runtime_recovery["recovery_safety_scope_id"] = ""
+    seq1 = next(
+        node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("bridge_outline_id") or "").strip() == "RECOVERY_SEQ1"
+    )
+
+    try:
+        product_agent._dispatch_params_for_task_node(seq1)
+    except RuntimeError as exc:
+        assert "Recovery Safety Check dispatch blocked" in str(exc)
+    else:
+        raise AssertionError("validated recovery task without recovery_safety_scope_id was not blocked")
+
+    assert str(product_agent.runtime_recovery.get("status") or "").strip() == "human_required"
+    assert product_agent._runtime_recovery_blocks_execution() is True
 
 
 def test_case3_no_validation_recovery_scope_dispatch_params_do_not_route_scoped_recovery_safety_runtime_check(
@@ -3526,6 +4324,107 @@ def test_case3_dryrun_recovery_safety_generation_writes_debug_artifacts(
         "REQ_2_T3",
         "REQ_2_T4",
     ]
+    recovery_seq4 = next(
+        row
+        for row in _case3_archived_transition_trace()
+        if str(row.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
+    )
+    recovery_seq4_end_state = dict(
+        recovery_seq4.get("expected_end_state")
+        or recovery_seq4.get("projected_outline_state")
+        or {}
+    )
+    recovery_seq4_part_state = str(
+        recovery_seq4_end_state.get("part_state") or ""
+    ).strip()
+    assert recovery_seq4_part_state
+    safe_2_result = dict(all_rule_results["SAFE_2"])
+    safe_2_ap_details = [
+        dict(row) for row in (safe_2_result.get("aps") or []) if isinstance(row, dict)
+    ]
+    recovery_event_fulls = [
+        str(row.get("full") or "").strip()
+        for row in safe_2_ap_details
+        if str(row.get("source") or "").strip() == "recovery"
+        and str(row.get("kind") or "").strip() == "ap_event"
+    ]
+    recovery_state_fulls = [
+        str(row.get("full") or "").strip()
+        for row in safe_2_ap_details
+        if str(row.get("source") or "").strip() == "recovery"
+        and str(row.get("kind") or "").strip() == "ap_state"
+    ]
+    nominal_ap_fulls = [
+        str(row.get("full") or "").strip()
+        for row in safe_2_ap_details
+        if str(row.get("source") or "").strip() == "nominal"
+    ]
+    nominal_state_fulls = [
+        str(row.get("full") or "").strip()
+        for row in safe_2_ap_details
+        if str(row.get("source") or "").strip() == "nominal"
+        and str(row.get("kind") or "").strip() == "ap_state"
+    ]
+    assert any("execute_recovery_macro" in token for token in recovery_event_fulls)
+    assert any("task_id=REQ_2_T3" in token for token in nominal_ap_fulls)
+    assert any(
+        "positioned" in token and "task_id=REQ_2_T3" in token
+        for token in nominal_state_fulls
+    )
+    assert any(
+        "placed" in token and "task_id=REQ_2_T4" in token
+        for token in nominal_state_fulls
+    )
+    grounded_nominal_states = [
+        dict(row)
+        for row in (safe_2_result.get("grounded_nominal_states") or [])
+        if isinstance(row, dict)
+    ]
+    assert any(
+        str(row.get("id") or "").strip() == "REQ_2_T3"
+        and str(row.get("value") or "").strip() == "positioned"
+        for row in grounded_nominal_states
+    )
+    assert any(
+        str(row.get("id") or "").strip() == "REQ_2_T4"
+        and str(row.get("value") or "").strip() == "placed"
+        for row in grounded_nominal_states
+    )
+    nominal_side_aps = [
+        str(token or "").strip()
+        for token in (safe_2_result.get("nominal_side_aps") or [])
+        if str(token or "").strip()
+    ]
+    assert any(
+        "positioned" in token and "task_id=REQ_2_T3" in token
+        for token in nominal_side_aps
+    )
+    assert any(
+        "placed" in token and "task_id=REQ_2_T4" in token
+        for token in nominal_side_aps
+    )
+    assert any(
+        str(row.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
+        and str(row.get("field") or "").strip() == "part_state"
+        and str(row.get("value") or "").strip() == recovery_seq4_part_state
+        for row in safe_2_ap_details
+        if str(row.get("source") or "").strip() == "recovery"
+        and str(row.get("kind") or "").strip() == "ap_state"
+    )
+    assert any(
+        recovery_seq4_part_state in token and "outline_id=RECOVERY_SEQ4" in token
+        for token in recovery_state_fulls
+    )
+    safe_2_ltlf = str(safe_2_result.get("ltlf") or "").strip()
+    assert safe_2_ltlf.startswith("G !((")
+    assert ") & (" in safe_2_ltlf
+    for token in recovery_event_fulls + recovery_state_fulls + nominal_ap_fulls:
+        assert token in safe_2_ltlf
+    assert recovery_event_fulls and recovery_state_fulls
+    same_side_pair = f"{recovery_event_fulls[0]} & {recovery_state_fulls[0]}"
+    reverse_same_side_pair = f"{recovery_state_fulls[0]} & {recovery_event_fulls[0]}"
+    assert same_side_pair not in safe_2_ltlf
+    assert reverse_same_side_pair not in safe_2_ltlf
     raw_grounding_response_payload = json.loads(
         Path(
             str(result.get("latest_grounding_llm_response_artifact_path") or "")
@@ -3569,10 +4468,146 @@ def test_case3_dryrun_recovery_safety_generation_writes_debug_artifacts(
         "task_id=REQ_2_T3" in str(ap.get("full") or "")
         for ap in aps
     )
+    assert any(
+        "positioned" in str(ap.get("full") or "")
+        and "task_id=REQ_2_T3" in str(ap.get("full") or "")
+        for ap in aps
+    )
+    assert any(
+        "placed" in str(ap.get("full") or "")
+        and "task_id=REQ_2_T4" in str(ap.get("full") or "")
+        for ap in aps
+    )
+    assert any(
+        str(ap.get("source") or "").strip() == "recovery"
+        and str(ap.get("kind") or "").strip() == "ap_state"
+        and str(ap.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
+        for ap in aps
+        if isinstance(ap, dict)
+    )
     assert not any(
         "recover_place_LG_to_assembly_board-v1" in str(ap.get("full") or "")
         for ap in aps
     )
+
+
+def test_case3_recovery_safety_generation_preserves_recovery_completion_state_symbols(
+    tmp_path: Path,
+) -> None:
+    async def _run(part_state: str, debug_dir: Path) -> dict[str, Any]:
+        _, product_agent, _, prepared_bridge_request = await _prepare_bridge_dryrun_harness(
+            reasoning_mode="multi_turn"
+        )
+        trace = _case3_archived_transition_trace()
+        for row in trace:
+            if str(row.get("outline_id") or "").strip() != "RECOVERY_SEQ4":
+                continue
+            expected_end_state = dict(row.get("expected_end_state") or {})
+            expected_end_state["part_state"] = part_state
+            row["expected_end_state"] = expected_end_state
+            if isinstance(row.get("projected_outline_state"), dict):
+                projected_outline_state = dict(row.get("projected_outline_state") or {})
+                projected_outline_state["part_state"] = part_state
+                row["projected_outline_state"] = projected_outline_state
+            break
+        multi_turn_session = {
+            "accepted_outline_prefix": trace,
+            "projected_outline_state": _case3_archived_projected_outline_state(),
+        }
+        payload = _build_dryrun_recovery_safety_generation_payload(
+            prepared_bridge_request=prepared_bridge_request,
+            multi_turn_session=multi_turn_session,
+            recovery_safety_scope_id=f"dryrun_recovery_scope_case3_{part_state}",
+        )
+
+        async def _fake_ask_llm_structured(
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            return _fake_case3_recovery_safety_grounding_response(payload)
+
+        product_agent.ask_llm_structured = _fake_ask_llm_structured  # type: ignore[method-assign]
+        with patch("test.test_case3_bridge_dryrun.DEBUG_DIR", debug_dir):
+            return await _generate_dryrun_recovery_safety_artifacts(
+                product_agent=product_agent,
+                prepared_bridge_request=prepared_bridge_request,
+                multi_turn_session=multi_turn_session,
+                recovery_safety_scope_id=f"dryrun_recovery_scope_case3_{part_state}",
+            )
+
+    for part_state in ("restored", "revived"):
+        result = asyncio.run(_run(part_state, tmp_path / part_state))
+        safe_2_result = next(
+            dict(row)
+            for row in (result.get("all_rule_results") or [])
+            if isinstance(row, dict) and str(row.get("rule_id") or "").strip() == "SAFE_2"
+        )
+        recovery_state_tokens = [
+            str(token or "").strip()
+            for token in (safe_2_result.get("selected_recovery_state_tokens") or [])
+            if str(token or "").strip()
+        ]
+        assert f"part_state={part_state}" in recovery_state_tokens
+        assert not any(
+            token == "part_state=placed" and part_state != "placed"
+            for token in recovery_state_tokens
+        )
+        recovery_state_aps = [
+            dict(ap)
+            for ap in (safe_2_result.get("aps") or [])
+            if isinstance(ap, dict)
+            and str(ap.get("source") or "").strip() == "recovery"
+            and str(ap.get("kind") or "").strip() == "ap_state"
+        ]
+        assert any(
+            str(ap.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
+            and str(ap.get("field") or "").strip() == "part_state"
+            and str(ap.get("value") or "").strip() == part_state
+            and f"/{part_state}/" in str(ap.get("full") or "")
+            for ap in recovery_state_aps
+        )
+
+
+def test_case3_recovery_safety_validation_rejects_recovery_state_symbol_not_in_selected_row() -> None:
+    trace = _case3_archived_transition_trace()
+    for row in trace:
+        if str(row.get("outline_id") or "").strip() != "RECOVERY_SEQ4":
+            continue
+        expected_end_state = dict(row.get("expected_end_state") or {})
+        expected_end_state["part_state"] = "revived"
+        row["expected_end_state"] = expected_end_state
+        if isinstance(row.get("projected_outline_state"), dict):
+            projected_outline_state = dict(row.get("projected_outline_state") or {})
+            projected_outline_state["part_state"] = "revived"
+            row["projected_outline_state"] = projected_outline_state
+        break
+    message = _validate_grounded_rule_result(
+        source_rule={"id": "SAFE_2", "aps": []},
+        payload={
+            "accepted_outline_prefix": trace,
+            "pending_nominal_tasks": [],
+        },
+        rule_result={
+            "grounded_recovery_events": [],
+            "grounded_nominal_events": [],
+            "grounded_recovery_states": [
+                {
+                    "outline_id": "RECOVERY_SEQ4",
+                    "field": "part_state",
+                    "value": "placed",
+                }
+            ],
+            "grounded_nominal_states": [],
+            "generated_aps": [],
+        },
+    )
+
+    assert "accepted completion token part_state=placed" in message
 
 
 def test_case3_recovery_safety_grounding_does_not_treat_product_jid_as_destination(
@@ -3661,7 +4696,7 @@ def test_case3_recovery_safety_grounding_does_not_treat_product_jid_as_destinati
     assert list(
         dict(selected_safe_2.get("grounded_bindings") or {}).get("nominal_task_ids")
         or []
-    ) == ["REQ_2_T3"]
+    ) == ["REQ_2_T3", "REQ_2_T4"]
 
 
 def test_case3_dryrun_recovery_safety_generation_falls_back_to_prepared_session_state(
@@ -3916,30 +4951,21 @@ def test_case3_recovery_safety_monitor_uses_generated_recovery_grounded_aps(
         for rule in (result.get("rules") or [])
         if isinstance(rule, dict) and str(rule.get("id") or "").strip() == "SAFE_2"
     )
-    recovery_label = next(
+    recovery_state_label = next(
         str(ap.get("label") or "").strip()
         for ap in (safe_2_rule.get("aps") or [])
-        if "outline_id=RECOVERY_SEQ4" in str(ap.get("full") or "")
+        if str(ap.get("source") or "").strip() == "recovery"
+        and str(ap.get("kind") or "").strip() == "ap_state"
+        and str(ap.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
     )
-    nominal_label = next(
-        str(ap.get("label") or "").strip()
+    recovery_state_value = next(
+        str(ap.get("value") or "").strip()
         for ap in (safe_2_rule.get("aps") or [])
-        if "task_id=REQ_2_T3" in str(ap.get("full") or "")
+        if str(ap.get("source") or "").strip() == "recovery"
+        and str(ap.get("kind") or "").strip() == "ap_state"
+        and str(ap.get("outline_id") or "").strip() == "RECOVERY_SEQ4"
     )
-
-    nominal_first_allowed, nominal_first_info = monitor.process_start_event(
-        {
-            "task_id": "REQ_2_T3",
-            "resource_jid": "xarm6@localhost",
-            "function_name": "place_approach",
-            "params": {
-                "task_id": "REQ_2_T3",
-                "part_name": "LG",
-            },
-        }
-    )
-    assert nominal_first_allowed is True
-    assert nominal_label in set(monitor.running_aps)
+    assert recovery_state_value
 
     recovery_allowed, recovery_info = monitor.process_start_event(
         {
@@ -3952,35 +4978,39 @@ def test_case3_recovery_safety_monitor_uses_generated_recovery_grounded_aps(
                 "outline_id": "RECOVERY_SEQ4",
                 "event_name": "recover_place_LG_to_assembly_board-v1",
                 "part_name": "LG",
-                "projected_outline_state": {
-                    "part_location": "assembly_board-v1",
-                    "part_state": "placed",
-                },
+                "destination_location": "assembly_board-v1",
                 "expected_end_state": {
                     "part_location": "assembly_board-v1",
-                    "part_state": "placed",
+                    "part_state": recovery_state_value,
+                    "resource_state": "idle",
                 },
             },
         }
     )
-    assert recovery_allowed is False
-    assert str(recovery_info.get("violated_rule") or "").strip() == "SAFE_2"
+    assert recovery_allowed is True, recovery_info
+
+    nominal_while_recovery_running_allowed, nominal_while_recovery_running_info = (
+        monitor.process_start_event(
+            {
+                "task_id": "REQ_2_T3",
+                "resource_jid": "xarm6@localhost",
+                "function_name": "place_approach",
+                "params": {
+                    "task_id": "REQ_2_T3",
+                    "part_name": "LG",
+                },
+            }
+        )
+    )
+    assert nominal_while_recovery_running_allowed is False
+    assert (
+        str(nominal_while_recovery_running_info.get("violated_rule") or "").strip()
+        == "SAFE_2"
+    )
 
     monitor.process_finish_event(
         {
-            "task_id": "REQ_2_T3",
-            "resource_jid": "xarm6@localhost",
-            "function_name": "place_approach",
-            "current_state": "positioned",
-            "params": {
-                "part_name": "LG",
-                "task_id": "REQ_2_T3",
-            },
-        }
-    )
-
-    recovery_after_allowed, _ = monitor.process_start_event(
-        {
+            "task_id": "RECOVERY_BRIDGE_SEQ4",
             "resource_jid": "ur5e@localhost",
             "function_name": "execute_recovery_macro",
             "params": {
@@ -3989,19 +5019,64 @@ def test_case3_recovery_safety_monitor_uses_generated_recovery_grounded_aps(
                 "outline_id": "RECOVERY_SEQ4",
                 "event_name": "recover_place_LG_to_assembly_board-v1",
                 "part_name": "LG",
-                "projected_outline_state": {
-                    "part_location": "assembly_board-v1",
-                    "part_state": "placed",
-                },
+                "destination_location": "assembly_board-v1",
                 "expected_end_state": {
                     "part_location": "assembly_board-v1",
-                    "part_state": "placed",
+                    "part_state": recovery_state_value,
+                    "resource_state": "idle",
                 },
             },
         }
     )
-    assert recovery_after_allowed is True
-    assert recovery_label in set(monitor.running_aps)
+    assert recovery_state_label in set(monitor.resource_state_aps.get("ur5e@localhost") or [])
+
+    nominal_while_recovery_state_allowed, nominal_while_recovery_state_info = (
+        monitor.process_start_event(
+            {
+                "task_id": "REQ_2_T3",
+                "resource_jid": "xarm6@localhost",
+                "function_name": "place_approach",
+                "params": {
+                    "task_id": "REQ_2_T3",
+                    "part_name": "LG",
+                },
+            }
+        )
+    )
+    assert nominal_while_recovery_state_allowed is False
+    assert (
+        str(nominal_while_recovery_state_info.get("violated_rule") or "").strip()
+        == "SAFE_2"
+    )
+
+    monitor.process_finish_event(
+        {
+            "task_id": "REPAIR_EVENT_AFTER_RECOVERY_SEQ4",
+            "resource_jid": "ur5e@localhost",
+            "function_name": "execute_recovery_macro",
+            "current_state": "picked",
+            "params": {
+                "task_id": "REPAIR_EVENT_AFTER_RECOVERY_SEQ4",
+                "part_name": "MCP",
+            },
+        }
+    )
+    assert recovery_state_label not in set(
+        monitor.resource_state_aps.get("ur5e@localhost") or []
+    )
+
+    nominal_after_clear_allowed, nominal_after_clear_info = monitor.process_start_event(
+        {
+            "task_id": "REQ_2_T3",
+            "resource_jid": "xarm6@localhost",
+            "function_name": "place_approach",
+            "params": {
+                "task_id": "REQ_2_T3",
+                "part_name": "LG",
+            },
+        }
+    )
+    assert nominal_after_clear_allowed is True, nominal_after_clear_info
 
 
 def test_case3_multi_turn_artifacts_route_into_recovery_outline_and_recovery_primitves(
@@ -5130,6 +6205,8 @@ def test_case3_archived_bridge_approval_validated_dispatches_runtime_safety_chec
         _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
             tmp_path,
             validation_policy="validated",
+            recovery_safety_scope_id="recovery_scope_case3",
+            recovery_safety_status="ready",
         )
 
     assert recovery["status"] == "validating"
@@ -5137,10 +6214,11 @@ def test_case3_archived_bridge_approval_validated_dispatches_runtime_safety_chec
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=False,
     )
 
 
-def test_case3_archived_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+def test_case3_archived_bridge_approval_no_validation_dispatches_normal_cca_validation(
     tmp_path: Path,
 ) -> None:
     with patch.object(
@@ -5159,10 +6237,16 @@ def test_case3_archived_bridge_approval_no_validation_syncs_repaired_fsa_without
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=True,
     )
+    active_bridge_sequence = dict(recovery.get("active_bridge_sequence") or {})
+    execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
+    assert execution_policy["validation_policy"] == "no_validation"
+    assert execution_policy["complete_full_tail"] is True
+    assert product_agent._runtime_recovery_blocks_execution() is True
 
 
-def test_case3_archived_bridge_approval_no_validation_dispatches_skip_revalidation_payload(
+def test_case3_archived_bridge_approval_no_validation_dispatches_recovery_safety_filter(
     tmp_path: Path,
 ) -> None:
     _, product_agent, _, _, recovery = _approve_case3_archived_bridge(
@@ -5181,6 +6265,14 @@ def test_case3_archived_bridge_approval_no_validation_dispatches_skip_revalidati
     assert dispatched_payloads
     assert all(
         not bool(dict(row.get("body") or {}).get("skip_revalidation"))
+        for row in dispatched_payloads
+    )
+    assert all(
+        bool(dict(row.get("body") or {}).get("skip_recovery_safety_validation"))
+        for row in dispatched_payloads
+    )
+    assert all(
+        "skip_recovery_nominal_validation" not in dict(row.get("body") or {})
         for row in dispatched_payloads
     )
 
@@ -5221,7 +6313,7 @@ def test_case3_no_validation_ignores_late_runtime_safety_result(
     assert str(product_agent.runtime_recovery.get("validation_policy") or "").strip() == "no_validation"
 
 
-def test_case3_no_validation_terminal_bridge_completion_still_dispatches_runtime_plan_validation(
+def test_case3_no_validation_terminal_bridge_completion_dispatches_normal_cca_validation(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
@@ -5320,7 +6412,10 @@ def test_case3_no_validation_terminal_bridge_completion_still_dispatches_runtime
             )
         )
 
-    mocked_validation.assert_called_once_with(product_agent.recovery_controller)
+    mocked_validation.assert_called_once_with(
+        product_agent.recovery_controller,
+        skip_recovery_safety_validation=True,
+    )
     assert handled is True
     assert str(product_agent.runtime_recovery.get("status") or "").strip() == "validating"
     assert product_agent.runtime_recovery.get("active_bridge_sequence") is None
@@ -5341,6 +6436,8 @@ def test_case3_live_bridge_approval_validated_dispatches_runtime_safety_check(
             bridge_source="live_multi_turn",
             bridge_mode="auto",
             validation_policy="validated",
+            recovery_safety_scope_id="recovery_scope_case3",
+            recovery_safety_status="ready",
         )
 
     assert recovery["status"] == "validating"
@@ -5348,10 +6445,11 @@ def test_case3_live_bridge_approval_validated_dispatches_runtime_safety_check(
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=False,
     )
 
 
-def test_case3_live_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+def test_case3_live_bridge_approval_no_validation_dispatches_normal_cca_validation(
     tmp_path: Path,
 ) -> None:
     with patch.object(
@@ -5372,6 +6470,7 @@ def test_case3_live_bridge_approval_no_validation_syncs_repaired_fsa_without_val
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=True,
     )
 
 
@@ -5390,6 +6489,8 @@ def test_case3_verification_only_bridge_approval_validated_dispatches_runtime_sa
             bridge_mode="auto",
             validation_policy="validated",
             verification_only=True,
+            recovery_safety_scope_id="recovery_scope_case3",
+            recovery_safety_status="ready",
         )
 
     assert recovery["status"] == "validating"
@@ -5399,10 +6500,11 @@ def test_case3_verification_only_bridge_approval_validated_dispatches_runtime_sa
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=False,
     )
 
 
-def test_case3_verification_only_bridge_approval_no_validation_syncs_repaired_fsa_without_validating(
+def test_case3_verification_only_bridge_approval_no_validation_dispatches_normal_cca_validation(
     tmp_path: Path,
 ) -> None:
     with patch.object(
@@ -5423,9 +6525,11 @@ def test_case3_verification_only_bridge_approval_no_validation_syncs_repaired_fs
     active_bridge_sequence = dict(product_agent.runtime_recovery.get("active_bridge_sequence") or {})
     execution_policy = dict(active_bridge_sequence.get("execution_policy") or {})
     assert execution_policy["verification_only"] is True
+    assert execution_policy["validation_policy"] == "no_validation"
     mocked_validation.assert_called_once_with(
         product_agent.recovery_controller,
         skip_revalidation=False,
+        skip_recovery_safety_validation=True,
     )
 
 

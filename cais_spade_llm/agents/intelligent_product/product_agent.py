@@ -9,6 +9,7 @@ import os
 import shutil
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -241,6 +242,7 @@ class ProductAgent(LlmAgent):
         self,
         *,
         skip_revalidation: bool = False,
+        skip_recovery_safety_validation: bool = False,
         skip_offline_validation: bool | None = None,
         request_id: str | None = None,
     ):
@@ -254,14 +256,23 @@ class ProductAgent(LlmAgent):
         if fsa is None and not skip_revalidation:
             raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
 
-        return {
+        payload = {
             "fsa": fsa or {},                # <-- upload FSA here
             "product_jid": str(self.jid),
             "plan": {"nodes": nodes},
             "runtime_context": self._build_runtime_plan_context(),
             "skip_revalidation": bool(skip_revalidation),
+            "skip_recovery_safety_validation": bool(skip_recovery_safety_validation),
             "request_id": str(request_id or "").strip(),
         }
+        recovery_safety_result = (
+            self._runtime_recovery_context.get("recovery_safety_result")
+            if isinstance(getattr(self, "_runtime_recovery_context", None), dict)
+            else None
+        )
+        if isinstance(recovery_safety_result, dict) and recovery_safety_result:
+            payload["recovery_safety_result"] = deepcopy(recovery_safety_result)
+        return payload
 
     def _build_runtime_plan_context(self) -> dict[str, Any]:
         completed_task_ids: list[str] = []
@@ -1367,7 +1378,7 @@ class ProductAgent(LlmAgent):
                     )
                     return False
 
-                # NEW: prefer resource_jid chosen by the planner (LLM)
+                # Prefer resource_jid chosen by the planner.
                 to = task_node.get("resource_jid")
                 if not to:
                     # Fallback: first configured resource JID
@@ -1377,10 +1388,54 @@ class ProductAgent(LlmAgent):
                         task_node.get("id"),
                         to,
                     )
+                to = str(to or "").strip()
+                active_statuses = {"dispatched", "accepted", "running"}
+                active_same_resource_task_ids: list[str] = []
+                planner_nodes = getattr(
+                    getattr(agent, "process_planner", None),
+                    "nodes",
+                    [],
+                ) or []
+                for other_node in planner_nodes:
+                    if not isinstance(other_node, dict):
+                        continue
+                    other_task_id = str(other_node.get("id") or "").strip()
+                    if other_task_id and other_task_id == task_id:
+                        continue
+                    if str(other_node.get("resource_jid") or "").strip() != to:
+                        continue
+                    other_status = str(other_node.get("status") or "").strip().lower()
+                    other_tracked_status = str(
+                        agent.task_states.get(other_task_id) or ""
+                    ).strip().lower()
+                    if (
+                        other_status in active_statuses
+                        or other_tracked_status in active_statuses
+                    ):
+                        active_same_resource_task_ids.append(other_task_id or "<unknown>")
+                if active_same_resource_task_ids:
+                    agent.logger.info(
+                        "[Product] Dispatch guard suppressed task %s for resource_jid=%s while active task(s) are running on that resource: %s.",
+                        task_id or "<unknown>",
+                        to or "<unknown>",
+                        active_same_resource_task_ids,
+                    )
+                    return False
 
                 # Build the instruction for the RobotAgent from the DAG node.
                 # Recovery macro primitive steps own their destination intent.
-                params = agent._dispatch_params_for_task_node(task_node)
+                try:
+                    params = agent._dispatch_params_for_task_node(task_node)
+                except RuntimeError as exc:
+                    if "Recovery Safety Check dispatch blocked" not in str(exc):
+                        raise
+                    agent.logger.error(
+                        "[Product] Dispatch blocked for %s: %s",
+                        task_id or "<unknown>",
+                        exc,
+                    )
+                    await asyncio.to_thread(agent._persist_product_state)
+                    return False
 
                 instruction = {
                     "function_name": task_node.get("function_name"),

@@ -1,0 +1,79 @@
+{
+  "outline_id": "RECOVERY_SEQ3",
+  "resource_jid": "ur5e@localhost",
+  "primitive_local_turn_index": 3,
+  "decision": "primitive_steps_ready",
+  "response": {
+    "thought": "I retrieved and adapted the suggested pick capability decompositions already served for this event. Because LG's observed pose is explicitly available in served context, I can safely skip detect_parts per the pick_approach note and ground compute_pick_targets from the observed pose. The remaining sequence follows pick_approach into pick_grasp using only visible primitives.",
+    "decision": "primitive_steps_ready",
+    "outline_id": "RECOVERY_SEQ3",
+    "resource_jid": "ur5e@localhost",
+    "context_requests": [],
+    "rationale": "Adapted /capability_decompositions/pick_approach and /capability_decompositions/pick_grasp to the served LG observed-pose context. detect_parts is omitted because an equivalent observed pose for LG was already retrieved. compute_pick_targets is grounded with the served observed pose, then the robot moves to computed approach and target poses, grasps LG using the served model_name, and performs the modeled relative lift.",
+    "notes": [
+      "Sequence authors only the active RECOVERY_SEQ3 transition.",
+      "All primitives are from the visible catalog.",
+      "Pose-valued move_cartesian params are bound from event_facts produced by compute_pick_targets.",
+      "Observed-pose grounding is taken from served context /parts/LG/observed_pose.",
+      "model_name is grounded from served context /parts/LG/snapshot.target.model_name."
+    ],
+    "primitive_steps": [
+      {
+        "primitive": "compute_pick_targets",
+        "params": {
+          "part_name": "LG",
+          "target_pose": {
+            "x": 0,
+            "y": 0.2,
+            "z": 1.035
+          },
+          "target_pose_source": "observed_pose"
+        }
+      },
+      {
+        "primitive": "move_cartesian",
+        "params": {
+          "x": {
+            "context_ref": "event_facts.pick_targets.LG.approach_pose.x"
+          },
+          "y": {
+            "context_ref": "event_facts.pick_targets.LG.approach_pose.y"
+          },
+          "z": {
+            "context_ref": "event_facts.pick_targets.LG.approach_pose.z"
+          }
+        }
+      },
+      {
+        "primitive": "move_cartesian",
+        "params": {
+          "x": {
+            "context_ref": "event_facts.pick_targets.LG.target_pose.x"
+          },
+          "y": {
+            "context_ref": "event_facts.pick_targets.LG.target_pose.y"
+          },
+          "z": {
+            "context_ref": "event_facts.pick_targets.LG.target_pose.z"
+          }
+        }
+      },
+      {
+        "primitive": "grasp_part",
+        "params": {
+          "model_name": "gear_large",
+          "part_name": "LG"
+        }
+      },
+      {
+        "primitive": "move_relative",
+        "params": {
+          "dx": 0,
+          "dy": 0,
+          "dz": 0.05,
+          "speed": 0.8
+        }
+      }
+    ]
+  }
+}

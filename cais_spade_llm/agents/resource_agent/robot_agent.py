@@ -1119,6 +1119,7 @@ class RobotAgent(ResourceAgent):
         self,
         primitive: str,
         params: Dict[str, Any],
+        step_result: Dict[str, Any],
         event_facts: Dict[str, Any],
     ) -> None:
         """Snap direct bridge releases into assembly slot depth when geometry says inserted."""
@@ -1152,6 +1153,14 @@ class RobotAgent(ResourceAgent):
             or ""
         ).strip()
         if not model_name:
+            return
+        release_mode = str((step_result or {}).get("release_mode") or "").strip()
+        if release_mode == "assumed_open_after_detach_timeout":
+            self.logger.warning(
+                "[Robot] skipping recovery release snap_part_to_slot for %s because release_part used release_mode=%s",
+                model_name,
+                release_mode,
+            )
             return
 
         snap = await self._execute_primitive(
@@ -1424,6 +1433,7 @@ class RobotAgent(ResourceAgent):
             await self._stabilize_recovery_release_if_needed(
                 primitive,
                 params,
+                step_result,
                 event_facts,
             )
 

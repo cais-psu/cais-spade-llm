@@ -81,6 +81,56 @@ class CentralControllerAgent(LlmAgent):
             name, str(self.safety_file)
         )
 
+    @staticmethod
+    def _plan_recovery_task_ids(plan: Optional[dict[str, Any]]) -> set[str]:
+        if not isinstance(plan, dict):
+            return set()
+        recovery_task_ids: set[str] = set()
+        for node in plan.get("nodes") or []:
+            if not isinstance(node, dict) or node.get("type") != "task":
+                continue
+            task_id = str(node.get("id") or "").strip()
+            if not task_id:
+                continue
+            params = node.get("params") if isinstance(node.get("params"), dict) else {}
+            function_name = str(node.get("function_name") or "").strip()
+            if (
+                task_id.startswith("RECOVERY_BRIDGE_")
+                or task_id.startswith("REPAIR_EVENT_")
+                or function_name == "execute_recovery_macro"
+                or str(node.get("bridge_outline_id") or "").strip()
+                or str(params.get("outline_id") or "").strip()
+                or str(node.get("repair_operator") or "").strip()
+            ):
+                recovery_task_ids.add(task_id)
+        return recovery_task_ids
+
+    @classmethod
+    def _filter_recovery_safety_validation_violations(
+        cls,
+        violations: list[dict[str, Any]],
+        plan: Optional[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        recovery_task_ids = cls._plan_recovery_task_ids(plan)
+        if not recovery_task_ids:
+            return list(violations or []), 0
+
+        filtered: list[dict[str, Any]] = []
+        suppressed = 0
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            witness_task_ids = {
+                str(task_id).strip()
+                for task_id in (violation.get("witness_task_ids") or [])
+                if str(task_id).strip()
+            }
+            if witness_task_ids & recovery_task_ids:
+                suppressed += 1
+                continue
+            filtered.append(violation)
+        return filtered, suppressed
+
     async def setup(self) -> None:
         """Attach startup, runtime monitor, and plan validation behaviours."""
         await super().setup()
@@ -191,6 +241,44 @@ class CentralControllerAgent(LlmAgent):
         entry = self.recovery_safety_scopes.get(scope_id)
         monitor = entry.get("monitor") if isinstance(entry, dict) else None
         return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
+
+    def _register_recovery_safety_scope_result(
+        self,
+        result: dict[str, Any],
+    ) -> bool:
+        if not isinstance(result, dict):
+            return False
+        recovery_safety_scope_id = str(
+            result.get("recovery_safety_scope_id") or ""
+        ).strip()
+        if not recovery_safety_scope_id:
+            return False
+        if result.get("ok"):
+            self.recovery_safety_scopes[recovery_safety_scope_id] = {
+                "status": "ready",
+                "rules": deepcopy(result.get("rules") or []),
+                "rule_dfas": deepcopy(result.get("rule_dfas") or {}),
+                "recovery_safety_logic_json": str(
+                    result.get("recovery_safety_logic_json") or ""
+                ).strip(),
+                "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
+                "recovery_safery_dir": str(
+                    result.get("recovery_safery_dir") or ""
+                ).strip(),
+                "monitor": OnlineSafetyMonitor(
+                    deepcopy(result.get("rule_dfas") or {}),
+                    deepcopy(result.get("rules") or []),
+                    tools_catalog=getattr(self, "tools_catalog", []),
+                ),
+            }
+            return True
+        self.recovery_safety_scopes[recovery_safety_scope_id] = {
+            "status": "failed",
+            "failure_reason": str(result.get("failure_reason") or "").strip(),
+            "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
+            "recovery_safery_dir": str(result.get("recovery_safery_dir") or "").strip(),
+        }
+        return False
 
     @staticmethod
     def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1525,29 +1613,7 @@ class CentralControllerAgent(LlmAgent):
                 }
 
             if recovery_safety_scope_id:
-                if result.get("ok"):
-                    agent.recovery_safety_scopes[recovery_safety_scope_id] = {
-                        "status": "ready",
-                        "rules": deepcopy(result.get("rules") or []),
-                        "rule_dfas": deepcopy(result.get("rule_dfas") or {}),
-                        "recovery_safety_logic_json": str(
-                            result.get("recovery_safety_logic_json") or ""
-                        ).strip(),
-                        "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
-                        "recovery_safery_dir": str(result.get("recovery_safery_dir") or "").strip(),
-                        "monitor": OnlineSafetyMonitor(
-                            deepcopy(result.get("rule_dfas") or {}),
-                            deepcopy(result.get("rules") or []),
-                            tools_catalog=getattr(agent, "tools_catalog", []),
-                        ),
-                    }
-                else:
-                    agent.recovery_safety_scopes[recovery_safety_scope_id] = {
-                        "status": "failed",
-                        "failure_reason": str(result.get("failure_reason") or "").strip(),
-                        "recovery_plan_dir": str(result.get("recovery_plan_dir") or "").strip(),
-                        "recovery_safery_dir": str(result.get("recovery_safery_dir") or "").strip(),
-                    }
+                agent._register_recovery_safety_scope_result(result)
 
             if not product_jid:
                 return
@@ -1679,9 +1745,16 @@ class CentralControllerAgent(LlmAgent):
                 plan = data.get("plan")          # OPTIONAL (semantic AP mapping)
                 product_jid = data.get("product_jid")
                 runtime_context = data.get("runtime_context") or {}
+                recovery_safety_result = data.get("recovery_safety_result") or {}
                 request_id = str(data.get("request_id") or "").strip()
                 skip_revalidation = bool(
                     data.get("skip_revalidation", data.get("skip_offline_validation", False))
+                )
+                skip_recovery_safety_validation = bool(
+                    data.get(
+                        "skip_recovery_safety_validation",
+                        data.get("skip_recovery_nominal_validation", False),
+                    )
                 )
             except Exception:
                 agent.logger.exception("[CCA] Malformed plan_safety_check.")
@@ -1690,6 +1763,19 @@ class CentralControllerAgent(LlmAgent):
             if not fsa:
                 agent.logger.warning("[CCA] No FSA provided for plan validation.")
                 return
+
+            if isinstance(recovery_safety_result, dict) and recovery_safety_result:
+                registered = agent._register_recovery_safety_scope_result(
+                    recovery_safety_result
+                )
+                if registered:
+                    agent.logger.info(
+                        "[CCA] Registered recovery safety scope from plan_safety_check: scope=%s",
+                        str(
+                            recovery_safety_result.get("recovery_safety_scope_id")
+                            or ""
+                        ).strip(),
+                    )
 
             prior_plan_fsa_monitor = agent.plan_fsa_monitor
 
@@ -1778,6 +1864,19 @@ class CentralControllerAgent(LlmAgent):
                         product_jid=product_jid,
                         runtime_context=runtime_context,
                     )
+                    if skip_recovery_safety_validation:
+                        violations, suppressed_count = (
+                            agent._filter_recovery_safety_validation_violations(
+                                violations,
+                                plan,
+                            )
+                        )
+                        ok = not violations
+                        if suppressed_count:
+                            agent.logger.info(
+                                "[CCA] Plan FSA Validation: suppressed %d recovery-involved witness(es); normal CCA validation remains active.",
+                                suppressed_count,
+                            )
                 try:
                     agent._initialize_online_supervisor(
                         validator=validator,

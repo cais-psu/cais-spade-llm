@@ -1,0 +1,28 @@
+{
+  "outline_id": "RECOVERY_SEQ1",
+  "resource_jid": "xarm6@localhost",
+  "primitive_local_turn_index": 2,
+  "decision": "draft_ready",
+  "response": {
+    "thought": "A matching capability decomposition for move_home was already served and directly fits this recovery event: preconditions require no held part and a named pose 'home', both consistent with the event description and named pose rules. The modeled bridge-visible sequence is a single move_to_named_pose step.",
+    "decision": "primitive_steps_ready",
+    "outline_id": "RECOVERY_SEQ1",
+    "resource_jid": "xarm6@localhost",
+    "context_requests": [],
+    "rationale": "Adapted the retrieved /capability_decompositions/move_home decomposition without modification. It satisfies the event goal of returning xarm6@localhost from failed to idle at the home location using a visible primitive and grounded literal params from served context.",
+    "notes": [
+      "Using the suggested capability decomposition 'move_home'.",
+      "The event states the robot holds no part, matching the decomposition precondition.",
+      "'home' is an allowed named pose under the provided named pose rules."
+    ],
+    "primitive_steps": [
+      {
+        "primitive": "move_to_named_pose",
+        "params": {
+          "pose_name": "home",
+          "speed": 0.8
+        }
+      }
+    ]
+  }
+}

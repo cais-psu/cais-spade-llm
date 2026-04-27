@@ -1,0 +1,141 @@
+{
+  "thought": "The only grounded recovery step that clearly advances the marked-state conditions and is enabled by the current state is to have ur5e acquire LG from its observed misplaced pose. SAFE_1 requires LG to be handled before any MCP place-approach toward the assembly station, and ur5e is the only robot whose current reachable set/workspace can cover LG's observed pose at y=0.2. xarm6 cannot ground this pickup because its workspace upper y bound is 0.1. MCP-related placement progress should not be proposed first because the open guard explicitly requires LG to be placed at assembly_board-v1 before MCP assembly placement.",
+  "decision": "need_next_task",
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_lg_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
+    }
+  ],
+  "candidate_evaluation_summary": [
+    {
+      "candidate_index": 0,
+      "valid": true,
+      "task": {
+        "outline_id": "RECOVERY_SEQ3",
+        "event_name": "pick_lg_from_observed_pose",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+        "expected_start_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "misplaced"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": "LG",
+          "part_state": "misplaced"
+        },
+        "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
+      }
+    }
+  ],
+  "selected_candidate_index": 0,
+  "selected_transition": {
+    "outline_id": "RECOVERY_SEQ3",
+    "event_name": "pick_lg_from_observed_pose",
+    "resource_jid": "ur5e@localhost",
+    "part_name": "LG",
+    "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+    "expected_start_state": {
+      "resource_state": "idle",
+      "held_part": null,
+      "part_state": "misplaced"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "held_part": "LG",
+      "part_state": "misplaced"
+    },
+    "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
+  },
+  "selected_candidate_task": {
+    "outline_id": "RECOVERY_SEQ3",
+    "event_name": "pick_lg_from_observed_pose",
+    "resource_jid": "ur5e@localhost",
+    "part_name": "LG",
+    "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+    "expected_start_state": {
+      "resource_state": "idle",
+      "held_part": null,
+      "part_state": "misplaced"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "held_part": "LG",
+      "part_state": "misplaced"
+    },
+    "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
+  },
+  "transition_trace": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+      "llm_outline_id": "recovery_xarm6_failed_to_idle_home"
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "place_mcp_to_prusa_mk4_2_temp",
+      "resource_jid": "ur5e@localhost",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": "prusa-mk4-2"
+      },
+      "rationale": "Enabled because ur5e currently holds MCP and can reach prusa-mk4-2. This clears the gripper without entering the assembly board area, preserving SAFE_1 so LG can be recovered first, and it positions MCP at a known grounded location for later re-pick.",
+      "part_name": "MCP"
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_lg_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+      "part_name": "LG"
+    }
+  ],
+  "transition_validation": {
+    "status": "passed",
+    "selected_candidate_index": 0
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,8 @@ class ProcessRecoveryPlanner:
         '_splice_bridge_chain_before_task',
         'apply_bridge_macro_proposal',
         '_apply_primitive_bridge_proposal',
+        '_task_ids_running_in_fsa_state',
+        'apply_validation_witness_ordering_repairs',
         'replan_with_feedback_offline',
         'replan_with_feedback_online',
         'replan_with_feedback_des',
@@ -263,6 +266,128 @@ class ProcessRecoveryPlanner:
                         seen.add(candidate)
                         task_ids.append(candidate)
         return task_ids
+
+    @staticmethod
+    def _task_ids_running_in_fsa_state(state: Any) -> list[str]:
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"run=([^:),]+)", str(state or "")):
+            task_id = str(match.group(1) or "").strip()
+            if not task_id or task_id in seen:
+                continue
+            seen.add(task_id)
+            task_ids.append(task_id)
+        return task_ids
+
+    def apply_validation_witness_ordering_repairs(
+        self,
+        violations: list[dict[str, Any]],
+    ) -> bool:
+        task_nodes = [
+            node
+            for node in self.nodes
+            if isinstance(node, dict) and node.get("type") == "task"
+        ]
+        node_map = {
+            str(node.get("id") or "").strip(): node
+            for node in task_nodes
+            if str(node.get("id") or "").strip()
+        }
+        if not node_map:
+            return False
+
+        successor_graph: dict[str, set[str]] = {task_id: set() for task_id in node_map}
+        for task_id, node in node_map.items():
+            for successor_id in node.get("successors") or []:
+                successor_id = str(successor_id or "").strip()
+                if successor_id in node_map and successor_id != task_id:
+                    successor_graph[task_id].add(successor_id)
+            for predecessor_id in node.get("predecessors") or []:
+                predecessor_id = str(predecessor_id or "").strip()
+                if predecessor_id in node_map and predecessor_id != task_id:
+                    successor_graph[predecessor_id].add(task_id)
+
+        def _has_path(start_task_id: str, goal_task_id: str) -> bool:
+            if start_task_id == goal_task_id:
+                return True
+            stack = list(successor_graph.get(start_task_id) or [])
+            seen: set[str] = set()
+            while stack:
+                current = stack.pop()
+                if current == goal_task_id:
+                    return True
+                if current in seen:
+                    continue
+                seen.add(current)
+                stack.extend(successor_graph.get(current) or [])
+            return False
+
+        modifications: list[dict[str, Any]] = []
+        modified_targets: set[str] = set()
+        for violation in violations or []:
+            if not isinstance(violation, dict):
+                continue
+            witness_transitions = violation.get("witness_transitions") or []
+            if not isinstance(witness_transitions, list):
+                continue
+            for transition in reversed(witness_transitions):
+                if not isinstance(transition, dict):
+                    continue
+                target_task_id = str(transition.get("task_id") or "").strip()
+                if not target_task_id or target_task_id not in node_map:
+                    continue
+                event_name = str(transition.get("event") or "").strip()
+                if event_name and not event_name.endswith(".start"):
+                    continue
+                if target_task_id in modified_targets:
+                    break
+                running_task_ids = [
+                    task_id
+                    for task_id in self._task_ids_running_in_fsa_state(
+                        transition.get("from")
+                    )
+                    if task_id in node_map and task_id != target_task_id
+                ]
+                if not running_task_ids:
+                    continue
+                target_node = node_map[target_task_id]
+                existing_predecessors = [
+                    str(task_id or "").strip()
+                    for task_id in (target_node.get("predecessors") or [])
+                    if str(task_id or "").strip()
+                ]
+                added_predecessors: list[str] = []
+                for running_task_id in running_task_ids:
+                    if running_task_id in existing_predecessors:
+                        continue
+                    if _has_path(target_task_id, running_task_id):
+                        continue
+                    added_predecessors.append(running_task_id)
+                if not added_predecessors:
+                    continue
+                predecessors = list(
+                    dict.fromkeys(existing_predecessors + added_predecessors)
+                )
+                modifications.append(
+                    {
+                        "id": target_task_id,
+                        "predecessors": predecessors,
+                        "change_reason": (
+                            "MODIFICATION: CCA validation witness — gate "
+                            f"{target_task_id} after {', '.join(added_predecessors)}"
+                        ),
+                    }
+                )
+                modified_targets.add(target_task_id)
+                for predecessor_id in added_predecessors:
+                    successor_graph.setdefault(predecessor_id, set()).add(target_task_id)
+                break
+
+        if not modifications:
+            return False
+
+        self._apply_replan_patch(modifications)
+        return True
 
     @staticmethod
     def _coerce_xyz_pose(payload: Any) -> dict[str, float] | None:

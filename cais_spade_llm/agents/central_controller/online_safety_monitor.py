@@ -218,7 +218,11 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             self.running_aps.discard(ap)
 
         current_state = str(event.get("current_state", "") or "").strip()
-        if current_state:
+        projected_surface = self._state_surface_from_prediction(event_params)
+        if current_state or projected_surface:
+            current_state = current_state or str(
+                projected_surface.get("resource_state") or ""
+            ).strip()
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,
@@ -255,7 +259,11 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             self.running_aps.discard(ap)
 
         current_state = str(event.get("current_state", "") or "").strip()
-        if current_state:
+        projected_surface = self._state_surface_from_prediction(event_params)
+        if current_state or projected_surface:
+            current_state = current_state or str(
+                projected_surface.get("resource_state") or ""
+            ).strip()
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,

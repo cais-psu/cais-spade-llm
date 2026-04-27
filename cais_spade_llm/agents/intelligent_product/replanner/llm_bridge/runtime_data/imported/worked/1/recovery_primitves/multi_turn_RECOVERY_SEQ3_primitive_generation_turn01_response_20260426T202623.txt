@@ -1,0 +1,25 @@
+{
+  "outline_id": "RECOVERY_SEQ3",
+  "resource_jid": "ur5e@localhost",
+  "primitive_local_turn_index": 1,
+  "decision": "need_context",
+  "response": {
+    "thought": "Capability decompositions are available and must be retrieved before authoring. I also need the relevant primitive contracts and LG's grounded observed pose details to safely adapt the pick sequence without guessing parameter structure or target bindings.",
+    "decision": "need_context",
+    "outline_id": "RECOVERY_SEQ3",
+    "resource_jid": "ur5e@localhost",
+    "context_requests": [
+      "/capability_decompositions/pick_approach",
+      "/capability_decompositions/pick_grasp",
+      "/primitive_contracts/compute_pick_targets",
+      "/primitive_contracts/move_cartesian",
+      "/primitive_contracts/grasp_part",
+      "/parts/LG/observed_pose"
+    ],
+    "rationale": "The active event is a pick from observed pose, and the instructions require adapting the closest applicable capability decomposition rather than inventing a new sequence. Primitive contracts are also needed to bind params correctly and avoid assuming unsupported fields or semantics.",
+    "notes": [
+      "I did not request place-related context because this turn must author only the active pick transition.",
+      "If the decomposition already grounds use of compute_pick_targets from observed pose, LG's observed pose may only serve as a consistency check."
+    ]
+  }
+}

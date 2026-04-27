@@ -1,0 +1,180 @@
+{
+  "thought": "The most immediate enabled recovery step is to clear the explicit open guard that requires xarm6@localhost to reach idle. From the authoritative DES state, xarm6@localhost is currently in resource_state=failed with no held part, so a recovery/reset transition to idle is grounded and directly progresses the session. In parallel, SAFE_1 prevents MCP placement at the assembly station until LG has been placed there first, so any immediate MCP-to-assembly action is not acceptable. ur5e@localhost is currently holding MCP, so a non-assembly relocation such as moving to home remains plausible as a staging action, but it does not satisfy the open guard as directly as recovering xarm6. I therefore select the xarm6 recovery transition first.",
+  "decision": "need_next_task",
+  "candidate_events": [
+    {
+      "outline_id": "recovery_xarm6_failed_to_idle_home",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "description": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2."
+    },
+    {
+      "outline_id": "staging_ur5e_with_mcp_to_home",
+      "event_name": "move_to_home_with_held_part",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "rationale": "Enabled because ur5e@localhost is currently in picked while holding MCP. Moving to home is a grounded single-resource staging action that helps keep the assembly area clear while SAFE_1 blocks MCP assembly placement until LG is restored first.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "picked",
+        "resource_location": "home",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "description": "Enabled because ur5e@localhost is currently in picked while holding MCP. Moving to home is a grounded single-resource staging action that helps keep the assembly area clear while SAFE_1 blocks MCP assembly placement until LG is restored first."
+    },
+    {
+      "outline_id": "recovery_ur5e_unload_mcp_to_origin",
+      "event_name": "place_held_part_to_prusa-mk4-2",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "rationale": "Enabled in principle because ur5e@localhost can reach prusa-mk4-2 and is already holding MCP. This would free ur5e to later recover LG, though it temporarily increases distance from REQ_1 and is therefore weaker than first recovering xarm6.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "prusa-mk4-2"
+      },
+      "description": "Enabled in principle because ur5e@localhost can reach prusa-mk4-2 and is already holding MCP. This would free ur5e to later recover LG, though it temporarily increases distance from REQ_1 and is therefore weaker than first recovering xarm6."
+    }
+  ],
+  "candidate_evaluation_summary": [
+    {
+      "candidate_index": 0,
+      "valid": true,
+      "task": {
+        "outline_id": "recovery_xarm6_failed_to_idle_home",
+        "event_name": "recover_to_home_idle",
+        "resource_jid": "xarm6@localhost",
+        "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+        "expected_start_state": {
+          "resource_state": "failed"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "resource_location": "home"
+        },
+        "description": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2."
+      }
+    },
+    {
+      "candidate_index": 1,
+      "valid": true,
+      "task": {
+        "outline_id": "staging_ur5e_with_mcp_to_home",
+        "event_name": "move_to_home_with_held_part",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "MCP",
+        "rationale": "Enabled because ur5e@localhost is currently in picked while holding MCP. Moving to home is a grounded single-resource staging action that helps keep the assembly area clear while SAFE_1 blocks MCP assembly placement until LG is restored first.",
+        "expected_start_state": {
+          "resource_state": "picked",
+          "held_part": "MCP",
+          "part_state": "in_gripper",
+          "part_location": "ur5e@localhost_gripper"
+        },
+        "expected_end_state": {
+          "resource_state": "picked",
+          "resource_location": "home",
+          "held_part": "MCP",
+          "part_state": "in_gripper",
+          "part_location": "ur5e@localhost_gripper"
+        },
+        "description": "Enabled because ur5e@localhost is currently in picked while holding MCP. Moving to home is a grounded single-resource staging action that helps keep the assembly area clear while SAFE_1 blocks MCP assembly placement until LG is restored first."
+      }
+    },
+    {
+      "candidate_index": 2,
+      "valid": true,
+      "task": {
+        "outline_id": "recovery_ur5e_unload_mcp_to_origin",
+        "event_name": "place_held_part_to_prusa-mk4-2",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "MCP",
+        "rationale": "Enabled in principle because ur5e@localhost can reach prusa-mk4-2 and is already holding MCP. This would free ur5e to later recover LG, though it temporarily increases distance from REQ_1 and is therefore weaker than first recovering xarm6.",
+        "expected_start_state": {
+          "resource_state": "picked",
+          "held_part": "MCP",
+          "part_state": "in_gripper",
+          "part_location": "ur5e@localhost_gripper"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "placed",
+          "part_location": "prusa-mk4-2"
+        },
+        "description": "Enabled in principle because ur5e@localhost can reach prusa-mk4-2 and is already holding MCP. This would free ur5e to later recover LG, though it temporarily increases distance from REQ_1 and is therefore weaker than first recovering xarm6."
+      }
+    }
+  ],
+  "selected_candidate_index": 0,
+  "selected_transition": {
+    "outline_id": "RECOVERY_SEQ1",
+    "llm_outline_id": "recovery_xarm6_failed_to_idle_home",
+    "event_name": "recover_to_home_idle",
+    "resource_jid": "xarm6@localhost",
+    "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+    "expected_start_state": {
+      "resource_state": "failed"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "resource_location": "home"
+    },
+    "description": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2."
+  },
+  "selected_candidate_task": {
+    "outline_id": "recovery_xarm6_failed_to_idle_home",
+    "event_name": "recover_to_home_idle",
+    "resource_jid": "xarm6@localhost",
+    "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+    "expected_start_state": {
+      "resource_state": "failed"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "resource_location": "home"
+    },
+    "description": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2."
+  },
+  "transition_trace": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+      "llm_outline_id": "recovery_xarm6_failed_to_idle_home"
+    }
+  ],
+  "transition_validation": {
+    "status": "passed",
+    "selected_candidate_index": 0
+  }
+}

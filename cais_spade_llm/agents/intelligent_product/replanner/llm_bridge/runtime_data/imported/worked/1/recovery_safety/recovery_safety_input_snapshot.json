@@ -1,0 +1,1146 @@
+{
+  "accepted_outline_prefix": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "des_event_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "part_name": null,
+      "target_ref": null,
+      "predecessors": [],
+      "description": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "rationale": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "home",
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "des_event_id": "RECOVERY_SEQ2",
+      "event_name": "stage_mcp_to_prusa_mk4_2",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "target_ref": "prusa-mk4-2",
+      "predecessors": [],
+      "description": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "rationale": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "prusa-mk4-2"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "MCP",
+            "destination_location": "prusa-mk4-2"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "part_name": "MCP"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.MCP.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.MCP.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.MCP.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.MCP.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.MCP.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.MCP.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "des_event_id": "RECOVERY_SEQ3",
+      "event_name": "recover_pick_LG_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": null,
+      "predecessors": [
+        "RECOVERY_SEQ2"
+      ],
+      "description": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "rationale": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_pick_targets",
+          "params": {
+            "part_name": "LG",
+            "target_pose": {
+              "x": 0,
+              "y": 0.2,
+              "z": 1.035
+            },
+            "target_pose_source": "observed_pose",
+            "prefer_live_detection": false
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "move_relative",
+          "params": {
+            "dx": 0,
+            "dy": 0,
+            "dz": 0.05,
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "des_event_id": "RECOVERY_SEQ4",
+      "event_name": "recover_place_LG_to_assembly_board-v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": "assembly_board-v1",
+      "predecessors": [
+        "RECOVERY_SEQ3"
+      ],
+      "description": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "rationale": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "assembly_board-v1"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "LG",
+            "destination_location": "assembly_board-v1"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.LG.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.LG.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.LG.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.LG.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.LG.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.LG.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "projected_outline_state": {},
+  "pending_nominal_tasks": [
+    {
+      "id": "REQ_1_T3",
+      "function": "place_approach",
+      "part": "MCP",
+      "resource": "ur5e@localhost",
+      "blocked_by_condition_ids": [
+        "cond_0a2b949b8282"
+      ]
+    },
+    {
+      "id": "REQ_1_T4",
+      "function": "place_insert",
+      "part": "MCP",
+      "resource": "ur5e@localhost",
+      "blocked_by_condition_ids": []
+    },
+    {
+      "id": "REQ_1_T5",
+      "function": "move_home",
+      "part": null,
+      "resource": "ur5e@localhost",
+      "blocked_by_condition_ids": []
+    },
+    {
+      "id": "REQ_2_T5",
+      "function": "move_home",
+      "part": null,
+      "resource": "xarm6@localhost",
+      "blocked_by_condition_ids": [
+        "cond_d9fd586b7d36"
+      ]
+    }
+  ],
+  "pending_nominal_task_ids": [
+    "REQ_1_T3",
+    "REQ_1_T4",
+    "REQ_1_T5",
+    "REQ_2_T5"
+  ],
+  "nominal_candidate_tasks": [
+    {
+      "id": "REQ_1_T1",
+      "function": "pick_approach",
+      "resource": "ur5e@localhost",
+      "part": "MCP",
+      "status": "completed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_1",
+      "sequence_index": 0,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_1_T2",
+      "function": "pick_grasp",
+      "resource": "ur5e@localhost",
+      "part": "MCP",
+      "status": "completed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_1",
+      "sequence_index": 1,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_1_T3",
+      "function": "place_approach",
+      "resource": "ur5e@localhost",
+      "part": "MCP",
+      "status": "pending",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_1",
+      "sequence_index": 2,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "Assembly Station",
+      "blocked_by_condition_ids": [
+        "cond_0a2b949b8282"
+      ],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_1_T4",
+      "function": "place_insert",
+      "resource": "ur5e@localhost",
+      "part": "MCP",
+      "status": "pending",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_1",
+      "sequence_index": 3,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "Assembly Station",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_1_T5",
+      "function": "move_home",
+      "resource": "ur5e@localhost",
+      "part": "",
+      "status": "pending",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_1",
+      "sequence_index": 4,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_2_T1",
+      "function": "pick_approach",
+      "resource": "xarm6@localhost",
+      "part": "LG",
+      "status": "completed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_2",
+      "sequence_index": 0,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_2_T2",
+      "function": "pick_grasp",
+      "resource": "xarm6@localhost",
+      "part": "LG",
+      "status": "completed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_2",
+      "sequence_index": 1,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_2_T3",
+      "function": "place_approach",
+      "resource": "xarm6@localhost",
+      "part": "LG",
+      "status": "completed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_2",
+      "sequence_index": 2,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "Assembly Station",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_2_T4",
+      "function": "place_insert",
+      "resource": "xarm6@localhost",
+      "part": "LG",
+      "status": "failed",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_2",
+      "sequence_index": 3,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "Assembly Station",
+      "blocked_by_condition_ids": [],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    },
+    {
+      "id": "REQ_2_T5",
+      "function": "move_home",
+      "resource": "xarm6@localhost",
+      "part": "",
+      "status": "pending",
+      "in_state": "",
+      "out_state": "",
+      "requirement_id": "REQ_2",
+      "sequence_index": 4,
+      "product_jid": "assembly_board-v1@localhost",
+      "destination_location": "",
+      "blocked_by_condition_ids": [
+        "cond_d9fd586b7d36"
+      ],
+      "expected_start_state": {},
+      "expected_end_state": {},
+      "projected_outline_state": {}
+    }
+  ],
+  "nominal_candidate_task_ids": [
+    "REQ_1_T1",
+    "REQ_1_T2",
+    "REQ_1_T3",
+    "REQ_1_T4",
+    "REQ_1_T5",
+    "REQ_2_T1",
+    "REQ_2_T2",
+    "REQ_2_T3",
+    "REQ_2_T4",
+    "REQ_2_T5"
+  ],
+  "loaded_safety_rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "LG by xarm6 must place_approach first before MCP by ur5e to the assembly station.",
+      "constraint_type": "ordering_place_approach_priority",
+      "process": "assembly",
+      "product": [
+        "LG",
+        "MCP"
+      ],
+      "resources": [
+        "xarm6",
+        "ur5e"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": "place_approach",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap004",
+          "full": "ap_event/assembly/mcp/ur5e/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap003",
+          "full": "ap_event/assembly/lg/xarm6/place_approach/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "(!(ap004) U ap003)",
+      "generated_interpretation": "Blocks any ur5e MCP place_approach to assembly_board-v1 until after the xarm6 completes its LG place_approach there; after that, ur5e is allowed.",
+      "rule_id": "SAFE_1",
+      "summary": "Blocks any ur5e MCP place_approach to assembly_board-v1 until after the xarm6 completes its LG place_approach there; after that, ur5e is allowed.",
+      "ap_scope": "both",
+      "dfa_dot": "digraph MONA_DFA {\n rankdir = LR;\n center = true;\n size = \"7.5,10.5\";\n edge [fontname = Courier];\n node [height = .5, width = .5];\n node [shape = doublecircle]; 2;\n node [shape = circle]; 1;\n init [shape = plaintext, label = \"\"];\n init -> 1;\n 1 -> 1 [label=\"~ap003 & ~ap004\"];\n 1 -> 2 [label=\"ap003\"];\n 1 -> 3 [label=\"ap004 & ~ap003\"];\n 2 -> 2 [label=\"true\"];\n 3 -> 3 [label=\"true\"];\n}",
+      "bridge_aps": [
+        {
+          "label": "ap004",
+          "full": "ap_event/bridge/mcp/ur5e/move_part_to_destination/destination=assembly_board-v1",
+          "selector": {
+            "mode": "move_part_to_destination",
+            "part": "mcp",
+            "resource": "ur5e",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap003",
+          "full": "ap_state/bridge/lg/any/part_goal_satisfied/destination=assembly_board-v1&state=assembled",
+          "selector": {
+            "mode": "part_goal_satisfied",
+            "part": "lg",
+            "resource": "any",
+            "destination": "assembly_board-v1",
+            "states": [
+              "assembled",
+              "placed"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "ur5e and xarm6 must not both be in the assembly board destination area at the same time.",
+      "constraint_type": "mutual_exclusion_in_destination_area",
+      "process": null,
+      "product": [],
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": null,
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap008",
+          "full": "ap_state/assembly/any/xarm6/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap007",
+          "full": "ap_state/assembly/any/xarm6/placed/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "G (!(((ap001 | ap006 | ap005) & (ap002 | ap008 | ap007))))",
+      "generated_interpretation": "Prevents ur5e and xarm6 from being in the assembly_board-v1 zone at the same time by forbidding overlap of their place_approach, positioned, or placed states.",
+      "rule_id": "SAFE_2",
+      "summary": "Prevents ur5e and xarm6 from being in the assembly_board-v1 zone at the same time by forbidding overlap of their place_approach, positioned, or placed states.",
+      "ap_scope": "both",
+      "dfa_dot": "digraph MONA_DFA {\n rankdir = LR;\n center = true;\n size = \"7.5,10.5\";\n edge [fontname = Courier];\n node [height = .5, width = .5];\n node [shape = doublecircle]; 1;\n node [shape = circle]; 1;\n init [shape = plaintext, label = \"\"];\n init -> 1;\n 1 -> 1 [label=\"(~ap001 | ~ap002) & (~ap001 | ~ap007) & (~ap001 | ~ap008) & (~ap002 | ~ap005) & (~ap002 | ~ap006) & (~ap005 | ~ap007) & (~ap005 | ~ap008) & (~ap006 | ~ap007) & (~ap006 | ~ap008)\"];\n 1 -> 2 [label=\"(ap001 & ap002) | (ap001 & ap007) | (ap001 & ap008) | (ap002 & ap005) | (ap002 & ap006) | (ap005 & ap007) | (ap005 & ap008) | (ap006 & ap007) | (ap006 & ap008)\"];\n 2 -> 2 [label=\"true\"];\n}",
+      "bridge_aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/bridge/any/ur5e/resource_move_to_destination/destination=assembly_board-v1",
+          "selector": {
+            "mode": "resource_move_to_destination",
+            "part": "any",
+            "resource": "ur5e",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/bridge/any/ur5e/resource_in_destination/destination=assembly_board-v1&symbol=positioned",
+          "selector": {
+            "mode": "resource_in_destination",
+            "part": "any",
+            "resource": "ur5e",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/bridge/any/ur5e/resource_in_destination/destination=assembly_board-v1&symbol=placed",
+          "selector": {
+            "mode": "resource_in_destination",
+            "part": "any",
+            "resource": "ur5e",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/bridge/any/xarm6/resource_move_to_destination/destination=assembly_board-v1",
+          "selector": {
+            "mode": "resource_move_to_destination",
+            "part": "any",
+            "resource": "xarm6",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap008",
+          "full": "ap_state/bridge/any/xarm6/resource_in_destination/destination=assembly_board-v1&symbol=positioned",
+          "selector": {
+            "mode": "resource_in_destination",
+            "part": "any",
+            "resource": "xarm6",
+            "destination": "assembly_board-v1"
+          }
+        },
+        {
+          "label": "ap007",
+          "full": "ap_state/bridge/any/xarm6/resource_in_destination/destination=assembly_board-v1&symbol=placed",
+          "selector": {
+            "mode": "resource_in_destination",
+            "part": "any",
+            "resource": "xarm6",
+            "destination": "assembly_board-v1"
+          }
+        }
+      ]
+    }
+  ],
+  "bridge_safety_context": {
+    "constraints": [],
+    "safety_rules": [],
+    "rule_ids": []
+  },
+  "tools_catalog": [
+    {
+      "function": "move_home",
+      "function_owner_agent": "ur5e",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "any",
+      "out_state": "idle",
+      "context": [],
+      "params": {
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "description": "Robot arm move to its home position."
+    },
+    {
+      "function": "pick_approach",
+      "function_owner_agent": "ur5e",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "idle",
+      "out_state": "at_pick",
+      "required_context_keys": [
+        "origin"
+      ],
+      "context_mapping": {
+        "location_param": "origin_resource_location",
+        "location_type": "part_location"
+      },
+      "params": {
+        "origin_resource_location": {
+          "type": "string",
+          "description": "Target origin location to approach for picking."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part intended to be picked (for tracking)."
+        },
+        "speed": {
+          "type": "number",
+          "description": "Optional motion speed."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing part poses in world frame."
+        }
+      },
+      "description": "Approach the part's origin location with empty gripper."
+    },
+    {
+      "function": "pick_grasp",
+      "function_owner_agent": "ur5e",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "at_pick",
+      "out_state": "picked",
+      "part_in_state": "ready",
+      "required_context_keys": [
+        "origin"
+      ],
+      "context_mapping": {
+        "location_param": "origin_resource_location",
+        "location_type": "current_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "in_gripper",
+          "location_template": "{resource_jid}_gripper"
+        }
+      },
+      "params": {
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part to pick."
+        },
+        "origin_resource_location": {
+          "type": "string",
+          "description": "Origin location of the part (printer or fixture)."
+        },
+        "gripper": {
+          "type": "string",
+          "description": "Optional gripper configuration."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing part poses in world frame."
+        }
+      },
+      "description": "Pick a ready part from an origin location."
+    },
+    {
+      "function": "place_approach",
+      "function_owner_agent": "ur5e",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "picked",
+      "out_state": "positioned",
+      "part_in_state": "in_gripper",
+      "required_context_keys": [
+        "destination"
+      ],
+      "context_mapping": {
+        "location_param": "destination_location",
+        "location_type": "reachable_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "in_transit",
+          "location_template": "{resource_jid}_gripper"
+        }
+      },
+      "params": {
+        "destination_location": {
+          "type": "string",
+          "description": "Destination location to carry the loaded part."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part being moved."
+        },
+        "speed": {
+          "type": "number",
+          "description": "Optional motion speed while loaded."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing target placement poses."
+        }
+      },
+      "description": "Move the loaded part to its destination location."
+    },
+    {
+      "function": "place_insert",
+      "function_owner_agent": "ur5e",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "positioned",
+      "out_state": "placed",
+      "part_in_state": "in_transit",
+      "required_context_keys": [
+        "destination"
+      ],
+      "context_mapping": {
+        "location_param": "destination_location",
+        "location_type": "current_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "assembled",
+          "verify_camera": true,
+          "location_param": "destination_location"
+        }
+      },
+      "params": {
+        "destination_location": {
+          "type": "string",
+          "description": "Final assembly location for the part."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part being assembled."
+        },
+        "orientation": {
+          "type": "string",
+          "description": "Optional placement orientation."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing insertion target pose."
+        }
+      },
+      "description": "Assemble the currently held part at its final destination."
+    },
+    {
+      "function": "move_home",
+      "function_owner_agent": "xarm6",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "any",
+      "out_state": "idle",
+      "context": [],
+      "params": {
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "description": "Robot arm move to its home position."
+    },
+    {
+      "function": "pick_approach",
+      "function_owner_agent": "xarm6",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "idle",
+      "out_state": "at_pick",
+      "required_context_keys": [
+        "origin"
+      ],
+      "context_mapping": {
+        "location_param": "origin_resource_location",
+        "location_type": "part_location"
+      },
+      "params": {
+        "origin_resource_location": {
+          "type": "string",
+          "description": "Target origin location to approach for picking."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part intended to be picked (for tracking)."
+        },
+        "speed": {
+          "type": "number",
+          "description": "Optional motion speed."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing part poses in world frame."
+        }
+      },
+      "description": "Approach the part's origin location with empty gripper."
+    },
+    {
+      "function": "pick_grasp",
+      "function_owner_agent": "xarm6",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "at_pick",
+      "out_state": "picked",
+      "part_in_state": "ready",
+      "required_context_keys": [
+        "origin"
+      ],
+      "context_mapping": {
+        "location_param": "origin_resource_location",
+        "location_type": "current_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "in_gripper",
+          "location_template": "{resource_jid}_gripper"
+        }
+      },
+      "params": {
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part to pick."
+        },
+        "origin_resource_location": {
+          "type": "string",
+          "description": "Origin location of the part (printer or fixture)."
+        },
+        "gripper": {
+          "type": "string",
+          "description": "Optional gripper configuration."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing part poses in world frame."
+        }
+      },
+      "description": "Pick a ready part from an origin location."
+    },
+    {
+      "function": "place_approach",
+      "function_owner_agent": "xarm6",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "picked",
+      "out_state": "positioned",
+      "part_in_state": "in_gripper",
+      "required_context_keys": [
+        "destination"
+      ],
+      "context_mapping": {
+        "location_param": "destination_location",
+        "location_type": "reachable_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "in_transit",
+          "location_template": "{resource_jid}_gripper"
+        }
+      },
+      "params": {
+        "destination_location": {
+          "type": "string",
+          "description": "Destination location to carry the loaded part."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part being moved."
+        },
+        "speed": {
+          "type": "number",
+          "description": "Optional motion speed while loaded."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing target placement poses."
+        }
+      },
+      "description": "Move the loaded part to its destination location."
+    },
+    {
+      "function": "place_insert",
+      "function_owner_agent": "xarm6",
+      "process": "assembly",
+      "resource_type": "robot",
+      "in_state": "positioned",
+      "out_state": "placed",
+      "part_in_state": "in_transit",
+      "required_context_keys": [
+        "destination"
+      ],
+      "context_mapping": {
+        "location_param": "destination_location",
+        "location_type": "current_location"
+      },
+      "part_transition": {
+        "completed": {
+          "state": "assembled",
+          "verify_camera": true,
+          "location_param": "destination_location"
+        }
+      },
+      "params": {
+        "destination_location": {
+          "type": "string",
+          "description": "Final assembly location for the part."
+        },
+        "part_name": {
+          "type": "string",
+          "description": "Name of the part being assembled."
+        },
+        "orientation": {
+          "type": "string",
+          "description": "Optional placement orientation."
+        },
+        "product_jid": {
+          "type": "string",
+          "description": "JID of the ProductAgent that owns this task."
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "product_geometry": {
+          "type": "object",
+          "description": "Product geometry payload containing insertion target pose."
+        }
+      },
+      "description": "Assemble the currently held part at its final destination."
+    }
+  ],
+  "recovery_safety_scope_id": "dryrun_recovery_scope",
+  "generated_at_utc": "2026-04-26T20:32:52.320885+00:00"
+}

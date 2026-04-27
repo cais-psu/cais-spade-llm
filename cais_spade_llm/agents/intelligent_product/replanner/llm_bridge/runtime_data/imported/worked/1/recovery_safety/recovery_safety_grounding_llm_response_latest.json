@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "rule_id": "SAFE_1",
+      "status": "not_involved",
+      "reason": "No supplied recovery outline matches the rule's bound combination without adaptation. There is no xarm6 recovery outline for LG with a place_approach/assembly_board-v1 context, and the ur5e MCP row targets prusa-mk4-2 and appears nominal rather than a recovery row.",
+      "selected_recovery_outline_ids": []
+    },
+    {
+      "rule_id": "SAFE_2",
+      "status": "selected",
+      "reason": "RECOVERY_SEQ4 is directly relevant because it is a ur5e recovery action whose target_ref and state tokens place LG at assembly_board-v1, the destination area named by the mutual-exclusion rule. No supplied xarm6 recovery row is explicitly tied to assembly_board-v1.",
+      "selected_recovery_outline_ids": [
+        "RECOVERY_SEQ4"
+      ]
+    }
+  ]
+}

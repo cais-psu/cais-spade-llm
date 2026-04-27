@@ -1,0 +1,983 @@
+{
+  "final_accepted_outline_summary": [
+    "RECOVERY_SEQ1 / xarm6@localhost -> Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+    "RECOVERY_SEQ2 / ur5e@localhost / MCP -> Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+    "RECOVERY_SEQ3 / ur5e@localhost / LG -> Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+    "RECOVERY_SEQ4 / ur5e@localhost / LG -> Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement."
+  ],
+  "status": "ready_for_primitive_generation",
+  "current_phase": "primitive_generation",
+  "accepted_outline_prefix": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "des_event_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "part_name": null,
+      "target_ref": null,
+      "predecessors": [],
+      "description": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "rationale": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "home",
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "des_event_id": "RECOVERY_SEQ2",
+      "event_name": "stage_mcp_to_prusa_mk4_2",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "target_ref": "prusa-mk4-2",
+      "predecessors": [],
+      "description": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "rationale": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "prusa-mk4-2"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "MCP",
+            "destination_location": "prusa-mk4-2"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "part_name": "MCP"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.MCP.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.MCP.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.MCP.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.MCP.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.MCP.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.MCP.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "des_event_id": "RECOVERY_SEQ3",
+      "event_name": "recover_pick_LG_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": null,
+      "predecessors": [
+        "RECOVERY_SEQ2"
+      ],
+      "description": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "rationale": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_pick_targets",
+          "params": {
+            "part_name": "LG",
+            "target_pose": {
+              "x": 0,
+              "y": 0.2,
+              "z": 1.035
+            },
+            "target_pose_source": "observed_pose",
+            "prefer_live_detection": false
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "move_relative",
+          "params": {
+            "dx": 0,
+            "dy": 0,
+            "dz": 0.05,
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "des_event_id": "RECOVERY_SEQ4",
+      "event_name": "recover_place_LG_to_assembly_board-v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": "assembly_board-v1",
+      "predecessors": [
+        "RECOVERY_SEQ3"
+      ],
+      "description": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "rationale": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "assembly_board-v1"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "LG",
+            "destination_location": "assembly_board-v1"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.LG.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.LG.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.LG.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.LG.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.LG.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.LG.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "transition_trace": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "des_event_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "part_name": null,
+      "target_ref": null,
+      "predecessors": [],
+      "description": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "rationale": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "home",
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "des_event_id": "RECOVERY_SEQ2",
+      "event_name": "stage_mcp_to_prusa_mk4_2",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "target_ref": "prusa-mk4-2",
+      "predecessors": [],
+      "description": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "rationale": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "prusa-mk4-2"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "MCP",
+            "destination_location": "prusa-mk4-2"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "part_name": "MCP"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.MCP.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.MCP.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.MCP.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.MCP.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.MCP.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.MCP.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "des_event_id": "RECOVERY_SEQ3",
+      "event_name": "recover_pick_LG_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": null,
+      "predecessors": [
+        "RECOVERY_SEQ2"
+      ],
+      "description": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "rationale": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_pick_targets",
+          "params": {
+            "part_name": "LG",
+            "target_pose": {
+              "x": 0,
+              "y": 0.2,
+              "z": 1.035
+            },
+            "target_pose_source": "observed_pose",
+            "prefer_live_detection": false
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.pick_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "move_relative",
+          "params": {
+            "dx": 0,
+            "dy": 0,
+            "dz": 0.05,
+            "speed": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "des_event_id": "RECOVERY_SEQ4",
+      "event_name": "recover_place_LG_to_assembly_board-v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "target_ref": "assembly_board-v1",
+      "predecessors": [
+        "RECOVERY_SEQ3"
+      ],
+      "description": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "rationale": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "held"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "placed",
+        "part_location": "assembly_board-v1"
+      },
+      "primitive_steps": [
+        {
+          "primitive": "compute_place_targets",
+          "params": {
+            "part_name": "LG",
+            "destination_location": "assembly_board-v1"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.target_pose.z"
+            }
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "model_name": "gear_large",
+            "part_name": "LG"
+          }
+        },
+        {
+          "primitive": "snap_part_to_slot",
+          "params": {
+            "model_name": {
+              "context_ref": "event_facts.place_targets.LG.model_name"
+            },
+            "slot_x": {
+              "context_ref": "event_facts.place_targets.LG.slot_x"
+            },
+            "slot_y": {
+              "context_ref": "event_facts.place_targets.LG.slot_y"
+            },
+            "part_height": {
+              "context_ref": "event_facts.place_targets.LG.part_height"
+            },
+            "board_top_z": {
+              "context_ref": "event_facts.place_targets.LG.board_top_z"
+            },
+            "part_origin_z": {
+              "context_ref": "event_facts.place_targets.LG.place_part_origin_z"
+            }
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "x": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+            },
+            "y": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+            },
+            "z": {
+              "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "final_output": {
+    "engine": "multi_turn",
+    "decision": "final_output_ready",
+    "final_output_stage": "outline_ready",
+    "status": "ready_for_primitive_generation",
+    "current_phase": "primitive_generation",
+    "accepted_trace_length": 4,
+    "transition_trace": [
+      {
+        "outline_id": "RECOVERY_SEQ1",
+        "des_event_id": "RECOVERY_SEQ1",
+        "event_name": "recover_to_home_idle",
+        "resource_jid": "xarm6@localhost",
+        "part_name": null,
+        "target_ref": null,
+        "predecessors": [],
+        "description": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+        "rationale": "Enabled because xarm6 is currently failed and has a grounded named pose home. This directly advances the open guard requiring xarm6@localhost to reach idle and reduces coordination risk before LG/MCP recovery continues.",
+        "expected_start_state": {
+          "resource_state": "failed"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "resource_location": "home"
+        },
+        "primitive_steps": [
+          {
+            "primitive": "move_to_named_pose",
+            "params": {
+              "pose_name": "home",
+              "speed": 0.8
+            }
+          }
+        ]
+      },
+      {
+        "outline_id": "RECOVERY_SEQ2",
+        "des_event_id": "RECOVERY_SEQ2",
+        "event_name": "stage_mcp_to_prusa_mk4_2",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "MCP",
+        "target_ref": "prusa-mk4-2",
+        "predecessors": [],
+        "description": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+        "rationale": "Enabled now because ur5e is holding MCP and prusa-mk4-2 is a grounded reachable location for ur5e. This clears ur5e's gripper so it can recover LG first, which is required before any MCP place approach at assembly_board-v1.",
+        "expected_start_state": {
+          "resource_state": "picked",
+          "held_part": "MCP",
+          "part_state": "in_gripper",
+          "part_location": "ur5e@localhost_gripper"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "placed",
+          "part_location": "prusa-mk4-2"
+        },
+        "primitive_steps": [
+          {
+            "primitive": "compute_place_targets",
+            "params": {
+              "part_name": "MCP",
+              "destination_location": "prusa-mk4-2"
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.MCP.target_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.MCP.target_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.MCP.target_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "release_part",
+            "params": {
+              "part_name": "MCP"
+            }
+          },
+          {
+            "primitive": "snap_part_to_slot",
+            "params": {
+              "model_name": {
+                "context_ref": "event_facts.place_targets.MCP.model_name"
+              },
+              "slot_x": {
+                "context_ref": "event_facts.place_targets.MCP.slot_x"
+              },
+              "slot_y": {
+                "context_ref": "event_facts.place_targets.MCP.slot_y"
+              },
+              "part_height": {
+                "context_ref": "event_facts.place_targets.MCP.part_height"
+              },
+              "board_top_z": {
+                "context_ref": "event_facts.place_targets.MCP.board_top_z"
+              },
+              "part_origin_z": {
+                "context_ref": "event_facts.place_targets.MCP.place_part_origin_z"
+              }
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.MCP.approach_pose.z"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "outline_id": "RECOVERY_SEQ3",
+        "des_event_id": "RECOVERY_SEQ3",
+        "event_name": "recover_pick_LG_from_observed_pose",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "target_ref": null,
+        "predecessors": [
+          "RECOVERY_SEQ2"
+        ],
+        "description": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+        "rationale": "Enabled because ur5e@localhost is idle, not holding any part, and LG is misplaced and unheld at an observed pose within ur5e's reachable workspace. This is the necessary next recovery step to clear the blocker on LG and move toward satisfying REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+        "expected_start_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "misplaced"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": "LG",
+          "part_state": "held"
+        },
+        "primitive_steps": [
+          {
+            "primitive": "compute_pick_targets",
+            "params": {
+              "part_name": "LG",
+              "target_pose": {
+                "x": 0,
+                "y": 0.2,
+                "z": 1.035
+              },
+              "target_pose_source": "observed_pose",
+              "prefer_live_detection": false
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.pick_targets.LG.approach_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.pick_targets.LG.approach_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.pick_targets.LG.approach_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.pick_targets.LG.target_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.pick_targets.LG.target_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.pick_targets.LG.target_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "grasp_part",
+            "params": {
+              "model_name": "gear_large",
+              "part_name": "LG"
+            }
+          },
+          {
+            "primitive": "move_relative",
+            "params": {
+              "dx": 0,
+              "dy": 0,
+              "dz": 0.05,
+              "speed": 0.8
+            }
+          }
+        ]
+      },
+      {
+        "outline_id": "RECOVERY_SEQ4",
+        "des_event_id": "RECOVERY_SEQ4",
+        "event_name": "recover_place_LG_to_assembly_board-v1",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "target_ref": "assembly_board-v1",
+        "predecessors": [
+          "RECOVERY_SEQ3"
+        ],
+        "description": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+        "rationale": "Enabled now because ur5e is idle, currently holding LG, and can reach assembly_board-v1. This directly satisfies REQ_2 and clears the explicit guard that LG must be placed at assembly_board-v1 before MCP can proceed toward assembly placement.",
+        "expected_start_state": {
+          "resource_state": "idle",
+          "held_part": "LG",
+          "part_state": "held"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "placed",
+          "part_location": "assembly_board-v1"
+        },
+        "primitive_steps": [
+          {
+            "primitive": "compute_place_targets",
+            "params": {
+              "part_name": "LG",
+              "destination_location": "assembly_board-v1"
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.LG.target_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.LG.target_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.LG.target_pose.z"
+              }
+            }
+          },
+          {
+            "primitive": "release_part",
+            "params": {
+              "model_name": "gear_large",
+              "part_name": "LG"
+            }
+          },
+          {
+            "primitive": "snap_part_to_slot",
+            "params": {
+              "model_name": {
+                "context_ref": "event_facts.place_targets.LG.model_name"
+              },
+              "slot_x": {
+                "context_ref": "event_facts.place_targets.LG.slot_x"
+              },
+              "slot_y": {
+                "context_ref": "event_facts.place_targets.LG.slot_y"
+              },
+              "part_height": {
+                "context_ref": "event_facts.place_targets.LG.part_height"
+              },
+              "board_top_z": {
+                "context_ref": "event_facts.place_targets.LG.board_top_z"
+              },
+              "part_origin_z": {
+                "context_ref": "event_facts.place_targets.LG.place_part_origin_z"
+              }
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+              },
+              "y": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.y"
+              },
+              "z": {
+                "context_ref": "event_facts.place_targets.LG.approach_pose.z"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "primitive_program_complete": false
+  },
+  "turns": [
+    {
+      "turn_index": 6,
+      "phase": "final_output",
+      "final_output_stage": "outline_ready"
+    }
+  ]
+}

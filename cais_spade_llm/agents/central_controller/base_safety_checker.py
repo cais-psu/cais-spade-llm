@@ -104,10 +104,10 @@ class BaseSafetyChecker:
         if current_state_token:
             surface["resource_state"] = current_state_token
         for source in (
-            params,
-            params.get("projected_outline_state"),
-            params.get("expected_end_state"),
             params.get("outline_expected_start_state"),
+            params,
+            params.get("expected_end_state"),
+            params.get("projected_outline_state"),
         ):
             if not isinstance(source, dict):
                 continue

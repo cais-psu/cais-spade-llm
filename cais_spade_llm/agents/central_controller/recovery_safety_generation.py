@@ -533,6 +533,20 @@ def _row_state_tokens(row: dict[str, Any]) -> set[str]:
     return tokens
 
 
+def _row_completion_state_tokens(row: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for state in (
+        row.get("expected_end_state"),
+        row.get("projected_outline_state"),
+    ):
+        tokens |= {
+            f"{field}={value}"
+            for field, value in _compact_state_surface(state or {}).items()
+            if str(field).strip() and str(value).strip()
+        }
+    return tokens
+
+
 def _row_destination_tokens(row: dict[str, Any]) -> set[str]:
     tokens: set[str] = set()
     for key in ("target_ref", "destination_location"):
@@ -550,6 +564,111 @@ def _row_destination_tokens(row: dict[str, Any]) -> set[str]:
             if token:
                 tokens.add(token)
     return tokens
+
+
+def _row_function(row: dict[str, Any]) -> str:
+    return str(row.get("function") or row.get("function_name") or "").strip()
+
+
+def _row_resource(row: dict[str, Any]) -> str:
+    return str(row.get("resource") or row.get("resource_jid") or "").strip()
+
+
+def _row_part(row: dict[str, Any]) -> str:
+    return str(row.get("part") or row.get("part_name") or "").strip()
+
+
+def _tool_rows_for_nominal_task(
+    row: dict[str, Any],
+    tools_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    function = _row_function(row)
+    resource = _normalize_resource_token(_row_resource(row))
+    if not function:
+        return []
+    matches: list[dict[str, Any]] = []
+    for tool in tools_catalog:
+        if not isinstance(tool, dict):
+            continue
+        if str(tool.get("function") or "").strip() != function:
+            continue
+        owner = _normalize_resource_token(tool.get("function_owner_agent"))
+        if owner and resource and owner != resource:
+            continue
+        matches.append(dict(tool))
+    return matches
+
+
+def _nominal_state_rows_from_task_projection(
+    selected_task_ids: list[str],
+    nominal_by_id: dict[str, dict[str, Any]],
+    tools_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for task_id in selected_task_ids:
+        nominal_row = dict(nominal_by_id.get(task_id) or {})
+        if not nominal_row:
+            continue
+        state_values: list[str] = []
+        for source in (
+            nominal_row,
+            *_tool_rows_for_nominal_task(nominal_row, tools_catalog),
+        ):
+            out_state = str(source.get("out_state") or "").strip()
+            if not out_state or out_state.lower() == "any":
+                continue
+            state_values.append(out_state)
+        for value in state_values:
+            key = (task_id, "resource_state", value)
+            if key in seen:
+                continue
+            rows.append(
+                {
+                    "id": str(nominal_row.get("id") or "").strip(),
+                    "function": _row_function(nominal_row),
+                    "resource": _row_resource(nominal_row),
+                    "part": _row_part(nominal_row),
+                    "field": "resource_state",
+                    "value": value,
+                    "blocked_by_condition_ids": [
+                        str(token_value).strip()
+                        for token_value in (nominal_row.get("blocked_by_condition_ids") or [])
+                        if str(token_value).strip()
+                    ],
+                }
+            )
+            seen.add(key)
+    return rows
+
+
+def _enrich_nominal_rows_with_tool_metadata(
+    rows: list[dict[str, Any]],
+    tools_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    enriched_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        enriched = dict(row)
+        for tool_row in _tool_rows_for_nominal_task(enriched, tools_catalog):
+            for key in ("in_state", "out_state", "part_in_state"):
+                if str(enriched.get(key) or "").strip():
+                    continue
+                token = str(tool_row.get(key) or "").strip()
+                if token:
+                    enriched[key] = token
+            if isinstance(tool_row.get("context_mapping"), dict) and not isinstance(
+                enriched.get("context_mapping"), dict
+            ):
+                enriched["context_mapping"] = deepcopy(tool_row.get("context_mapping"))
+            if isinstance(tool_row.get("part_transition"), dict) and not isinstance(
+                enriched.get("part_transition"), dict
+            ):
+                enriched["part_transition"] = deepcopy(tool_row.get("part_transition"))
+            break
+        enriched_rows.append(enriched)
+    return enriched_rows
 
 
 def _normalize_selection_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -631,7 +750,7 @@ def _selected_recovery_states(
         accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
         if not accepted_row:
             continue
-        accepted_tokens = _accepted_state_tokens(accepted_row)
+        accepted_tokens = _row_completion_state_tokens(accepted_row)
         for token in selected_tokens:
             if token not in accepted_tokens:
                 continue
@@ -812,15 +931,36 @@ def _nominal_event_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, An
     }
 
 
-def _recovery_state_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+def _context_token_from_pairs(pairs: list[tuple[str, str]]) -> str:
+    tokens = [
+        f"{str(key).strip()}={str(value).strip()}"
+        for key, value in pairs
+        if str(key).strip() and str(value).strip()
+    ]
+    return "&".join(tokens) if tokens else "any"
+
+
+def _recovery_state_ap(
+    rule: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    destination_required: str = "",
+) -> dict[str, Any]:
     process = str(rule.get("process") or "assembly").strip().lower() or "assembly"
     product = _normalize_part_token(row.get("part_name")) or "any"
     resource = _normalize_resource_token(row.get("resource_jid")) or "any"
     outline_id = str(row.get("outline_id") or "").strip()
     token = f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
+    state_symbol = str(row.get("value") or "").strip() or token
+    context = _context_token_from_pairs(
+        [
+            ("destination", destination_required),
+            ("outline_id", outline_id),
+        ]
+    )
     return {
         "kind": "ap_state",
-        "full": f"ap_state/{process}/{product}/{resource}/{token}/outline_id={outline_id}",
+        "full": f"ap_state/{process}/{product}/{resource}/{state_symbol}/{context}",
         "why": f"selected recovery state token {token} for {outline_id}",
         "source": "recovery",
         "source_task_ids": [outline_id] if outline_id else [],
@@ -838,15 +978,27 @@ def _recovery_state_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, A
     }
 
 
-def _nominal_state_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+def _nominal_state_ap(
+    rule: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    destination_required: str = "",
+) -> dict[str, Any]:
     process = str(rule.get("process") or "assembly").strip().lower() or "assembly"
     product = _normalize_part_token(row.get("part")) or "any"
     resource = _normalize_resource_token(row.get("resource")) or "any"
     task_id = str(row.get("id") or "").strip()
     token = f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
+    state_symbol = str(row.get("value") or "").strip() or token
+    context = _context_token_from_pairs(
+        [
+            ("destination", destination_required),
+            ("task_id", task_id),
+        ]
+    )
     return {
         "kind": "ap_state",
-        "full": f"ap_state/{process}/{product}/{resource}/{token}/task_id={task_id}",
+        "full": f"ap_state/{process}/{product}/{resource}/{state_symbol}/{context}",
         "why": f"selected nominal state token {token} for {task_id}",
         "source": "nominal",
         "source_task_ids": [task_id] if task_id else [],
@@ -876,6 +1028,111 @@ def _dedupe_ap_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _rule_state_symbols(rule: dict[str, Any]) -> set[str]:
+    symbols: set[str] = set()
+    for source_key in ("aps", "bridge_aps"):
+        for ap in (rule.get(source_key) or []):
+            if not isinstance(ap, dict):
+                continue
+            full = str(ap.get("full") or "").strip()
+            parts = full.split("/")
+            if len(parts) < 6 or parts[0] != "ap_state":
+                continue
+            symbol = str(parts[4] or "").strip().lower()
+            if symbol:
+                symbols.add(symbol)
+            for pair in str(parts[5] or "").split("&"):
+                key, sep, value = pair.partition("=")
+                if sep and key.strip() == "symbol" and value.strip():
+                    symbols.add(value.strip().lower())
+    return symbols
+
+
+def _state_rows_relevant_to_rule(
+    *,
+    state_rows: list[dict[str, Any]],
+    source_rows_by_id: dict[str, dict[str, Any]],
+    source_id_key: str,
+    state_symbols: set[str],
+    destination_required: str,
+    require_exact_destination: bool = True,
+) -> list[dict[str, Any]]:
+    if not state_symbols:
+        return []
+    relevant: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in state_rows:
+        source_id = str(row.get(source_id_key) or "").strip()
+        source_row = dict(source_rows_by_id.get(source_id) or {})
+        if destination_required:
+            destination_tokens = _row_destination_tokens(source_row)
+            if require_exact_destination:
+                if destination_required not in destination_tokens:
+                    continue
+            elif not destination_tokens:
+                continue
+        value = str(row.get("value") or "").strip().lower()
+        if value not in state_symbols:
+            continue
+        key = (
+            source_id,
+            str(row.get("field") or "").strip(),
+            str(row.get("value") or "").strip(),
+        )
+        if key in seen:
+            continue
+        relevant.append(row)
+        seen.add(key)
+    return relevant
+
+
+def _recovery_state_rows_relevant_to_rule(
+    *,
+    state_rows: list[dict[str, Any]],
+    accepted_by_outline_id: dict[str, dict[str, Any]],
+    destination_required: str,
+) -> list[dict[str, Any]]:
+    relevant: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in state_rows:
+        outline_id = str(row.get("outline_id") or "").strip()
+        accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
+        if not accepted_row:
+            continue
+        if destination_required and destination_required not in _row_destination_tokens(accepted_row):
+            continue
+        token = f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
+        if token not in _row_completion_state_tokens(accepted_row):
+            continue
+        key = (
+            outline_id,
+            str(row.get("field") or "").strip(),
+            str(row.get("value") or "").strip(),
+        )
+        if key in seen:
+            continue
+        relevant.append(row)
+        seen.add(key)
+    return relevant
+
+
+def _side_group_formula(aps: list[str]) -> str:
+    return f"({' | '.join(aps)})"
+
+
+def _compile_mutex_side_grouped_ltlf(
+    *,
+    recovery_side_aps: list[str],
+    nominal_side_aps: list[str],
+) -> str:
+    if not recovery_side_aps or not nominal_side_aps:
+        return ""
+    return (
+        f"G !({_side_group_formula(recovery_side_aps)} "
+        f"& {_side_group_formula(nominal_side_aps)})"
+    )
+
+
 def _state_tokens_for_recovery_outline_ids(
     selected_outline_ids: list[str],
     accepted_by_outline_id: dict[str, dict[str, Any]],
@@ -885,7 +1142,7 @@ def _state_tokens_for_recovery_outline_ids(
         accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
         if not accepted_row:
             continue
-        tokens |= _accepted_state_tokens(accepted_row)
+        tokens |= _row_completion_state_tokens(accepted_row)
     return sorted(tokens)
 
 
@@ -1054,6 +1311,7 @@ def _deterministic_rule_result_from_selection(
     selection_row: dict[str, Any],
     accepted_by_outline_id: dict[str, dict[str, Any]],
     nominal_by_id: dict[str, dict[str, Any]],
+    tools_catalog: list[dict[str, Any]],
 ) -> dict[str, Any]:
     normalized = _normalize_selection_row(selection_row)
     selected_recovery_outline_ids = list(normalized["selected_recovery_outline_ids"])
@@ -1079,7 +1337,7 @@ def _deterministic_rule_result_from_selection(
         selected_recovery_outline_ids,
         accepted_by_outline_id,
     )
-    selected_nominal_state_tokens = _state_tokens_for_nominal_task_ids(
+    explicit_nominal_state_tokens = _state_tokens_for_nominal_task_ids(
         selected_nominal_task_ids,
         nominal_by_id,
     )
@@ -1090,9 +1348,26 @@ def _deterministic_rule_result_from_selection(
     )
     nominal_states, unmatched_nominal_tokens = _selected_nominal_states(
         selected_nominal_task_ids,
-        selected_nominal_state_tokens,
+        explicit_nominal_state_tokens,
         nominal_by_id,
     )
+    projected_nominal_states = _nominal_state_rows_from_task_projection(
+        selected_nominal_task_ids,
+        nominal_by_id,
+        tools_catalog,
+    )
+    selected_nominal_state_tokens = sorted(
+        {
+            *explicit_nominal_state_tokens,
+            *[
+                f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
+                for row in projected_nominal_states
+                if str(row.get("field") or "").strip()
+                and str(row.get("value") or "").strip()
+            ],
+        }
+    )
+    nominal_states = [*nominal_states, *projected_nominal_states]
 
     rule_result = {
         "rule_id": str(source_rule.get("id") or source_rule.get("rule_id") or "").strip(),
@@ -1107,7 +1382,10 @@ def _deterministic_rule_result_from_selection(
         "grounded_nominal_events": [],
         "grounded_recovery_states": [],
         "grounded_nominal_states": [],
+        "recovery_side_aps": [],
+        "nominal_side_aps": [],
         "aps": [],
+        "ltlf": "",
         "status": "not_involved",
         "failure_reason": "",
     }
@@ -1230,26 +1508,87 @@ def _deterministic_rule_result_from_selection(
             if str(row.get("outline_id") or "").strip()
             == str(primary_recovery_event.get("outline_id") or "").strip()
         ]
+        nominal_side_event_ids = {
+            str(row.get("id") or "").strip()
+            for row in matched_nominal_events
+            if _normalize_resource_token(row.get("resource"))
+            != _normalize_resource_token(primary_recovery_event.get("resource_jid"))
+        }
         grounded_nominal_states = [
             row
             for row in nominal_states
-            if str(row.get("id") or "").strip()
-            == str(primary_nominal_event.get("id") or "").strip()
+            if str(row.get("id") or "").strip() in nominal_side_event_ids
         ]
-        aps: list[dict[str, Any]] = [
-            _recovery_event_ap(source_rule, primary_recovery_event),
-            _nominal_event_ap(source_rule, primary_nominal_event),
-        ]
-        if grounded_recovery_states:
-            aps.append(_recovery_state_ap(source_rule, grounded_recovery_states[0]))
-        if grounded_nominal_states:
-            aps.append(_nominal_state_ap(source_rule, grounded_nominal_states[0]))
+        state_symbols = _rule_state_symbols(source_rule)
+        relevant_recovery_states = _recovery_state_rows_relevant_to_rule(
+            state_rows=grounded_recovery_states,
+            accepted_by_outline_id=accepted_by_outline_id,
+            destination_required=destination_required,
+        )
+        relevant_nominal_states = _state_rows_relevant_to_rule(
+            state_rows=grounded_nominal_states,
+            source_rows_by_id=nominal_by_id,
+            source_id_key="id",
+            state_symbols=state_symbols,
+            destination_required=destination_required,
+            require_exact_destination=False,
+        )
+        recovery_side_aps = _dedupe_ap_rows(
+            [
+                _recovery_event_ap(source_rule, primary_recovery_event),
+                *[
+                    _recovery_state_ap(
+                        source_rule,
+                        row,
+                        destination_required=destination_required,
+                    )
+                    for row in relevant_recovery_states
+                ],
+            ]
+        )
+        nominal_side_aps = _dedupe_ap_rows(
+            [
+                _nominal_event_ap(source_rule, primary_nominal_event),
+                *[
+                    _nominal_state_ap(
+                        source_rule,
+                        row,
+                        destination_required=destination_required,
+                    )
+                    for row in relevant_nominal_states
+                ],
+            ]
+        )
+        aps: list[dict[str, Any]] = _dedupe_ap_rows(recovery_side_aps + nominal_side_aps)
+        deterministic_ltlf = _compile_mutex_side_grouped_ltlf(
+            recovery_side_aps=[
+                str(row.get("full") or "").strip()
+                for row in recovery_side_aps
+                if str(row.get("full") or "").strip()
+            ],
+            nominal_side_aps=[
+                str(row.get("full") or "").strip()
+                for row in nominal_side_aps
+                if str(row.get("full") or "").strip()
+            ],
+        )
         rule_result["status"] = "grounded"
         rule_result["grounded_recovery_events"] = [primary_recovery_event]
         rule_result["grounded_nominal_events"] = [primary_nominal_event]
-        rule_result["grounded_recovery_states"] = grounded_recovery_states
-        rule_result["grounded_nominal_states"] = grounded_nominal_states
-        rule_result["aps"] = _dedupe_ap_rows(aps[:2])
+        rule_result["grounded_recovery_states"] = relevant_recovery_states
+        rule_result["grounded_nominal_states"] = relevant_nominal_states
+        rule_result["recovery_side_aps"] = [
+            str(row.get("full") or "").strip()
+            for row in recovery_side_aps
+            if str(row.get("full") or "").strip()
+        ]
+        rule_result["nominal_side_aps"] = [
+            str(row.get("full") or "").strip()
+            for row in nominal_side_aps
+            if str(row.get("full") or "").strip()
+        ]
+        rule_result["aps"] = aps
+        rule_result["ltlf"] = deterministic_ltlf
         rule_result["grounded_bindings"] = _grounded_bindings_from_row(rule_result)
         return rule_result
 
@@ -1355,9 +1694,9 @@ def _validate_grounded_rule_result(
         if not accepted_row:
             return f"grounded recovery state references unknown outline_id {outline_id or '<missing>'}"
         token = f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
-        if token not in _accepted_state_tokens(accepted_row):
+        if token not in _row_completion_state_tokens(accepted_row):
             return (
-                f"grounded recovery state for {outline_id} does not preserve accepted token {token or '<missing>'}"
+                f"grounded recovery state for {outline_id} does not preserve accepted completion token {token or '<missing>'}"
             )
 
     for item in nominal_events:
@@ -1416,8 +1755,8 @@ def _validate_grounded_rule_result(
                 return f"generated recovery event AP for {outline_id} does not preserve accepted event_name"
             if kind == "ap_state":
                 token = f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
-                if token not in _accepted_state_tokens(accepted_row):
-                    return f"generated recovery state AP for {outline_id} does not preserve accepted token {token or '<missing>'}"
+                if token not in _row_completion_state_tokens(accepted_row):
+                    return f"generated recovery state AP for {outline_id} does not preserve accepted completion token {token or '<missing>'}"
         if source == "nominal":
             task_id = str(item.get("id") or "").strip()
             if task_id not in pending_by_id:
@@ -1466,6 +1805,15 @@ async def generate_recovery_safety_bundle(
     recovery_safery_dir = recovery_safety_dir
 
     recovery_safety_dir.mkdir(parents=True, exist_ok=True)
+    tools_catalog = [
+        deepcopy(row)
+        for row in (
+            payload.get("tools_catalog")
+            or getattr(controller_agent, "tools_catalog", [])
+            or []
+        )
+        if isinstance(row, dict)
+    ]
 
     snapshot = {
         "accepted_outline_prefix": deepcopy(payload.get("accepted_outline_prefix") or []),
@@ -1478,6 +1826,7 @@ async def generate_recovery_safety_bundle(
         ),
         "loaded_safety_rules": deepcopy(payload.get("loaded_safety_rules") or []),
         "bridge_safety_context": deepcopy(payload.get("bridge_safety_context") or {}),
+        "tools_catalog": deepcopy(tools_catalog),
         "recovery_safety_scope_id": str(payload.get("recovery_safety_scope_id") or "").strip(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
@@ -1542,6 +1891,10 @@ async def generate_recovery_safety_bundle(
         )
         if isinstance(row, dict)
     ]
+    nominal_candidate_tasks = _enrich_nominal_rows_with_tool_metadata(
+        nominal_candidate_tasks,
+        tools_catalog,
+    )
     nominal_by_id = {
         str(row.get("id") or row.get("task_id") or "").strip(): dict(row)
         for row in nominal_candidate_tasks
@@ -1565,6 +1918,7 @@ async def generate_recovery_safety_bundle(
             selection_row=row,
             accepted_by_outline_id=accepted_by_outline_id,
             nominal_by_id=nominal_by_id,
+            tools_catalog=tools_catalog,
         )
         seen_rule_ids.add(rule_id)
         if str(rule_result.get("status") or "").strip() == "not_involved":
@@ -1598,11 +1952,13 @@ async def generate_recovery_safety_bundle(
             )
             all_rule_results.append(rule_result)
             continue
-        deterministic_ltlf = SafetyLogic._compile_ltlf_for_rule(
-            source_rule,
-            aps,
-            refinement_feedback="",
-        )
+        deterministic_ltlf = str(rule_result.get("ltlf") or "").strip()
+        if not deterministic_ltlf:
+            deterministic_ltlf = SafetyLogic._compile_ltlf_for_rule(
+                source_rule,
+                aps,
+                refinement_feedback="",
+            )
         if not deterministic_ltlf:
             failure_reason = "deterministic ltlf rebuild failed for grounded rule"
             ungroundable.append(
@@ -1642,6 +1998,8 @@ async def generate_recovery_safety_bundle(
         rule["grounded_nominal_states"] = deepcopy(
             rule_result.get("grounded_nominal_states") or []
         )
+        rule["recovery_side_aps"] = deepcopy(rule_result.get("recovery_side_aps") or [])
+        rule["nominal_side_aps"] = deepcopy(rule_result.get("nominal_side_aps") or [])
 
         scoped_rules.append(rule)
         grounded_rule_ids.append(rule_id)
@@ -1670,7 +2028,10 @@ async def generate_recovery_safety_bundle(
                 "grounded_nominal_events": [],
                 "grounded_recovery_states": [],
                 "grounded_nominal_states": [],
+                "recovery_side_aps": [],
+                "nominal_side_aps": [],
                 "aps": [],
+                "ltlf": "",
                 "status": "not_involved",
                 "failure_reason": "selector omitted this rule",
             }

@@ -1,0 +1,27 @@
+{
+  "outline_id": "RECOVERY_SEQ2",
+  "resource_jid": "ur5e@localhost",
+  "primitive_local_turn_index": 1,
+  "decision": "need_context",
+  "response": {
+    "thought": "I need the modeled place decomposition before authoring, and likely the grounded target geometry/placement facts for prusa-mk4-2 to bind safe place parameters without guessing.",
+    "decision": "need_context",
+    "outline_id": "RECOVERY_SEQ2",
+    "resource_jid": "ur5e@localhost",
+    "context_requests": [
+      "/capability_decompositions/place_approach",
+      "/capability_decompositions/place_insert",
+      "/parts/MCP/target",
+      "/projected_snapshot/ur5e@localhost",
+      "/primitive_contracts/compute_place_targets",
+      "/primitive_contracts/release_part"
+    ],
+    "rationale": "Capability decompositions are available and must be consulted first. This event is a temporary grounded placement while MCP is already in the gripper, so I need the closest place decomposition plus the grounded target/placement contract to adapt it correctly. I am not guessing target geometry, release preconditions, or whether compute_place_targets alone provides all required approach/place poses for prusa-mk4-2.",
+    "notes": [
+      "Active event is a place while already holding MCP.",
+      "Suggested decompositions for this event are place_approach and place_insert.",
+      "I left primitive_steps empty until the modeled decomposition and target-binding details are served."
+    ],
+    "primitive_steps": []
+  }
+}

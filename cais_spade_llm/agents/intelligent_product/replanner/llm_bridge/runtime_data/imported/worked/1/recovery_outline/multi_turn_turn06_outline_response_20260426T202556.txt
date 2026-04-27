@@ -1,0 +1,163 @@
+{
+  "thought": "The current authoritative DES state shows ur5e@localhost is idle and holding LG, while xarm6@localhost is idle with no part. The open guard and safety rules require LG to be placed at assembly_board-v1 before any MCP place-approach to the assembly station. Therefore the most direct enabled recovery transition is for ur5e@localhost to place LG at assembly_board-v1. This is grounded by the listed reachable target refs for ur5e and reduces the marked-state gap for REQ_2 while clearing the blocker on MCP recovery.",
+  "decision": "outline_ready",
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "place_lg_to_assembly_board_v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "restored",
+        "part_location": "assembly_board-v1"
+      },
+      "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
+    }
+  ],
+  "candidate_evaluation_summary": [
+    {
+      "candidate_index": 0,
+      "valid": true,
+      "task": {
+        "outline_id": "RECOVERY_SEQ4",
+        "event_name": "place_lg_to_assembly_board_v1",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+        "expected_start_state": {
+          "resource_state": "idle",
+          "held_part": "LG",
+          "part_state": "misplaced"
+        },
+        "expected_end_state": {
+          "resource_state": "idle",
+          "held_part": null,
+          "part_state": "restored",
+          "part_location": "assembly_board-v1"
+        },
+        "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
+      }
+    }
+  ],
+  "selected_candidate_index": 0,
+  "selected_transition": {
+    "outline_id": "RECOVERY_SEQ4",
+    "event_name": "place_lg_to_assembly_board_v1",
+    "resource_jid": "ur5e@localhost",
+    "part_name": "LG",
+    "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+    "expected_start_state": {
+      "resource_state": "idle",
+      "held_part": "LG",
+      "part_state": "misplaced"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "held_part": null,
+      "part_state": "restored",
+      "part_location": "assembly_board-v1"
+    },
+    "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
+  },
+  "selected_candidate_task": {
+    "outline_id": "RECOVERY_SEQ4",
+    "event_name": "place_lg_to_assembly_board_v1",
+    "resource_jid": "ur5e@localhost",
+    "part_name": "LG",
+    "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+    "expected_start_state": {
+      "resource_state": "idle",
+      "held_part": "LG",
+      "part_state": "misplaced"
+    },
+    "expected_end_state": {
+      "resource_state": "idle",
+      "held_part": null,
+      "part_state": "restored",
+      "part_location": "assembly_board-v1"
+    },
+    "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
+  },
+  "transition_trace": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "xarm6@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
+      "llm_outline_id": "recovery_xarm6_failed_to_idle_home"
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "place_mcp_to_prusa_mk4_2_temp",
+      "resource_jid": "ur5e@localhost",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": "prusa-mk4-2"
+      },
+      "rationale": "Enabled because ur5e currently holds MCP and can reach prusa-mk4-2. This clears the gripper without entering the assembly board area, preserving SAFE_1 so LG can be recovered first, and it positions MCP at a known grounded location for later re-pick.",
+      "part_name": "MCP"
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_lg_from_observed_pose",
+      "resource_jid": "ur5e@localhost",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
+      "part_name": "LG"
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "place_lg_to_assembly_board_v1",
+      "resource_jid": "ur5e@localhost",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "restored",
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",
+      "part_name": "LG"
+    }
+  ],
+  "transition_validation": {
+    "status": "passed",
+    "selected_candidate_index": 0
+  }
+}
