@@ -1253,6 +1253,10 @@ def _resource_constraint_finding(
     guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence = dict(evidence or {})
+    durable = str(constraint_code or "").strip().lower() in {
+        "resource_validation_unavailable",
+        "workspace_unreachable",
+    }
     return {
         "task_id": str(task.get("outline_id") or "").strip(),
         "resource_jid": resource_jid or None,
@@ -1267,7 +1271,188 @@ def _resource_constraint_finding(
         "reason": reason,
         "guard": deepcopy(guard),
         "evidence": deepcopy(evidence),
+        "durable": durable,
+        "retriable": True,
     }
+
+
+def _resource_bridge_snapshot_for_feasibility(
+    *,
+    resource_jid: str,
+    resource_row: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+) -> dict[str, Any]:
+    bridge_entry = dict(
+        dict(prepared_bridge_request.get("bridge_resources") or {}).get(resource_jid)
+        or {}
+    )
+    bridge_snapshot = deepcopy(dict(bridge_entry.get("bridge_snapshot") or {}))
+    static_capabilities = dict(bridge_entry.get("static_capabilities") or {})
+    for key, value in static_capabilities.items():
+        if bridge_snapshot.get(key) in (None, "", [], {}):
+            bridge_snapshot[key] = deepcopy(value)
+    bridge_snapshot.update(deepcopy(resource_row or {}))
+    bridge_snapshot.setdefault("resource_jid", resource_jid)
+    if (
+        bridge_snapshot.get("current_state") in (None, "")
+        and bridge_snapshot.get("resource_state") not in (None, "")
+    ):
+        bridge_snapshot["current_state"] = deepcopy(bridge_snapshot.get("resource_state"))
+    if (
+        bridge_snapshot.get("resource_state") in (None, "")
+        and bridge_snapshot.get("current_state") not in (None, "")
+    ):
+        bridge_snapshot["resource_state"] = deepcopy(bridge_snapshot.get("current_state"))
+    return bridge_snapshot
+
+
+def _part_context_for_resource_feasibility(
+    *,
+    part_name: str,
+    part_row: dict[str, Any],
+    resource_row: dict[str, Any],
+    grounded_action: dict[str, Any],
+) -> dict[str, Any]:
+    part_context = deepcopy(part_row or {})
+    part_context.setdefault("part_name", part_name)
+    if (
+        part_context.get("current_state") in (None, "")
+        and part_context.get("part_state") not in (None, "")
+    ):
+        part_context["current_state"] = deepcopy(part_context.get("part_state"))
+    if (
+        part_context.get("part_state") in (None, "")
+        and part_context.get("current_state") not in (None, "")
+    ):
+        part_context["part_state"] = deepcopy(part_context.get("current_state"))
+    if (
+        part_context.get("current_location") in (None, "")
+        and part_context.get("part_location") not in (None, "")
+    ):
+        part_context["current_location"] = deepcopy(part_context.get("part_location"))
+    if (
+        part_context.get("part_location") in (None, "")
+        and part_context.get("current_location") not in (None, "")
+    ):
+        part_context["part_location"] = deepcopy(part_context.get("current_location"))
+    if (
+        part_context.get("current_holder_resource_jid") in (None, "")
+        and part_context.get("part_holder_resource_jid") not in (None, "")
+    ):
+        part_context["current_holder_resource_jid"] = deepcopy(
+            part_context.get("part_holder_resource_jid")
+        )
+    if (
+        part_context.get("part_holder_resource_jid") in (None, "")
+        and part_context.get("current_holder_resource_jid") not in (None, "")
+    ):
+        part_context["part_holder_resource_jid"] = deepcopy(
+            part_context.get("current_holder_resource_jid")
+        )
+    part_context["resource_held_part"] = deepcopy(resource_row.get("held_part"))
+    if resource_row.get("gripper_state") not in (None, ""):
+        part_context["resource_gripper_state"] = deepcopy(resource_row.get("gripper_state"))
+    target = dict(grounded_action.get("target") or {})
+    if target:
+        part_context["target"] = deepcopy(target)
+    return part_context
+
+
+def _validate_outline_task_resource_feasibility(
+    *,
+    planner: Any,
+    task: dict[str, Any],
+    grounded_action: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+    prepared_bridge_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    resource_jid = str(
+        grounded_action.get("resource_jid") or _task_resource_jid(task) or ""
+    ).strip()
+    part_name = str(
+        grounded_action.get("part_name") or _task_part_name(task) or ""
+    ).strip()
+    if not resource_jid:
+        return []
+
+    resource_agent = _resource_agent_map(planner).get(resource_jid)
+    oracle = getattr(resource_agent, "bridge_feasibility_oracle", None)
+    if not callable(oracle):
+        return [
+            _resource_constraint_finding(
+                task=task,
+                constraint_code="resource_validation_unavailable",
+                reason=f"resource '{resource_jid}' does not expose bridge_feasibility_oracle",
+                resource_jid=resource_jid,
+                part_name=part_name,
+                evidence={"available_resource_jids": sorted(_resource_agent_map(planner))},
+            )
+        ]
+
+    resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+    bridge_snapshot = _resource_bridge_snapshot_for_feasibility(
+        resource_jid=resource_jid,
+        resource_row=resource_row,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    part_context = _part_context_for_resource_feasibility(
+        part_name=part_name,
+        part_row=part_row,
+        resource_row=resource_row,
+        grounded_action=grounded_action,
+    )
+
+    try:
+        result = oracle(
+            part_context=deepcopy(part_context),
+            bridge_snapshot=deepcopy(bridge_snapshot),
+            grounded_action=deepcopy(grounded_action),
+            operation_kind=str(grounded_action.get("operation_kind") or "").strip(),
+            part_name=part_name or None,
+        )
+    except Exception as exc:
+        return [
+            _resource_constraint_finding(
+                task=task,
+                constraint_code="resource_validation_error",
+                reason=f"resource feasibility oracle for '{resource_jid}' failed: {exc}",
+                resource_jid=resource_jid,
+                part_name=part_name,
+                evidence={"exception_type": type(exc).__name__},
+            )
+        ]
+
+    if not isinstance(result, dict):
+        return [
+            _resource_constraint_finding(
+                task=task,
+                constraint_code="resource_validation_error",
+                reason=(
+                    f"resource feasibility oracle for '{resource_jid}' "
+                    "returned non-object result"
+                ),
+                resource_jid=resource_jid,
+                part_name=part_name,
+                evidence={"result_type": type(result).__name__},
+            )
+        ]
+    if bool(result.get("allowed", True)):
+        return []
+
+    evidence = dict(result.get("evidence") or {})
+    return [
+        _resource_constraint_finding(
+            task=task,
+            constraint_code=str(result.get("constraint_code") or "resource_blocked").strip(),
+            reason=str(result.get("reason") or "resource rejected the outline task").strip(),
+            resource_jid=resource_jid,
+            part_name=part_name,
+            evidence=evidence,
+            guard=dict(result.get("guard") or {}),
+        )
+    ]
 
 
 def _validate_outline_task_cca(
@@ -1418,6 +1603,16 @@ def _validate_single_outline_task(
             parts_by_name=parts_by_name,
             llm_input=llm_input,
             prior_findings=findings,
+        )
+    )
+    findings.extend(
+        _validate_outline_task_resource_feasibility(
+            planner=planner,
+            task=task,
+            grounded_action=grounded_action,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+            prepared_bridge_request=prepared_bridge_request,
         )
     )
     return findings, grounded_action
@@ -2015,21 +2210,7 @@ def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
 
 def _is_hidden_outline_runtime_finding(finding: dict[str, Any]) -> bool:
     stage = str(finding.get("stage") or "").strip().lower()
-    constraint_family = str(finding.get("constraint_family") or "").strip().lower()
-    constraint_owner = str(finding.get("constraint_owner") or "").strip().lower()
-    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     if stage == "resource_realizability":
-        return True
-    if constraint_family == "resource_feasibility":
-        return True
-    if constraint_owner == "resource" and constraint_code in {
-        "gripper_occupancy_conflict",
-        "holder_conflict",
-        "required_part_not_held",
-        "resource_unavailable",
-        "resource_validation_unavailable",
-        "workspace_unreachable",
-    }:
         return True
     return False
 

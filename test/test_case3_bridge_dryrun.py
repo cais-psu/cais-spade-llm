@@ -2693,6 +2693,85 @@ def test_case3_recovery_safety_filter_preserves_nominal_only_cca_violations() ->
     assert filtered == [violations[2]]
 
 
+def test_case3_outline_validation_rejects_xarm6_lg_pick_outside_workspace() -> None:
+    _, _, planner, prepared_bridge_request = asyncio.run(
+        _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
+    )
+    session_state = deepcopy(
+        prepared_bridge_request.get("multi_turn_session_seed") or {}
+    )
+    session_state["symbolic_resources"] = {
+        "xarm6@localhost": {
+            "resource_jid": "xarm6@localhost",
+            "resource_state": "idle",
+            "current_state": "idle",
+            "held_part": None,
+            "current_pose": {"x": 0.1, "y": 0.08, "z": 1.1994999760206477},
+        },
+        "ur5e@localhost": {
+            "resource_jid": "ur5e@localhost",
+            "resource_state": "picked",
+            "current_state": "picked",
+            "held_part": "MCP",
+            "current_pose": {"x": -0.25, "y": 0.22, "z": 1.18},
+        },
+    }
+    session_state["symbolic_parts"] = {
+        "LG": {
+            "part_name": "LG",
+            "part_state": "misplaced",
+            "current_state": "misplaced",
+            "part_location": None,
+            "current_location": None,
+            "part_holder_resource_jid": None,
+            "current_holder_resource_jid": None,
+            "observed_pose": {"x": 0.0, "y": 0.2, "z": 1.035},
+            "goal_location": "assembly_board-v1",
+        },
+        "MCP": {
+            "part_name": "MCP",
+            "part_state": "in_gripper",
+            "current_state": "in_gripper",
+            "part_location": "ur5e@localhost_gripper",
+            "current_location": "ur5e@localhost_gripper",
+            "part_holder_resource_jid": "ur5e@localhost",
+            "current_holder_resource_jid": "ur5e@localhost",
+            "goal_location": "assembly_board-v1",
+        },
+    }
+
+    findings, grounded_action = multi_turn_mode._validate_single_outline_task(
+        planner=planner,
+        session_state=session_state,
+        prepared_bridge_request=prepared_bridge_request,
+        task={
+            "outline_id": "RECOVERY_SEQ4",
+            "event_name": "pick_LG_for_recovery",
+            "resource_jid": "xarm6@localhost",
+            "part_name": "LG",
+            "rationale": "Pick the misplaced LG.",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "misplaced",
+            },
+            "expected_end_state": {
+                "resource_state": "picked",
+                "held_part": "LG",
+                "part_state": "in_gripper",
+                "part_location": "xarm6@localhost_gripper",
+            },
+        },
+    )
+
+    assert grounded_action is not None
+    assert any(
+        str(row.get("constraint_code") or "") == "workspace_unreachable"
+        and str(row.get("constraint_family") or "") == "resource_feasibility"
+        for row in findings
+    )
+
+
 def test_case3_archived_bridge_selects_first_ready_task_for_serial_dispatch(
     tmp_path: Path,
 ) -> None:

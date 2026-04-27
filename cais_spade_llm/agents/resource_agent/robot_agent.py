@@ -1674,13 +1674,17 @@ class RobotAgent(ResourceAgent):
         projection: Any | None = None,
         part_context: Dict[str, Any],
         bridge_snapshot: Dict[str, Any],
+        operation_kind: str = "",
+        part_name: str | None = None,
+        grounded_action: Dict[str, Any] | None = None,
         **_compat_kwargs: Any,
     ) -> Dict[str, Any]:
         """Workspace-aware feasibility check for bridge recovery events.
 
         Uses the canonical bridge event instance plus typed projection rather
-        than any derived task/action dict. Falls back to permissive behavior
-        when the event does not expose a pose that can be checked.
+        than any derived task/action dict when available. Outline validation
+        can also pass a compiled grounded_action. Falls back to permissive
+        behavior when the event does not expose a pose that can be checked.
         """
         from copy import deepcopy
 
@@ -1705,58 +1709,107 @@ class RobotAgent(ResourceAgent):
 
         bridge_snapshot = deepcopy(bridge_snapshot or {})
         part_context = deepcopy(part_context or {})
-        target_info = dict(getattr(projection, "action_target", {}) or part_context.get("target") or {})
-        event_instance = event_instance
-        projection = projection
+        grounded_action = deepcopy(grounded_action or {})
         schema_id = str(getattr(schema, "schema_id", "") or "").strip().lower()
         action_type = str(getattr(schema, "action_type", "") or "").strip().lower()
-        part_name = str(getattr(projection, "part_name", "") or "").strip() or None
-        start_state = dict(getattr(projection, "start_state", {}) or {})
-        end_state = dict(getattr(projection, "end_state", {}) or {})
-        source_ref: Dict[str, Any] = {
-            "location": str(getattr(event_instance, "object_bindings", {}).get("source_location") or "").strip() or None,
-        }
-        if source_ref.get("location") == "observed_pose":
-            source_pose = dict(part_context.get("observed_pose") or {})
-            if source_pose:
-                source_ref["pose"] = deepcopy(source_pose)
-        desired_resource_state = str(end_state.get("resource_state") or "").strip()
-        desired_resource_location = str(
-            end_state.get("resource_location")
-            or end_state.get("current_location")
-            or end_state.get("location")
-            or end_state.get("named_pose")
-            or ""
-        ).strip()
-        desired_held_part = str(end_state.get("held_part") or "").strip()
-        desired_part_holder = str(end_state.get("part_holder_resource_jid") or "").strip()
-        desired_part_location = str(end_state.get("part_location") or "").strip()
-        expected_resource = {
-            "current_state": desired_resource_state or None,
-            "location": desired_resource_location or None,
-            "held_part": desired_held_part or None,
-        }
-        expected_part = {
-            "state": str(end_state.get("part_state") or "").strip() or None,
-            "location": desired_part_location or None,
-            "holder": desired_part_holder or None,
-        }
+        if not grounded_action:
+            projection_part_name = str(getattr(projection, "part_name", "") or "").strip()
+            part_name = str(part_name or projection_part_name or "").strip() or None
+            end_state = dict(getattr(projection, "end_state", {}) or {})
+            source_ref: Dict[str, Any] = {
+                "location": str(
+                    getattr(event_instance, "object_bindings", {}).get("source_location")
+                    or ""
+                ).strip()
+                or None,
+            }
+            if source_ref.get("location") == "observed_pose":
+                source_pose = dict(part_context.get("observed_pose") or {})
+                if source_pose:
+                    source_ref["pose"] = deepcopy(source_pose)
+            expected_resource = {
+                "current_state": str(end_state.get("resource_state") or "").strip() or None,
+                "location": str(
+                    end_state.get("resource_location")
+                    or end_state.get("current_location")
+                    or end_state.get("location")
+                    or end_state.get("named_pose")
+                    or ""
+                ).strip()
+                or None,
+                "held_part": str(end_state.get("held_part") or "").strip() or None,
+            }
+            expected_part = {
+                "state": str(end_state.get("part_state") or "").strip() or None,
+                "location": str(end_state.get("part_location") or "").strip() or None,
+                "holder": str(end_state.get("part_holder_resource_jid") or "").strip() or None,
+            }
+            part_affecting = bool(
+                part_name
+                and any(
+                    expected_part.get(key) not in (None, "", [], {})
+                    for key in ("state", "location", "holder")
+                )
+            )
+            resource_affecting = bool(
+                any(
+                    expected_resource.get(key) not in (None, "", [], {})
+                    for key in ("current_state", "location", "held_part")
+                )
+            )
+            effect_scope = (
+                "resource_and_part"
+                if resource_affecting and part_affecting
+                else "part_only"
+                if part_affecting
+                else "resource_only"
+            )
+            grounded_action = {
+                "resource_jid": str(getattr(self, "jid", "") or ""),
+                "part_name": part_name,
+                "operation_kind": str(action_type or operation_kind or "").strip(),
+                "task_kind": str(action_type or operation_kind or "").strip(),
+                "target": deepcopy(
+                    getattr(projection, "action_target", {})
+                    or part_context.get("target")
+                    or {}
+                ),
+                "expected_effect": {
+                    "resource": expected_resource,
+                    "part": expected_part,
+                },
+                "preconditions": {
+                    "source_ref": source_ref,
+                    "part": {"requires_acquisition": schema_id == "pick_part"},
+                },
+                "effect_scope": effect_scope,
+            }
+
+        evidence["grounded_action"] = deepcopy(grounded_action)
+        target_info = dict(grounded_action.get("target") or part_context.get("target") or {})
+        expected_effect = dict(grounded_action.get("expected_effect") or {})
+        preconditions = dict(grounded_action.get("preconditions") or {})
+        part_preconditions = dict(preconditions.get("part") or {})
+        source_ref = dict(preconditions.get("source_ref") or {})
+        effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
+        task_kind = str(
+            grounded_action.get("task_kind") or action_type or operation_kind or ""
+        ).strip().lower()
+        part_name = (
+            str(part_name or grounded_action.get("part_name") or "").strip() or None
+        )
+        expected_resource = dict(expected_effect.get("resource") or {})
+        expected_part = dict(expected_effect.get("part") or {})
         part_affecting = bool(
-            part_name
-            and any(expected_part.get(key) not in (None, "", [], {}) for key in ("state", "location", "holder"))
+            effect_scope in {"part_only", "resource_and_part"}
+            or any(
+                key in expected_part and expected_part.get(key) not in (None, "", [], {})
+                for key in ("state", "location", "pose", "holder")
+            )
         )
-        resource_affecting = bool(
-            any(expected_resource.get(key) not in (None, "", [], {}) for key in ("current_state", "location", "held_part"))
-        )
-        effect_scope = (
-            "resource_and_part"
-            if resource_affecting and part_affecting
-            else "part_only"
-            if part_affecting
-            else "resource_only"
-        )
-        task_kind = action_type
-        named_pose = str(target_info.get("named_pose") or part_context.get("named_pose") or "").strip()
+        named_pose = str(
+            target_info.get("named_pose") or part_context.get("named_pose") or ""
+        ).strip()
         available_named_poses = {
             str(name).strip()
             for name in (
@@ -1808,6 +1861,8 @@ class RobotAgent(ResourceAgent):
         ).strip().lower()
         current_holder = str(part_context.get("current_holder_resource_jid") or "").strip()
         resource_jid = str(getattr(self, "jid", "") or "")
+        desired_resource_state = str(expected_resource.get("current_state") or "").strip()
+        desired_resource_location = str(expected_resource.get("location") or "").strip()
         supported_recovery_states = {
             str(token).strip()
             for token in (
@@ -1821,7 +1876,14 @@ class RobotAgent(ResourceAgent):
             effect_scope == "resource_only"
             and desired_resource_state.lower() == "idle"
         )
-        requires_part_acquisition = bool(part_name and schema_id == "pick_part")
+        requires_part_acquisition = bool(
+            part_name
+            and part_affecting
+            and (
+                bool(part_preconditions.get("requires_acquisition"))
+                or schema_id == "pick_part"
+            )
+        )
         if (
             effect_scope == "resource_only"
             and desired_resource_state
@@ -1832,7 +1894,10 @@ class RobotAgent(ResourceAgent):
                 or target_info.get("slot_pose")
                 or desired_resource_location
             )
-            and (not supported_recovery_states or desired_resource_state not in supported_recovery_states)
+            and (
+                not supported_recovery_states
+                or desired_resource_state not in supported_recovery_states
+            )
         ):
             return {
                 "allowed": False,
