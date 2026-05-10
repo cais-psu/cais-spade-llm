@@ -43,7 +43,7 @@ def render(bridge: SystemBridge) -> None:
 def _render_safety_requirements_card(bridge: SystemBridge) -> None:
     with ui.card().classes("w-full"):
         ui.label("Safety Requirements").classes("text-lg font-semibold mb-2")
-        ui.label("Text files that define safety constraints for the system.").classes(
+        ui.label("Text files that define all runtime constraints, including ordering constraints.").classes(
             "text-xs text-slate-500 mb-3"
         )
 
@@ -65,7 +65,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         with ui.row().classes("w-full gap-2 items-end flex-nowrap"):
             req_select = ui.select(
                 {},
-                label="Requirement File",
+                label="Safety File",
             ).classes("w-56 shrink-0")
             name_input = ui.input(label="New file", placeholder="e.g. safety_case3").classes("w-56 shrink-0")
             create_btn = ui.button("Create", icon="add").props("flat")
@@ -635,7 +635,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if select_path and select_path in file_map:
                 req_select.value = select_path
             elif req_files:
-                req_select.value = str(req_files[0])
+                default_file = next(
+                    (f for f in req_files if f.name == "safety_none.txt"),
+                    req_files[0],
+                )
+                req_select.value = str(default_file)
             else:
                 req_select.value = None
                 req_editor.value = ""
@@ -882,7 +886,18 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         generate_btn.on_click(_generate_initial_preview)
         regenerate_btn.on_click(_regenerate_preview_with_feedback)
 
-        _refresh_file_list()
+        initial_refresh_timer = {"timer": None}
+
+        def _deferred_initial_refresh() -> None:
+            timer = initial_refresh_timer.get("timer")
+            if timer is not None:
+                try:
+                    timer.deactivate()
+                except Exception:
+                    pass
+            _refresh_file_list()
+
+        initial_refresh_timer["timer"] = ui.timer(0.1, _deferred_initial_refresh)
 
         def _update_readonly():
             readonly = bridge.system_running or preview_generation_state["busy"] or verification_lock_state["locked"]

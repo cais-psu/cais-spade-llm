@@ -20,8 +20,10 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
@@ -38,6 +40,14 @@ from cais_spade_llm.bundles.models import (
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     DEFAULT_BRIDGE_RUNTIME_DATA_DIR,
 )
+from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.product.order import (
+    derive_ordering_constraints_from_safety,
+    geometry_slot_names,
+    load_product_order_file,
+    validate_product_order,
+)
+from cais_spade_llm.product.profile import ProductProfile
 
 log = logging.getLogger("ui.bridge")
 
@@ -52,6 +62,7 @@ _MONITOR = _BASE / "monitor"
 _BRIDGE_RUNTIME_DATA_DIR = Path(DEFAULT_BRIDGE_RUNTIME_DATA_DIR)
 _LOG_DIR = _BASE / "log"
 _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements"
+_PRODUCT_ORDERS_DIR = _BASE / "specification" / "products" / "orders"
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
@@ -151,6 +162,7 @@ class SystemBridge:
         self.robot_env: str = "gazebo"
         self.selected_product: str = ""
         self.selected_requirement_file: str = ""
+        self.selected_product_order_file: str = ""
         # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
         # any other value -> explicit safety text file path.
         self.selected_safety_file: str = ""
@@ -206,6 +218,11 @@ class SystemBridge:
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
         self._agent_creator_prefetch_thread: Optional[threading.Thread] = None
+        self._agent_runtime_loop: asyncio.AbstractEventLoop | None = None
+        self._agent_runtime_thread: threading.Thread | None = None
+        self._agent_runtime_lock = threading.Lock()
+        self._safety_rule_preview_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self._safety_rule_preview_cache_lock = threading.Lock()
         self._ui_diag_enabled: bool = str(os.getenv("CAIS_UI_DIAG", "0")).strip().lower() in {
             "1",
             "true",
@@ -482,6 +499,77 @@ class SystemBridge:
         self._startup_phase = str(phase)
         self._startup_phase_ts = time.monotonic()
         self._diag_emit(f"startup phase -> {self._startup_phase}")
+
+    def _ensure_agent_runtime_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the dedicated SPADE runtime loop, starting it if needed."""
+        with self._agent_runtime_lock:
+            loop = self._agent_runtime_loop
+            thread = self._agent_runtime_thread
+            if (
+                loop is not None
+                and thread is not None
+                and thread.is_alive()
+                and loop.is_running()
+            ):
+                return loop
+
+            ready = threading.Event()
+            holder: dict[str, Any] = {}
+
+            def _runner() -> None:
+                runtime_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(runtime_loop)
+                holder["loop"] = runtime_loop
+                ready.set()
+                try:
+                    runtime_loop.run_forever()
+                finally:
+                    pending = [task for task in asyncio.all_tasks(runtime_loop) if not task.done()]
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        runtime_loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                    runtime_loop.run_until_complete(runtime_loop.shutdown_asyncgens())
+                    runtime_loop.close()
+
+            thread = threading.Thread(
+                target=_runner,
+                name="cais-spade-agent-runtime",
+                daemon=True,
+            )
+            thread.start()
+            if not ready.wait(timeout=5.0):
+                raise RuntimeError("agent runtime loop did not start")
+            loop = holder.get("loop")
+            if loop is None:
+                raise RuntimeError("agent runtime loop unavailable")
+            self._agent_runtime_loop = loop
+            self._agent_runtime_thread = thread
+            return loop
+
+    async def _run_on_agent_runtime(self, coroutine: Any) -> Any:
+        loop = self._ensure_agent_runtime_loop()
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is loop:
+            return await coroutine
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        return await asyncio.wrap_future(future)
+
+    def _shutdown_agent_runtime_loop(self) -> None:
+        with self._agent_runtime_lock:
+            loop = self._agent_runtime_loop
+            thread = self._agent_runtime_thread
+            self._agent_runtime_loop = None
+            self._agent_runtime_thread = None
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
 
     def _gazebo_timing_emit(self, message: str) -> None:
         """Emit Gazebo/MoveIt startup timing lines when explicitly enabled."""
@@ -772,6 +860,10 @@ class SystemBridge:
     def _default_product_requirement_path(product_name: str) -> Path:
         return (_PRODUCT_REQUIREMENTS_DIR / f"{str(product_name).strip()}.txt").resolve()
 
+    @staticmethod
+    def _default_product_order_path(product_name: str) -> Path:
+        return (_PRODUCT_ORDERS_DIR / f"{str(product_name).strip()}.json").resolve()
+
     def _compute_safety_generation_hashes(self, safety_file: Path) -> dict[str, str]:
         if not safety_file.exists():
             raise FileNotFoundError(f"safety file missing: {safety_file}")
@@ -864,6 +956,77 @@ class SystemBridge:
                 if p.is_file() and p.suffix == ".txt":
                     options.add(self._norm_path(str(p)))
         return sorted(options)
+
+    def list_product_order_files(self, product_init_file: str | None = None) -> list[str]:
+        options: set[str] = set()
+        if _PRODUCT_ORDERS_DIR.is_dir():
+            for p in _PRODUCT_ORDERS_DIR.iterdir():
+                if p.is_file() and p.suffix == ".json":
+                    options.add(self._norm_path(str(p)))
+        if product_init_file:
+            try:
+                raw = self.load_config(str(product_init_file))
+                _product_name, product_meta = self._first_manifest_entry(raw)
+                order_raw = str(product_meta.get("product_order_file", "")).strip()
+                if order_raw:
+                    options.add(self._norm_path(self._abs_project_path(order_raw)))
+            except Exception:
+                pass
+        return sorted(options)
+
+    def load_product_order(self, product_order_file: str) -> dict[str, Any]:
+        order_path = self._abs_project_path(product_order_file).resolve()
+        return load_product_order_file(order_path)
+
+    def save_product_order(self, product_order_file: str, payload: dict[str, Any]) -> dict[str, Any]:
+        order_path = self._abs_project_path(product_order_file).resolve()
+        order_path.parent.mkdir(parents=True, exist_ok=True)
+        order_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return load_product_order_file(order_path)
+
+    def delete_product_order(self, product_order_file: str) -> None:
+        order_path = self._abs_project_path(product_order_file).resolve()
+        if order_path.exists():
+            order_path.unlink()
+
+    def product_geometry_slots_for_product(self, product_init_file: str | None = None) -> list[str]:
+        product_file = str(product_init_file or self.selected_product or "").strip()
+        if not product_file:
+            files = self.list_product_files()
+            product_file = files[0] if files else ""
+        if not product_file:
+            return []
+        raw = self.load_config(product_file)
+        _product_name, product_meta = self._first_manifest_entry(raw)
+        geometry_file = str(product_meta.get("product_geometry_file", "")).strip()
+        if not geometry_file:
+            return []
+        geometry = ProductProfile.load_product_geometry(
+            str(self._abs_project_path(geometry_file)),
+            robot_env="real" if self.execution_mode == "physical" else "gazebo",
+        )
+        return geometry_slot_names(geometry)
+
+    def _resolve_product_init_for_product_order(self, product_order_file: str) -> dict[str, Any]:
+        order_norm = self._norm_path(self._abs_project_path(product_order_file))
+        candidates: list[dict[str, Any]] = []
+        for init_file in self.list_product_files():
+            try:
+                ctx = self._resolve_product_context(init_file, include_hashes=False)
+            except Exception:
+                continue
+            out = dict(ctx)
+            out["product_init_file"] = str(Path(init_file).resolve())
+            candidates.append(out)
+            if self._norm_path(ctx.get("product_order_file", "")) == order_norm:
+                return out
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ValueError(f"No product initialization manifest references product order file: {product_order_file}")
+
+    def resolve_product_init_for_product_order(self, product_order_file: str) -> str:
+        ctx = self._resolve_product_init_for_product_order(product_order_file)
+        return str(ctx["product_init_file"])
 
     def _load_safety_intent_approvals(self) -> dict[str, Any]:
         source = _SAFETY_INTENT_APPROVALS
@@ -1871,6 +2034,28 @@ class SystemBridge:
                 "rules": [],
             }
 
+        dot_signature: list[tuple[str, int]] = []
+        for raw_dot in latest.get("dfa_dot_files", []):
+            try:
+                dot_path = Path(str(raw_dot or "").strip())
+                dot_signature.append(
+                    (str(dot_path.resolve()), dot_path.stat().st_mtime_ns if dot_path.exists() else 0)
+                )
+            except Exception:
+                continue
+        cache_signature = (
+            safety_key,
+            current_hash,
+            str(latest.get("preview_id", "") or "").strip(),
+            str(logic_path.resolve()),
+            logic_path.stat().st_mtime_ns,
+            tuple(sorted(dot_signature)),
+        )
+        with self._safety_rule_preview_cache_lock:
+            cached = self._safety_rule_preview_cache.get(safety_key)
+            if cached and cached[0] == cache_signature:
+                return deepcopy(cached[1])
+
         logic_payload = self._read_json_dict(logic_path)
         raw_rules = logic_payload.get("rules", [])
         rules: list[dict[str, Any]] = raw_rules if isinstance(raw_rules, list) else []
@@ -1933,7 +2118,7 @@ class SystemBridge:
 
         preview_hash = str(latest.get("safety_sha256", "")).strip()
         hash_matches = bool(current_hash and preview_hash and current_hash == preview_hash)
-        return {
+        payload_out = {
             "available": True,
             "reason": "ok",
             "safety_file": safety_key,
@@ -1953,6 +2138,9 @@ class SystemBridge:
             "preview_interpretation_summary": preview_interpretation_summary,
             "rules": preview_rules,
         }
+        with self._safety_rule_preview_cache_lock:
+            self._safety_rule_preview_cache[safety_key] = (cache_signature, deepcopy(payload_out))
+        return payload_out
 
     def generate_safety_rule_preview(
         self,
@@ -2330,6 +2518,7 @@ class SystemBridge:
         raw = self.load_config(str(p))
         product_name, product_meta = self._first_manifest_entry(raw)
         product_spec_path_raw = str(product_meta.get("product_specification_file", "")).strip()
+        product_order_path_raw = str(product_meta.get("product_order_file", "")).strip()
 
         cca_raw = self.load_config(str(_CCA_INIT))
         if "cca" in cca_raw and isinstance(cca_raw["cca"], dict):
@@ -2345,6 +2534,11 @@ class SystemBridge:
             req_file_str = str(self._abs_project_path(product_spec_path_raw).resolve())
         elif product_name:
             req_file_str = str(self._default_product_requirement_path(product_name))
+        order_file_str = ""
+        if product_order_path_raw:
+            order_file_str = str(self._abs_project_path(product_order_path_raw).resolve())
+        elif product_name:
+            order_file_str = str(self._default_product_order_path(product_name))
         safe_file_str = ""
         if safety_path:
             safe_file_str = str(self._abs_project_path(safety_path).resolve())
@@ -2356,6 +2550,7 @@ class SystemBridge:
         return {
             "product_name": product_name,
             "product_spec_file": req_file_str,
+            "product_order_file": order_file_str,
             "safety_file": safe_file_str,
             "product_init_file": str(p.resolve()),
             "source_hashes": source_hashes,
@@ -2754,6 +2949,228 @@ class SystemBridge:
             robot_env=robot_env,
             safety_requirement_file=safety_requirement_file,
         )
+
+    def run_order_dry_run(
+        self,
+        product_order_file: str,
+        safety_requirement_file: str,
+        *,
+        require_verified_safety: bool = True,
+    ) -> dict[str, Any]:
+        if self.system_running or self._starting or self._stopping:
+            raise RuntimeError("cannot run order dry run while system lifecycle is active")
+        self._ensure_called_from_worker_thread("run_order_dry_run")
+
+        order_path = self._abs_project_path(product_order_file).resolve()
+        if not order_path.exists():
+            raise FileNotFoundError(f"product order file missing: {order_path}")
+        product_ctx = self._resolve_product_init_for_product_order(str(order_path))
+        product_init_file = str(product_ctx.get("product_init_file") or "")
+        product_raw = self.load_config(product_init_file)
+        product_name, product_meta = self._first_manifest_entry(product_raw)
+        geometry_file = str(product_meta.get("product_geometry_file", "")).strip()
+        if not geometry_file:
+            raise ValueError(f"product {product_name} missing product_geometry_file")
+        geometry = ProductProfile.load_product_geometry(
+            str(self._abs_project_path(geometry_file)),
+            robot_env="real" if self.execution_mode == "physical" else "gazebo",
+        )
+        product_order = load_product_order_file(order_path)
+        validated = validate_product_order(product_order, geometry)
+
+        safety_raw = str(safety_requirement_file or "").strip()
+        if not safety_raw or safety_raw.upper() == "__NONE__":
+            raise ValueError("select a verified safety file for order dry run")
+        safety_path = self._abs_project_path(safety_raw).resolve()
+        if not safety_path.exists():
+            raise FileNotFoundError(f"safety file missing: {safety_path}")
+        if require_verified_safety:
+            safety_eval = self.evaluate_safety_intent_approval(str(safety_path))
+            if not bool(safety_eval.get("approved", False)):
+                reason = str(safety_eval.get("reason", "not_approved") or "not_approved")
+                raise ValueError(f"safety file is not verified: {reason}")
+        safety_text = safety_path.read_text(encoding="utf-8").strip()
+        preview = self.get_safety_rule_preview(str(safety_path))
+        preview_rules = preview.get("rules", []) if isinstance(preview.get("rules"), list) else []
+
+        resources = self.bundle_compiler._collect_resource_refs(
+            robot_env="real" if self.execution_mode == "physical" else "gazebo"
+        )
+        tools_catalog = []
+        if _TOOLS_OUT.exists():
+            try:
+                raw_tools = json.loads(_TOOLS_OUT.read_text(encoding="utf-8"))
+                if isinstance(raw_tools, list):
+                    tools_catalog = raw_tools
+            except Exception:
+                tools_catalog = []
+        dry_agent = SimpleNamespace(
+            jid=str(validated.payload.get("product_jid") or f"{product_name}@localhost"),
+            logger=log,
+            product_geometry=geometry,
+            product_order_file=str(order_path),
+            tools_catalog=tools_catalog,
+        )
+        planner = ProcessPlanner(dry_agent, resources)
+        artifact = planner.build_from_product_order(
+            dict(validated.payload),
+            safety_text=safety_text,
+        )
+        try:
+            planner.compile_global_fsa()
+        except Exception as exc:
+            artifact["derived_dag_compile_error"] = str(exc)
+
+        simulation = self._simulate_order_dry_run(planner.nodes)
+        monitor_rules = [
+            {
+                "id": str(rule.get("id", "")),
+                "raw_text": str(rule.get("raw_text", "")),
+                "constraint_type": str(rule.get("constraint_type", "")),
+                "ltlf": str(rule.get("ltlf", "")),
+                "generated_interpretation": str(rule.get("generated_interpretation", "")),
+            }
+            for rule in preview_rules
+            if isinstance(rule, dict)
+        ]
+        if not monitor_rules:
+            monitor_rules = list(artifact.get("monitor_rules") or [])
+
+        out = {
+            **artifact,
+            "product_order": dict(validated.payload),
+            "selected_parts": list(validated.selected_parts),
+            "ordering_constraints": derive_ordering_constraints_from_safety(
+                safety_text,
+                list(validated.selected_parts),
+            ),
+            "monitor_rules": monitor_rules,
+            "derived_nodes": deepcopy(planner.nodes),
+            "simulated_event_trace": simulation["simulated_event_trace"],
+            "ready_operations": simulation["ready_operations"],
+            "blocked_operations": simulation["blocked_operations"],
+            "completed_operations": simulation["completed_operations"],
+            "monitor_state": simulation["monitor_state"],
+            "product_order_file": str(order_path),
+            "safety_file": str(safety_path),
+        }
+        dry_run_dir = _MONITOR / "dry_run"
+        dry_run_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        artifact_path = dry_run_dir / f"{stamp}__{slug(order_path.stem)}.json"
+        suffix = 1
+        while artifact_path.exists():
+            suffix += 1
+            artifact_path = dry_run_dir / f"{stamp}__{slug(order_path.stem)}_{suffix}.json"
+        out["artifact_path"] = str(artifact_path.resolve())
+        atomic_json_write(artifact_path, out)
+        return out
+
+    @staticmethod
+    def _simulate_order_dry_run(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        task_nodes = [
+            deepcopy(node)
+            for node in nodes
+            if isinstance(node, dict) and node.get("type") == "task"
+        ]
+        pending: dict[str, dict[str, Any]] = {
+            str(node.get("id")): node
+            for node in task_nodes
+            if str(node.get("id") or "").strip()
+        }
+        completed: set[str] = set()
+        completed_operations: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
+
+        def _operation_row(node: dict[str, Any], *, missing: list[str] | None = None) -> dict[str, Any]:
+            params = node.get("params") if isinstance(node.get("params"), dict) else {}
+            return {
+                "task_id": str(node.get("id", "")),
+                "function_name": str(node.get("function_name", "")),
+                "part_name": str(params.get("part_name", "")),
+                "resource_jid": str(node.get("resource_jid", "")),
+                "missing_predecessors": list(missing or []),
+            }
+
+        step = 0
+        last_ready: list[dict[str, Any]] = []
+        last_blocked: list[dict[str, Any]] = []
+        while pending:
+            ready_nodes: list[dict[str, Any]] = []
+            blocked_rows: list[dict[str, Any]] = []
+            for node in sorted(
+                pending.values(),
+                key=lambda item: (
+                    int(item.get("sequence_index", 10**9) or 0),
+                    str(item.get("id", "")),
+                ),
+            ):
+                missing = [
+                    str(pred_id)
+                    for pred_id in (node.get("predecessors") or [])
+                    if str(pred_id) not in completed
+                ]
+                if missing:
+                    blocked_rows.append(_operation_row(node, missing=missing))
+                else:
+                    ready_nodes.append(node)
+
+            ready_rows = [_operation_row(node) for node in ready_nodes]
+            trace.append(
+                {
+                    "step": step,
+                    "ready_operations": ready_rows,
+                    "blocked_operations": blocked_rows,
+                    "completed_task_ids": sorted(completed),
+                }
+            )
+            last_ready = ready_rows
+            last_blocked = blocked_rows
+            if not ready_nodes:
+                return {
+                    "ready_operations": last_ready,
+                    "blocked_operations": last_blocked,
+                    "completed_operations": completed_operations,
+                    "simulated_event_trace": trace,
+                    "monitor_state": {
+                        "status": "blocked",
+                        "completed_task_count": len(completed),
+                        "remaining_task_count": len(pending),
+                    },
+                }
+
+            for node in ready_nodes:
+                task_id = str(node.get("id", ""))
+                if task_id not in pending:
+                    continue
+                event = _operation_row(node)
+                event["status"] = "completed"
+                event["start_event"] = f"{task_id}.start"
+                event["done_event"] = f"{task_id}.done"
+                completed_operations.append(event)
+                completed.add(task_id)
+                pending.pop(task_id, None)
+            step += 1
+
+        trace.append(
+            {
+                "step": step,
+                "ready_operations": [],
+                "blocked_operations": [],
+                "completed_task_ids": sorted(completed),
+            }
+        )
+        return {
+            "ready_operations": last_ready,
+            "blocked_operations": last_blocked,
+            "completed_operations": completed_operations,
+            "simulated_event_trace": trace,
+            "monitor_state": {
+                "status": "completed",
+                "completed_task_count": len(completed),
+                "remaining_task_count": 0,
+            },
+        }
 
     @staticmethod
     def _ensure_called_from_worker_thread(method_name: str) -> None:
@@ -3405,8 +3822,9 @@ class SystemBridge:
                 )
                 if not sim_ready:
                     raise RuntimeError(sim_reason)
-                # Hand off prewarmed controllers to SPADE agents instead of
-                # destroying them — avoids duplicate ROS2 init on first task.
+                # Hand off prewarmed controllers only when explicitly kept alive.
+                # By default prewarm is readiness-only and destroys controllers
+                # after wait_for_services() to keep the UI/Gazebo process stable.
                 with self._gazebo_prewarm_lock:
                     prewarmed = dict(self._gazebo_prewarm_controllers)
                     self._gazebo_prewarm_controllers.clear()
@@ -3470,6 +3888,19 @@ class SystemBridge:
             if not prod_files:
                 raise RuntimeError("No product initialization files found.")
 
+            selected_product_order_file = str(self.selected_product_order_file or "").strip()
+            if selected_product_order_file:
+                try:
+                    selected_product_file = await asyncio.to_thread(
+                        self.resolve_product_init_for_product_order,
+                        selected_product_order_file,
+                    )
+                    self.selected_product = selected_product_file
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to resolve product init for product order file '{selected_product_order_file}': {exc}"
+                    ) from exc
+
             selected_requirement_file = str(self.selected_requirement_file or "").strip()
             if selected_requirement_file:
                 try:
@@ -3505,18 +3936,22 @@ class SystemBridge:
             else:
                 selected_safety_for_compat = None
 
-            startup_bundle_scope = self._startup_bundle_scope_input(
-                selected_product_file,
-                selected_requirement_file,
-            )
-
-            bundle_context, bundle_notice = await asyncio.to_thread(
-                self._resolve_startup_bundle_context,
-                product_spec_file=startup_bundle_scope,
-                execution_mode=self.execution_mode,
-                robot_env=self.robot_env,
-                safety_requirement_file=selected_safety_for_compat,
-            )
+            bundle_context: dict[str, Any] | None = None
+            bundle_notice: str | None = None
+            if selected_product_order_file:
+                self.bundle_store.set_active_bundle_id(None)
+            else:
+                startup_bundle_scope = self._startup_bundle_scope_input(
+                    selected_product_file,
+                    selected_requirement_file,
+                )
+                bundle_context, bundle_notice = await asyncio.to_thread(
+                    self._resolve_startup_bundle_context,
+                    product_spec_file=startup_bundle_scope,
+                    execution_mode=self.execution_mode,
+                    robot_env=self.robot_env,
+                    safety_requirement_file=selected_safety_for_compat,
+                )
             if bundle_notice:
                 self.last_notice = bundle_notice
             if bundle_context:
@@ -3525,6 +3960,8 @@ class SystemBridge:
                 )
 
             runtime_overrides: dict[str, Any] = {}
+            if selected_product_order_file:
+                runtime_overrides["product_order_file"] = selected_product_order_file
             if selected_requirement_file:
                 runtime_overrides["product_requirement_file"] = selected_requirement_file
             if selected_safety_raw:
@@ -3538,23 +3975,29 @@ class SystemBridge:
 
             # Create agents, passing prewarmed controllers for reuse.
             self._set_startup_phase("create_agents")
+            agent_loop = self._ensure_agent_runtime_loop()
+
+            async def _create_agents_on_runtime_loop() -> tuple[Any, list[Any], list[Any], Any]:
+                return self._create_agents(
+                    ac,
+                    prod_files,
+                    res_files,
+                    str(_CCA_INIT),
+                    prewarmed,
+                    bundle_context,
+                    runtime_overrides,
+                )
+
             (
                 self.user_agent,
                 self.resource_agents,
                 self.product_agents,
                 self.cca,
-            ) = await asyncio.to_thread(
-                self._create_agents,
-                ac,
-                prod_files,
-                res_files,
-                str(_CCA_INIT),
-                prewarmed,
-                bundle_context,
-                runtime_overrides,
+            ) = await self._run_on_agent_runtime(
+                _create_agents_on_runtime_loop()
             )
             self._bind_agents_to_running_loop(
-                asyncio.get_running_loop(),
+                agent_loop,
                 user_agent=self.user_agent,
                 resource_agents=self.resource_agents,
                 product_agents=self.product_agents,
@@ -3595,69 +4038,9 @@ class SystemBridge:
                 f"startup#{startup_id} llm tools catalogue source={tools_catalogue_path}"
             )
 
-            # Start agents in order: resources → CCA → user → products.
-            self._set_startup_phase("start_resource_agents")
-            ra_tasks = []
-            for ra in self.resource_agents:
-                ra_tasks.append(ra.start(auto_register=True))
-            if ra_tasks:
-                t_ra = time.monotonic()
-                self._diag_emit(f"startup#{startup_id} starting {len(ra_tasks)} resource agents")
-                await asyncio.gather(*ra_tasks)
-                self._diag_emit(
-                    f"startup#{startup_id} resource agents started in {time.monotonic() - t_ra:.2f}s"
-                )
-
-            self._set_startup_phase("start_cca")
-            if self.cca:
-                t_cca = time.monotonic()
-                await self.cca.start(auto_register=True)
-                self._diag_emit(
-                    f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s"
-                )
-
-            self._set_startup_phase("start_user")
-            if self.user_agent:
-                t_user = time.monotonic()
-                await self.user_agent.start(auto_register=True)
-                self._diag_emit(
-                    f"startup#{startup_id} user started in {time.monotonic() - t_user:.2f}s"
-                )
-
-            self._set_startup_phase("start_product_agents")
-            pa_tasks = []
-            for pa in self.product_agents:
-                pa_tasks.append(pa.start(auto_register=True))
-            if pa_tasks:
-                t_pa = time.monotonic()
-                self._diag_emit(f"startup#{startup_id} starting {len(pa_tasks)} product agents")
-                await asyncio.gather(*pa_tasks)
-                self._diag_emit(
-                    f"startup#{startup_id} product agents started in {time.monotonic() - t_pa:.2f}s"
-                )
-
-            self._set_startup_phase("wait_product_kickoff")
-            kickoff_results: list[dict[str, Any]] = []
-            for pa in self.product_agents:
-                wait_for_kickoff = getattr(pa, "wait_for_kickoff_result", None)
-                if not callable(wait_for_kickoff):
-                    kickoff_results.append(
-                        {
-                            "success": False,
-                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: kickoff wait unavailable",
-                        }
-                    )
-                    continue
-                result = await wait_for_kickoff(timeout=180.0)
-                if isinstance(result, dict):
-                    kickoff_results.append(result)
-                else:
-                    kickoff_results.append(
-                        {
-                            "success": False,
-                            "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: invalid kickoff result",
-                        }
-                    )
+            kickoff_results = await self._run_on_agent_runtime(
+                self._start_agents_and_wait_kickoff(startup_id, startup_t0)
+            )
 
             kickoff_failures = [r for r in kickoff_results if not bool(r.get("success", False))]
             if kickoff_failures:
@@ -3689,11 +4072,85 @@ class SystemBridge:
                 f"startup#{startup_id} failed after {time.monotonic() - startup_t0:.2f}s: {exc}"
             )
             log.exception("Failed to start system")
-            await self._cleanup_agents()
+            await self._run_on_agent_runtime(self._cleanup_agents())
         finally:
             self._starting = False
             if not self.system_running:
                 self._set_startup_phase("idle")
+
+    async def _start_agents_and_wait_kickoff(
+        self,
+        startup_id: int,
+        startup_t0: float,
+    ) -> list[dict[str, Any]]:
+        """Start SPADE agents on the dedicated agent runtime loop."""
+        # Start agents in order: resources → CCA → user → products.
+        self._set_startup_phase("start_resource_agents")
+        ra_tasks = []
+        for ra in self.resource_agents:
+            ra_tasks.append(ra.start(auto_register=True))
+        if ra_tasks:
+            t_ra = time.monotonic()
+            self._diag_emit(f"startup#{startup_id} starting {len(ra_tasks)} resource agents")
+            await asyncio.gather(*ra_tasks)
+            self._diag_emit(
+                f"startup#{startup_id} resource agents started in {time.monotonic() - t_ra:.2f}s"
+            )
+
+        self._set_startup_phase("start_cca")
+        if self.cca:
+            t_cca = time.monotonic()
+            await self.cca.start(auto_register=True)
+            self._diag_emit(
+                f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s"
+            )
+
+        self._set_startup_phase("start_user")
+        if self.user_agent:
+            t_user = time.monotonic()
+            await self.user_agent.start(auto_register=True)
+            self._diag_emit(
+                f"startup#{startup_id} user started in {time.monotonic() - t_user:.2f}s"
+            )
+
+        self._set_startup_phase("start_product_agents")
+        pa_tasks = []
+        for pa in self.product_agents:
+            pa_tasks.append(pa.start(auto_register=True))
+        if pa_tasks:
+            t_pa = time.monotonic()
+            self._diag_emit(f"startup#{startup_id} starting {len(pa_tasks)} product agents")
+            await asyncio.gather(*pa_tasks)
+            self._diag_emit(
+                f"startup#{startup_id} product agents started in {time.monotonic() - t_pa:.2f}s"
+            )
+
+        self._set_startup_phase("wait_product_kickoff")
+        kickoff_results: list[dict[str, Any]] = []
+        for pa in self.product_agents:
+            wait_for_kickoff = getattr(pa, "wait_for_kickoff_result", None)
+            if not callable(wait_for_kickoff):
+                kickoff_results.append(
+                    {
+                        "success": False,
+                        "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: kickoff wait unavailable",
+                    }
+                )
+                continue
+            result = await wait_for_kickoff(timeout=180.0)
+            if isinstance(result, dict):
+                kickoff_results.append(result)
+            else:
+                kickoff_results.append(
+                    {
+                        "success": False,
+                        "message": f"{getattr(pa, 'agent_name', getattr(pa, 'jid', 'product'))}: invalid kickoff result",
+                    }
+                )
+        self._diag_emit(
+            f"startup#{startup_id} agent kickoff wait done in {time.monotonic() - startup_t0:.2f}s"
+        )
+        return kickoff_results
 
     async def stop_system(self) -> None:
         """Stop all SPADE agents."""
@@ -3701,7 +4158,7 @@ class SystemBridge:
             return
         self._stopping = True
         try:
-            await self._cleanup_agents()
+            await self._run_on_agent_runtime(self._cleanup_agents())
             self.system_running = False
             self._clear_cached_plan_safety_alerts()
             log.info("All agents stopped.")
@@ -3804,6 +4261,8 @@ class SystemBridge:
         execution_mode: str,
         perception_backend: str,
     ) -> None:
+        if str(execution_mode or "").strip().lower() == "simulation":
+            os.environ["ENABLE_ROBOT_AGENT_PREWARM"] = "0"
         configure = getattr(agent_creator_module, "configure_runtime", None)
         if callable(configure):
             configure(
@@ -3831,6 +4290,7 @@ class SystemBridge:
         runtime_overrides: dict[str, Any] | None = None,
     ) -> tuple[Any, list[Any], list[Any], Any]:
         runtime_overrides = dict(runtime_overrides or {})
+        product_order_file = runtime_overrides.get("product_order_file")
         product_requirement_file = runtime_overrides.get("product_requirement_file")
         safety_override_set = bool(runtime_overrides.get("safety_file_override_set", False))
         safety_override = runtime_overrides.get("safety_file_override")
@@ -3842,6 +4302,8 @@ class SystemBridge:
             prewarmed_controllers=prewarmed_controllers,
         )
         product_kwargs: dict[str, Any] = {}
+        if product_order_file:
+            product_kwargs["product_order_file"] = product_order_file
         if product_requirement_file:
             product_kwargs["product_requirement_file"] = product_requirement_file
         if safety_override_set:
@@ -4738,16 +5200,20 @@ class SystemBridge:
         if settings is None:
             return False, time.monotonic() - start_ts, "controller config missing"
         controller_cfg, named_positions = settings
+        keep_controller_alive = str(
+            os.environ.get("CAIS_KEEP_GAZEBO_PREWARM_CONTROLLERS", "0")
+        ).strip().lower() not in {"0", "false", "no", "off"}
 
         with self._gazebo_prewarm_lock:
             existing = self._gazebo_prewarm_controllers.get(robot_key)
         if existing is not None:
-            try:
-                if existing.wait_for_services(timeout_sec=1.0):
-                    log.info("Gazebo prewarm already ready for %s", robot_key)
-                    return True, time.monotonic() - start_ts, "reused existing controller"
-            except Exception:
-                pass
+            if keep_controller_alive:
+                try:
+                    if existing.wait_for_services(timeout_sec=1.0):
+                        log.info("Gazebo prewarm already ready for %s", robot_key)
+                        return True, time.monotonic() - start_ts, "reused existing controller"
+                except Exception:
+                    pass
             try:
                 existing.shutdown()
             except Exception:
@@ -4805,15 +5271,22 @@ class SystemBridge:
             ok = bool(controller.wait_for_services(timeout_sec=self._GAZEBO_PREWARM_TIMEOUT_S))
             elapsed = time.monotonic() - start
             if ok:
-                with self._gazebo_prewarm_lock:
-                    old = self._gazebo_prewarm_controllers.pop(robot_key, None)
-                    self._gazebo_prewarm_controllers[robot_key] = controller
-                if old is not None and old is not controller:
+                if keep_controller_alive:
+                    with self._gazebo_prewarm_lock:
+                        old = self._gazebo_prewarm_controllers.pop(robot_key, None)
+                        self._gazebo_prewarm_controllers[robot_key] = controller
+                    if old is not None and old is not controller:
+                        try:
+                            old.shutdown()
+                        except Exception:
+                            pass
+                    controller = None  # kept alive for reuse; cleaned up when Gazebo stops
+                else:
                     try:
-                        old.shutdown()
+                        controller.shutdown()
                     except Exception:
-                        pass
-                controller = None  # kept alive for reuse; cleaned up when Gazebo stops
+                        log.exception("Gazebo prewarm cleanup failed for %s", robot_key)
+                    controller = None
                 log.info("Gazebo prewarm ready for %s in %.2fs", robot_key, elapsed)
                 return True, time.monotonic() - start_ts, "controller ready"
             else:

@@ -11,6 +11,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Mapping, Optional
 
+from cais_spade_llm.product.order import load_product_order_file
+
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_GAZEBO_WORLD_PATH = _REPO_ROOT / "ros2" / "cais_lab_gazebo" / "worlds" / "table.world"
@@ -22,6 +24,7 @@ class ProductProfile:
 
     name: str
     product_specification_file: Optional[str] = None
+    product_order_file: Optional[str] = None
     product_geometry_file: Optional[str] = None
     safety_file: Optional[str] = None
     instruction_override: Optional[str] = None
@@ -113,6 +116,37 @@ class ProductProfile:
     def extract_requirement_text(self, *, logger: Any | None = None) -> Optional[str]:
         """Load requirement text from the configured product specification file."""
         return self.extract_requirement_file(self.product_specification_file, logger=logger)
+
+    def read_product_order(self, *, logger: Any | None = None) -> Optional[Dict[str, Any]]:
+        """Load product-order JSON if configured."""
+        return self.read_product_order_file(self.product_order_file, logger=logger)
+
+    @staticmethod
+    def read_product_order_file(
+        product_order_file: Optional[str],
+        *,
+        logger: Any | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not product_order_file:
+            return None
+        try:
+            path = Path(product_order_file)
+            if not path.exists():
+                if logger is not None:
+                    logger.warning("[Product] Product order file not found: %s", path)
+                return None
+            payload = load_product_order_file(path)
+            if logger is not None:
+                logger.info("[Product] Using product order file: %s", path.resolve())
+            return payload
+        except Exception as exc:
+            if logger is not None:
+                logger.exception(
+                    "[Product] Failed to read product order from %s: %s",
+                    product_order_file,
+                    exc,
+                )
+            raise
 
     @staticmethod
     def extract_requirement_file(

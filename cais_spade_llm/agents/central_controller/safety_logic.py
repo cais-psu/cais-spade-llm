@@ -1500,6 +1500,12 @@ class SafetyLogic:
         self.logic_raw.clear()
         self.global_safety_spec.clear()
 
+        if not self._safety_text_has_requirements(safety_text):
+            msg = "[SafetyLogic] Parsed 0 structured safety rule(s): no non-empty safety requirements."
+            if self.logger:
+                self.logger.info(msg)
+            return msg
+
         try:
             structured = await self._llm_parse_safety_rules(
                 safety_text,
@@ -1616,6 +1622,17 @@ class SafetyLogic:
 
         return msg
 
+    @staticmethod
+    def _safety_text_has_requirements(safety_text: str) -> bool:
+        for raw_line in str(safety_text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("["):
+                continue
+            if line.startswith(("-", "*")):
+                line = line[1:].strip()
+            if line:
+                return True
+        return False
 
     async def build_safety_rules_and_logic(
         self,

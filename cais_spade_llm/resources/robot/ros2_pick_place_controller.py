@@ -281,6 +281,29 @@ class Ros2PickPlaceController:
             0.05,
             opt_float(motion, "release_detach_verify_poll_sec", 0.1),
         )
+        self.release_best_effort_detach_timeout_sec = max(
+            0.05,
+            opt_float(
+                motion,
+                "release_best_effort_detach_timeout_sec",
+                min(
+                    self.release_detach_timeout_sec,
+                    max(2.0, self.detach_timeout_sec),
+                ),
+            ),
+        )
+        self.snap_to_slot_timeout_sec = max(
+            0.1,
+            opt_float(motion, "snap_to_slot_timeout_sec", 5.0),
+        )
+        self.snap_to_slot_retry_count = max(
+            0,
+            opt_int(motion, "snap_to_slot_retry_count", 1),
+        )
+        self.snap_to_slot_retry_delay_sec = max(
+            0.0,
+            opt_float(motion, "snap_to_slot_retry_delay_sec", 0.25),
+        )
         self.release_retry_lift_m = max(
             0.0,
             opt_float(motion, "release_retry_lift_m", 0.005),
@@ -918,7 +941,10 @@ class Ros2PickPlaceController:
                 )
                 time.sleep(self.release_detach_retry_delay_sec)
         if not ok:
-            if assume_released_if_open and self._gripper_is_open_enough():
+            if (
+                self._release_open_fallback_allowed(assume_released_if_open)
+                and self._gripper_is_open_enough()
+            ):
                 if not target_model and self._attached_model:
                     target_model = str(self._attached_model)
                 verified_release = self._verify_detach_timeout_release(target_model)
@@ -1075,10 +1101,18 @@ class Ros2PickPlaceController:
             }
         time.sleep(self.release_postopen_settle_sec)
 
-        detached = self.detach_part(
-            target_model,
-            assume_released_if_open=assume_released_if_open,
-        )
+        used_simulation_release_fallback = False
+        if self._simulation_release_fallback_enabled(assume_released_if_open):
+            used_simulation_release_fallback = True
+            detached = self._release_part_simulation_best_effort_detach(
+                target_model,
+                target_part,
+            )
+        else:
+            detached = self.detach_part(
+                target_model,
+                assume_released_if_open=assume_released_if_open,
+            )
         if detached.get("success"):
             time.sleep(self.release_postdetach_settle_sec)
             result = {
@@ -1092,6 +1126,48 @@ class Ros2PickPlaceController:
             if detached.get("release_mode"):
                 result["release_mode"] = detached.get("release_mode")
             return result
+
+        if (
+            self._release_open_fallback_allowed(assume_released_if_open)
+            and not used_simulation_release_fallback
+        ):
+            fallback_model = target_model
+            if not fallback_model and self._attached_model:
+                fallback_model = str(self._attached_model)
+            verified_release = self._verify_detach_timeout_release(fallback_model)
+            if verified_release is not False:
+                self._attached_model = None
+                self._attached_link = None
+                time.sleep(self.release_postdetach_settle_sec)
+                result = {
+                    "success": True,
+                    "message": (
+                        f"released {target_part or fallback_model or 'part'}"
+                        if (target_part or fallback_model)
+                        else "released part"
+                    ),
+                    "release_mode": (
+                        "verified_open_after_detach_timeout"
+                        if verified_release is True
+                        else "assumed_open_after_detach_timeout"
+                    ),
+                }
+                if verified_release is True:
+                    self._log().warn(
+                        f"Confirmed {fallback_model or 'held part'} was released after detach failure because the model is separated from the gripper"
+                    )
+                else:
+                    self._log().warn(
+                        f"Assuming {fallback_model or 'held part'} was released because the gripper open command succeeded and detach verification is unavailable"
+                    )
+                return result
+            detached = {
+                "success": False,
+                "message": (
+                    f"detach failed and release verification kept "
+                    f"{fallback_model or 'held part'} near the gripper"
+                ),
+            }
 
         rollback_ok = self.close_gripper()
         rollback_message = (
@@ -1108,6 +1184,93 @@ class Ros2PickPlaceController:
                 f"{str(detached.get('message') or 'failed to detach part')}; "
                 f"rollback: {rollback_message}"
             ),
+        }
+
+    def _release_open_fallback_allowed(self, assume_released_if_open: bool) -> bool:
+        if not assume_released_if_open:
+            return False
+        mode = str(getattr(self, "execution_mode", "") or "").strip().lower()
+        return mode != "physical"
+
+    def _simulation_release_fallback_enabled(self, assume_released_if_open: bool) -> bool:
+        if not self._release_open_fallback_allowed(assume_released_if_open):
+            return False
+        mode = str(getattr(self, "execution_mode", "") or "").strip().lower()
+        return mode == "simulation"
+
+    def _simulation_release_detach_timeout_sec(self) -> float:
+        configured = _as_float(
+            getattr(self, "release_best_effort_detach_timeout_sec", None),
+            0.75,
+        )
+        release_timeout = _as_float(
+            getattr(self, "release_detach_timeout_sec", None),
+            configured,
+        )
+        if configured <= 0.0:
+            configured = 0.75
+        if release_timeout > 0.0:
+            configured = min(configured, release_timeout)
+        return max(0.05, configured)
+
+    def _release_part_simulation_best_effort_detach(
+        self,
+        target_model: str,
+        target_part: str,
+    ) -> dict[str, Any]:
+        fallback_model = str(target_model or "").strip()
+        if not fallback_model and self._attached_model:
+            fallback_model = str(self._attached_model)
+        display_name = target_part or fallback_model or "held part"
+
+        ok = self._detach_part(
+            fallback_model,
+            timeout_sec=self._simulation_release_detach_timeout_sec(),
+            attached_link_only=False,
+            log_failure=False,
+            timeout_log_level="warn",
+            break_on_timeout=False,
+            prefer_attached_link=False,
+        )
+        if ok:
+            return {
+                "success": True,
+                "message": f"detached {display_name}",
+            }
+
+        verified_release = self._verify_detach_timeout_release(
+            fallback_model,
+            timeout_log_level="debug",
+        )
+        if verified_release is False:
+            return {
+                "success": False,
+                "message": (
+                    f"detach failed and release verification kept "
+                    f"{fallback_model or 'held part'} near the gripper"
+                ),
+                "release_mode": "verification_failed_after_detach_timeout",
+            }
+
+        if verified_release is True:
+            self._attached_model = None
+            self._attached_link = None
+            self._log().warn(
+                f"Confirmed {fallback_model or 'held part'} was released after detach timeout because the model is separated from the gripper"
+            )
+            return {
+                "success": True,
+                "message": f"verified detached {display_name} after gripper opened",
+                "release_mode": "verified_open_after_detach_timeout",
+            }
+
+        return {
+            "success": False,
+            "message": (
+                f"detach failed and release verification is unavailable for "
+                f"{fallback_model or display_name}"
+            ),
+            "release_mode": "verification_unavailable_after_detach_timeout",
         }
 
     # ------------------------------------------------------------------ #
@@ -1625,8 +1788,7 @@ class Ros2PickPlaceController:
                     return {"success": True, "message": "already at named home pose"}
         elif missing:
             self._log().warning(
-                "move_home could not confirm current joint state before homing; missing=%s",
-                missing,
+                f"move_home could not confirm current joint state before homing; missing={missing}"
             )
 
         # Move to the explicit named joint-space home pose.
@@ -2056,9 +2218,14 @@ class Ros2PickPlaceController:
             float(translation.z),
         )
 
-    def _get_entity_world_position(self, model_name: str) -> tuple[float, float, float] | None:
+    def _get_entity_world_position(
+        self,
+        model_name: str,
+        timeout_log_level: str = "error",
+    ) -> tuple[float, float, float] | None:
         target_model = str(model_name or "").strip()
-        if not target_model or self.execution_mode == "physical":
+        mode = str(getattr(self, "execution_mode", "") or "").strip().lower()
+        if not target_model or mode == "physical":
             return None
         if not self._get_state_client or not getattr(self, "_GetEntityState", None):
             return None
@@ -2073,6 +2240,7 @@ class Ros2PickPlaceController:
             future,
             timeout_sec=1.0,
             label=f"get_entity_state:{target_model}",
+            timeout_log_level=timeout_log_level,
         )
         if not response or not getattr(response, "success", False):
             return None
@@ -2094,7 +2262,11 @@ class Ros2PickPlaceController:
             + (float(a[2]) - float(b[2])) ** 2
         )
 
-    def _verify_detach_timeout_release(self, target_model: str) -> bool | None:
+    def _verify_detach_timeout_release(
+        self,
+        target_model: str,
+        timeout_log_level: str = "error",
+    ) -> bool | None:
         target_model = str(target_model or "").strip()
         if not target_model:
             return None
@@ -2114,7 +2286,10 @@ class Ros2PickPlaceController:
         best_min_distance: float | None = None
         best_link_name = ""
         while True:
-            model_position = self._get_entity_world_position(target_model)
+            model_position = self._get_entity_world_position(
+                target_model,
+                timeout_log_level=timeout_log_level,
+            )
             if model_position is None:
                 return None
 
@@ -2138,10 +2313,8 @@ class Ros2PickPlaceController:
 
             if min_distance > self.release_detach_verify_distance_m:
                 self._log().info(
-                    "Verified detach fallback for %s: closest link %s is %.3fm away",
-                    target_model,
-                    min_link_name or "<unknown>",
-                    min_distance,
+                    f"Verified detach fallback for {target_model}: closest link "
+                    f"{min_link_name or '<unknown>'} is {min_distance:.3f}m away"
                 )
                 return True
 
@@ -2150,11 +2323,10 @@ class Ros2PickPlaceController:
             time.sleep(self.release_detach_verify_poll_sec)
 
         self._log().warn(
-            "Detach fallback verification failed for %s: closest link %s remained within %.3fm (threshold=%.3fm)",
-            target_model,
-            best_link_name or "<unknown>",
-            float(best_min_distance or 0.0),
-            self.release_detach_verify_distance_m,
+            f"Detach fallback verification failed for {target_model}: closest link "
+            f"{best_link_name or '<unknown>'} remained within "
+            f"{float(best_min_distance or 0.0):.3f}m "
+            f"(threshold={self.release_detach_verify_distance_m:.3f}m)"
         )
         return False
 
@@ -2212,7 +2384,13 @@ class Ros2PickPlaceController:
         self._last_failure_message = ""
         return True
 
-    def _wait_future(self, future, timeout_sec: float, label: str):
+    def _wait_future(
+        self,
+        future,
+        timeout_sec: float,
+        label: str,
+        timeout_log_level: str = "error",
+    ):
         deadline = time.monotonic() + timeout_sec
         while self._rclpy.ok() and not future.done() and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -2221,7 +2399,33 @@ class Ros2PickPlaceController:
                 future.cancel()
             except Exception:
                 pass
-            self._log().error(f"[{label}] timed out")
+            message = f"[{label}] timed out"
+            logger = self._log()
+            level = str(timeout_log_level or "error").strip().lower()
+            if level == "debug":
+                log_method = (
+                    getattr(logger, "debug", None)
+                    or getattr(logger, "warn", None)
+                    or getattr(logger, "warning", None)
+                )
+                if log_method:
+                    log_method(message)
+                else:
+                    logger.error(message)
+            elif level in {"warn", "warning"}:
+                log_method = getattr(logger, "warn", None) or getattr(
+                    logger,
+                    "warning",
+                    None,
+                )
+                if log_method:
+                    log_method(message)
+                else:
+                    logger.error(message)
+            elif level == "info" and hasattr(logger, "info"):
+                logger.info(message)
+            else:
+                logger.error(message)
             return None
         return future.result()
 
@@ -2320,6 +2524,9 @@ class Ros2PickPlaceController:
         timeout_sec: float | None = None,
         attached_link_only: bool = False,
         log_failure: bool = True,
+        timeout_log_level: str = "error",
+        break_on_timeout: bool = True,
+        prefer_attached_link: bool = True,
     ) -> bool:
         if not self._link_attacher_enabled:
             return True
@@ -2334,7 +2541,7 @@ class Ros2PickPlaceController:
             detach_timeout = self.detach_timeout_sec
 
         links_to_try: list[str] = []
-        if self._attached_link:
+        if prefer_attached_link and self._attached_link:
             links_to_try.append(self._attached_link)
         if not (attached_link_only and links_to_try):
             if self.primary_attach_link and self.primary_attach_link not in links_to_try:
@@ -2342,7 +2549,14 @@ class Ros2PickPlaceController:
             for link in self.attach_link_candidates:
                 if link not in links_to_try:
                     links_to_try.append(link)
-        links_to_try = links_to_try[: max(1, self.detach_max_link_attempts)]
+        if not prefer_attached_link and self._attached_link and self._attached_link not in links_to_try:
+            links_to_try.append(self._attached_link)
+        max_link_attempts = (
+            len(links_to_try)
+            if not break_on_timeout and not attached_link_only
+            else max(1, self.detach_max_link_attempts)
+        )
+        links_to_try = links_to_try[: max(1, max_link_attempts)]
 
         for link_name in links_to_try:
             req = self._detach_srv.Request()
@@ -2356,18 +2570,20 @@ class Ros2PickPlaceController:
                 future,
                 timeout_sec=detach_timeout,
                 label=f"detach:{link_name}",
+                timeout_log_level=timeout_log_level,
             )
             if response and response.success:
                 self._attached_model = None
                 self._attached_link = None
                 return True
             
-            # If the service timed out (no response), subsequent links will likely time out too. 
-            # We fail fast instead of waiting 5s * N links = 15s.
             if response is None:
                 if log_failure:
-                    self._log().error(f"Detach service timed out on {link_name}, skipping remaining links")
-                break
+                    suffix = "skipping remaining links" if break_on_timeout else "trying next link"
+                    self._log().error(f"Detach service timed out on {link_name}, {suffix}")
+                if break_on_timeout:
+                    break
+                continue
 
         if log_failure:
             self._log().error(f"Failed to detach {target_model}")
@@ -2401,9 +2617,27 @@ class Ros2PickPlaceController:
         req = self._SetEntityState.Request()
         req.state = state
 
-        future = self._set_state_client.call_async(req)
-        response = self._wait_future(future, timeout_sec=5.0, label="snap_to_slot")
-        return bool(response and response.success)
+        attempts = max(1, 1 + int(getattr(self, "snap_to_slot_retry_count", 0) or 0))
+        timeout_sec = _as_float(getattr(self, "snap_to_slot_timeout_sec", None), 5.0)
+        retry_delay_sec = _as_float(
+            getattr(self, "snap_to_slot_retry_delay_sec", None),
+            0.25,
+        )
+        for attempt_idx in range(attempts):
+            future = self._set_state_client.call_async(req)
+            response = self._wait_future(
+                future,
+                timeout_sec=timeout_sec,
+                label="snap_to_slot",
+            )
+            if response and response.success:
+                return True
+            if attempt_idx + 1 < attempts:
+                self._log().warn(
+                    f"snap_to_slot retry {attempt_idx + 1}/{attempts - 1} for {model_name}"
+                )
+                time.sleep(retry_delay_sec)
+        return False
 
     def _cartesian_move(
         self,

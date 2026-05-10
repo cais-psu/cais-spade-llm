@@ -14,6 +14,7 @@ from cais_spade_llm import utils
 
 _log = logging.getLogger(__name__)
 _REQ_DIR = Path("cais_spade_llm/specification/products/requirements")
+_ORDER_DIR = Path("cais_spade_llm/specification/products/orders")
 
 from cais_spade_llm.agents.shared_information.user import User
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
@@ -229,12 +230,28 @@ def _default_requirement_file(product_name: str | None = None) -> str | None:
     return None
 
 
+def _default_product_order_file(product_name: str | None = None) -> str | None:
+    """Return the default product-order JSON path for a product."""
+    name = str(product_name or "").strip()
+    if name:
+        candidate = _ORDER_DIR / f"{name}.json"
+        _log.info("[agent_creator] No product_order_file set; defaulting to %s", candidate)
+        return str(candidate)
+    if _ORDER_DIR.is_dir():
+        files = sorted(_ORDER_DIR.glob("*.json"))
+        if files:
+            _log.info("[agent_creator] No product_order_file set; using %s", files[0])
+            return str(files[0])
+    return None
+
+
 def create_product_agents(
     product_init_list: Iterable[str],
     resource_agents: list,
     cca_init_file: str,
     bundle_context: dict | None = None,
     product_requirement_file: str | None = None,
+    product_order_file: str | None = None,
     safety_file_override: object = _UNSET_OVERRIDE,
 ) -> List[ProductAgent]:
     """
@@ -296,10 +313,15 @@ def create_product_agents(
                 pw,
                 name=name,
                 instructions=meta.get("instructions"),
+                product_order_file=(
+                    product_order_file
+                    or meta.get("product_order_file")
+                    or _default_product_order_file(name)
+                ),
                 product_specification_file=(
                     product_requirement_file
                     or meta.get("product_specification_file")
-                    or _default_requirement_file(name)
+                    or None
                 ),
                 product_geometry_file=meta.get("product_geometry_file"),
                 safety_file=(

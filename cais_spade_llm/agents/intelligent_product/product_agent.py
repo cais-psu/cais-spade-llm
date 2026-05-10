@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import uuid
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
@@ -19,10 +20,15 @@ from spade.message import Message
 from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import (
+    send_agent_message,
+    send_agent_message_sync,
+)
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
     ProductRecoveryController,
 )
+from cais_spade_llm.product.order import validate_product_order
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
@@ -89,6 +95,7 @@ class ProductAgent(LlmAgent):
         name: str,
         resource_jids: Optional[Iterable[str]] = None,
         resource_agents: Optional[Iterable[Any]] = None,
+        product_order_file: Optional[str] = None,
         product_specification_file: Optional[str] = None,
         product_geometry_file: Optional[str] = None,
         safety_file: Optional[str] = None,
@@ -113,6 +120,7 @@ class ProductAgent(LlmAgent):
         self.product_profile = ProductProfile(
             name=name,
             product_specification_file=product_specification_file,
+            product_order_file=product_order_file,
             product_geometry_file=product_geometry_file,
             safety_file=safety_file,
             instruction_override=instruction_override,
@@ -120,6 +128,7 @@ class ProductAgent(LlmAgent):
             logger=self.logger,
         )
         self.product_specification_file = self.product_profile.product_specification_file
+        self.product_order_file = self.product_profile.product_order_file
         self.product_geometry_file = self.product_profile.product_geometry_file
         self.product_geometry: Dict[str, Any] = dict(self.product_profile.product_geometry)
         self.safety_file = self.product_profile.safety_file
@@ -129,13 +138,14 @@ class ProductAgent(LlmAgent):
 
         # Cache safety text for use during replanning
         self.safety_text: str = ""
+        self.safety_text_has_requirements: bool = False
 
         self.precomputed_bundle: dict[str, Any] = dict(self.product_profile.precomputed_bundle or {})
 
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/monitor/plan")
         base_state_dir = Path("cais_spade_llm/monitor/state")
-        # For now: requirements file (NL → structured requirements)
+        # Legacy requirement snapshot path used only when no product order is provided.
         self.structured_requirements_path = base_plan_dir / f"{name}_requirements.json"
         # Reserved for later: full DAG task plan (requirements → task graph)
         self.plan_path = base_plan_dir / f"{name}_plan.json"
@@ -165,6 +175,10 @@ class ProductAgent(LlmAgent):
         self.execution_timeline: list[dict[str, Any]] = []  # [{timestamp, task_id, status, ...}]
         # NOTE: Robot states are queried directly from ResourceAgents, not cached here
         self._plan_result_inbox_registered = False
+        self._product_order_runtime_enabled = False
+        self._product_order_commit_inflight = False
+        self._product_order_commit_validation_request_id = ""
+        self._product_order_commit_pending: dict[str, Any] = {}
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
@@ -245,6 +259,8 @@ class ProductAgent(LlmAgent):
         skip_recovery_safety_validation: bool = False,
         skip_offline_validation: bool | None = None,
         request_id: str | None = None,
+        validation_scope: str | None = None,
+        composition_backend: str | None = None,
     ):
         """Package plan + FSA for plan validation by the CCA."""
         if skip_offline_validation is not None:
@@ -252,6 +268,13 @@ class ProductAgent(LlmAgent):
 
         fsa = self.process_planner.global_fsa
         nodes = self.process_planner.nodes
+        runtime_context = self._build_runtime_plan_context()
+        validation_scope = str(validation_scope or "").strip()
+        composition_backend = str(composition_backend or "").strip()
+        if validation_scope:
+            runtime_context["validation_scope"] = validation_scope
+        if composition_backend:
+            runtime_context["composition_backend"] = composition_backend
 
         if fsa is None and not skip_revalidation:
             raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
@@ -260,11 +283,15 @@ class ProductAgent(LlmAgent):
             "fsa": fsa or {},                # <-- upload FSA here
             "product_jid": str(self.jid),
             "plan": {"nodes": nodes},
-            "runtime_context": self._build_runtime_plan_context(),
+            "runtime_context": runtime_context,
             "skip_revalidation": bool(skip_revalidation),
             "skip_recovery_safety_validation": bool(skip_recovery_safety_validation),
             "request_id": str(request_id or "").strip(),
         }
+        if validation_scope:
+            payload["validation_scope"] = validation_scope
+        if composition_backend:
+            payload["composition_backend"] = composition_backend
         recovery_safety_result = (
             self._runtime_recovery_context.get("recovery_safety_result")
             if isinstance(getattr(self, "_runtime_recovery_context", None), dict)
@@ -306,7 +333,70 @@ class ProductAgent(LlmAgent):
             "completed_task_ids": completed_task_ids,
             "running_task_ids": running_task_ids,
             "failed_task_ids": failed_task_ids,
+            "safety_event_history": self._build_safety_event_history(),
         }
+
+    def _build_safety_event_history(self) -> list[dict[str, Any]]:
+        """Build ordered task-event history for safety DFA progress across active FSA windows."""
+        node_by_id = {
+            str(node.get("id") or "").strip(): node
+            for node in getattr(self.process_planner, "nodes", []) or []
+            if isinstance(node, dict) and str(node.get("id") or "").strip()
+        }
+        history: list[dict[str, Any]] = []
+        emitted: set[tuple[str, str]] = set()
+
+        def _suffix_for_status(status: str) -> str:
+            normalized = str(status or "").strip().lower()
+            if normalized in {"dispatched", "accepted", "running"}:
+                return "start"
+            if normalized in {"completed", "finished"}:
+                return "done"
+            if normalized == "failed" or normalized.startswith("failed"):
+                return "fail"
+            return ""
+
+        def _append(task_id: str, suffix: str, source_event: dict[str, Any]) -> None:
+            task_id = str(task_id or "").strip()
+            suffix = str(suffix or "").strip()
+            if not task_id or not suffix or (task_id, suffix) in emitted:
+                return
+            task_node = node_by_id.get(task_id) or {}
+            params = dict(task_node.get("params") or {})
+            resource_jid = str(
+                task_node.get("resource_jid")
+                or source_event.get("resource_jid")
+                or ""
+            ).strip()
+            function_name = str(task_node.get("function_name") or "").strip()
+            part_name = str(self._tracked_part_name_for_task(task_node) or "").strip()
+            emitted.add((task_id, suffix))
+            history.append(
+                {
+                    "task_id": task_id,
+                    "suffix": suffix,
+                    "event": f"{task_id}.{suffix}",
+                    "function_name": function_name,
+                    "part_name": part_name,
+                    "resource_jid": resource_jid,
+                    "params": params,
+                    "status": str(source_event.get("status") or "").strip(),
+                    "timestamp": str(source_event.get("timestamp") or "").strip(),
+                }
+            )
+
+        for event in self.execution_timeline:
+            if not isinstance(event, dict):
+                continue
+            task_id = str(event.get("task_id") or "").strip()
+            suffix = _suffix_for_status(str(event.get("status") or ""))
+            if not task_id or not suffix:
+                continue
+            if suffix in {"done", "fail"} and (task_id, "start") not in emitted:
+                _append(task_id, "start", event)
+            _append(task_id, suffix, event)
+
+        return history
 
 
     def _dispatch_agent_message_sync(
@@ -316,19 +406,12 @@ class ProductAgent(LlmAgent):
         trace_category: str = "agent",
     ) -> None:
         """Send a SPADE message synchronously from local helper code."""
-        if msg.empty_sender():
-            msg.sender = str(self.jid)
-
-        if self.container.has_agent(str(msg.to)):
-            self.container.get_agent(str(msg.to)).dispatch(msg)
-        else:
-            if self.client is None:
-                raise RuntimeError("agent client is not connected")
-            slixmpp_msg = msg.prepare(self.client)
-            slixmpp_msg.send()
-
-        msg.sent = True
-        self.traces.append(msg, category=trace_category)
+        send_agent_message_sync(
+            self,
+            msg,
+            trace_category=trace_category,
+            transport_label=trace_category,
+        )
 
 
     def _run_callable_on_agent_loop_sync(
@@ -501,6 +584,19 @@ class ProductAgent(LlmAgent):
     def _read_safety_text(self) -> str:
         """Compatibility wrapper for ProductProfile safety text loading."""
         return ProductProfile.read_safety_file(self.safety_file, logger=self.logger)
+
+    @staticmethod
+    def _safety_text_has_requirements(safety_text: str) -> bool:
+        """Return True when the selected safety text contains a non-empty requirement line."""
+        for raw_line in str(safety_text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("["):
+                continue
+            if line.startswith(("-", "*")):
+                line = line[1:].strip()
+            if line:
+                return True
+        return False
     
 
 
@@ -604,12 +700,25 @@ class ProductAgent(LlmAgent):
             "parts": dict(self.part_tracker),
             "execution_timeline": final_timeline,
             "requirements_status": requirements_status,
+            "product_order_runtime": deepcopy(
+                getattr(self.process_planner, "last_product_order_artifact", {}) or {}
+            ),
         }
 
     def _extract_requirement_text(self) -> Optional[str]:
         """Compatibility wrapper for ProductProfile requirement text loading."""
         return ProductProfile.extract_requirement_file(
             self.product_specification_file,
+            logger=self.logger,
+        )
+
+    def _load_product_order(self) -> Optional[Dict[str, Any]]:
+        """Compatibility wrapper for ProductProfile product-order JSON loading."""
+        profile = getattr(self, "product_profile", None)
+        if isinstance(profile, ProductProfile):
+            return profile.read_product_order(logger=self.logger)
+        return ProductProfile.read_product_order_file(
+            self.product_order_file,
             logger=self.logger,
         )
 
@@ -723,6 +832,305 @@ class ProductAgent(LlmAgent):
         # 4) Return both artifacts
         return self.process_planner.nodes, self.process_planner.global_fsa
 
+    async def _build_plan_from_product_order(
+        self,
+        product_order: dict[str, Any],
+        safety_text: str = "",
+    ):
+        """Build a rolling runtime product-order skeleton from product-order JSON."""
+        validate_product_order(product_order, self.product_geometry)
+        self.process_planner.build_product_order_runtime_skeleton(
+            product_order,
+            safety_text=safety_text,
+        )
+        self._product_order_runtime_enabled = True
+        self.process_planner.save(self.plan_path)
+        return self.process_planner.nodes, self.process_planner.global_fsa
+
+    def _product_order_runtime_active(self) -> bool:
+        runtime = getattr(self.process_planner, "product_order_runtime", {}) or {}
+        return bool(self._product_order_runtime_enabled and runtime.get("enabled"))
+
+    def _product_order_unavailable_resource_jids(
+        self,
+        *,
+        exclude_part: str = "",
+    ) -> set[str]:
+        """Return resources already reserved by uncompleted Product-order/runtime nodes."""
+        unavailable: set[str] = set()
+        final_statuses = {"completed", "finished"}
+        exclude_part = str(exclude_part or "").strip()
+        for node in getattr(self.process_planner, "nodes", []) or []:
+            if not isinstance(node, dict) or node.get("type") != "task":
+                continue
+            if exclude_part and str(node.get("product_order_part") or "").strip() == exclude_part:
+                continue
+            resource_jid = str(node.get("resource_jid") or "").strip()
+            if not resource_jid:
+                continue
+            task_id = str(node.get("id") or "").strip()
+            status = str(self.task_states.get(task_id) or node.get("status") or "").strip().lower()
+            if not status or status in final_statuses:
+                continue
+            unavailable.add(resource_jid)
+        return unavailable
+
+    def _product_order_part_nodes(self, part_name: str) -> list[dict[str, Any]]:
+        part_name = str(part_name or "").strip()
+        return [
+            node
+            for node in getattr(self.process_planner, "nodes", []) or []
+            if isinstance(node, dict)
+            and node.get("type") == "task"
+            and str(node.get("product_order_part") or "").strip() == part_name
+        ]
+
+    def _product_order_part_chain_completed(self, part_name: str) -> bool:
+        nodes = self._product_order_part_nodes(part_name)
+        return bool(nodes) and all(
+            str(node.get("status") or "").strip().lower() in {"completed", "finished"}
+            for node in nodes
+        )
+
+    def _mark_product_order_part_completed_if_ready(self, part_name: str) -> bool:
+        if not self._product_order_runtime_active():
+            return False
+        part_name = str(part_name or "").strip()
+        if not part_name or not self._product_order_part_chain_completed(part_name):
+            return False
+        self.process_planner.mark_product_order_part_completed(part_name)
+        return True
+
+    async def _maybe_commit_product_order_runtime_parts(self, behaviour: CyclicBehaviour) -> bool:
+        """Commit ready Product-order parts, validate the updated FSA, and hold dispatch until CCA OK."""
+        if not self._product_order_runtime_active():
+            return False
+        if self._product_order_commit_inflight:
+            return False
+
+        ready_parts = self.process_planner.ready_product_order_parts()
+        if not ready_parts:
+            return False
+
+        unavailable = self._product_order_unavailable_resource_jids()
+        committed: list[dict[str, Any]] = []
+        for part_name in ready_parts:
+            try:
+                record = self.process_planner.commit_product_order_part(
+                    part_name,
+                    unavailable_resource_jids=unavailable,
+                    status="pending_validation",
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if "no available product bid resources" in message:
+                    self.logger.debug(
+                        "[Product] Product-order part %s is ready but no resource is available for bidding yet.",
+                        part_name,
+                    )
+                    continue
+                self.logger.error(
+                    "[Product] Product-order commit failed for %s: %s",
+                    part_name,
+                    exc,
+                )
+                self._set_plan_safety_alert(
+                    stage="runtime",
+                    message=f"{self.agent_name}: product-order commit failed for {part_name} ({exc}).",
+                    retries_used=0,
+                    retries_max=0,
+                    violations=[],
+                    paused=False,
+                )
+                continue
+            committed.append(record)
+            resource_jid = str(record.get("resource_jid") or "").strip()
+            if resource_jid:
+                unavailable.add(resource_jid)
+
+        if not committed:
+            return False
+
+        try:
+            self.process_planner.recompile_committed_product_order_fsa()
+            self.process_planner.save_global_fsa(self.global_fsa_path)
+        except Exception as exc:
+            parts = [str(record.get("part") or "").strip() for record in committed]
+            removed = self.process_planner.rollback_product_order_committed_parts(parts)
+            self.logger.exception(
+                "[Product] Product-order committed FSA compile failed; rolled back parts=%s.",
+                removed,
+            )
+            self._set_plan_safety_alert(
+                stage="runtime",
+                message=f"{self.agent_name}: product-order committed FSA compile failed ({exc}).",
+                retries_used=0,
+                retries_max=0,
+                violations=[],
+                paused=False,
+            )
+            await asyncio.to_thread(self._persist_plan_snapshot)
+            await asyncio.to_thread(self._persist_product_state)
+            return False
+
+        request_id = f"product_order_commit_{uuid.uuid4().hex}"
+        task_ids = [
+            str(task_id or "").strip()
+            for record in committed
+            for task_id in (record.get("task_ids") or [])
+            if str(task_id or "").strip()
+        ]
+        parts = [
+            str(record.get("part") or "").strip()
+            for record in committed
+            if str(record.get("part") or "").strip()
+        ]
+        self._product_order_commit_inflight = True
+        self._product_order_commit_validation_request_id = request_id
+        self._product_order_commit_pending = {
+            "request_id": request_id,
+            "parts": parts,
+            "task_ids": task_ids,
+            "created_at_utc": self._utc_now_iso(),
+        }
+
+        payload = self._build_plan_validation_payload(
+            request_id=request_id,
+            validation_scope="active_window",
+            composition_backend="explicit_fsa_dfa",
+        )
+        msg = Message(to=self.cca_jid)
+        msg.set_metadata("type", "plan_safety_check")
+        msg.body = json.dumps(payload)
+        await send_agent_message(
+            behaviour,
+            msg,
+            transport_label="product_order_commit_plan_check",
+        )
+        self.logger.info(
+            "[Product] Product-order committed part(s) pending CCA validation request_id=%s parts=%s task_ids=%s.",
+            request_id,
+            parts,
+            task_ids,
+        )
+        await asyncio.to_thread(self._persist_plan_snapshot)
+        await asyncio.to_thread(self._persist_product_state)
+        await asyncio.to_thread(self._persist_resource_state)
+        return True
+
+    async def _handle_product_order_commit_validation_result(
+        self,
+        *,
+        ok: bool,
+        violations: list[dict[str, Any]],
+        request_id: str,
+    ) -> bool:
+        """Consume CCA validation replies for rolling Product-order commits."""
+        if not self._product_order_runtime_active():
+            return False
+        request_id = str(request_id or "").strip()
+        expected = str(self._product_order_commit_validation_request_id or "").strip()
+        if request_id != expected:
+            if request_id.startswith("product_order_commit_"):
+                self.logger.warning(
+                    "[Product] Ignoring stale Product-order commit validation result request_id=%s expected=%s.",
+                    request_id,
+                    expected or "<none>",
+                )
+                return True
+            return False
+
+        pending = dict(self._product_order_commit_pending or {})
+        parts = [
+            str(part or "").strip()
+            for part in (pending.get("parts") or [])
+            if str(part or "").strip()
+        ]
+        if ok:
+            validated = self.process_planner.mark_product_order_commit_validated(parts)
+            self._product_order_commit_inflight = False
+            self._product_order_commit_validation_request_id = ""
+            self._product_order_commit_pending = {}
+            self._clear_plan_safety_alert()
+            self.logger.info(
+                "[Product] Product-order commit validation PASSED request_id=%s parts=%s.",
+                request_id,
+                validated,
+            )
+            await asyncio.to_thread(self._persist_plan_snapshot)
+            await asyncio.to_thread(self._persist_product_state)
+            await asyncio.to_thread(self._persist_resource_state)
+            return True
+
+        removed = self.process_planner.rollback_product_order_committed_parts(parts)
+        if self.process_planner.nodes:
+            try:
+                self.process_planner.recompile_committed_product_order_fsa()
+                self.process_planner.save_global_fsa(self.global_fsa_path)
+            except Exception:
+                self.logger.exception(
+                    "[Product] Product-order rollback FSA recompile failed after commit validation failure."
+                )
+                self.process_planner.global_fsa = None
+        else:
+            self.process_planner.global_fsa = None
+        self._product_order_commit_inflight = False
+        self._product_order_commit_validation_request_id = ""
+        self._product_order_commit_pending = {}
+        alert = self._set_plan_safety_alert(
+            stage="runtime",
+            message=(
+                f"{self.agent_name}: product-order commit validation failed for "
+                f"{', '.join(parts) or '<unknown>'}; rolled back {', '.join(removed) or '<none>'}."
+            ),
+            retries_used=0,
+            retries_max=0,
+            violations=violations,
+            paused=False,
+        )
+        self.logger.warning(
+            "[Product] Product-order commit validation FAILED request_id=%s parts=%s removed=%s violations=%d.",
+            request_id,
+            parts,
+            removed,
+            len(violations),
+        )
+        await asyncio.to_thread(self._persist_plan_snapshot)
+        await asyncio.to_thread(self._persist_product_state)
+        await asyncio.to_thread(self._persist_resource_state)
+        return bool(alert is not None or True)
+
+    async def _rebid_product_order_pending_assignment_if_resource_unavailable(
+        self,
+        task_node: dict[str, Any],
+        behaviour: CyclicBehaviour,
+    ) -> bool:
+        """Rollback a not-yet-dispatched Product-order part if its resource becomes unavailable."""
+        if not self._product_order_runtime_active() or self._product_order_commit_inflight:
+            return False
+        if not isinstance(task_node, dict):
+            return False
+        if str(task_node.get("status") or "").strip() != "pending":
+            return False
+        part_name = str(task_node.get("product_order_part") or "").strip()
+        resource_jid = str(task_node.get("resource_jid") or "").strip()
+        if not part_name or not resource_jid:
+            return False
+        unavailable = self._product_order_unavailable_resource_jids(exclude_part=part_name)
+        if resource_jid not in unavailable:
+            return False
+        removed = self.process_planner.rollback_product_order_committed_parts([part_name])
+        if not removed:
+            return False
+        self.logger.info(
+            "[Product] Product-order assignment for %s was rolled back before dispatch because %s became unavailable; rebidding.",
+            part_name,
+            resource_jid,
+        )
+        await asyncio.to_thread(self._persist_plan_snapshot)
+        await asyncio.to_thread(self._persist_product_state)
+        return await self._maybe_commit_product_order_runtime_parts(behaviour)
+
     def _load_precomputed_plan_bundle(self) -> bool:
         """Load precomputed plan/global FSA artifacts when provided by startup bundle context."""
         bundle = dict(self.precomputed_bundle or {})
@@ -782,9 +1190,11 @@ class ProductAgent(LlmAgent):
             max_retries = 3
 
             try:
-                instruction = agent._extract_requirement_text()
+                product_order = agent._load_product_order()
+                instruction = None if product_order else agent._extract_requirement_text()
                 safety_text = agent._read_safety_text()
                 agent.safety_text = safety_text
+                agent.safety_text_has_requirements = agent._safety_text_has_requirements(safety_text)
                 agent.runtime_repair_state = "idle"
                 agent._runtime_repair_fail_streak = 0
                 agent._clear_plan_safety_alert()
@@ -793,9 +1203,40 @@ class ProductAgent(LlmAgent):
                 used_precomputed = agent._load_precomputed_plan_bundle()
                 max_retries = 0 if used_precomputed else 3
                 if not used_precomputed:
-                    if not instruction:
+                    if product_order:
+                        await agent._build_plan_from_product_order(product_order, safety_text)
+                    elif not instruction:
                         raise RuntimeError("no product requirement text available for startup planning")
-                    await agent._build_plan(instruction, safety_text)
+                    else:
+                        await agent._build_plan(instruction, safety_text)
+
+                if (
+                    product_order
+                    and not used_precomputed
+                    and agent._product_order_runtime_active()
+                    and not agent.process_planner.nodes
+                ):
+                    message = (
+                        f"{agent.agent_name}: product-order runtime skeleton ready; "
+                        "rolling Product bidding will validate committed parts at runtime."
+                    )
+                    agent.logger.info(
+                        "[Product] Product-order runtime skeleton ready. Startup FSA validation deferred until first committed part."
+                    )
+                    agent._clear_plan_safety_alert()
+                    agent._ensure_plan_result_inbox()
+                    agent.add_behaviour(agent._PlanExecutor())
+                    await asyncio.to_thread(agent._persist_plan_snapshot)
+                    await asyncio.to_thread(agent._persist_product_state)
+                    await asyncio.to_thread(agent._persist_resource_state)
+                    agent._set_kickoff_result(
+                        success=True,
+                        message=message,
+                        retries_used=0,
+                        retries_max=0,
+                        violations=[],
+                    )
+                    return
 
                 while True:
                     if used_precomputed:
@@ -815,7 +1256,11 @@ class ProductAgent(LlmAgent):
                     msg = Message(to=agent.cca_jid)
                     msg.set_metadata("type", "plan_safety_check")
                     msg.body = json.dumps(payload)
-                    await self.send(msg)
+                    await send_agent_message(
+                        self,
+                        msg,
+                        transport_label="product_plan_check",
+                    )
 
                     reply = None
                     while reply is None:
@@ -1079,6 +1524,11 @@ class ProductAgent(LlmAgent):
                     observations=observations,
                 )
 
+            if task_node and str(status).strip().lower() in {"completed", "finished"}:
+                product_order_part = str(task_node.get("product_order_part") or "").strip()
+                if product_order_part and agent._mark_product_order_part_completed_if_ready(product_order_part):
+                    updated_node = True
+
             if updated_node and not handled_bridge_ack and _should_persist_ack_state(task_node, str(status)):
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
@@ -1165,6 +1615,13 @@ class ProductAgent(LlmAgent):
                 violations = []
             request_id = str(payload.get("request_id") or "").strip()
 
+            if await agent._handle_product_order_commit_validation_result(
+                ok=ok,
+                violations=violations,
+                request_id=request_id,
+            ):
+                return
+
             if await agent._handle_runtime_plan_validation_result(
                 ok=ok,
                 violations=violations,
@@ -1248,7 +1705,11 @@ class ProductAgent(LlmAgent):
                 check_msg = Message(to=agent.cca_jid)
                 check_msg.set_metadata("type", "plan_safety_check")
                 check_msg.body = json.dumps(check_payload)
-                await self.send(check_msg)
+                await send_agent_message(
+                    self,
+                    check_msg,
+                    transport_label="product_runtime_plan_check",
+                )
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
                 await asyncio.to_thread(agent._persist_resource_state)
@@ -1484,7 +1945,11 @@ class ProductAgent(LlmAgent):
                                 active_bridge_sequence=next_sequence,
                             )
 
-                await self.send(msg)
+                await send_agent_message(
+                    self,
+                    msg,
+                    transport_label="product_task",
+                )
                 agent.logger.info(f"[Product] Dispatched task {task_id} -> {to} ({instruction})")
                 return is_bridge_task
 
@@ -1496,7 +1961,17 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
             if not task_node:
+                if await agent._maybe_commit_product_order_runtime_parts(self):
+                    await asyncio.sleep(0.01)
+                    return
                 await asyncio.sleep(0.05)
+                return
+
+            if await agent._rebid_product_order_pending_assignment_if_resource_unavailable(
+                task_node,
+                self,
+            ):
+                await asyncio.sleep(0.01)
                 return
 
             is_bridge_task = await _dispatch_task_node(task_node)

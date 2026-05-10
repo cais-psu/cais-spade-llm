@@ -6,7 +6,6 @@
     "resource_type": "robot",
     "in_state": "any",
     "out_state": "idle",
-    "context": [],
     "params": {
       "product_jid": {
         "type": "string",
@@ -45,16 +44,16 @@
         "type": "number",
         "description": "Optional motion speed."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing part poses in world frame."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing part poses in world frame."
       }
     },
     "description": "Approach the part's origin location with empty gripper."
@@ -93,16 +92,16 @@
         "type": "string",
         "description": "Optional gripper configuration."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing part poses in world frame."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing part poses in world frame."
       }
     },
     "description": "Pick a ready part from an origin location."
@@ -141,16 +140,16 @@
         "type": "number",
         "description": "Optional motion speed while loaded."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing target placement poses."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing target placement poses."
       }
     },
     "description": "Move the loaded part to its destination location."
@@ -190,16 +189,16 @@
         "type": "string",
         "description": "Optional placement orientation."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing insertion target pose."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing insertion target pose."
       }
     },
     "description": "Assemble the currently held part at its final destination."
@@ -211,7 +210,6 @@
     "resource_type": "robot",
     "in_state": "any",
     "out_state": "idle",
-    "context": [],
     "params": {
       "product_jid": {
         "type": "string",
@@ -250,16 +248,16 @@
         "type": "number",
         "description": "Optional motion speed."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing part poses in world frame."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing part poses in world frame."
       }
     },
     "description": "Approach the part's origin location with empty gripper."
@@ -298,16 +296,16 @@
         "type": "string",
         "description": "Optional gripper configuration."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing part poses in world frame."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing part poses in world frame."
       }
     },
     "description": "Pick a ready part from an origin location."
@@ -346,16 +344,16 @@
         "type": "number",
         "description": "Optional motion speed while loaded."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing target placement poses."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing target placement poses."
       }
     },
     "description": "Move the loaded part to its destination location."
@@ -395,16 +393,16 @@
         "type": "string",
         "description": "Optional placement orientation."
       },
+      "product_geometry": {
+        "type": "object",
+        "description": "Product geometry payload containing insertion target pose."
+      },
       "product_jid": {
         "type": "string",
         "description": "JID of the ProductAgent that owns this task."
       },
       "task_id": {
         "type": "string"
-      },
-      "product_geometry": {
-        "type": "object",
-        "description": "Product geometry payload containing insertion target pose."
       }
     },
     "description": "Assemble the currently held part at its final destination."

@@ -161,6 +161,80 @@ class PlanSafetyValidator(BaseSafetyChecker):
             runtime_context=runtime_context,
         )
 
+    def validate_active_window_fsa(
+        self,
+        fsa: Dict[str, Any],
+        plan: Optional[Dict[str, Any]] = None,
+        product_jid: str | None = None,
+        runtime_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Validate an active executable FSA window against each safety DFA."""
+        A = (fsa or {}).get("A") or {}
+        Tr = A.get("Tr") or []
+        x0 = A.get("x0")
+        Xm = set(A.get("Xm") or [])
+
+        if not x0 or not Tr:
+            return True, []
+
+        self.logger.info(
+            "[PlanValidator] Validating active_window FSA for %s with explicit_fsa_dfa (|Tr|=%d)...",
+            product_jid,
+            len(Tr),
+        )
+
+        enabled = self._index_enabled(Tr)
+        task_lookup = self._build_task_lookup(plan)
+        task_meta_lookup = self._build_transition_task_lookup(enabled, task_lookup)
+        initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
+        all_violations: List[Dict[str, Any]] = []
+
+        for rule in self.safety_rules:
+            rule_id = rule.get("id")
+            if not rule_id:
+                continue
+
+            dfa = self.dfas.get(rule_id)
+            if not dfa:
+                continue
+
+            aps_for_rule: Set[str] = set(dfa.get("ap_symbols", []))
+            if not aps_for_rule:
+                continue
+
+            start_plan_state, start_q, start_resource_states = (
+                self._restore_active_window_rule_start(
+                    rule_id=rule_id,
+                    aps_for_rule=aps_for_rule,
+                    enabled=enabled,
+                    x0=str(x0),
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    initial_resource_states=initial_resource_states,
+                    runtime_context=runtime_context,
+                )
+            )
+
+            violations = self._check_rule_on_fsa_product(
+                rule_id=rule_id,
+                rule=rule,
+                x0=start_plan_state,
+                initial_q=start_q,
+                Xm=Xm,
+                enabled=enabled,
+                aps_for_rule=aps_for_rule,
+                task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                initial_resource_states=start_resource_states,
+            )
+            if violations:
+                violation = dict(violations[0])
+                violation["validation_scope"] = "active_window"
+                violation["composition_backend"] = "explicit_fsa_dfa"
+                all_violations.append(violation)
+
+        return (len(all_violations) == 0), all_violations
+
     # ------------------------------------------------------------------ #
     # INDEXING
     # ------------------------------------------------------------------ #
@@ -697,6 +771,184 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if str(task_id).strip()
         ]
         return completed_task_ids, running_task_ids, failed_task_ids
+
+    def _restore_active_window_rule_start(
+        self,
+        *,
+        rule_id: str,
+        aps_for_rule: Set[str],
+        enabled: Dict[str, List[Dict[str, Any]]],
+        x0: str,
+        task_lookup: Dict[str, Dict[str, Any]],
+        task_meta_lookup: Dict[str, Dict[str, Any]],
+        initial_resource_states: Dict[str, Dict[str, Any]],
+        runtime_context: Optional[Dict[str, Any]],
+    ) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+        current_q, current_resource_states = self._restore_rule_start_from_safety_event_history(
+            rule_id=rule_id,
+            aps_for_rule=aps_for_rule,
+            task_lookup=task_lookup,
+            initial_resource_states=initial_resource_states,
+            runtime_context=runtime_context,
+        )
+
+        current_state = str(x0)
+        completed_task_ids, running_task_ids, failed_task_ids = (
+            self._runtime_progress_task_ids(runtime_context)
+        )
+        completed_set = set(completed_task_ids)
+
+        def _apply_active_event(task_id: str, suffix: str) -> bool:
+            nonlocal current_state, current_q, current_resource_states
+            event_label = f"{task_id}.{suffix}"
+            transition = next(
+                (
+                    candidate
+                    for candidate in enabled.get(current_state, [])
+                    if str(candidate.get("event") or "").strip() == event_label
+                ),
+                None,
+            )
+            if not isinstance(transition, dict):
+                return False
+            checked_q, committed_q, next_resource_states, _sigma = (
+                self._transition_successor(
+                    rule_id=rule_id,
+                    q=current_q,
+                    x=current_state,
+                    transition=transition,
+                    aps_for_rule=aps_for_rule,
+                    task_lookup=task_lookup,
+                    task_meta_lookup=task_meta_lookup,
+                    resource_states=current_resource_states,
+                )
+            )
+            violation_state = str(self.dfas.get(rule_id, {}).get("violation_state") or "").strip()
+            if violation_state and checked_q == violation_state:
+                current_q = checked_q
+            else:
+                current_q = committed_q
+            current_state = str(transition.get("to") or current_state).strip() or current_state
+            current_resource_states = next_resource_states
+            return True
+
+        for task_id in running_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_active_event(task_id, "start")
+
+        for task_id in failed_task_ids:
+            if task_id in completed_set:
+                continue
+            _apply_active_event(task_id, "start")
+            _apply_active_event(task_id, "fail")
+
+        return current_state, current_q, current_resource_states
+
+    def _restore_rule_start_from_safety_event_history(
+        self,
+        *,
+        rule_id: str,
+        aps_for_rule: Set[str],
+        task_lookup: Dict[str, Dict[str, Any]],
+        initial_resource_states: Dict[str, Dict[str, Any]],
+        runtime_context: Optional[Dict[str, Any]],
+    ) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+        dfa = self.dfas.get(rule_id) or {}
+        current_q = str(dfa.get("initial") or "1")
+        current_resource_states = deepcopy(initial_resource_states)
+        if not isinstance(runtime_context, dict):
+            return current_q, current_resource_states
+
+        history = runtime_context.get("safety_event_history") or []
+        if not isinstance(history, list) or not history:
+            return current_q, current_resource_states
+
+        running_task_aps: Dict[str, Set[str]] = {}
+        violation_state = str(dfa.get("violation_state") or "").strip()
+
+        for event in history:
+            if not isinstance(event, dict):
+                continue
+            task_id = str(event.get("task_id") or "").strip()
+            suffix = str(event.get("suffix") or "").strip()
+            if not suffix:
+                event_name = str(event.get("event") or "").strip()
+                suffix = event_name.rsplit(".", 1)[-1] if "." in event_name else ""
+            if suffix not in {"start", "done", "finish", "fail"}:
+                continue
+
+            meta = {}
+            if task_id and task_id in task_lookup:
+                self._merge_task_metadata(meta, task_lookup[task_id])
+            self._merge_task_metadata(meta, event)
+            if task_id:
+                meta["task_id"] = task_id
+            params = dict(meta.get("params") or {})
+            part_name = str(event.get("part_name") or "").strip()
+            if part_name and not params.get("part_name"):
+                params["part_name"] = part_name
+            resource_jid = str(meta.get("resource_jid") or event.get("resource_jid") or "").strip()
+            function_name = str(meta.get("function_name") or event.get("function_name") or "").strip()
+            if not resource_jid or not function_name:
+                continue
+
+            running_before: Set[str] = set()
+            for aps in running_task_aps.values():
+                running_before.update(aps)
+            persistent_before = set(self._state_aps_for_resources(current_resource_states, aps_for_rule))
+            candidate_event_aps = set(
+                ap for ap in self._map_task_to_aps(resource_jid, function_name, params)
+                if ap in aps_for_rule
+            )
+
+            if suffix == "start":
+                predicted_state_aps = set(
+                    ap for ap in self._predict_state_aps(resource_jid, function_name, params)
+                    if ap in aps_for_rule
+                )
+                sigma = frozenset(
+                    running_before
+                    | persistent_before
+                    | candidate_event_aps
+                    | predicted_state_aps
+                )
+                checked_q = self._delta(rule_id, current_q, sigma)
+                if violation_state and checked_q == violation_state:
+                    current_q = checked_q
+                if task_id:
+                    running_task_aps[task_id] = set(candidate_event_aps)
+                continue
+
+            running_after = set(running_before)
+            if task_id:
+                running_task_aps.pop(task_id, None)
+            for ap in candidate_event_aps:
+                running_after.discard(ap)
+
+            if suffix in {"done", "finish"}:
+                next_payload = current_resource_states.setdefault(
+                    resource_jid,
+                    {
+                        "current_state": current_resource_states.get(resource_jid, {}).get(
+                            "current_state",
+                            "idle",
+                        ),
+                        "params": {},
+                    },
+                )
+                out_state = str(meta.get("out_state") or "").strip()
+                if out_state and out_state.lower() != "any":
+                    next_payload["current_state"] = out_state
+                    next_payload["params"] = dict(params)
+                elif "params" not in next_payload:
+                    next_payload["params"] = dict(params)
+
+            persistent_after = set(self._state_aps_for_resources(current_resource_states, aps_for_rule))
+            sigma = frozenset(running_after | persistent_after | candidate_event_aps)
+            current_q = self._delta(rule_id, current_q, sigma)
+
+        return current_q, current_resource_states
 
     def _restore_runtime_rule_start(
         self,

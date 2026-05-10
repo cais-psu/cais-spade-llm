@@ -180,6 +180,12 @@ class OnlineFsaMonitor:
             to_state = tr.get("to") or to_state
             readable_event = tr.get("readable_event")
             self.current_state = to_state
+        elif event_type == "fail":
+            self.logger.debug(
+                "[OnlineFSA] Failure event %s not enabled from state %s; recording failed task and leaving plan FSA state unchanged.",
+                event_label,
+                from_state,
+            )
         else:
             self.logger.warning(
                 "[OnlineFSA] Event %s not enabled from state %s; leaving plan FSA state unchanged.",

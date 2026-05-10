@@ -22,7 +22,6 @@ _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
     ("Control", "/control", "gamepad"),
-    ("Plans", "/plans", "schema"),
     ("Safety", "/safety", "shield"),
     ("Products", "/products", "inventory_2"),
     ("Resources", "/resources", "precision_manufacturing"),
@@ -128,7 +127,7 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, plans, control, safety, resources, products
+    from cais_spade_llm.ui.pages import dashboard, control, safety, resources, products
 
     @ui.page("/")
     def index_page():
@@ -139,11 +138,6 @@ def create_app() -> None:
     def control_page():
         _page_wrapper(bridge)
         control.render(bridge)
-
-    @ui.page("/plans")
-    def plans_page():
-        _page_wrapper(bridge)
-        plans.render(bridge)
 
     @ui.page("/resources")
     def resources_page():
@@ -234,6 +228,11 @@ def create_app() -> None:
             bridge._shutdown_gazebo_prewarm_controllers()
         except Exception:
             log.debug("App shutdown: prewarm cleanup skipped")
+
+        try:
+            bridge._shutdown_agent_runtime_loop()
+        except Exception:
+            log.debug("App shutdown: agent runtime cleanup skipped")
 
         log.info("App shutdown: cleanup complete.")
 

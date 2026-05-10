@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from nicegui import context, ui
@@ -36,8 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 def render(bridge: SystemBridge) -> None:
+    ui.add_head_html(
+        """
+        <style>
+        .dashboard-select-popup {
+            z-index: 10000 !important;
+            pointer-events: auto !important;
+        }
+        </style>
+        """
+    )
     client = context.client
     timers: list[Any] = []
+    select_popup_open = {"value": False}
+    select_pause_until = {"value": 0.0}
 
     def _notify(message: Any, **kwargs: Any) -> None:
         if getattr(client, "_deleted", False):
@@ -48,11 +62,86 @@ def render(bridge: SystemBridge) -> None:
         def _safe_callback():
             if getattr(client, "_deleted", False):
                 return None
-            return callback()
+            if select_popup_open["value"] or time.monotonic() < select_pause_until["value"]:
+                return None
+            try:
+                return callback()
+            except Exception as exc:
+                logger.exception("Dashboard callback failed: %s", exc)
+                if hasattr(bridge, "_diag_emit"):
+                    bridge._diag_emit(f"dashboard callback exception: {exc}")
+                return None
 
         timer = ui.timer(interval, _safe_callback, **kwargs)
         timers.append(timer)
         return timer
+
+    def _pause_select_refresh(seconds: float = 8.0) -> None:
+        select_pause_until["value"] = max(
+            select_pause_until["value"],
+            time.monotonic() + seconds,
+        )
+
+    def _track_select_popup(element: Any) -> None:
+        def _pause(e: Any) -> None:
+            _pause_select_refresh()
+
+        def _show(e: Any) -> None:
+            select_popup_open["value"] = True
+            _pause_select_refresh()
+
+        def _hide(e: Any) -> None:
+            select_popup_open["value"] = False
+
+        element.on("click", _pause)
+        element.on("focus", _pause)
+        element.on("popup-show", _show)
+        element.on("popup-hide", _hide)
+
+    class _NativeSelect:
+        def __init__(self, options: dict[str, str], value: str | None, label: str, width_class: str) -> None:
+            self.options = dict(options)
+            self.value = value
+            self._handlers: list[Callable[[Any], Any]] = []
+            with ui.column().classes(f"{width_class} gap-1"):
+                ui.label(label).classes("text-xs text-slate-600")
+                self.element = (
+                    ui.element("select")
+                    .classes("w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm")
+                    .style("min-height: 40px;")
+                )
+            self.element.on(
+                "change",
+                self._handle_change,
+                js_handler="e => emit(e.target.value)",
+            )
+            self.update()
+
+        def _handle_change(self, e: Any) -> None:
+            raw = getattr(e, "args", "")
+            if isinstance(raw, list):
+                value = str(raw[0] if raw else "")
+            else:
+                value = str(raw or "")
+            self.value = value
+            event = SimpleNamespace(value=value)
+            for handler in list(self._handlers):
+                handler(event)
+
+        def on_value_change(self, handler: Callable[[Any], Any]) -> None:
+            self._handlers.append(handler)
+
+        def update(self) -> None:
+            self.element.clear()
+            with self.element:
+                for key, text in self.options.items():
+                    option = ui.element("option")
+                    option._props["value"] = key
+                    if key == self.value:
+                        option._props["selected"] = True
+                    option._text = text
+                    option.update()
+            self.element.update()
 
     def _cancel_timers(*_) -> None:
         for timer in timers:
@@ -74,13 +163,13 @@ def render(bridge: SystemBridge) -> None:
       with ui.column().classes("flex-1 gap-6 min-w-0"):
 
         # ── System Control Card ──────────────────────────────────────
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full").style("overflow: visible;"):
             ui.label("System Control").classes("text-lg font-semibold mb-2")
 
             with ui.row().classes("items-end gap-6 flex-wrap"):
                 startup_source_select = ui.radio(
-                    ["Generate Plan At Startup", "Use Verified Plan Set"],
-                    value="Use Verified Plan Set",
+                    ["Product Order Runtime"],
+                    value="Product Order Runtime",
                 ).props("inline")
 
             product_init_files = bridge.list_product_files()
@@ -88,47 +177,75 @@ def render(bridge: SystemBridge) -> None:
                 {f: Path(f).stem for f in product_init_files},
                 value=product_init_files[0] if product_init_files else None,
                 label="Product",
-            ).classes("w-64 mt-2")
+            ).props("popup-content-class=dashboard-select-popup").classes("w-64 mt-2")
+            _track_select_popup(product_init_select)
 
-            requirement_files = bridge.list_product_requirement_files()
+            def _manifest_product_order_file(product_init_file: str | None) -> str:
+                product_file = str(product_init_file or "").strip()
+                if not product_file:
+                    return ""
+                try:
+                    ctx = bridge._resolve_product_context(product_file, include_hashes=False)
+                except Exception:
+                    logger.debug(
+                        "Failed to resolve product order file for product init %s",
+                        product_file,
+                        exc_info=True,
+                    )
+                    return ""
+                return str(ctx.get("product_order_file") or "").strip()
+
+            product_order_files = bridge.list_product_order_files()
             safety_files = bridge.list_safety_requirement_files()
-            requirement_options = {f: Path(f).name for f in requirement_files}
+            product_order_options = {f: Path(f).name for f in product_order_files}
+            default_product_order_file = _manifest_product_order_file(
+                str(product_init_select.value or "")
+            )
+            if default_product_order_file not in product_order_options:
+                default_product_order_file = product_order_files[0] if product_order_files else None
             safety_options = {"__NONE__": "None"}
             for f in safety_files:
                 safety_options[f] = Path(f).name
+            default_safety_file = next(
+                (f for f in safety_files if Path(f).name == "safety_none.txt"),
+                safety_files[0] if safety_files else "__NONE__",
+            )
 
-            with ui.row().classes("items-end gap-4 flex-wrap mt-2") as generate_source_row:
-                requirement_select = ui.select(
-                    requirement_options,
-                    value=requirement_files[0] if requirement_files else None,
-                    label="Product Requirement (.txt)",
-                ).classes("w-80")
+            with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
+                order_select = _NativeSelect(
+                    product_order_options,
+                    value=default_product_order_file,
+                    label="Product Order JSON",
+                    width_class="w-80",
+                )
 
-                safety_select = ui.select(
+                safety_select = _NativeSelect(
                     safety_options,
-                    value=safety_files[0] if safety_files else "__NONE__",
+                    value=default_safety_file,
                     label="Safety Requirement (.txt)",
-                ).classes("w-80")
-
-            with ui.row().classes("items-end gap-4 flex-wrap mt-2") as verified_source_row:
-                plan_set_select = ui.select({}, label="Verified Plan Set").classes("w-96")
+                    width_class="w-80",
+                )
 
             source_hint_label = ui.label("").classes("text-xs text-slate-600")
             with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
-                mode_select = ui.radio(
-                    _MODE_LABELS,
+                mode_select = _NativeSelect(
+                    {label: label for label in _MODE_LABELS},
                     value="Simulation",
-                ).props("inline")
+                    label="Mode",
+                    width_class="w-48",
+                )
             runtime_bridge_settings = bridge.get_runtime_bridge_settings()
             bridge_archive_options: dict[str, str] = {}
             bridge_archive_entries: dict[str, dict[str, Any]] = {}
             bridge_control_refreshing = {"value": False}
+            selection_refreshing = {"value": False}
             with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
                 bridge_mode_select = ui.select(
                     _BRIDGE_MODE_OPTIONS,
                     value=str(runtime_bridge_settings.get("mode") or "pre_ran").strip() or "pre_ran",
                     label="Bridge Handoff Mode",
-                ).classes("w-48")
+                ).props("popup-content-class=dashboard-select-popup").classes("w-48")
+                _track_select_popup(bridge_mode_select)
                 bridge_validation_select = ui.select(
                     _BRIDGE_VALIDATION_POLICY_OPTIONS,
                     value=(
@@ -136,11 +253,13 @@ def render(bridge: SystemBridge) -> None:
                         or "validated"
                     ),
                     label="Recovery Safety Mode",
-                ).classes("w-52")
+                ).props("popup-content-class=dashboard-select-popup").classes("w-52")
+                _track_select_popup(bridge_validation_select)
                 bridge_archive_select = ui.select(
                     {},
                     label="Archived Bridge Run",
-                ).classes("w-[34rem]")
+                ).props("popup-content-class=dashboard-select-popup").classes("w-[34rem]")
+                _track_select_popup(bridge_archive_select)
             bridge_mode_status = ui.label("").classes("text-xs text-slate-600")
             bridge_fixture_status = ui.label("").classes("text-xs text-amber-700")
             bridge_archive_hint = ui.label("").classes("text-xs text-slate-600")
@@ -149,6 +268,7 @@ def render(bridge: SystemBridge) -> None:
 
             # Prerequisite banner.
             prereq_banner = ui.column().classes("w-full mt-3")
+            bundle_gate_banner = ui.column().classes("w-full mt-2")
 
             with ui.column().classes("w-full gap-2 mt-4"):
                 banner_hide_task: asyncio.Task | None = None
@@ -157,52 +277,34 @@ def render(bridge: SystemBridge) -> None:
                 start_task: asyncio.Task | None = None
 
                 def _selected_files() -> tuple[str, str]:
-                    req_file = str(requirement_select.value or "").strip()
+                    order_file = str(order_select.value or "").strip()
                     safe_file = str(safety_select.value or "").strip()
-                    return req_file, safe_file
+                    return order_file, safe_file
 
-                def _update_source_picker_visibility() -> None:
-                    use_verified = str(startup_source_select.value or "") == "Use Verified Plan Set"
-                    generate_source_row.style("display:none;" if use_verified else "display:flex;")
-                    verified_source_row.style("display:flex;" if use_verified else "display:none;")
-
-                def _refresh_plan_set_options() -> None:
-                    options: dict[str, str] = {}
-                    selected_product_stem = Path(
-                        str(product_init_select.value or "")
-                    ).stem or ""
-
-                    for row in bridge.list_bundles():
-                        bid = str(row.get("bundle_id", "")).strip()
-                        if not bid:
-                            continue
-                        status = str(row.get("status", "")).lower()
-                        if status != "verified":
-                            continue
-                        bundle_product = str(row.get("product_name", "")).strip()
-                        if selected_product_stem and bundle_product and bundle_product != selected_product_stem:
-                            continue
-                        created = str(row.get("created_at_utc", ""))[:19].replace("T", " ")
-                        options[bid] = f"{created} | {bid}"
-
-                    current = str(plan_set_select.value or "").strip()
-                    plan_set_select.options = options
-                    plan_set_select.update()
-                    if current in options:
-                        plan_set_select.value = current
-                    else:
-                        plan_set_select.value = next(iter(options.keys()), None)
-
-                    if str(startup_source_select.value) == "Use Verified Plan Set":
-                        source_hint_label.text = (
-                            "Startup source: verified plan set (runtime plan/safety generation skipped)."
+                def _refresh_product_order_options() -> None:
+                    selection_refreshing["value"] = True
+                    try:
+                        options = {
+                            f: Path(f).name
+                            for f in bridge.list_product_order_files(str(product_init_select.value or ""))
+                        }
+                        current = str(order_select.value or "").strip()
+                        manifest_order_file = _manifest_product_order_file(
+                            str(product_init_select.value or "")
                         )
-                    else:
+                        order_select.options = options
+                        if current in options:
+                            order_select.value = current
+                        elif manifest_order_file in options:
+                            order_select.value = manifest_order_file
+                        else:
+                            order_select.value = next(iter(options.keys()), None)
+                        order_select.update()
                         source_hint_label.text = (
-                            "Startup source: runtime generation from selected requirement/safety files."
+                            "Startup source: selected product-order JSON and verified safety file."
                         )
-
-                    plan_set_select.set_enabled(str(startup_source_select.value) == "Use Verified Plan Set")
+                    finally:
+                        selection_refreshing["value"] = False
 
                 def _refresh_runtime_bridge_controls() -> None:
                     bridge_control_refreshing["value"] = True
@@ -331,16 +433,17 @@ def render(bridge: SystemBridge) -> None:
                     _refresh_runtime_recovery_panel()
 
                 def _bundle_gate(*, strict: bool) -> tuple[bool, str]:
-                    source = str(startup_source_select.value or "")
-                    if source == "Use Verified Plan Set":
-                        bid = str(plan_set_select.value or "").strip()
-                        if not bid:
-                            return False, "Select a verified plan set."
+                    order_file, safe_file = _selected_files()
+                    if not order_file:
+                        return False, "Select a product order JSON file."
+                    if not safe_file or safe_file.upper() == "__NONE__":
                         return True, ""
-
-                    req_file, _ = _selected_files()
-                    if not req_file:
-                        return False, "Select a product requirement file."
+                    if Path(safe_file).name == "safety_none.txt":
+                        return True, ""
+                    safety_eval = bridge.evaluate_safety_intent_approval(safe_file)
+                    if not bool(safety_eval.get("approved", False)):
+                        reason = str(safety_eval.get("reason", "not_approved") or "not_approved")
+                        return False, f"Selected safety file is not verified: {reason}."
                     return True, ""
 
                 def _set_action_banner(kind: str, message: str, *, auto_hide_s: float | None = None) -> None:
@@ -393,72 +496,38 @@ def render(bridge: SystemBridge) -> None:
                     bridge.execution_mode = internal
                     bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
 
-                    bundle_ok, bundle_msg = _bundle_gate(strict=True)
+                    try:
+                        bundle_ok, bundle_msg = _bundle_gate(strict=True)
+                    except Exception as exc:
+                        _set_action_banner(
+                            "error",
+                            f"Startup source check failed: {exc}",
+                            auto_hide_s=8.0,
+                        )
+                        return
                     if not bundle_ok:
                         _set_action_banner("warning", bundle_msg, auto_hide_s=8.0)
                         return
 
-                    source = str(startup_source_select.value or "")
                     try:
-                        if source == "Use Verified Plan Set":
-                            selected_plan_set_id = str(plan_set_select.value or "").strip()
-                            if not selected_plan_set_id:
-                                _set_action_banner("warning", "Select a verified plan set.", auto_hide_s=6.0)
-                                return
-                            bridge.set_active_bundle(selected_plan_set_id)
-
-                            active = bridge.get_active_bundle() or {}
-                            manifest = active.get("manifest", {}) if isinstance(active, dict) else {}
-                            if not isinstance(manifest, dict):
-                                manifest = {}
-                            bundle_req_file = str(manifest.get("product_spec_file", "")).strip()
-                            bundle_safe_file = str(manifest.get("safety_file", "")).strip()
-                            if not bundle_req_file:
-                                _set_action_banner(
-                                    "error",
-                                    "Selected verified plan set is missing product requirement file in manifest.",
-                                    auto_hide_s=8.0,
-                                )
-                                return
-                            try:
-                                bridge.selected_product = bridge.resolve_product_init_for_requirement(bundle_req_file)
-                            except Exception as exc:
-                                _set_action_banner(
-                                    "error",
-                                    f"Verified plan set product mapping failed: {exc}",
-                                    auto_hide_s=8.0,
-                                )
-                                return
-
-                            # In verified-plan mode, startup should use the plan set's own files.
-                            bridge.selected_requirement_file = bundle_req_file
-                            bridge.selected_safety_file = bundle_safe_file
-
-                            # Keep visible selectors in sync when values exist in current options.
-                            req_opts = requirement_select.options if isinstance(requirement_select.options, dict) else {}
-                            safe_opts = safety_select.options if isinstance(safety_select.options, dict) else {}
-                            if bundle_req_file in req_opts:
-                                requirement_select.value = bundle_req_file
-                            if bundle_safe_file in safe_opts:
-                                safety_select.value = bundle_safe_file
+                        order_file, safe_file = _selected_files()
+                        if not order_file:
+                            _set_action_banner("warning", "Select a product order JSON file.", auto_hide_s=6.0)
+                            return
+                        selected_product = str(product_init_select.value or "").strip()
+                        if selected_product:
+                            bridge.selected_product = selected_product
                         else:
-                            req_file, safe_file = _selected_files()
-                            if not req_file:
-                                _set_action_banner("warning", "Select a product requirement file.", auto_hide_s=6.0)
+                            try:
+                                bridge.selected_product = bridge.resolve_product_init_for_product_order(order_file)
+                            except Exception as exc:
+                                _set_action_banner("error", f"Invalid product order selection: {exc}", auto_hide_s=8.0)
                                 return
-                            selected_product = str(product_init_select.value or "").strip()
-                            if selected_product:
-                                bridge.selected_product = selected_product
-                            else:
-                                try:
-                                    bridge.selected_product = bridge.resolve_product_init_for_requirement(req_file)
-                                except Exception as exc:
-                                    _set_action_banner("error", f"Invalid requirement selection: {exc}", auto_hide_s=8.0)
-                                    return
 
-                            bridge.selected_requirement_file = req_file
-                            bridge.selected_safety_file = safe_file or ""
-                            bridge.set_active_bundle(None)
+                        bridge.selected_product_order_file = order_file
+                        bridge.selected_requirement_file = ""
+                        bridge.selected_safety_file = safe_file or ""
+                        bridge.set_active_bundle(None)
                     except Exception as exc:
                         _set_action_banner("error", f"Failed to configure startup source: {exc}", auto_hide_s=8.0)
                         return
@@ -526,6 +595,46 @@ def render(bridge: SystemBridge) -> None:
                             _set_action_banner("error", "Stop failed. System is still running.", auto_hide_s=8.0)
                     finally:
                         _update_controls()
+
+                async def _run_order_dry_run():
+                    order_file, safe_file = _selected_files()
+                    if not order_file:
+                        _set_action_banner("warning", "Select a product order JSON file.", auto_hide_s=6.0)
+                        return
+                    if not safe_file or safe_file.upper() == "__NONE__":
+                        _set_action_banner("warning", "Select a verified safety file.", auto_hide_s=6.0)
+                        return
+                    dry_run_status.text = "Running product-order dry run..."
+                    dry_run_status.classes(replace="text-sm text-blue-700")
+                    dry_run_result_code.content = "{}"
+                    try:
+                        result = await asyncio.to_thread(
+                            bridge.run_order_dry_run,
+                            order_file,
+                            safe_file,
+                        )
+                    except Exception as exc:
+                        dry_run_status.text = f"Order dry run failed: {exc}"
+                        dry_run_status.classes(replace="text-sm text-red-700")
+                        return
+
+                    summary = {
+                        "artifact_path": result.get("artifact_path", ""),
+                        "selected_parts": result.get("selected_parts", []),
+                        "ready_operations": result.get("ready_operations", []),
+                        "blocked_operations": result.get("blocked_operations", []),
+                        "completed_count": len(result.get("completed_operations", []) or []),
+                        "monitor_state": result.get("monitor_state", {}),
+                        "ordering_constraints": result.get("ordering_constraints", []),
+                        "monitor_rules": result.get("monitor_rules", []),
+                    }
+                    dry_run_result_code.content = json.dumps(summary, indent=2)
+                    dry_run_status.text = (
+                        "Order dry run completed. "
+                        f"completed={summary['completed_count']} "
+                        f"blocked={len(summary['blocked_operations'])}"
+                    )
+                    dry_run_status.classes(replace="text-sm text-green-700")
 
                 async def _launch_gazebo_dual():
                     if gazebo_launch_state["busy"]:
@@ -632,12 +741,18 @@ def render(bridge: SystemBridge) -> None:
 
                 with ui.row().classes("items-end gap-4 flex-wrap"):
                     start_btn = ui.button("Start System", on_click=_start, icon="play_arrow").props("color=green")
+                    dry_run_btn = ui.button(
+                        "Run Order Dry Run",
+                        on_click=_run_order_dry_run,
+                        icon="preview",
+                    ).props("color=primary")
                     stop_btn = ui.button("Stop System", on_click=_stop, icon="stop").props("color=red")
                     reset_scope_select = ui.select(
                         {opt: opt for opt in reset_scope_options},
                         value="Reset All",
                         label="Reset Scope",
-                    ).classes("w-44")
+                    ).props("popup-content-class=dashboard-select-popup").classes("w-44")
+                    _track_select_popup(reset_scope_select)
                     reset_btn = ui.button("Reset", on_click=_reset_selected, icon="restart_alt").props("color=blue")
                 action_banner = ui.row().classes(
                     "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-blue-700 bg-blue-50"
@@ -646,6 +761,9 @@ def render(bridge: SystemBridge) -> None:
                 with action_banner:
                     action_banner_icon = ui.icon("info")
                     action_banner_label = ui.label("")
+                with ui.expansion("Order Dry Run Preview", icon="schema", value=False).classes("w-full mt-2"):
+                    dry_run_status = ui.label("No dry run has been run.").classes("text-sm text-slate-600")
+                    dry_run_result_code = ui.code("{}", language="json").classes("w-full")
                 plan_safety_banner = ui.row().classes(
                     "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-red-700 bg-red-50"
                 )
@@ -679,6 +797,20 @@ def render(bridge: SystemBridge) -> None:
                 plan_safety_banner_label.text = f"{product} [{stage}] {message}{retry_text}{extra}"
                 plan_safety_banner.style("display:flex;")
 
+            def _set_bundle_gate_banner(message: str) -> None:
+                text = str(message or "").strip()
+                signature = ("bundle_gate", text)
+                if getattr(bundle_gate_banner, "_cais_bundle_gate_signature", None) == signature:
+                    return
+                setattr(bundle_gate_banner, "_cais_bundle_gate_signature", signature)
+                bundle_gate_banner.clear()
+                if not text:
+                    return
+                with bundle_gate_banner:
+                    with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
+                        ui.icon("warning").classes("text-lg")
+                        ui.label(text).classes("text-sm font-semibold")
+
             def _update_controls():
                 try:
                     internal = _MODE_MAP.get(mode_select.value, "dry_run")
@@ -707,15 +839,16 @@ def render(bridge: SystemBridge) -> None:
 
                     bundle_ok, bundle_msg = _bundle_gate(strict=False)
                     if not bundle_ok:
-                        prereqs_met = False
                         if not bridge.system_running:
-                            with prereq_banner:
-                                with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
-                                    ui.icon("warning").classes("text-lg")
-                                    ui.label(bundle_msg).classes("text-sm font-semibold")
+                            _set_bundle_gate_banner(bundle_msg)
+                        else:
+                            _set_bundle_gate_banner("")
+                    else:
+                        _set_bundle_gate_banner("")
 
                     can_start = (
                         prereqs_met
+                        and bundle_ok
                         and not bridge.system_running
                         and not bridge._starting
                         and not start_click_state["locked"]
@@ -731,6 +864,14 @@ def render(bridge: SystemBridge) -> None:
                         # Plan reset can run even when Gazebo stack is not up.
                         can_reset = True
                     start_btn.set_enabled(can_start)
+                    dry_run_btn.set_enabled(
+                        bool(str(order_select.value or "").strip())
+                        and bool(str(safety_select.value or "").strip())
+                        and str(safety_select.value or "").strip().upper() != "__NONE__"
+                        and not bridge.system_running
+                        and not bridge._starting
+                        and not bridge._stopping
+                    )
                     stop_btn.set_enabled(bridge.system_running and not bridge._stopping)
                     reset_btn.set_enabled(
                         can_reset
@@ -743,6 +884,7 @@ def render(bridge: SystemBridge) -> None:
                     if hasattr(bridge, "_diag_emit"):
                         bridge._diag_emit(f"dashboard update_controls exception: {exc}")
                     start_btn.set_enabled(False)
+                    dry_run_btn.set_enabled(False)
                     stop_btn.set_enabled(False)
                     reset_btn.set_enabled(False)
                     _set_plan_safety_banner([])
@@ -750,23 +892,71 @@ def render(bridge: SystemBridge) -> None:
 
             _managed_timer(1.0, _update_controls)
 
-            def _refresh_selection_and_controls() -> None:
-                _update_source_picker_visibility()
-                _refresh_plan_set_options()
-                _refresh_runtime_bridge_controls()
+            def _refresh_controls_and_dag() -> None:
                 _update_controls()
                 refresh_dag_now()
 
-            product_init_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            requirement_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            safety_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            startup_source_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            plan_set_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            mode_select.on_value_change(lambda e: _refresh_selection_and_controls())
-            bridge_mode_select.on_value_change(_handle_bridge_mode_change)
-            bridge_validation_select.on_value_change(_handle_bridge_validation_policy_change)
-            bridge_archive_select.on_value_change(_handle_bridge_archive_change)
-            reset_scope_select.on_value_change(lambda e: _refresh_selection_and_controls())
+            def _refresh_selection_and_controls() -> None:
+                _refresh_product_order_options()
+                _refresh_runtime_bridge_controls()
+                _refresh_controls_and_dag()
+
+            def _handle_product_init_change(e: Any) -> None:
+                if selection_refreshing["value"]:
+                    return
+                _refresh_product_order_options()
+                _refresh_controls_and_dag()
+
+            def _handle_order_or_safety_change(e: Any) -> None:
+                if selection_refreshing["value"]:
+                    return
+                _refresh_controls_and_dag()
+
+            def _handle_mode_or_source_change(e: Any) -> None:
+                _refresh_controls_and_dag()
+
+            def _guard_select_handler(name: str, handler: Callable[[Any], Any]) -> Callable[[Any], Any]:
+                def _wrapped(e: Any) -> Any:
+                    select_popup_open["value"] = False
+                    select_pause_until["value"] = 0.0
+                    try:
+                        return handler(e)
+                    except Exception as exc:
+                        logger.exception("Dashboard select handler failed: %s", exc)
+                        if hasattr(bridge, "_diag_emit"):
+                            bridge._diag_emit(f"dashboard select handler {name} exception: {exc}")
+                        error_label.text = f"Dashboard selection update failed: {exc}"
+                        return None
+
+                return _wrapped
+
+            product_init_select.on_value_change(
+                _guard_select_handler("product_init_select", _handle_product_init_change)
+            )
+            order_select.on_value_change(
+                _guard_select_handler("order_select", _handle_order_or_safety_change)
+            )
+            safety_select.on_value_change(
+                _guard_select_handler("safety_select", _handle_order_or_safety_change)
+            )
+            startup_source_select.on_value_change(
+                _guard_select_handler("startup_source_select", _handle_mode_or_source_change)
+            )
+            mode_select.on_value_change(
+                _guard_select_handler("mode_select", _handle_mode_or_source_change)
+            )
+            bridge_mode_select.on_value_change(
+                _guard_select_handler("bridge_mode_select", _handle_bridge_mode_change)
+            )
+            bridge_validation_select.on_value_change(
+                _guard_select_handler("bridge_validation_select", _handle_bridge_validation_policy_change)
+            )
+            bridge_archive_select.on_value_change(
+                _guard_select_handler("bridge_archive_select", _handle_bridge_archive_change)
+            )
+            reset_scope_select.on_value_change(
+                _guard_select_handler("reset_scope_select", _handle_mode_or_source_change)
+            )
             _refresh_selection_and_controls()
             _managed_timer(5.0, _refresh_runtime_bridge_controls)
 
@@ -825,10 +1015,6 @@ def render(bridge: SystemBridge) -> None:
             nodes = bridge.get_plan_nodes()
             if nodes or bridge.system_running:
                 return nodes
-            source = str(startup_source_select.value or "")
-            selected_plan_set_id = str(plan_set_select.value or "").strip()
-            if source == "Use Verified Plan Set" and selected_plan_set_id:
-                return bridge.get_bundle_plan_nodes(selected_plan_set_id)
             return []
 
         def _preview_or_runtime_task_states(nodes: list[dict]) -> dict[str, str]:
@@ -893,23 +1079,22 @@ def render(bridge: SystemBridge) -> None:
             ).classes("w-full")
 
             def _refresh_runtime_safety_rules():
-                selected_bundle_id = ""
-                if str(startup_source_select.value or "") == "Use Verified Plan Set":
-                    selected_bundle_id = str(plan_set_select.value or "").strip()
-
-                rules = bridge.get_safety_rules(selected_bundle_id or None)
+                selected_safety_file = str(safety_select.value or "").strip()
+                preview = {}
+                if selected_safety_file and selected_safety_file.upper() != "__NONE__":
+                    try:
+                        preview = bridge.get_safety_rule_preview(selected_safety_file)
+                    except Exception:
+                        preview = {}
+                rules = preview.get("rules", []) if isinstance(preview.get("rules"), list) else []
+                if not rules:
+                    rules = bridge.get_safety_rules(None)
                 if bridge.system_running and bridge.cca and getattr(bridge.cca, "safety_rules", None):
                     runtime_rules_source.text = "Source: live runtime rules from the active controller"
-                elif selected_bundle_id:
-                    runtime_rules_source.text = f"Source: selected verified plan set {selected_bundle_id}"
+                elif rules and selected_safety_file:
+                    runtime_rules_source.text = f"Source: selected safety file {Path(selected_safety_file).name}"
                 else:
-                    active = bridge.get_active_bundle() or {}
-                    active_id = str(active.get("bundle_id", "")).strip()
-                    runtime_rules_source.text = (
-                        f"Source: active verified plan set {active_id}"
-                        if active_id
-                        else "Source: no runtime or verified bundle safety loaded"
-                    )
+                    runtime_rules_source.text = "Source: no runtime or verified safety loaded"
                 rows = []
                 for i, r in enumerate(rules):
                     rows.append(
@@ -2643,28 +2828,41 @@ def _check_prerequisites(
     launch_simulation_busy: bool = False,
 ) -> bool:
     """Check if prerequisites are met for the selected mode. Updates the banner. Returns True if OK."""
-    banner.clear()
+    def _replace_banner(signature: tuple[Any, ...], render_body: Callable[[], None] | None) -> None:
+        if getattr(banner, "_cais_prereq_signature", None) == signature:
+            return
+        setattr(banner, "_cais_prereq_signature", signature)
+        banner.clear()
+        if render_body is None:
+            return
+        with banner:
+            render_body()
 
     def _suppress_sim_ready_note(message: str) -> bool:
         text = str(message or "").strip().lower()
         return text.startswith("perception is still warming up:")
 
     if bridge.system_running:
+        _replace_banner(("system_running",), None)
         return True  # Already running, don't block.
 
     if bridge._starting:
-        with banner:
+        def _render_starting() -> None:
             with ui.row().classes("items-center gap-2 text-blue-600 bg-blue-50 p-3 rounded"):
                 ui.icon("hourglass_top").classes("text-lg")
                 ui.label("System startup in progress...").classes("text-sm font-semibold")
+
+        _replace_banner(("starting",), _render_starting)
         return False
 
     if mode == "dry_run":
         # Dry Run has no prerequisites.
-        with banner:
+        def _render_dry_run() -> None:
             with ui.row().classes("items-center gap-2 text-green-600"):
                 ui.icon("check_circle").classes("text-sm")
                 ui.label("Dry Run mode — no prerequisites required.").classes("text-sm")
+
+        _replace_banner(("dry_run",), _render_dry_run)
         return True
 
     if mode == "simulation":
@@ -2681,7 +2879,7 @@ def _check_prerequisites(
         elif gazebo_running:
             sim_ready = True
 
-        with banner:
+        def _render_simulation() -> None:
             if gazebo_running and sim_ready and sim_reason and not _suppress_sim_ready_note(sim_reason):
                 with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
                     ui.icon("info").classes("text-lg")
@@ -2712,6 +2910,17 @@ def _check_prerequisites(
                         launch_btn.set_enabled(
                             launch_simulation is not None and not launch_simulation_busy
                         )
+        _replace_banner(
+            (
+                "simulation",
+                gazebo_running,
+                sim_ready,
+                sim_reason,
+                bool(launch_simulation),
+                launch_simulation_busy,
+            ),
+            _render_simulation,
+        )
         return gazebo_running and sim_ready
 
     if mode == "physical":
@@ -2735,24 +2944,30 @@ def _check_prerequisites(
                 return f"{name}: {ip} reachable ({latency:.1f} ms)"
             return f"{name}: {ip} unreachable ({entry.get('message', 'no reply')})"
 
-        with banner:
+        xarm_line = _line("xArm6", xarm)
+        ur5e_line = _line("UR5e", ur5e)
+
+        def _render_physical() -> None:
             if not ready:
                 with ui.row().classes("items-center gap-2 text-red-700 bg-red-50 p-3 rounded"):
                     ui.icon("error").classes("text-lg")
                     with ui.column().classes("gap-1"):
                         ui.label("Physical mode is blocked.").classes("text-sm font-semibold")
                         ui.label(reason).classes("text-xs")
-                        ui.label(_line("xArm6", xarm)).classes("text-xs")
-                        ui.label(_line("UR5e", ur5e)).classes("text-xs")
+                        ui.label(xarm_line).classes("text-xs")
+                        ui.label(ur5e_line).classes("text-xs")
             else:
                 with ui.row().classes("items-center gap-2 text-blue-600 bg-blue-50 p-3 rounded"):
                     ui.icon("info").classes("text-lg")
                     with ui.column().classes("gap-1"):
                         ui.label("Physical mode — ensure robots are powered on and controllers are running.").classes("text-sm")
-                        ui.label(_line("xArm6", xarm)).classes("text-xs")
-                        ui.label(_line("UR5e", ur5e)).classes("text-xs")
+                        ui.label(xarm_line).classes("text-xs")
+                        ui.label(ur5e_line).classes("text-xs")
+
+        _replace_banner(("physical", ready, reason, xarm_line, ur5e_line), _render_physical)
         return ready
 
+    _replace_banner(("mode", mode), None)
     return True
 
 

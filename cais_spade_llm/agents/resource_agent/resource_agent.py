@@ -14,6 +14,7 @@ from spade.message import Message  # SPADE message objects (XMPP stanzas under t
 from spade.template import Template  # Filters incoming messages by metadata.
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
     build_failure_event,
 )
@@ -716,7 +717,11 @@ class ResourceAgent(LlmAgent):
                         "params": fn_args,
                         "status": "running",
                     })
-                    await self.send(running_msg)
+                    await send_agent_message(
+                        self,
+                        running_msg,
+                        transport_label="resource_running",
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[Resource] Failed to send running event for fast-path task %s (ignored).",
@@ -738,7 +743,11 @@ class ResourceAgent(LlmAgent):
                         "params": fn_args,
                         "status": "safety_check",   # <-- REQUEST permission
                     })
-                    await self.send(resource_msg)
+                    await send_agent_message(
+                        self,
+                        resource_msg,
+                        transport_label="resource_safety",
+                    )
                 except Exception:
                     agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
 
@@ -764,7 +773,11 @@ class ResourceAgent(LlmAgent):
                     "params": fn_args,
                     "status": "running",
                 })
-                await self.send(running_msg)
+                await send_agent_message(
+                    self,
+                    running_msg,
+                    transport_label="resource_running",
+                )
 
             # ---------------------------
             #  EXECUTE THE TOOL
@@ -795,33 +808,40 @@ class ResourceAgent(LlmAgent):
                 final_status = (result or {}).get("status") or "completed"
 
                 # ----- RESOURCE EVENT: TASK FINISHED (notify CCA) ----- #
-                try:
-                    failure_context = agent._build_failure_context(
-                        fn_name=fn_name,
-                        fn_args=fn_args,
-                        result=result if isinstance(result, dict) else None,
-                        final_status=final_status,
-                        state_before=state_before,
-                        state_after=state_after,
-                    )
+                if not (isinstance(final_status, str) and final_status.startswith("failed")):
+                    try:
+                        failure_context = agent._build_failure_context(
+                            fn_name=fn_name,
+                            fn_args=fn_args,
+                            result=result if isinstance(result, dict) else None,
+                            final_status=final_status,
+                            state_before=state_before,
+                            state_after=state_after,
+                        )
 
-                    done_msg = Message(to=agent.cca_jid)
-                    done_msg.set_metadata("type", "resource_event")
-                    done_msg.body = json.dumps({
-                        "task_id": task_id,
-                        "resource_jid": str(agent.jid),
-                        "function_name": fn_name,
-                        "params": fn_args,
-                        "status": final_status,  # e.g. "completed", "blocked", etc.
-                        "failure_context": failure_context,
-                        "current_state": state_after.get("current_state", "idle"),
-                    })
-                    # fire-and-forget so we don't block on CCA
-                    asyncio.create_task(self.send(done_msg))
-                except Exception:
-                    agent.logger.exception(
-                        "[Resource] Failed to send final resource_event to CCA (ignored)."
-                    )
+                        done_msg = Message(to=agent.cca_jid)
+                        done_msg.set_metadata("type", "resource_event")
+                        done_msg.body = json.dumps({
+                            "task_id": task_id,
+                            "resource_jid": str(agent.jid),
+                            "function_name": fn_name,
+                            "params": fn_args,
+                            "status": final_status,  # e.g. "completed", "blocked", etc.
+                            "failure_context": failure_context,
+                            "current_state": state_after.get("current_state", "idle"),
+                        })
+                        # fire-and-forget so we don't block on CCA
+                        asyncio.create_task(
+                            send_agent_message(
+                                self,
+                                done_msg,
+                                transport_label="resource_done",
+                            )
+                        )
+                    except Exception:
+                        agent.logger.exception(
+                            "[Resource] Failed to send final resource_event to CCA (ignored)."
+                        )
 
             except asyncio.TimeoutError:
                 agent.logger.exception("[Resource] Tool execution timeout")
@@ -853,7 +873,11 @@ class ResourceAgent(LlmAgent):
                         "failure_context": failure_context,
                         "current_state": state_after.get("current_state", "idle"),
                     })
-                    await self.send(fail_msg)
+                    await send_agent_message(
+                        self,
+                        fail_msg,
+                        transport_label="resource_fail",
+                    )
                 except Exception:
                     agent.logger.exception(
                         "[Resource] Failed to send fail resource_event to CCA."
@@ -895,7 +919,11 @@ class ResourceAgent(LlmAgent):
             if isinstance(observations, dict) and observations:
                 payload["observations"] = observations
             reply.body = json.dumps(payload)
-            await self.send(reply)
+            await send_agent_message(
+                self,
+                reply,
+                transport_label="resource_ack",
+            )
 
     class _SafetyDecisionInbox(CyclicBehaviour):
         """Receives safety_decision messages from CCA and stores them on the agent."""

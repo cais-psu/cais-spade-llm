@@ -14,6 +14,7 @@ from spade.message import Message
 from spade.template import Template
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
 )
@@ -80,6 +81,17 @@ class CentralControllerAgent(LlmAgent):
             "CentralControllerAgent '%s' initialized. safety_file=%s",
             name, str(self.safety_file)
         )
+
+    async def _wait_for_safety_monitor_ready(self, *, timeout_s: float = 30.0) -> bool:
+        """Wait briefly for _InitCCA to publish the runtime safety monitor."""
+        if self.safety_monitor is not None:
+            return True
+        deadline = asyncio.get_running_loop().time() + max(float(timeout_s or 0.0), 0.0)
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            if self.safety_monitor is not None:
+                return True
+        return self.safety_monitor is not None
 
     @staticmethod
     def _plan_recovery_task_ids(plan: Optional[dict[str, Any]]) -> set[str]:
@@ -1163,10 +1175,12 @@ class CentralControllerAgent(LlmAgent):
             if not msg:
                 return
 
-            # Safety guard: ensure monitor is loaded
+            # Safety guard: ensure monitor is loaded. During startup the CCA can
+            # receive the first resource_event before _InitCCA finishes.
             if not agent.safety_monitor:
-                agent.logger.warning("[CCA] SafetyMonitor not loaded yet.")
-                return
+                if not await agent._wait_for_safety_monitor_ready():
+                    agent.logger.warning("[CCA] SafetyMonitor not loaded yet; dropping resource_event.")
+                    return
 
             # 1. DELEGATE PARSING to the Monitor
             #
@@ -1252,7 +1266,11 @@ class CentralControllerAgent(LlmAgent):
                                 "blocked_task_id": task_id,
                             },
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     return
 
             candidate_aps = monitor._map_task_to_aps(
@@ -1316,7 +1334,11 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=info,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                 return
 
             if agent.online_supervisor and not recovery_safety_scope_id:
@@ -1345,7 +1367,11 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=diagnosis,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     return
                 if diagnosis.get("status") == "deferred_monitoring":
                     agent.logger.info(
@@ -1440,7 +1466,11 @@ class CentralControllerAgent(LlmAgent):
                             event=event,
                             safety_info=diagnosis,
                         )
-                        await self.send(replan_msg)
+                        await send_agent_message(
+                            self,
+                            replan_msg,
+                            transport_label="cca_replan",
+                        )
                     elif status_token == "pending_obligation":
                         agent.logger.info(
                             "[CCA] Supervisor pending obligation after task=%s: rules=%s safe_next=%s",
@@ -1478,7 +1508,11 @@ class CentralControllerAgent(LlmAgent):
                                     "running_tasks": plan_running_tasks,
                                 },
                             )
-                            await self.send(replan_msg)
+                            await send_agent_message(
+                                self,
+                                replan_msg,
+                                transport_label="cca_replan",
+                            )
 
         async def _retry_blocked_tasks(self) -> None:
             """
@@ -1559,7 +1593,11 @@ class CentralControllerAgent(LlmAgent):
                     "task_ids": task_ids,
                     "reason": "safety_unblocked",
                 })
-                await self.send(retry_msg)
+                await send_agent_message(
+                    self,
+                    retry_msg,
+                    transport_label="cca_retry_ready",
+                )
                 agent.logger.info(
                     "[CCA] Notified product=%s to requeue %d task(s) after transient safety block cleared: %s",
                     product_jid,
@@ -1571,7 +1609,11 @@ class CentralControllerAgent(LlmAgent):
             msg = Message(to=to_jid)
             msg.set_metadata("type", "safety_decision")
             msg.body = json.dumps({"task_id": task_id, "decision": decision})
-            await self.send(msg)
+            await send_agent_message(
+                self,
+                msg,
+                transport_label="cca_decision",
+            )
 
     class _RecoverySafetyGeneration(CyclicBehaviour):
         async def run(self) -> None:
@@ -1625,7 +1667,11 @@ class CentralControllerAgent(LlmAgent):
                     **deepcopy(result),
                 }
             )
-            await self.send(reply)
+            await send_agent_message(
+                self,
+                reply,
+                transport_label="cca_recovery_safety_generated",
+            )
 
 
     class _InitCCA(OneShotBehaviour):
@@ -1747,6 +1793,22 @@ class CentralControllerAgent(LlmAgent):
                 runtime_context = data.get("runtime_context") or {}
                 recovery_safety_result = data.get("recovery_safety_result") or {}
                 request_id = str(data.get("request_id") or "").strip()
+                validation_scope = str(
+                    data.get("validation_scope")
+                    or (runtime_context.get("validation_scope") if isinstance(runtime_context, dict) else "")
+                    or ""
+                ).strip()
+                composition_backend = str(
+                    data.get("composition_backend")
+                    or (runtime_context.get("composition_backend") if isinstance(runtime_context, dict) else "")
+                    or ""
+                ).strip()
+                if validation_scope or composition_backend:
+                    runtime_context = dict(runtime_context) if isinstance(runtime_context, dict) else {}
+                    if validation_scope:
+                        runtime_context["validation_scope"] = validation_scope
+                    if composition_backend:
+                        runtime_context["composition_backend"] = composition_backend
                 skip_revalidation = bool(
                     data.get("skip_revalidation", data.get("skip_offline_validation", False))
                 )
@@ -1763,6 +1825,8 @@ class CentralControllerAgent(LlmAgent):
             if not fsa:
                 agent.logger.warning("[CCA] No FSA provided for plan validation.")
                 return
+
+            monitor_ready = await agent._wait_for_safety_monitor_ready()
 
             if isinstance(recovery_safety_result, dict) and recovery_safety_result:
                 registered = agent._register_recovery_safety_scope_result(
@@ -1857,6 +1921,20 @@ class CentralControllerAgent(LlmAgent):
 
                 if skip_revalidation:
                     ok, violations = True, []
+                elif (
+                    validation_scope == "active_window"
+                    and composition_backend == "explicit_fsa_dfa"
+                ):
+                    agent.logger.info(
+                        "[CCA] Plan FSA Validation: active_window explicit_fsa_dfa request_id=%s",
+                        request_id or "<none>",
+                    )
+                    ok, violations = validator.validate_active_window_fsa(
+                        fsa=fsa,
+                        plan=plan,
+                        product_jid=product_jid,
+                        runtime_context=runtime_context,
+                    )
                 else:
                     ok, violations = validator.validate_plan_fsa(
                         fsa=fsa,
@@ -1892,7 +1970,10 @@ class CentralControllerAgent(LlmAgent):
                         "[CCA] Failed to initialize online safety supervisor."
                     )
             else:
-                agent.logger.warning("[CCA] Safety logic not ready; skipping validation.")
+                if monitor_ready:
+                    agent.logger.warning("[CCA] Safety logic not ready; skipping validation.")
+                else:
+                    agent.logger.warning("[CCA] Safety logic not ready after waiting; skipping validation.")
                 ok, violations = True, []
                 agent.online_supervisor = None
 
@@ -1960,6 +2041,10 @@ class CentralControllerAgent(LlmAgent):
                     "violations": violations,
                     "request_id": request_id,
                 })
-                await self.send(reply)
+                await send_agent_message(
+                    self,
+                    reply,
+                    transport_label="cca_plan_result",
+                )
             except Exception:
                 agent.logger.exception("Failed to send reply.")

@@ -180,12 +180,33 @@ def _launch_section(bridge: SystemBridge) -> None:
             _refresh_ping_labels()
 
         launch_container = ui.column().classes("w-full gap-3")
+        refresh_state = {"signature": None, "busy": False}
 
-        def _refresh():
+        def _launch_signature() -> tuple:
+            statuses = bridge.ros2_all_statuses()
+            return (
+                tuple((name, statuses.get(name, "stopped")) for name in _GAZEBO_VARIANTS),
+                tuple((name, statuses.get(name, "stopped")) for name in _HARDWARE_PROC_NAMES),
+                tuple((name, statuses.get(name, "stopped")) for name in _SUPPORT_PROCS),
+            )
+
+        def _refresh(*, force: bool = False):
             if not _client_alive(launch_container):
                 return
+            if refresh_state["busy"]:
+                return
+            refresh_state["busy"] = True
+            try:
+                signature = _launch_signature()
+                if not force and signature == refresh_state["signature"]:
+                    asyncio.create_task(_refresh_ping_async())
+                    return
+                refresh_state["signature"] = signature
+                statuses = dict(signature[0] + signature[1] + signature[2])
+            finally:
+                refresh_state["busy"] = False
+
             launch_container.clear()
-            statuses = bridge.ros2_all_statuses()
             asyncio.create_task(_refresh_ping_async())
             any_gazebo_running = any(statuses.get(name) == "running" for name in _GAZEBO_VARIANTS)
             any_hardware_running = any(statuses.get(name) == "running" for name in _HARDWARE_PROC_NAMES)
@@ -220,28 +241,35 @@ def _launch_section(bridge: SystemBridge) -> None:
 
                 # Utility buttons.
                 with ui.row().classes("gap-4"):
-                    def _stop_all():
-                        bridge.ros2_stop_all()
+                    async def _stop_all_async():
+                        await asyncio.to_thread(bridge.ros2_stop_all)
                         ui.notify("Stopped all tracked processes", type="info")
-                        _refresh()
+                        _refresh(force=True)
+
+                    def _stop_all():
+                        asyncio.create_task(_stop_all_async())
 
                     async def _reset_gazebo_async() -> None:
                         ok, msg = await asyncio.to_thread(bridge.ros2_reset_gazebo_environment)
                         ui.notify(msg, type=("positive" if ok else "warning"), timeout=4500)
-                        _refresh()
+                        _refresh(force=True)
 
                     def _reset_gazebo():
                         asyncio.create_task(_reset_gazebo_async())
 
-                    def _cleanup():
-                        bridge.ros2_cleanup_processes()
+                    async def _cleanup_async():
+                        await asyncio.to_thread(bridge.ros2_cleanup_processes)
                         ui.notify("Cleanup complete: removed stale ROS2/MoveIt/driver processes", type="info")
-                        _refresh()
+                        _refresh(force=True)
+
+                    def _cleanup():
+                        asyncio.create_task(_cleanup_async())
 
                     ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props("flat dense").classes("text-red-600")
                     ui.button("Reset Gazebo Scene", on_click=_reset_gazebo, icon="restart_alt").props("flat dense").classes("text-blue-700")
                     ui.button("Cleanup", on_click=_cleanup, icon="cleaning_services").props("flat dense").classes("text-amber-700")
 
+        _refresh(force=True)
         ui.timer(3.0, _refresh)
 
 
@@ -264,19 +292,27 @@ def _proc_row(
         is_running = status == "running"
         start_blocked = bool(blocked_reason)
 
-        def _start(n=name):
-            if blocked_reason:
-                ui.notify(blocked_reason, type="warning")
-                return
-            err = bridge.ros2_start(n)
+        async def _start_async(n=name):
+            err = await asyncio.to_thread(bridge.ros2_start, n)
             if err:
                 ui.notify(err, type="warning")
             else:
                 ui.notify(f"Started {label}", type="positive")
+            _refresh(force=True)
+
+        async def _stop_async(n=name):
+            await asyncio.to_thread(bridge.ros2_stop, n)
+            ui.notify(f"Stopped {label}", type="info")
+            _refresh(force=True)
+
+        def _start(n=name):
+            if blocked_reason:
+                ui.notify(blocked_reason, type="warning")
+                return
+            asyncio.create_task(_start_async(n))
 
         def _stop(n=name):
-            bridge.ros2_stop(n)
-            ui.notify(f"Stopped {label}", type="info")
+            asyncio.create_task(_stop_async(n))
 
         ui.button("Start", on_click=_start, icon="play_arrow").props(
             "flat dense" + (" disable" if (is_running or start_blocked) else "")

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "active_bundle_id": "case4_two_parts_each_llm_bridge__simulation__gazebo__dfeed425",
+  "active_bundle_id": null,
   "bundles": [
     {
       "bundle_id": "case1_one_arm_no_move_home",

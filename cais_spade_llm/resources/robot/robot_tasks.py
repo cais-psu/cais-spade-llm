@@ -695,6 +695,7 @@ async def execute_robot_task(
             duration=float(task.program.dry_run_duration or 5.0),
         )
 
+    completed_step_ids: set[str] = set()
     for step in task.program.steps:
         result = await _execute_task_step(
             agent=agent,
@@ -707,7 +708,13 @@ async def execute_robot_task(
         if result.get("skipped"):
             continue
         if not result.get("success"):
-            if step.continue_on_failure:
+            simulation_lift_after_release = (
+                str(getattr(agent, "execution_mode", "") or "").strip().lower() == "simulation"
+                and task.name == "place_insert"
+                and step.id == "lift"
+                and "release_part" in completed_step_ids
+            )
+            if step.continue_on_failure or simulation_lift_after_release:
                 raw = dict(result.get("raw") or {})
                 agent.logger.warning(
                     "[Robot] %s.%s soft-failed: %s",
@@ -728,6 +735,7 @@ async def execute_robot_task(
                 ),
             )
         payload = result.get("payload")
+        completed_step_ids.add(str(step.id))
         if step.store_as:
             step_outputs[step.store_as] = deepcopy(payload if payload is not None else {})
         if isinstance(payload, dict) and "absolute_position" in payload:

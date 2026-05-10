@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from cais_spade_llm.agents.intelligent_product.process_recovery_planner import (
     ProcessRecoveryPlanner,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
+    compute_bid,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import (
     LlmBridgeReplannerMixin,
@@ -16,6 +20,11 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import (
 from cais_spade_llm.prompts import (
     build_requirement_parse_prompt,
     build_task_expansion_prompt,
+)
+from cais_spade_llm.product.order import (
+    derive_ordering_constraints_from_safety,
+    part_place_geometry,
+    validate_product_order,
 )
 
 class ProcessPlanner(LlmBridgeReplannerMixin):
@@ -33,6 +42,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self.phase_to_node: Dict[str, Dict[str, Any]] = {}
         self.global_fsa: Optional[Dict[str, Any]] = None
         self.last_bridge_debug: Dict[str, Any] = {}
+        self.product_order_runtime: Dict[str, Any] = {}
+        self.last_product_order_artifact: Dict[str, Any] = {}
         self.recovery_planner = ProcessRecoveryPlanner(self)
         self.recovery_planner.bind_methods()
 
@@ -44,6 +55,1035 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         if proposal.get("primitive_steps"):
             return [dict(proposal)]
         return []
+
+    # ------------------------------------------------------------------ #
+    # Product order → executable task nodes
+    # ------------------------------------------------------------------ #
+    def build_product_order_runtime_skeleton(
+        self,
+        product_order: dict[str, Any],
+        *,
+        safety_text: str = "",
+    ) -> dict[str, Any]:
+        """Validate product-order work without assigning resources or creating task nodes."""
+        self.nodes.clear()
+        self.phase_to_node.clear()
+        self.global_fsa = None
+
+        geometry = dict(getattr(self.product_agent, "product_geometry", {}) or {})
+        validated = validate_product_order(product_order, geometry)
+        order_payload = dict(validated.payload)
+        selected_parts = list(validated.selected_parts)
+        destination_location = str(order_payload.get("product") or "").strip()
+        product_jid = str(
+            order_payload.get("product_jid")
+            or getattr(self.product_agent, "jid", "")
+        ).strip()
+        ordering_constraints = derive_ordering_constraints_from_safety(
+            safety_text,
+            selected_parts,
+        )
+
+        self.product_order_runtime = {
+            "enabled": True,
+            "product_order": deepcopy(order_payload),
+            "selected_parts": selected_parts,
+            "destination_location": destination_location,
+            "product_jid": product_jid,
+            "ordering_constraints": ordering_constraints,
+            "pending_product_order_parts": list(selected_parts),
+            "committed_product_order_parts": [],
+            "completed_product_order_parts": [],
+            "bid_evidence_by_part": {},
+            "system_plan": [],
+            "task_by_part_fn": {},
+            "part_task_ids": {},
+            "part_requirement_ids": {},
+            "next_requirement_index": 1,
+        }
+        self._sync_product_order_runtime_artifact()
+        self.logger.info(
+            "[Planner] Built product-order runtime skeleton for %d pending part(s), %d task node(s).",
+            len(selected_parts),
+            0,
+        )
+        return deepcopy(self.last_product_order_artifact)
+
+    def ready_product_order_parts(self) -> list[str]:
+        """Return pending product-order parts whose product-order predecessors are completed."""
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return []
+        self._refresh_completed_product_order_parts_from_nodes()
+        pending = [
+            str(part or "").strip()
+            for part in (runtime.get("pending_product_order_parts") or [])
+            if str(part or "").strip()
+        ]
+        completed = {
+            str(part or "").strip()
+            for part in (runtime.get("completed_product_order_parts") or [])
+            if str(part or "").strip()
+        }
+        ready: list[str] = []
+        for part_name in pending:
+            predecessors = [
+                str(constraint.get("before") or "").strip()
+                for constraint in (runtime.get("ordering_constraints") or [])
+                if isinstance(constraint, dict)
+                and constraint.get("type") == "place_before"
+                and str(constraint.get("after") or "").strip() == part_name
+            ]
+            if all(before in completed for before in predecessors if before):
+                ready.append(part_name)
+        return ready
+
+    def commit_product_order_part(
+        self,
+        part_name: str,
+        *,
+        unavailable_resource_jids: Iterable[str] | None = None,
+        status: str = "pending_validation",
+    ) -> dict[str, Any]:
+        """Assign and materialize one ready product-order part chain."""
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            raise ValueError("product-order runtime skeleton is not initialized")
+
+        part_name = str(part_name or "").strip()
+        if not part_name:
+            raise ValueError("product-order part name is required")
+        if part_name not in set(runtime.get("pending_product_order_parts") or []):
+            raise ValueError(f"product-order part {part_name} is not pending")
+        if part_name in set(runtime.get("committed_product_order_parts") or []):
+            raise ValueError(f"product-order part {part_name} is already committed")
+
+        destination_location = str(runtime.get("destination_location") or "").strip()
+        product_jid = str(runtime.get("product_jid") or "").strip()
+        geometry = dict(getattr(self.product_agent, "product_geometry", {}) or {})
+        resource_options = self._product_order_resource_options(destination_location)
+        unavailable = {
+            str(jid or "").strip()
+            for jid in (unavailable_resource_jids or [])
+            if str(jid or "").strip()
+        }
+        if unavailable:
+            resource_options = [
+                option
+                for option in resource_options
+                if str(option.get("resource_jid") or "").strip() not in unavailable
+            ]
+        if not resource_options:
+            raise ValueError(
+                f"no available product bid resources for part {part_name} to {destination_location}"
+            )
+
+        tools_catalog = list(getattr(self.product_agent, "tools_catalog", []) or [])
+        if not tools_catalog:
+            raise ValueError("product bidding requires tools_catalog")
+        goal_state = self._product_order_goal_state(tools_catalog)
+        if not goal_state:
+            raise ValueError("product bidding could not resolve goal part state from tools_catalog")
+
+        load_counts = self._product_order_runtime_load_counts(resource_options)
+        selected_bid = self._select_product_order_bid(
+            part_name=part_name,
+            resource_options=resource_options,
+            destination_location=destination_location,
+            tools_catalog=tools_catalog,
+            goal_state=goal_state,
+            load_counts=load_counts,
+        )
+        resource_jid = str(selected_bid["resource_jid"])
+        source_location = str(selected_bid["source_location"])
+        selected_parts = [
+            str(part or "").strip()
+            for part in (runtime.get("selected_parts") or [])
+            if str(part or "").strip()
+        ]
+        if part_name in selected_parts:
+            requirement_index = selected_parts.index(part_name) + 1
+        else:
+            requirement_index = int(runtime.get("next_requirement_index") or 1)
+            runtime["next_requirement_index"] = requirement_index + 1
+        requirement_id = f"REQ_{requirement_index}"
+        place_geometry = part_place_geometry(part_name, geometry)
+        task_specs = self._task_specs_from_product_order_bid(
+            bid_events=list(selected_bid["events"]),
+            part_name=part_name,
+            product_jid=product_jid,
+            place_geometry=place_geometry,
+        )
+
+        task_by_part_fn = dict(runtime.get("task_by_part_fn") or {})
+        new_nodes: list[dict[str, Any]] = []
+        part_task_ids: list[str] = []
+        for task_index, (function_name, params) in enumerate(task_specs, start=1):
+            task_id = f"{requirement_id}_T{task_index}"
+            params = dict(params)
+            params["task_id"] = task_id
+            predecessors = [part_task_ids[-1]] if part_task_ids else []
+            node = {
+                "id": task_id,
+                "type": "task",
+                "requirement_id": requirement_id,
+                "function_name": function_name,
+                "params": params,
+                "resource_jid": resource_jid,
+                "sequence_index": len(self.nodes) + len(new_nodes),
+                "status": str(status or "pending_validation"),
+                "predecessors": predecessors,
+                "successors": [],
+                "product_order_part": part_name,
+                "product_order_file": str(getattr(self.product_agent, "product_order_file", "") or ""),
+                "product_order_commit_status": str(status or "pending_validation"),
+            }
+            if predecessors:
+                new_nodes[-1].setdefault("successors", []).append(task_id)
+            new_nodes.append(node)
+            part_task_ids.append(task_id)
+            task_by_part_fn[(part_name, function_name)] = task_id
+
+        for constraint in runtime.get("ordering_constraints") or []:
+            if not isinstance(constraint, dict) or constraint.get("type") != "place_before":
+                continue
+            if str(constraint.get("after") or "").strip() != part_name:
+                continue
+            before_tid = task_by_part_fn.get((str(constraint.get("before") or "").strip(), "place_insert"))
+            after_tid = task_by_part_fn.get((part_name, "place_insert"))
+            if not before_tid or not after_tid or before_tid == after_tid:
+                continue
+            before_node = next((node for node in self.nodes if node.get("id") == before_tid), None)
+            after_node = next((node for node in new_nodes if node.get("id") == after_tid), None)
+            if not before_node or not after_node:
+                continue
+            if before_tid not in after_node.setdefault("predecessors", []):
+                after_node["predecessors"].append(before_tid)
+            if after_tid not in before_node.setdefault("successors", []):
+                before_node["successors"].append(after_tid)
+
+        self.nodes.extend(new_nodes)
+        self._normalize_same_resource_chains(self.nodes)
+
+        runtime["pending_product_order_parts"] = [
+            part
+            for part in (runtime.get("pending_product_order_parts") or [])
+            if str(part or "").strip() != part_name
+        ]
+        committed = list(runtime.get("committed_product_order_parts") or [])
+        if part_name not in committed:
+            committed.append(part_name)
+        runtime["committed_product_order_parts"] = committed
+        runtime["task_by_part_fn"] = task_by_part_fn
+        part_task_id_map = dict(runtime.get("part_task_ids") or {})
+        part_task_id_map[part_name] = list(part_task_ids)
+        runtime["part_task_ids"] = part_task_id_map
+        part_requirement_ids = dict(runtime.get("part_requirement_ids") or {})
+        part_requirement_ids[part_name] = requirement_id
+        runtime["part_requirement_ids"] = part_requirement_ids
+
+        row = {
+            "part": part_name,
+            "source_location": source_location,
+            "target_slot": part_name,
+            "destination_location": destination_location,
+            "resource_jid": resource_jid,
+            "feasible_resources": [
+                {
+                    "resource_jid": str(opt["resource_jid"]),
+                    "source_locations": list(opt["source_locations"]),
+                    "destination_location": destination_location,
+                }
+                for opt in resource_options
+            ],
+            "product_bidding": {
+                "selected_bid": {
+                    "resource_jid": resource_jid,
+                    "source_location": source_location,
+                    "destination_location": destination_location,
+                    "event_count": len(selected_bid["events"]),
+                    "score": dict(selected_bid.get("score") or {}),
+                    "events": deepcopy(selected_bid["events"]),
+                },
+                "candidates": deepcopy(selected_bid.get("candidates") or []),
+            },
+            "operations": list(part_task_ids),
+            "commit_status": str(status or "pending_validation"),
+        }
+        system_plan = list(runtime.get("system_plan") or [])
+        system_plan.append(row)
+        runtime["system_plan"] = system_plan
+        bid_evidence = dict(runtime.get("bid_evidence_by_part") or {})
+        bid_evidence[part_name] = deepcopy(row["product_bidding"])
+        runtime["bid_evidence_by_part"] = bid_evidence
+        self.product_order_runtime = runtime
+        self._sync_product_order_runtime_artifact()
+        self.logger.info(
+            "[Planner] Committed product-order part %s -> %s from %s (%d task node(s)).",
+            part_name,
+            resource_jid,
+            source_location,
+            len(part_task_ids),
+        )
+        return {
+            "part": part_name,
+            "resource_jid": resource_jid,
+            "source_location": source_location,
+            "task_ids": list(part_task_ids),
+            "requirement_id": requirement_id,
+            "product_bidding": deepcopy(row["product_bidding"]),
+        }
+
+    def recompile_committed_product_order_fsa(self) -> Optional[Dict[str, Any]]:
+        """Compile the active-window FSA for currently executable product-order task nodes."""
+        active_nodes = self.active_product_order_fsa_nodes()
+        if not active_nodes:
+            self.global_fsa = None
+            self._sync_product_order_runtime_artifact()
+            return None
+
+        saved_nodes = self.nodes
+        try:
+            self.nodes = active_nodes
+            self._normalize_same_resource_chains(self.nodes)
+            fsa = self.compile_global_fsa()
+        finally:
+            self.nodes = saved_nodes
+
+        self.global_fsa = fsa
+        self._sync_product_order_runtime_artifact()
+        return fsa
+
+    def active_product_order_fsa_nodes(self) -> list[dict[str, Any]]:
+        """Return active executable Product-order nodes, excluding completed history/backlog."""
+        active_statuses = {
+            "pending_validation",
+            "pending",
+            "dispatched",
+            "accepted",
+            "running",
+            "blocked",
+            "human_required",
+        }
+        active_ids: set[str] = set()
+        active_nodes: list[dict[str, Any]] = []
+        for node in self.nodes:
+            if not isinstance(node, dict) or node.get("type") != "task":
+                continue
+            status = str(node.get("status") or "").strip().lower()
+            if status in active_statuses:
+                node_id = str(node.get("id") or "").strip()
+                if node_id:
+                    active_ids.add(node_id)
+                    active_nodes.append(deepcopy(node))
+
+        for node in active_nodes:
+            node["predecessors"] = [
+                pred
+                for pred in (node.get("predecessors") or [])
+                if str(pred or "").strip() in active_ids
+            ]
+            node["successors"] = [
+                succ
+                for succ in (node.get("successors") or [])
+                if str(succ or "").strip() in active_ids
+            ]
+        return active_nodes
+
+    def mark_product_order_part_completed(self, part_name: str) -> None:
+        """Record that one committed product-order part chain completed."""
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return
+        part_name = str(part_name or "").strip()
+        if not part_name:
+            return
+        completed = list(runtime.get("completed_product_order_parts") or [])
+        if part_name not in completed:
+            completed.append(part_name)
+        runtime["completed_product_order_parts"] = completed
+        runtime["committed_product_order_parts"] = [
+            part
+            for part in (runtime.get("committed_product_order_parts") or [])
+            if str(part or "").strip() != part_name
+        ]
+        self.product_order_runtime = runtime
+        self._sync_product_order_runtime_artifact()
+
+    def mark_product_order_commit_validated(self, part_names: Iterable[str]) -> list[str]:
+        """Make validated committed Product-order nodes dispatchable."""
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return []
+        targets = {
+            str(part or "").strip()
+            for part in (part_names or [])
+            if str(part or "").strip()
+        }
+        validated_parts: list[str] = []
+        for node in self.nodes:
+            part_name = str(node.get("product_order_part") or "").strip()
+            if part_name not in targets:
+                continue
+            if str(node.get("status") or "").strip() == "pending_validation":
+                node["status"] = "pending"
+            node["product_order_commit_status"] = "validated"
+            if part_name not in validated_parts:
+                validated_parts.append(part_name)
+        for row in runtime.get("system_plan") or []:
+            if str(row.get("part") or "").strip() in targets:
+                row["commit_status"] = "validated"
+        self.product_order_runtime = runtime
+        self._sync_product_order_runtime_artifact()
+        return validated_parts
+
+    def rollback_product_order_committed_parts(self, part_names: Iterable[str]) -> list[str]:
+        """Remove not-yet-dispatched committed product-order parts so they can be rebid."""
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return []
+        targets = {
+            str(part or "").strip()
+            for part in (part_names or [])
+            if str(part or "").strip()
+        }
+        if not targets:
+            return []
+
+        active_statuses = {
+            "dispatched",
+            "accepted",
+            "running",
+            "completed",
+            "finished",
+            "blocked",
+            "human_required",
+        }
+        removable: set[str] = set()
+        for part_name in sorted(targets):
+            part_nodes = [
+                node
+                for node in self.nodes
+                if str(node.get("product_order_part") or "").strip() == part_name
+            ]
+            if not part_nodes:
+                continue
+            if any(
+                str(node.get("status") or "").strip().lower().startswith("failed")
+                or str(node.get("status") or "").strip().lower() in active_statuses
+                for node in part_nodes
+            ):
+                continue
+            removable.add(part_name)
+
+        if not removable:
+            return []
+
+        removed_ids = {
+            str(node.get("id") or "").strip()
+            for node in self.nodes
+            if str(node.get("product_order_part") or "").strip() in removable
+            and str(node.get("id") or "").strip()
+        }
+        self.nodes = [
+            node
+            for node in self.nodes
+            if str(node.get("product_order_part") or "").strip() not in removable
+        ]
+        for node in self.nodes:
+            node["predecessors"] = [
+                pred
+                for pred in (node.get("predecessors") or [])
+                if str(pred or "").strip() not in removed_ids
+            ]
+            node["successors"] = [
+                succ
+                for succ in (node.get("successors") or [])
+                if str(succ or "").strip() not in removed_ids
+            ]
+
+        pending = list(runtime.get("pending_product_order_parts") or [])
+        for part_name in sorted(removable):
+            if part_name not in pending:
+                pending.append(part_name)
+        selected_order = {
+            str(part or "").strip(): index
+            for index, part in enumerate(runtime.get("selected_parts") or [])
+        }
+        pending.sort(key=lambda part: selected_order.get(str(part or "").strip(), 10**9))
+        runtime["pending_product_order_parts"] = pending
+        runtime["committed_product_order_parts"] = [
+            part
+            for part in (runtime.get("committed_product_order_parts") or [])
+            if str(part or "").strip() not in removable
+        ]
+        runtime["system_plan"] = [
+            row
+            for row in (runtime.get("system_plan") or [])
+            if str(row.get("part") or "").strip() not in removable
+        ]
+        for key in ("part_task_ids", "part_requirement_ids", "bid_evidence_by_part"):
+            mapping = dict(runtime.get(key) or {})
+            for part_name in removable:
+                mapping.pop(part_name, None)
+            runtime[key] = mapping
+        task_by_part_fn = dict(runtime.get("task_by_part_fn") or {})
+        runtime["task_by_part_fn"] = {
+            key: value
+            for key, value in task_by_part_fn.items()
+            if not (isinstance(key, tuple) and key and str(key[0]) in removable)
+        }
+        self.product_order_runtime = runtime
+        self._sync_product_order_runtime_artifact()
+        if self.nodes:
+            self._normalize_same_resource_chains(self.nodes)
+        else:
+            self.global_fsa = None
+        return sorted(removable)
+
+    def _refresh_completed_product_order_parts_from_nodes(self) -> None:
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return
+        completed = {
+            str(part or "").strip()
+            for part in (runtime.get("completed_product_order_parts") or [])
+            if str(part or "").strip()
+        }
+        for part_name, task_ids in dict(runtime.get("part_task_ids") or {}).items():
+            part = str(part_name or "").strip()
+            if not part:
+                continue
+            part_nodes = [
+                self._find_node(str(task_id or "").strip())
+                for task_id in (task_ids or [])
+                if str(task_id or "").strip()
+            ]
+            part_nodes = [node for node in part_nodes if isinstance(node, dict)]
+            if part_nodes and all(
+                str(node.get("status") or "").strip().lower() in {"completed", "finished"}
+                for node in part_nodes
+            ):
+                completed.add(part)
+        runtime["completed_product_order_parts"] = [
+            part
+            for part in (runtime.get("selected_parts") or [])
+            if str(part or "").strip() in completed
+        ]
+        runtime["committed_product_order_parts"] = [
+            part
+            for part in (runtime.get("committed_product_order_parts") or [])
+            if str(part or "").strip() not in completed
+        ]
+        self.product_order_runtime = runtime
+        self._sync_product_order_runtime_artifact()
+
+    def _product_order_runtime_load_counts(
+        self,
+        resource_options: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        load_counts: dict[str, int] = {
+            str(opt.get("resource_jid") or "").strip(): 0
+            for opt in resource_options
+            if str(opt.get("resource_jid") or "").strip()
+        }
+        completed = {
+            str(part or "").strip()
+            for part in (runtime.get("completed_product_order_parts") or [])
+            if str(part or "").strip()
+        }
+        for row in runtime.get("system_plan") or []:
+            if not isinstance(row, dict):
+                continue
+            part_name = str(row.get("part") or "").strip()
+            resource_jid = str(row.get("resource_jid") or "").strip()
+            if resource_jid in load_counts and part_name not in completed:
+                load_counts[resource_jid] += 1
+        return load_counts
+
+    def _sync_product_order_runtime_artifact(self) -> None:
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
+        if not runtime.get("enabled"):
+            return
+        self.last_product_order_artifact = {
+            "product_order": deepcopy(runtime.get("product_order") or {}),
+            "selected_parts": list(runtime.get("selected_parts") or []),
+            "system_plan": deepcopy(runtime.get("system_plan") or []),
+            "ordering_constraints": deepcopy(runtime.get("ordering_constraints") or []),
+            "monitor_rules": [
+                {
+                    "type": "ordering_constraint",
+                    "raw_text": str(item.get("raw_text", "")),
+                    "before_event": str(item.get("before_event", "")),
+                    "after_event": str(item.get("after_event", "")),
+                }
+                for item in (runtime.get("ordering_constraints") or [])
+                if isinstance(item, dict)
+            ],
+            "derived_nodes": deepcopy(self.nodes),
+            "active_window_nodes": self.active_product_order_fsa_nodes(),
+            "pending_product_order_parts": list(runtime.get("pending_product_order_parts") or []),
+            "committed_product_order_parts": list(runtime.get("committed_product_order_parts") or []),
+            "completed_product_order_parts": list(runtime.get("completed_product_order_parts") or []),
+            "bid_evidence_by_part": deepcopy(runtime.get("bid_evidence_by_part") or {}),
+            "rolling_runtime_product_bidding": True,
+        }
+
+    def build_from_product_order(
+        self,
+        product_order: dict[str, Any],
+        *,
+        safety_text: str = "",
+    ) -> dict[str, Any]:
+        """Build deterministic executable task nodes from product-order JSON."""
+        self.nodes.clear()
+        self.phase_to_node.clear()
+        self.global_fsa = None
+
+        geometry = dict(getattr(self.product_agent, "product_geometry", {}) or {})
+        validated = validate_product_order(product_order, geometry)
+        order_payload = dict(validated.payload)
+        selected_parts = list(validated.selected_parts)
+        destination_location = str(order_payload.get("product") or "").strip()
+        product_jid = str(order_payload.get("product_jid") or getattr(self.product_agent, "jid", "")).strip()
+
+        resource_options = self._product_order_resource_options(destination_location)
+        if not resource_options:
+            raise ValueError(
+                f"no feasible resources can reach {destination_location} with a source staging area"
+            )
+        tools_catalog = list(getattr(self.product_agent, "tools_catalog", []) or [])
+        if not tools_catalog:
+            raise ValueError("product bidding requires tools_catalog")
+        goal_state = self._product_order_goal_state(tools_catalog)
+        if not goal_state:
+            raise ValueError("product bidding could not resolve goal part state from tools_catalog")
+
+        ordering_constraints = derive_ordering_constraints_from_safety(
+            safety_text,
+            selected_parts,
+        )
+
+        nodes: list[dict[str, Any]] = []
+        system_plan: list[dict[str, Any]] = []
+        task_by_part_fn: dict[tuple[str, str], str] = {}
+        load_counts: dict[str, int] = {str(opt["resource_jid"]): 0 for opt in resource_options}
+
+        for req_index, part_name in enumerate(selected_parts, start=1):
+            feasible_resources = [
+                {
+                    "resource_jid": str(opt["resource_jid"]),
+                    "source_locations": list(opt["source_locations"]),
+                    "destination_location": destination_location,
+                }
+                for opt in resource_options
+            ]
+            selected_bid = self._select_product_order_bid(
+                part_name=part_name,
+                resource_options=resource_options,
+                destination_location=destination_location,
+                tools_catalog=tools_catalog,
+                goal_state=goal_state,
+                load_counts=load_counts,
+            )
+            resource_jid = str(selected_bid["resource_jid"])
+            load_counts[resource_jid] = load_counts.get(resource_jid, 0) + 1
+            source_location = str(selected_bid["source_location"])
+            requirement_id = f"REQ_{req_index}"
+            place_geometry = part_place_geometry(part_name, geometry)
+            task_specs = self._task_specs_from_product_order_bid(
+                bid_events=list(selected_bid["events"]),
+                part_name=part_name,
+                product_jid=product_jid,
+                place_geometry=place_geometry,
+            )
+
+            part_task_ids: list[str] = []
+            for task_index, (function_name, params) in enumerate(task_specs, start=1):
+                task_id = f"{requirement_id}_T{task_index}"
+                params = dict(params)
+                params["task_id"] = task_id
+                predecessors = [part_task_ids[-1]] if part_task_ids else []
+                node = {
+                    "id": task_id,
+                    "type": "task",
+                    "requirement_id": requirement_id,
+                    "function_name": function_name,
+                    "params": params,
+                    "resource_jid": resource_jid,
+                    "sequence_index": len(nodes),
+                    "status": "pending",
+                    "predecessors": predecessors,
+                    "successors": [],
+                    "product_order_part": part_name,
+                    "product_order_file": str(getattr(self.product_agent, "product_order_file", "") or ""),
+                }
+                if predecessors:
+                    prev = nodes[-1]
+                    prev.setdefault("successors", []).append(task_id)
+                nodes.append(node)
+                part_task_ids.append(task_id)
+                task_by_part_fn[(part_name, function_name)] = task_id
+
+            system_plan.append(
+                {
+                    "part": part_name,
+                    "source_location": source_location,
+                    "target_slot": part_name,
+                    "destination_location": destination_location,
+                    "resource_jid": resource_jid,
+                    "feasible_resources": feasible_resources,
+                    "product_bidding": {
+                        "selected_bid": {
+                            "resource_jid": resource_jid,
+                            "source_location": source_location,
+                            "destination_location": destination_location,
+                            "event_count": len(selected_bid["events"]),
+                            "score": dict(selected_bid.get("score") or {}),
+                            "events": deepcopy(selected_bid["events"]),
+                        },
+                        "candidates": deepcopy(selected_bid.get("candidates") or []),
+                    },
+                    "operations": list(part_task_ids),
+                }
+            )
+
+        for constraint in ordering_constraints:
+            if constraint.get("type") != "place_before":
+                continue
+            before_tid = task_by_part_fn.get((str(constraint.get("before")), "place_insert"))
+            after_tid = task_by_part_fn.get((str(constraint.get("after")), "place_insert"))
+            if not before_tid or not after_tid or before_tid == after_tid:
+                continue
+            before_node = next((node for node in nodes if node.get("id") == before_tid), None)
+            after_node = next((node for node in nodes if node.get("id") == after_tid), None)
+            if not before_node or not after_node:
+                continue
+            if before_tid not in after_node.setdefault("predecessors", []):
+                after_node["predecessors"].append(before_tid)
+            if after_tid not in before_node.setdefault("successors", []):
+                before_node["successors"].append(after_tid)
+
+        self._normalize_same_resource_chains(nodes)
+        self.nodes = nodes
+        artifact = {
+            "product_order": deepcopy(order_payload),
+            "selected_parts": selected_parts,
+            "system_plan": system_plan,
+            "ordering_constraints": ordering_constraints,
+            "monitor_rules": [
+                {
+                    "type": "ordering_constraint",
+                    "raw_text": str(item.get("raw_text", "")),
+                    "before_event": str(item.get("before_event", "")),
+                    "after_event": str(item.get("after_event", "")),
+                }
+                for item in ordering_constraints
+            ],
+            "derived_nodes": deepcopy(nodes),
+        }
+        self.last_product_order_artifact = artifact
+        self.logger.info(
+            "[Planner] Built product-order plan for %d part(s), %d task node(s).",
+            len(selected_parts),
+            len(nodes),
+        )
+        return artifact
+
+    @staticmethod
+    def _product_order_goal_state(tools_catalog: list[dict[str, Any]]) -> str:
+        completed_states: list[str] = []
+        intermediate_states: set[str] = set()
+        for tool in tools_catalog or []:
+            if not isinstance(tool, dict):
+                continue
+            part_in_state = str(tool.get("part_in_state") or "").strip()
+            if part_in_state:
+                intermediate_states.add(part_in_state)
+            completed_state = str(
+                (tool.get("part_transition") or {})
+                .get("completed", {})
+                .get("state", "")
+            ).strip()
+            if completed_state:
+                completed_states.append(completed_state)
+        for state in completed_states:
+            if state not in intermediate_states:
+                return state
+        return completed_states[-1] if completed_states else ""
+
+    def _select_product_order_bid(
+        self,
+        *,
+        part_name: str,
+        resource_options: list[dict[str, Any]],
+        destination_location: str,
+        tools_catalog: list[dict[str, Any]],
+        goal_state: str,
+        load_counts: dict[str, int],
+    ) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        complete_candidates: list[dict[str, Any]] = []
+
+        for option in resource_options:
+            resource_jid = str(option.get("resource_jid") or "").strip()
+            source_locations: list[str] = []
+            seen_sources: set[str] = set()
+            for raw_source_location in option.get("source_locations") or []:
+                source_location = str(raw_source_location or "").strip()
+                if not source_location or source_location in seen_sources:
+                    continue
+                seen_sources.add(source_location)
+                source_locations.append(source_location)
+            for source_order, source_location in enumerate(source_locations):
+                candidate = self._product_order_bid_candidate(
+                    part_name=part_name,
+                    resource_jid=resource_jid,
+                    source_location=source_location,
+                    source_order=source_order,
+                    destination_location=destination_location,
+                    tools_catalog=tools_catalog,
+                    goal_state=goal_state,
+                    load_count=load_counts.get(resource_jid, 0),
+                )
+                candidates.append(candidate)
+                if candidate.get("status") == "complete":
+                    complete_candidates.append(candidate)
+
+        if not complete_candidates:
+            raise ValueError(
+                f"no complete product bid for part {part_name} to {destination_location}"
+            )
+
+        selected = min(
+            complete_candidates,
+            key=lambda item: (
+                int(item.get("event_count", 0)),
+                int(item.get("load_count", 0)),
+                str(item.get("resource_jid") or ""),
+                int(item.get("source_order", 0)),
+                str(item.get("source_location") or ""),
+            ),
+        )
+        for candidate in candidates:
+            same_candidate = (
+                str(candidate.get("resource_jid") or "") == str(selected.get("resource_jid") or "")
+                and str(candidate.get("source_location") or "") == str(selected.get("source_location") or "")
+            )
+            if same_candidate:
+                candidate["status"] = "selected"
+            elif candidate.get("status") == "complete":
+                candidate["status"] = "rejected"
+        selected = dict(selected)
+        selected["status"] = "selected"
+        selected["candidates"] = candidates
+        return selected
+
+    def _product_order_bid_candidate(
+        self,
+        *,
+        part_name: str,
+        resource_jid: str,
+        source_location: str,
+        source_order: int,
+        destination_location: str,
+        tools_catalog: list[dict[str, Any]],
+        goal_state: str,
+        load_count: int,
+    ) -> dict[str, Any]:
+        candidate: dict[str, Any] = {
+            "resource_jid": resource_jid,
+            "source_location": source_location,
+            "source_order": int(source_order),
+            "destination_location": destination_location,
+            "load_count": int(load_count),
+        }
+        x_c = {
+            "resource_state": "idle",
+            "current_part": None,
+            "current_location": None,
+            "part_states": {part_name: "ready"},
+            "part_locations": {part_name: source_location},
+        }
+        reachability = [
+            location
+            for location in (source_location, destination_location)
+            if str(location or "").strip()
+        ]
+        staging_areas = {source_location: {}}
+        bid = compute_bid(
+            x_c=x_c,
+            P_id=[part_name],
+            goal_state=goal_state,
+            tools=tools_catalog,
+            reachability=reachability,
+            staging_areas=staging_areas,
+            resource_jid=resource_jid,
+            goal_resource_state="idle",
+        )
+        if not bid:
+            candidate.update({"status": "no_bid", "reason": "compute_bid returned no bid"})
+            return candidate
+
+        events = [dict(event) for event in (bid.str_e or []) if isinstance(event, dict)]
+        states = [dict(state) for state in (bid.str_x or []) if isinstance(state, dict)]
+        candidate.update(
+            {
+                "complete": bool(bid.complete),
+                "event_count": len(events),
+                "events": deepcopy(events),
+            }
+        )
+        valid, reason = self._product_order_bid_is_complete(
+            bid_complete=bool(bid.complete),
+            events=events,
+            states=states,
+            part_name=part_name,
+            source_location=source_location,
+            destination_location=destination_location,
+            goal_state=goal_state,
+        )
+        if not valid:
+            candidate.update({"status": "incomplete", "reason": reason})
+            return candidate
+
+        candidate.update(
+            {
+                "status": "complete",
+                "score": {
+                    "event_count": len(events),
+                    "load_count": int(load_count),
+                    "resource_jid": resource_jid,
+                    "source_order": int(source_order),
+                    "source_location": source_location,
+                },
+            }
+        )
+        return candidate
+
+    @staticmethod
+    def _product_order_bid_is_complete(
+        *,
+        bid_complete: bool,
+        events: list[dict[str, Any]],
+        states: list[dict[str, Any]],
+        part_name: str,
+        source_location: str,
+        destination_location: str,
+        goal_state: str,
+    ) -> tuple[bool, str]:
+        if not bid_complete:
+            return False, "bid did not report complete"
+        if not events:
+            return False, "bid has no events"
+        if str(events[-1].get("function_name") or "").strip() != "move_home":
+            return False, "bid does not return resource to idle through move_home"
+        first_params = dict(events[0].get("params") or {})
+        if str(first_params.get("origin_resource_location") or "").strip() != source_location:
+            return False, "bid does not start from evaluated source_location"
+        has_destination_approach = any(
+            str(event.get("function_name") or "").strip() == "place_approach"
+            and str((event.get("params") or {}).get("destination_location") or "").strip()
+            == destination_location
+            for event in events
+        )
+        if not has_destination_approach:
+            return False, "bid does not approach destination_location"
+        has_destination_insert = any(
+            str(event.get("function_name") or "").strip() == "place_insert"
+            and str((event.get("params") or {}).get("destination_location") or "").strip()
+            == destination_location
+            for event in events
+        )
+        if not has_destination_insert:
+            return False, "bid does not insert at destination_location"
+        final_state = states[-1] if states else {}
+        part_states = dict(final_state.get("part_states") or {})
+        part_locations = dict(final_state.get("part_locations") or {})
+        if str(final_state.get("resource_state") or "").strip() != "idle":
+            return False, "bid final resource_state is not idle"
+        if str(part_states.get(part_name) or "").strip() != goal_state:
+            return False, "bid final part state is not goal_state"
+        if str(part_locations.get(part_name) or "").strip() != destination_location:
+            return False, "bid final part location is not destination_location"
+        return True, ""
+
+    @staticmethod
+    def _task_specs_from_product_order_bid(
+        *,
+        bid_events: list[dict[str, Any]],
+        part_name: str,
+        product_jid: str,
+        place_geometry: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        task_specs: list[tuple[str, dict[str, Any]]] = []
+        for event in bid_events:
+            function_name = str(event.get("function_name") or "").strip()
+            params = dict(event.get("params") or {})
+            if function_name != "move_home":
+                params.setdefault("part_name", part_name)
+                params["product_geometry"] = deepcopy(place_geometry)
+            params["product_jid"] = product_jid
+            if function_name == "pick_approach":
+                params.setdefault("speed", None)
+            elif function_name == "pick_grasp":
+                params.setdefault("gripper", None)
+            elif function_name == "place_approach":
+                params.setdefault("speed", None)
+            elif function_name == "place_insert":
+                params.setdefault("orientation", None)
+            task_specs.append((function_name, params))
+        return task_specs
+
+    def _product_order_resource_options(self, destination_location: str) -> list[dict[str, Any]]:
+        options: list[dict[str, Any]] = []
+        destination = str(destination_location or "").strip()
+        for resource in self.resource_agents:
+            resource_jid = str(getattr(resource, "jid", "") or "").strip()
+            caps = getattr(resource, "static_capabilities", {}) or {}
+            if not isinstance(caps, dict):
+                continue
+            reachability = [
+                str(item)
+                for item in (caps.get("reachability") or [])
+                if str(item or "").strip()
+            ]
+            if destination and destination not in reachability:
+                continue
+            staging = caps.get("staging_areas") or {}
+            staging_locations = [
+                str(name)
+                for name in staging.keys()
+                if str(name or "").strip()
+            ] if isinstance(staging, dict) else []
+            staging_set = set(staging_locations)
+            source_locations = [
+                item
+                for item in reachability
+                if item and item in staging_set and item != destination
+            ]
+            for location in staging_locations:
+                if location not in source_locations:
+                    source_locations.append(location)
+            if not source_locations:
+                source_locations = [
+                    item
+                    for item in reachability
+                    if item and item != destination
+                ]
+            if not source_locations:
+                continue
+            options.append(
+                {
+                    "resource_jid": resource_jid,
+                    "source_locations": source_locations,
+                    "destination_location": destination,
+                    "reachability": reachability,
+                    "staging_areas": dict(staging) if isinstance(staging, dict) else {},
+                }
+            )
+        return sorted(options, key=lambda item: str(item.get("resource_jid", "")))
 
     # ------------------------------------------------------------------ #
     # 1. NL → High-level requirements

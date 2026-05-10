@@ -1251,6 +1251,8 @@ class ProductRecoveryController:
                     history_message=message,
                 )
                 raise RuntimeError(message)
+        elif not recovery_safety_task and not bool(getattr(self, "safety_text_has_requirements", False)):
+            params.setdefault("start_safety_mode", "fast_path")
         return params
 
     def _runtime_recovery_blocks_execution(self) -> bool:
@@ -2345,6 +2347,9 @@ class ProductRecoveryController:
                 "runtime_repair_state": self.runtime_repair_state,
                 "runtime_recovery": self.runtime_recovery,
                 "plan_safety_alert": self.plan_safety_alert,
+                "product_order_runtime": deepcopy(
+                    getattr(getattr(self, "process_planner", None), "last_product_order_artifact", {}) or {}
+                ),
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
             self.product_state_path.parent.mkdir(parents=True, exist_ok=True)
