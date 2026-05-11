@@ -7,12 +7,16 @@ from typing import Any
 
 # Mermaid class-name → status mapping.
 _STATUS_CLASS = {
+    "pending_validation": "pending_validation",
     "pending": "pending",
     "dispatched": "dispatched",
+    "accepted": "accepted",
     "running": "running",
     "completed": "completed",
+    "finished": "completed",
     "failed": "failed",
     "blocked": "blocked",
+    "human_required": "blocked",
 }
 
 
@@ -32,8 +36,10 @@ def nodes_to_mermaid(nodes: list[dict[str, Any]], task_states: dict[str, str] | 
     lines = ["graph LR"]
 
     # Define style classes.
+    lines.append("    classDef pending_validation fill:#78909c,color:#fff")
     lines.append("    classDef pending fill:#9e9e9e,color:#fff")
     lines.append("    classDef dispatched fill:#42a5f5,color:#fff")
+    lines.append("    classDef accepted fill:#26a69a,color:#fff")
     lines.append("    classDef running fill:#ffa726,color:#fff")
     lines.append("    classDef completed fill:#66bb6a,color:#fff")
     lines.append("    classDef failed fill:#ef5350,color:#fff")

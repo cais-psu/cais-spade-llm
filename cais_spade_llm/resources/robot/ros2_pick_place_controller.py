@@ -311,6 +311,14 @@ class Ros2PickPlaceController:
         self.trajectory_time_scale = need_float(
             motion, "trajectory_time_scale", "controller.motion.trajectory_time_scale"
         )
+        self.named_pose_duration_sec = max(
+            0.1,
+            opt_float(motion, "named_pose_duration_sec", 4.0),
+        )
+        self.move_home_duration_sec = max(
+            0.1,
+            opt_float(motion, "move_home_duration_sec", self.named_pose_duration_sec),
+        )
         self.xy_axis_step_m = max(
             0.01,
             opt_float(motion, "xy_axis_step_m", 1.0),
@@ -827,7 +835,7 @@ class Ros2PickPlaceController:
                 "message": f"unknown pose '{pose_name}'; available={available}",
             }
         joint_values = [float(v) for v in positions]
-        duration_sec = self._scaled_joint_duration(4.0, speed)
+        duration_sec = self._scaled_joint_duration(self.named_pose_duration_sec, speed)
         # Try trajectory publisher first, then MoveIt fallback.
         if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
             joint_values,
@@ -1661,6 +1669,11 @@ class Ros2PickPlaceController:
         else:
             place_gap = self.place_surface_gap_m - self.insertion_depth_m
             place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
+            if target_point == "inserted_part_origin":
+                place_part_origin_z = max(
+                    place_part_origin_z,
+                    board_top_z + (target_height * 0.5),
+                )
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
         place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
 
@@ -1764,7 +1777,7 @@ class Ros2PickPlaceController:
             return {"success": True, "message": "returned to remembered start pose"}
         return {"success": False, "message": "failed to return to remembered start pose"}
 
-    def move_home(self) -> dict[str, Any]:
+    def move_home(self, speed: float | None = None) -> dict[str, Any]:
         if not self.wait_for_services():
             return {
                 "success": False,
@@ -1792,10 +1805,15 @@ class Ros2PickPlaceController:
             )
 
         # Move to the explicit named joint-space home pose.
+        duration_sec = self._scaled_joint_duration(self.move_home_duration_sec, speed)
+        if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
+            target_positions,
+            duration_sec=duration_sec,
+        ):
+            self._last_start_pose = None
+            return {"success": True, "message": "moved to named home pose"}
         if self._arm_pub:
-            if self.move_joints(target_positions, duration_sec=4):
-                self._last_start_pose = None
-                return {"success": True, "message": "moved to named home pose"}
+            actual_positions, missing = self._get_arm_joint_positions(timeout_sec=0.5)
             if actual_positions is not None and len(actual_positions) == len(target_positions):
                 already_home_after_attempt = all(
                     self._angular_joint_error(actual, target) <= 0.08
@@ -1804,11 +1822,20 @@ class Ros2PickPlaceController:
                 if already_home_after_attempt:
                     self._last_start_pose = None
                     return {"success": True, "message": "already at named home pose"}
+            elif missing:
+                self._log().warning(
+                    f"move_home could not confirm current joint state after homing attempt; missing={missing}"
+                )
+            if not self._exec_client:
+                return {
+                    "success": False,
+                    "message": self._with_last_failure("failed to move to named home pose"),
+                }
 
         # Fallback to MoveIt execute_trajectory action (for robots like
         # xarm6 that have no direct arm trajectory publisher).
         if self._exec_client and self._JointTrajectory:
-            if self._move_joints_via_moveit(target_positions, duration_sec=4):
+            if self._move_joints_via_moveit(target_positions, duration_sec=duration_sec):
                 self._last_start_pose = None
                 return {"success": True, "message": "moved to named home pose"}
             actual_positions, missing = self._get_arm_joint_positions(timeout_sec=0.5)

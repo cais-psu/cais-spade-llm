@@ -5,6 +5,12 @@
   "objective": "assemble assembly_board-v1",
   "parts": [
     "MG",
-    "SRP"
+    "MRP",
+    "LRP",
+    "MCP",
+    "LCP",
+    "SG",
+    "SRP",
+    "SCP"
   ]
 }

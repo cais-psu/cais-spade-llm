@@ -132,6 +132,7 @@ class ProductAgent(LlmAgent):
         self.product_geometry_file = self.product_profile.product_geometry_file
         self.product_geometry: Dict[str, Any] = dict(self.product_profile.product_geometry)
         self.safety_file = self.product_profile.safety_file
+        self.safety_logic_path = Path("cais_spade_llm/safety/cca_safety_logic.json")
         self.robot_env = self.product_profile.robot_env
         # Manual instruction text provided at runtime overrides any file read.
         self.instruction_override = self.product_profile.instruction_override
@@ -166,6 +167,9 @@ class ProductAgent(LlmAgent):
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
         self.task_states: dict[str, str] = {}
+        self._pending_task_retry_ready_ids: set[str] = set()
+        self._runtime_safety_fast_path_cache: dict[str, Any] = {}
+        self._runtime_safety_history_cache: dict[str, Any] = {}
 
         # Sensor: camera module for post-placement verification
         self.camera = camera if camera is not None else CameraModule()
@@ -252,6 +256,27 @@ class ProductAgent(LlmAgent):
     # ------------------------------------------------------------------ #
     # Persistence helper
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _fsa_task_ids(fsa: dict[str, Any] | None) -> set[str]:
+        transitions = (((fsa or {}).get("A") or {}).get("Tr") or [])
+        return {
+            str(transition.get("task_id") or "").strip()
+            for transition in transitions
+            if isinstance(transition, dict) and str(transition.get("task_id") or "").strip()
+        }
+
+    def _filter_runtime_context_completed_task_ids_for_fsa(
+        self,
+        runtime_context: dict[str, Any],
+        fsa: dict[str, Any] | None,
+    ) -> None:
+        fsa_task_ids = self._fsa_task_ids(fsa)
+        runtime_context["completed_task_ids"] = [
+            str(task_id).strip()
+            for task_id in (runtime_context.get("completed_task_ids") or [])
+            if str(task_id).strip() and str(task_id).strip() in fsa_task_ids
+        ]
+
     def _build_plan_validation_payload(
         self,
         *,
@@ -261,6 +286,7 @@ class ProductAgent(LlmAgent):
         request_id: str | None = None,
         validation_scope: str | None = None,
         composition_backend: str | None = None,
+        runtime_supervisor_mode: str | None = None,
     ):
         """Package plan + FSA for plan validation by the CCA."""
         if skip_offline_validation is not None:
@@ -275,6 +301,17 @@ class ProductAgent(LlmAgent):
             runtime_context["validation_scope"] = validation_scope
         if composition_backend:
             runtime_context["composition_backend"] = composition_backend
+        runtime_supervisor_mode = str(runtime_supervisor_mode or "reactive").strip()
+        if runtime_supervisor_mode:
+            runtime_context["runtime_supervisor_mode"] = runtime_supervisor_mode
+        if (
+            validation_scope == "active_window"
+            and composition_backend == "explicit_fsa_dfa"
+        ):
+            self._filter_runtime_context_completed_task_ids_for_fsa(
+                runtime_context,
+                fsa or {},
+            )
 
         if fsa is None and not skip_revalidation:
             raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
@@ -292,6 +329,8 @@ class ProductAgent(LlmAgent):
             payload["validation_scope"] = validation_scope
         if composition_backend:
             payload["composition_backend"] = composition_backend
+        if runtime_supervisor_mode:
+            payload["runtime_supervisor_mode"] = runtime_supervisor_mode
         recovery_safety_result = (
             self._runtime_recovery_context.get("recovery_safety_result")
             if isinstance(getattr(self, "_runtime_recovery_context", None), dict)
@@ -300,6 +339,34 @@ class ProductAgent(LlmAgent):
         if isinstance(recovery_safety_result, dict) and recovery_safety_result:
             payload["recovery_safety_result"] = deepcopy(recovery_safety_result)
         return payload
+
+    def _safety_event_history_cache_key(self) -> tuple[tuple[Any, ...], bool]:
+        timeline = list(getattr(self, "execution_timeline", []) or [])
+        last_event = timeline[-1] if timeline and isinstance(timeline[-1], dict) else {}
+        timeline_cursor = (
+            len(timeline),
+            id(last_event) if isinstance(last_event, dict) else 0,
+            str((last_event or {}).get("task_id") or ""),
+            str((last_event or {}).get("status") or ""),
+            str((last_event or {}).get("timestamp") or ""),
+        )
+
+        classifier_available = False
+        monitor_getter = getattr(self, "_runtime_safety_fast_path_monitor", None)
+        if callable(monitor_getter):
+            try:
+                classifier_available = monitor_getter() is not None
+            except Exception:
+                classifier_available = False
+
+        fast_path_cache = getattr(self, "_runtime_safety_fast_path_cache", None)
+        classifier_identity = None
+        if isinstance(fast_path_cache, dict):
+            classifier_identity = fast_path_cache.get("cache_key")
+        if classifier_identity is None:
+            classifier_identity = ("classifier_unavailable",)
+
+        return (timeline_cursor, classifier_identity, classifier_available), classifier_available
 
     def _build_runtime_plan_context(self) -> dict[str, Any]:
         completed_task_ids: list[str] = []
@@ -338,6 +405,14 @@ class ProductAgent(LlmAgent):
 
     def _build_safety_event_history(self) -> list[dict[str, Any]]:
         """Build ordered task-event history for safety DFA progress across active FSA windows."""
+        cache_key, classifier_available = self._safety_event_history_cache_key()
+        history_cache = getattr(self, "_runtime_safety_history_cache", None)
+        if not isinstance(history_cache, dict):
+            history_cache = {}
+            self._runtime_safety_history_cache = history_cache
+        if history_cache.get("cache_key") == cache_key:
+            return deepcopy(history_cache.get("history") or [])
+
         node_by_id = {
             str(node.get("id") or "").strip(): node
             for node in getattr(self.process_planner, "nodes", []) or []
@@ -345,6 +420,7 @@ class ProductAgent(LlmAgent):
         }
         history: list[dict[str, Any]] = []
         emitted: set[tuple[str, str]] = set()
+        task_history_empty: dict[str, bool] = {}
 
         def _suffix_for_status(status: str) -> str:
             normalized = str(status or "").strip().lower()
@@ -356,6 +432,47 @@ class ProductAgent(LlmAgent):
                 return "fail"
             return ""
 
+        def _task_history_is_ap_empty(task_id: str, source_event: dict[str, Any]) -> bool:
+            task_id = str(task_id or "").strip()
+            if not classifier_available or not task_id:
+                return False
+            if task_id in task_history_empty:
+                return task_history_empty[task_id]
+
+            task_node = node_by_id.get(task_id) or {}
+            params = dict(task_node.get("params") or {})
+            params.setdefault("task_id", task_id)
+            resource_jid = str(
+                task_node.get("resource_jid")
+                or source_event.get("resource_jid")
+                or ""
+            ).strip()
+            function_name = str(
+                task_node.get("function_name")
+                or source_event.get("function_name")
+                or ""
+            ).strip()
+            if resource_jid:
+                params.setdefault("resource_jid", resource_jid)
+            if function_name:
+                params.setdefault("function_name", function_name)
+
+            classifier = getattr(self, "_runtime_safety_ap_sets_for_task", None)
+            if not callable(classifier) or not resource_jid or not function_name:
+                task_history_empty[task_id] = False
+                return False
+            try:
+                ap_sets = classifier(task_node, params)
+            except Exception:
+                ap_sets = None
+            if ap_sets is None:
+                task_history_empty[task_id] = False
+                return False
+
+            empty = not ap_sets.get("candidate_aps") and not ap_sets.get("predicted_state_aps")
+            task_history_empty[task_id] = bool(empty)
+            return bool(empty)
+
         def _append(task_id: str, suffix: str, source_event: dict[str, Any]) -> None:
             task_id = str(task_id or "").strip()
             suffix = str(suffix or "").strip()
@@ -363,6 +480,7 @@ class ProductAgent(LlmAgent):
                 return
             task_node = node_by_id.get(task_id) or {}
             params = dict(task_node.get("params") or {})
+            params.setdefault("task_id", task_id)
             resource_jid = str(
                 task_node.get("resource_jid")
                 or source_event.get("resource_jid")
@@ -392,10 +510,14 @@ class ProductAgent(LlmAgent):
             suffix = _suffix_for_status(str(event.get("status") or ""))
             if not task_id or not suffix:
                 continue
+            if _task_history_is_ap_empty(task_id, event):
+                continue
             if suffix in {"done", "fail"} and (task_id, "start") not in emitted:
                 _append(task_id, "start", event)
             _append(task_id, suffix, event)
 
+        history_cache["cache_key"] = cache_key
+        history_cache["history"] = deepcopy(history)
         return history
 
 
@@ -998,6 +1120,7 @@ class ProductAgent(LlmAgent):
             request_id=request_id,
             validation_scope="active_window",
             composition_backend="explicit_fsa_dfa",
+            runtime_supervisor_mode="reactive",
         )
         msg = Message(to=self.cca_jid)
         msg.set_metadata("type", "plan_safety_check")
@@ -1538,6 +1661,23 @@ class ProductAgent(LlmAgent):
                 f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
             )
 
+            if (
+                task_node
+                and str(status).strip().lower() == "blocked"
+                and str(task_id).strip()
+                in getattr(agent, "_pending_task_retry_ready_ids", set())
+            ):
+                reactivated = agent._handle_task_retry_ready([str(task_id).strip()])
+                if reactivated:
+                    agent.logger.info(
+                        "[Product] Requeued %d blocked task(s) after delayed blocked ACK matched earlier CCA transient safety clear: %s",
+                        reactivated,
+                        str(task_id).strip(),
+                    )
+                    await asyncio.to_thread(agent._persist_plan_snapshot)
+                    await asyncio.to_thread(agent._persist_product_state)
+                    await asyncio.to_thread(agent._persist_resource_state)
+
     class _ReplanInbox(CyclicBehaviour):
         """Handle online replan requests from the CCA."""
 
@@ -1802,6 +1942,12 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
 
+            async def _maybe_commit_product_order_runtime_parts() -> bool:
+                helper = getattr(agent, "_maybe_commit_product_order_runtime_parts", None)
+                if not callable(helper):
+                    return False
+                return bool(await helper(self))
+
             async def _dispatch_task_node(task_node: dict[str, Any]) -> bool:
                 task_id = str(task_node.get("id") or "").strip()
                 planner_status = str(task_node.get("status") or "").strip().lower()
@@ -1945,15 +2091,25 @@ class ProductAgent(LlmAgent):
                                 active_bridge_sequence=next_sequence,
                             )
 
-                await send_agent_message(
-                    self,
-                    msg,
-                    transport_label="product_task",
-                )
+                if isinstance(msg, Message):
+                    await send_agent_message(
+                        self,
+                        msg,
+                        transport_label="product_task",
+                    )
+                else:
+                    await self.send(msg)
                 agent.logger.info(f"[Product] Dispatched task {task_id} -> {to} ({instruction})")
                 return is_bridge_task
 
             task_node = agent._next_dispatchable_task_node()
+            if (
+                task_node
+                and str(task_node.get("function_name") or "").strip() != "execute_recovery_macro"
+            ):
+                if await _maybe_commit_product_order_runtime_parts():
+                    await asyncio.sleep(0.01)
+                    return
             if not task_node and agent._active_bridge_blocks_nominal_dispatch():
                 agent.logger.debug(
                     "[Product] Active bridge sequence is executing; suppressing nominal DAG dispatch."
@@ -1961,16 +2117,18 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.05)
                 return
             if not task_node:
-                if await agent._maybe_commit_product_order_runtime_parts(self):
+                if await _maybe_commit_product_order_runtime_parts():
                     await asyncio.sleep(0.01)
                     return
                 await asyncio.sleep(0.05)
                 return
 
-            if await agent._rebid_product_order_pending_assignment_if_resource_unavailable(
-                task_node,
-                self,
-            ):
+            rebid_helper = getattr(
+                agent,
+                "_rebid_product_order_pending_assignment_if_resource_unavailable",
+                None,
+            )
+            if callable(rebid_helper) and await rebid_helper(task_node, self):
                 await asyncio.sleep(0.01)
                 return
 

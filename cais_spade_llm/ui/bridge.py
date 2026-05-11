@@ -6337,6 +6337,63 @@ class SystemBridge:
                 nodes.extend(pp.nodes)
         return nodes
 
+    def get_current_task_dag_nodes(self) -> list[dict[str, Any]]:
+        nodes = []
+        for pa in self.product_agents:
+            pp = getattr(pa, "process_planner", None)
+            if not pp:
+                continue
+            task_states = getattr(pa, "task_states", {})
+            if not isinstance(task_states, dict):
+                task_states = {}
+            runtime = getattr(pp, "product_order_runtime", {})
+            if (
+                isinstance(runtime, dict)
+                and runtime.get("enabled")
+            ):
+                committed_parts = {
+                    str(part or "").strip()
+                    for part in (runtime.get("committed_product_order_parts") or [])
+                    if str(part or "").strip()
+                }
+                completed_parts = {
+                    str(part or "").strip()
+                    for part in (runtime.get("completed_product_order_parts") or [])
+                    if str(part or "").strip()
+                }
+                visible_parts = committed_parts - completed_parts
+                visible_ids: set[str] = set()
+                visible_nodes: list[dict[str, Any]] = []
+                for node in getattr(pp, "nodes", []) or []:
+                    if not isinstance(node, dict) or node.get("type") != "task":
+                        continue
+                    part_name = str(node.get("product_order_part") or "").strip()
+                    if part_name not in visible_parts:
+                        continue
+                    node_id = str(node.get("id") or node.get("task_id") or "").strip()
+                    node_copy = deepcopy(node)
+                    if node_id:
+                        visible_ids.add(node_id)
+                        if node_id in task_states:
+                            node_copy["status"] = str(task_states.get(node_id) or node_copy.get("status") or "pending")
+                    visible_nodes.append(node_copy)
+                for node in visible_nodes:
+                    node["predecessors"] = [
+                        pred
+                        for pred in (node.get("predecessors") or [])
+                        if str(pred or "").strip() in visible_ids
+                    ]
+                    node["successors"] = [
+                        succ
+                        for succ in (node.get("successors") or [])
+                        if str(succ or "").strip() in visible_ids
+                    ]
+                nodes.extend(visible_nodes)
+                continue
+            if hasattr(pp, "nodes"):
+                nodes.extend(pp.nodes)
+        return nodes
+
     @staticmethod
     def _read_json_dict(path: Path) -> dict[str, Any]:
         try:

@@ -254,6 +254,81 @@ class CentralControllerAgent(LlmAgent):
         monitor = entry.get("monitor") if isinstance(entry, dict) else None
         return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
 
+    def _seed_safety_monitor_resource_states(self) -> None:
+        if not self.safety_monitor:
+            return
+        self.safety_monitor.seed_resource_states(
+            {
+                str(getattr(ra, "jid", "")): ra._snapshot_state()
+                for ra in self.resource_agents
+                if hasattr(ra, "_snapshot_state")
+            }
+        )
+
+    def _load_current_safety_cache(
+        self,
+        safety_logic: SafetyLogic,
+        safety_text: str,
+        logic_path: Path | str | None = None,
+    ) -> bool:
+        p_logic = Path(logic_path) if logic_path else self.safety_logic_path
+        if not p_logic.exists():
+            return False
+
+        try:
+            safety_logic.load(p_logic)
+            expected_hash = SafetyLogic.compute_safety_text_sha256(safety_text)
+            cached_hash = str(getattr(safety_logic, "safety_text_sha256", "") or "").strip()
+            if not cached_hash or cached_hash != expected_hash:
+                self.logger.info(
+                    "[CCA] Cached safety logic at %s is stale or missing safety_text_sha256; regenerating.",
+                    p_logic,
+                )
+                return False
+
+            safety_rules = list(safety_logic.rules or [])
+            expected_rule_ids = [
+                str(rule.get("id") or "").strip()
+                for rule in safety_rules
+                if str(rule.get("id") or "").strip()
+            ]
+            dfa_map: dict[str, str] = {}
+            for rule_id in expected_rule_ids:
+                dot_path = p_logic.parent / f"{rule_id}_dfa.dot"
+                if not dot_path.exists():
+                    self.logger.info(
+                        "[CCA] Cached safety logic at %s is missing %s; regenerating.",
+                        p_logic,
+                        dot_path.name,
+                    )
+                    return False
+                dfa_map[rule_id] = dot_path.read_text(encoding="utf-8")
+
+            safety_logic.rule_dfas = dfa_map
+            self.safety_rules = safety_rules
+            self.safety_monitor = OnlineSafetyMonitor(
+                dfa_map,
+                self.safety_rules,
+                tools_catalog=getattr(self, "tools_catalog", []),
+            )
+            self._seed_safety_monitor_resource_states()
+            self.logger.info(
+                "[CCA] Loaded cached safety logic from %s (rules=%d).",
+                p_logic,
+                len(self.safety_rules),
+            )
+            self.logger.info(
+                "[CCA] _InitCCA completed. Monitor online with %d rules.",
+                len(self.safety_rules),
+            )
+            return True
+        except Exception:
+            self.logger.exception(
+                "[CCA] Failed loading cached safety logic at %s; regenerating.",
+                p_logic,
+            )
+            return False
+
     def _register_recovery_safety_scope_result(
         self,
         result: dict[str, Any],
@@ -339,7 +414,13 @@ class CentralControllerAgent(LlmAgent):
         skip_revalidation: bool,
     ) -> str:
         supported_modes = {"preventive", "reactive", "truly_reactive"}
-        configured_mode = str(policy.get("runtime_supervisor_mode") or "").strip().lower()
+        context_mode = (
+            str((runtime_context or {}).get("runtime_supervisor_mode") or "").strip().lower()
+            if isinstance(runtime_context, dict)
+            else ""
+        )
+        policy_mode = str(policy.get("runtime_supervisor_mode") or "").strip().lower()
+        configured_mode = context_mode or policy_mode
         verified_bundle_runtime = (
             str(self.precomputed_bundle.get("status", "")).strip().lower() == "verified"
         )
@@ -354,11 +435,7 @@ class CentralControllerAgent(LlmAgent):
         if prior_mode not in supported_modes:
             prior_mode = ""
 
-        fallback_mode = (
-            prior_mode
-            if runtime_validation and prior_mode
-            else ("reactive" if skip_revalidation else "preventive")
-        )
+        fallback_mode = prior_mode if runtime_validation and prior_mode else "reactive"
 
         if configured_mode in supported_modes:
             supervisor_mode = configured_mode
@@ -1713,13 +1790,7 @@ class CentralControllerAgent(LlmAgent):
                             agent.safety_rules,
                             tools_catalog=getattr(agent, "tools_catalog", []),
                         )
-                        agent.safety_monitor.seed_resource_states(
-                            {
-                                str(getattr(ra, "jid", "")): ra._snapshot_state()
-                                for ra in agent.resource_agents
-                                if hasattr(ra, "_snapshot_state")
-                            }
-                        )
+                        agent._seed_safety_monitor_resource_states()
                         agent.logger.info(
                             "[Bundle] Using precomputed safety bundle_id=%s path=%s rules=%d",
                             bundle.get("bundle_id", ""),
@@ -1746,6 +1817,13 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.warning("[CCA] No NL safety text.")
                 return
 
+            if await asyncio.to_thread(
+                agent._load_current_safety_cache,
+                safety_logic,
+                safety_text,
+            ):
+                return
+
             await safety_logic.build_safety_rules_and_logic(safety_text)
             await asyncio.to_thread(safety_logic.save, agent.safety_logic_path)
 
@@ -1759,13 +1837,7 @@ class CentralControllerAgent(LlmAgent):
                 agent.safety_rules,
                 tools_catalog=getattr(agent, "tools_catalog", []),
             )
-            agent.safety_monitor.seed_resource_states(
-                {
-                    str(getattr(ra, "jid", "")): ra._snapshot_state()
-                    for ra in agent.resource_agents
-                    if hasattr(ra, "_snapshot_state")
-                }
-            )
+            agent._seed_safety_monitor_resource_states()
 
             agent.logger.info(
                 "[CCA] _InitCCA completed. Monitor online with %d rules.",
@@ -1803,12 +1875,19 @@ class CentralControllerAgent(LlmAgent):
                     or (runtime_context.get("composition_backend") if isinstance(runtime_context, dict) else "")
                     or ""
                 ).strip()
-                if validation_scope or composition_backend:
+                runtime_supervisor_mode = str(
+                    data.get("runtime_supervisor_mode")
+                    or (runtime_context.get("runtime_supervisor_mode") if isinstance(runtime_context, dict) else "")
+                    or ""
+                ).strip().lower()
+                if validation_scope or composition_backend or runtime_supervisor_mode:
                     runtime_context = dict(runtime_context) if isinstance(runtime_context, dict) else {}
                     if validation_scope:
                         runtime_context["validation_scope"] = validation_scope
                     if composition_backend:
                         runtime_context["composition_backend"] = composition_backend
+                    if runtime_supervisor_mode:
+                        runtime_context["runtime_supervisor_mode"] = runtime_supervisor_mode
                 skip_revalidation = bool(
                     data.get("skip_revalidation", data.get("skip_offline_validation", False))
                 )
@@ -1842,15 +1921,30 @@ class CentralControllerAgent(LlmAgent):
                     )
 
             prior_plan_fsa_monitor = agent.plan_fsa_monitor
+            active_window_explicit_fsa = (
+                validation_scope == "active_window"
+                and composition_backend == "explicit_fsa_dfa"
+            )
+            validation_runtime_context = (
+                dict(runtime_context) if isinstance(runtime_context, dict) else {}
+            )
 
             # Reuse the live runtime monitor when the validated FSA is unchanged.
             if prior_plan_fsa_monitor and prior_plan_fsa_monitor.matches_fsa(fsa):
                 plan_fsa_monitor = prior_plan_fsa_monitor
+                if active_window_explicit_fsa:
+                    plan_fsa_monitor.completed_task_ids = set(
+                        plan_fsa_monitor.filter_task_ids(
+                            list(plan_fsa_monitor.completed_task_ids)
+                        )
+                    )
             else:
                 plan_fsa_monitor = OnlineFsaMonitor(fsa)
-                restored_from_live_state = plan_fsa_monitor.restore_from_prior_monitor(
-                    prior_plan_fsa_monitor
-                )
+                restored_from_live_state = False
+                if not active_window_explicit_fsa:
+                    restored_from_live_state = plan_fsa_monitor.restore_from_prior_monitor(
+                        prior_plan_fsa_monitor
+                    )
                 if restored_from_live_state:
                     prior_progress = plan_fsa_monitor.runtime_progress_snapshot()
                     agent.logger.info(
@@ -1861,27 +1955,31 @@ class CentralControllerAgent(LlmAgent):
                         len(prior_progress.get("running_task_ids") or []),
                         len(prior_progress.get("failed_task_ids") or []),
                     )
-                elif isinstance(runtime_context, dict):
+                else:
                     completed_task_ids = [
                         str(task_id).strip()
-                        for task_id in (runtime_context.get("completed_task_ids") or [])
+                        for task_id in (validation_runtime_context.get("completed_task_ids") or [])
                         if str(task_id).strip()
                     ]
+                    if active_window_explicit_fsa:
+                        completed_task_ids = plan_fsa_monitor.filter_task_ids(completed_task_ids)
                     seen_completed = set(completed_task_ids)
                     running_task_ids = [
                         str(task_id).strip()
-                        for task_id in (runtime_context.get("running_task_ids") or [])
+                        for task_id in (validation_runtime_context.get("running_task_ids") or [])
                         if str(task_id).strip()
                     ]
                     failed_task_ids = [
                         str(task_id).strip()
-                        for task_id in (runtime_context.get("failed_task_ids") or [])
+                        for task_id in (validation_runtime_context.get("failed_task_ids") or [])
                         if str(task_id).strip()
                     ]
                     if prior_plan_fsa_monitor:
                         prior_progress = prior_plan_fsa_monitor.runtime_progress_snapshot()
                         for task_id in prior_progress.get("completed_task_ids") or []:
                             task_id = str(task_id).strip()
+                            if active_window_explicit_fsa and not plan_fsa_monitor.filter_task_ids([task_id]):
+                                continue
                             if task_id and task_id not in seen_completed:
                                 completed_task_ids.append(task_id)
                                 seen_completed.add(task_id)
@@ -1903,12 +2001,21 @@ class CentralControllerAgent(LlmAgent):
                                 ]
                             )
                         )
+                    validation_runtime_context["completed_task_ids"] = completed_task_ids
+                    validation_runtime_context["running_task_ids"] = running_task_ids
+                    validation_runtime_context["failed_task_ids"] = failed_task_ids
                     plan_fsa_monitor.restore_runtime_progress(
                         completed_task_ids=completed_task_ids,
                         running_task_ids=running_task_ids,
                         failed_task_ids=failed_task_ids,
                     )
             agent.plan_fsa_monitor = plan_fsa_monitor
+            if active_window_explicit_fsa:
+                validation_runtime_context["completed_task_ids"] = (
+                    plan_fsa_monitor.filter_task_ids(
+                        validation_runtime_context.get("completed_task_ids") or []
+                    )
+                )
 
             # Delegate to the plan validator. A verified zero-rule bundle is
             # still "ready" even though its DFA map is empty.
@@ -1918,6 +2025,12 @@ class CentralControllerAgent(LlmAgent):
                     dfa_map=dict(agent.safety_logic.rule_dfas),
                     tools_catalog=getattr(agent, "tools_catalog", []),
                 )
+                diagnostic_only_active_window = False
+                requested_mode = str(
+                    validation_runtime_context.get("runtime_supervisor_mode")
+                    or agent.runtime_supervisor_mode
+                    or ""
+                ).strip().lower()
 
                 if skip_revalidation:
                     ok, violations = True, []
@@ -1933,14 +2046,30 @@ class CentralControllerAgent(LlmAgent):
                         fsa=fsa,
                         plan=plan,
                         product_jid=product_jid,
-                        runtime_context=runtime_context,
+                        runtime_context=validation_runtime_context,
                     )
+                    if (
+                        not ok
+                        and requested_mode in {"reactive", "truly_reactive"}
+                    ):
+                        diagnostic_only_active_window = True
+                        violations = [
+                            {**dict(violation), "diagnostic_only": True}
+                            for violation in violations
+                            if isinstance(violation, dict)
+                        ]
+                        agent.logger.warning(
+                            "[CCA] Plan FSA Validation: active_window violations are diagnostic only under runtime_supervisor_mode=%s request_id=%s",
+                            requested_mode,
+                            request_id or "<none>",
+                        )
+                        ok = True
                 else:
                     ok, violations = validator.validate_plan_fsa(
                         fsa=fsa,
                         plan=plan,
                         product_jid=product_jid,
-                        runtime_context=runtime_context,
+                        runtime_context=validation_runtime_context,
                     )
                     if skip_recovery_safety_validation:
                         violations, suppressed_count = (
@@ -1955,13 +2084,29 @@ class CentralControllerAgent(LlmAgent):
                                 "[CCA] Plan FSA Validation: suppressed %d recovery-involved witness(es); normal CCA validation remains active.",
                                 suppressed_count,
                             )
+                    if (
+                        not ok
+                        and requested_mode in {"reactive", "truly_reactive"}
+                    ):
+                        diagnostic_only_active_window = True
+                        violations = [
+                            {**dict(violation), "diagnostic_only": True}
+                            for violation in violations
+                            if isinstance(violation, dict)
+                        ]
+                        agent.logger.warning(
+                            "[CCA] Plan FSA Validation: violations are diagnostic only under runtime_supervisor_mode=%s request_id=%s",
+                            requested_mode,
+                            request_id or "<none>",
+                        )
+                        ok = True
                 try:
                     agent._initialize_online_supervisor(
                         validator=validator,
                         fsa=fsa,
                         plan=plan,
                         plan_fsa_monitor=plan_fsa_monitor,
-                        runtime_context=runtime_context,
+                        runtime_context=validation_runtime_context,
                         skip_revalidation=skip_revalidation,
                     )
                 except Exception:
@@ -1976,6 +2121,7 @@ class CentralControllerAgent(LlmAgent):
                     agent.logger.warning("[CCA] Safety logic not ready after waiting; skipping validation.")
                 ok, violations = True, []
                 agent.online_supervisor = None
+                diagnostic_only_active_window = False
 
             # ---- NEW: log summary + details ----
             violated_rules = sorted({v.get("violated_rule_id") for v in violations if v.get("violated_rule_id")})
@@ -1986,9 +2132,12 @@ class CentralControllerAgent(LlmAgent):
                     agent.runtime_supervisor_mode,
                 )
             else:
+                summary_status = "OK diagnostic_only" if diagnostic_only_active_window else ("OK" if ok else "FAIL")
+                rule_count_label = "Diagnostic rules" if diagnostic_only_active_window else "Violated rules"
                 agent.logger.info(
-                    "[CCA] Plan FSA Validation: %s (Violated rules: %d, Witnesses: %d) product=%s supervisor_mode=%s",
-                    "OK" if ok else "FAIL",
+                    "[CCA] Plan FSA Validation: %s (%s: %d, Witnesses: %d) product=%s supervisor_mode=%s",
+                    summary_status,
+                    rule_count_label,
                     len(violated_rules),
                     len(violations),
                     product_jid,
@@ -2040,6 +2189,7 @@ class CentralControllerAgent(LlmAgent):
                     "ok": ok,
                     "violations": violations,
                     "request_id": request_id,
+                    "diagnostic_only": bool(diagnostic_only_active_window),
                 })
                 await send_agent_message(
                     self,

@@ -1018,16 +1018,23 @@ def render(bridge: SystemBridge) -> None:
             return []
 
         def _preview_or_runtime_task_states(nodes: list[dict]) -> dict[str, str]:
-            task_states = bridge.get_task_states()
-            if task_states:
-                return task_states
             fallback: dict[str, str] = {}
             for node in nodes:
                 tid = str(node.get("id") or node.get("task_id") or "").strip()
                 if not tid:
                     continue
                 fallback[tid] = str(node.get("status", "pending") or "pending")
+            task_states = bridge.get_task_states()
+            if task_states:
+                for tid in list(fallback):
+                    if tid in task_states:
+                        fallback[tid] = str(task_states.get(tid) or fallback[tid])
             return fallback
+
+        def _current_task_dag_nodes() -> list[dict]:
+            if hasattr(bridge, "get_current_task_dag_nodes"):
+                return bridge.get_current_task_dag_nodes()
+            return _preview_or_runtime_nodes()
 
         # ── Task DAG ────────────────────────────────────────────────
         with ui.card().classes("w-full"):
@@ -1035,13 +1042,27 @@ def render(bridge: SystemBridge) -> None:
             mermaid = ui.mermaid("graph TD\n    empty[No plan loaded]").classes("w-full")
 
             def _refresh_dag():
-                nodes = _preview_or_runtime_nodes()
-                task_states = _preview_or_runtime_task_states(nodes)
+                nodes = _current_task_dag_nodes()
+                if not nodes:
+                    mermaid.content = "graph LR\n    empty[No current operations]"
+                    mermaid.update()
+                    return
+                visible_ids = {
+                    str(node.get("id") or node.get("task_id") or "").strip()
+                    for node in nodes
+                    if str(node.get("id") or node.get("task_id") or "").strip()
+                }
+                task_states = {
+                    task_id: status
+                    for task_id, status in _preview_or_runtime_task_states(nodes).items()
+                    if task_id in visible_ids
+                }
                 mermaid.content = nodes_to_mermaid(nodes, task_states)
+                mermaid.update()
 
             refresh_dag_now = _refresh_dag
             _refresh_dag()
-            _managed_timer(2.0, _refresh_dag)
+            _managed_timer(0.5, _refresh_dag)
 
         # ── Live Robot Status ───────────────────────────────────────
         with ui.card().classes("w-full"):

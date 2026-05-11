@@ -3465,6 +3465,55 @@ def test_case3_plan_executor_prefers_next_dispatchable_task_node_over_global_bri
     assert str(fake_agent.task_states.get("REQ_2_T5") or "").strip() == "dispatched"
 
 
+def test_case3_plan_executor_commits_product_order_parts_before_more_nominal_dispatch() -> None:
+    sent_messages: list[dict[str, Any]] = []
+    nominal_node = {
+        "id": "REQ_4_T2",
+        "status": "pending",
+        "function_name": "pick_grasp",
+        "resource_jid": "xarm6@localhost",
+        "params": {"part_name": "LCP"},
+    }
+
+    class FakeAgent(SimpleNamespace):
+        commit_calls = 0
+
+        async def _maybe_commit_product_order_runtime_parts(self, behaviour: Any) -> bool:
+            del behaviour
+            self.commit_calls += 1
+            return True
+
+    fake_agent = FakeAgent(
+        resource_jids=["xarm6@localhost", "ur5e@localhost"],
+        logger=logging.getLogger("case3_bridge_dryrun"),
+        task_states={},
+        runtime_recovery={},
+        _runtime_recovery_blocks_execution=lambda: False,
+        _next_dispatchable_task_node=lambda: nominal_node,
+        _active_bridge_blocks_nominal_dispatch=lambda: False,
+        _active_bridge_sequence=lambda: None,
+        _reconstruct_active_bridge_sequence_for_validation=lambda: None,
+        _bridge_sequence_task_ids=lambda ids: list(ids or []),
+        _set_runtime_recovery=lambda **kwargs: None,
+        _compose_task_msg=lambda **kwargs: dict(kwargs),
+        _dispatch_params_for_task_node=lambda task_node: dict(task_node.get("params") or {}),
+    )
+    executor = ProductAgent._PlanExecutor()
+    executor.agent = fake_agent  # type: ignore[attr-defined]
+
+    async def _fake_send(msg: dict[str, Any]) -> None:
+        sent_messages.append(dict(msg))
+
+    executor.send = _fake_send  # type: ignore[method-assign]
+
+    asyncio.run(executor.run())
+
+    assert fake_agent.commit_calls == 1
+    assert sent_messages == []
+    assert str(nominal_node.get("status") or "").strip() == "pending"
+    assert "REQ_4_T2" not in fake_agent.task_states
+
+
 def test_case3_plan_executor_dispatch_guard_allows_different_resource_active_task() -> None:
     sent_messages: list[dict[str, Any]] = []
     nominal_node = {

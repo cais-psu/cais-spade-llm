@@ -1,4 +1,49 @@
 {
   "preview_interpretation_summary": "",
-  "rules": []
+  "safety_text_sha256": "2aa3f3c034e0ed915213b76967d08967500b45cca208adc8970c53cccd368e32",
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "ur5e and xarm6 must not be in the assembly board destination area at the same time.",
+      "constraint_type": "mutual_exclusion_in_destination_area",
+      "process": "assembly",
+      "product": [],
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "resource_types": [],
+      "event": null,
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap004",
+          "full": "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap003",
+          "full": "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/assembly/any/xarm6/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/assembly/any/xarm6/placed/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "G (!(((ap001 | ap004 | ap003) & (ap002 | ap006 | ap005))))"
+    }
+  ]
 }

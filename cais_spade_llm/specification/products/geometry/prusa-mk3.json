@@ -43,6 +43,11 @@
         "MCP": 0.08,
         "LCP": 0.1
       }
+    },
+    "target_reference": {
+      "source": "gazebo_model_spawn_pose",
+      "target_point": "part_origin",
+      "surface_role": "support_surface"
     }
   },
   "real": {
@@ -89,6 +94,11 @@
         "MCP": 0.08,
         "LCP": 0.1
       }
+    },
+    "target_reference": {
+      "source": "gazebo_model_spawn_pose",
+      "target_point": "part_origin",
+      "surface_role": "support_surface"
     }
   }
 }

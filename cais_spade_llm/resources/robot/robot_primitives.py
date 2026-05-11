@@ -1244,6 +1244,11 @@ def _preview_place_targets_output(
     else:
         place_gap = -0.0125
         place_part_origin_z = board_top_z + (part_height * 0.5) + place_gap
+        if str(target_reference.get("target_point") or "").strip() == "inserted_part_origin":
+            place_part_origin_z = max(
+                place_part_origin_z,
+                board_top_z + (part_height * 0.5),
+            )
     place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
     place_z = place_tcp_z - tcp_offset_z + float(params.get("z_adjustment_m", 0.0) or 0.0)
     return {
@@ -1707,7 +1712,7 @@ def _primitive_allows_start_state(
     return True
 
 
-def _home_steps(compiler: Any, *, resource_jid: str, speed: float = 0.8) -> list[dict[str, Any]]:
+def _home_steps(compiler: Any, *, resource_jid: str, speed: float = 0.25) -> list[dict[str, Any]]:
     if _named_pose_available(compiler, resource_jid=resource_jid, pose_name="home"):
         return [{"primitive": "move_to_named_pose", "params": {"pose_name": "home", "speed": speed}}]
     return []
@@ -1802,7 +1807,7 @@ def _compile_clear_macro(
                     "x": _bridge_event_fact_ref(compiler, "current_pose.pose.x"),
                     "y": _bridge_event_fact_ref(compiler, "current_pose.pose.y"),
                     "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
-                    "speed": 0.8,
+                    "speed": 0.45,
                 },
             },
         ]
@@ -1866,7 +1871,7 @@ def _compile_pick_macro(
                     "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
                     "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
                     "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
-                    "speed": 1.2,
+                    "speed": 0.45,
                 },
             },
             {
@@ -1876,7 +1881,7 @@ def _compile_pick_macro(
                     "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
                     "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
-                    "speed": 0.8,
+                    "speed": 0.45,
                 },
             },
             {"primitive": "close_gripper", "params": {}},
@@ -1887,7 +1892,7 @@ def _compile_pick_macro(
                     "part_name": part_name,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8}},
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45}},
         ],
     }
 
@@ -1929,7 +1934,7 @@ def _compile_release_macro(
         },
         "primitive_steps": [
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": -0.03, "speed": 0.6}},
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": -0.03, "speed": 0.45}},
             {"primitive": "open_gripper", "params": {}},
             {
                 "primitive": "detach_part",
@@ -1938,8 +1943,8 @@ def _compile_release_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.8}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.8),
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
+        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -1986,7 +1991,7 @@ def _compile_place_macro(
                     "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
                     "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
                     "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
-                    "speed": 1.2,
+                    "speed": 0.45,
                 },
             },
             {
@@ -1996,7 +2001,7 @@ def _compile_place_macro(
                     "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
                     "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
-                    "speed": 0.8,
+                    "speed": 0.45,
                 },
             },
             {"primitive": "open_gripper", "params": {}},
@@ -2007,8 +2012,8 @@ def _compile_place_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.8),
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
+        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -2056,7 +2061,7 @@ def _compile_pick_place_macro(
                     "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
                     "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
                     "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
-                    "speed": 1.2,
+                    "speed": 0.45,
                 },
             },
             {
@@ -2066,7 +2071,7 @@ def _compile_pick_place_macro(
                     "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
                     "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
-                    "speed": 0.8,
+                    "speed": 0.45,
                 },
             },
             {"primitive": "close_gripper", "params": {}},
@@ -2077,7 +2082,7 @@ def _compile_pick_place_macro(
                     "part_name": part_name,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.8}},
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45}},
             {"primitive": "get_current_pose", "params": {}},
             {"primitive": "compute_place_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
             {
@@ -2086,7 +2091,7 @@ def _compile_pick_place_macro(
                     "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
                     "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
                     "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
-                    "speed": 1.2,
+                    "speed": 0.45,
                 },
             },
             {
@@ -2096,7 +2101,7 @@ def _compile_pick_place_macro(
                     "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
                     "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
-                    "speed": 0.8,
+                    "speed": 0.45,
                 },
             },
             {"primitive": "open_gripper", "params": {}},
@@ -2107,8 +2112,8 @@ def _compile_pick_place_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 1.0}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.8),
+            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
+        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 

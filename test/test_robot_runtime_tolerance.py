@@ -3,7 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from cais_spade_llm.resources.robot.robot_tasks import execute_robot_task
+import pytest
+
+from cais_spade_llm.resources.robot.robot_primitives import _preview_place_targets_output
+from cais_spade_llm.resources.robot.robot_tasks import (
+    execute_robot_task,
+    robot_task_capability_decompositions,
+)
 from cais_spade_llm.resources.robot.ros2_pick_place_controller import Ros2PickPlaceController
 
 
@@ -101,10 +107,148 @@ def test_simulation_place_insert_completes_after_release_when_lift_soft_fails():
         "snap_part_to_slot",
         "move_relative",
     ]
+    assert agent.calls[1][1]["model_name"] == "gear_medium"
+    assert agent.calls[1][1]["slot_x"] == 0.0
+    assert agent.calls[1][1]["slot_y"] == 0.08
+    assert agent.calls[1][1]["part_origin_z"] == 1.0325
     assert agent._held_part is None
     assert agent._current_state == "placed"
     assert agent._gripper_state == "open"
     assert agent._task_ctx == {}
+
+
+def test_compute_place_targets_clamps_inserted_mg_origin_to_visible_slot_height():
+    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller.execution_mode = "simulation"
+    controller.place_surface_gap_m = -0.01
+    controller.insertion_depth_m = 0.0025
+    controller.pick_tcp_z_bias_min_m = 0.003
+    controller.pick_tcp_z_bias_max_m = 0.02
+    controller.wait_for_services = lambda: True
+    controller._get_ee_tcp_world_z_offset = lambda: -0.218
+
+    result = controller.compute_place_targets(
+        pick_ctx={
+            "part_name": "MG",
+            "model_name": "gear_medium",
+            "pick_tcp_z": 1.076,
+            "tz": 1.474,
+            "tcp_offset_z": -0.218,
+        },
+        product_geometry={
+            "slot_xy": [0.0, 0.08],
+            "part_height_m": 0.015,
+            "model_name": "gear_medium",
+            "slot_floor_z_m": 1.025,
+            "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+            "target_reference": {
+                "source": "slot_geometry",
+                "target_point": "inserted_part_origin",
+                "surface_role": "assembly_slot",
+            },
+        },
+        part_name="MG",
+        destination_location="assembly_board-v1",
+    )
+
+    assert result["success"] is True
+    assert result["slot_x"] == 0.0
+    assert result["slot_y"] == 0.08
+    assert result["place_part_origin_z"] == pytest.approx(1.0325)
+
+
+def test_move_to_named_pose_uses_configured_named_pose_duration():
+    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller.named_positions = {"home": [0.0, 0.1, 0.2]}
+    controller.named_pose_duration_sec = 2.0
+    controller.trajectory_time_scale = 0.8
+    controller._arm_pub = object()
+    controller._exec_client = None
+    controller.wait_for_services = lambda: True
+
+    durations: list[float] = []
+
+    def _publish(positions, *, duration_sec, tolerance_rad=0.08):
+        durations.append(float(duration_sec))
+        return True
+
+    controller._publish_arm_joint_trajectory_and_wait = _publish
+
+    result = controller.move_to_named_pose("home", speed=0.8)
+
+    assert result["success"] is True
+    assert durations == [pytest.approx(1.6)]
+
+
+def test_move_home_uses_configured_home_duration():
+    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller.named_positions = {"home": [0.0, 0.1, 0.2]}
+    controller.move_home_duration_sec = 2.0
+    controller.trajectory_time_scale = 0.8
+    controller._arm_pub = object()
+    controller._exec_client = None
+    controller._JointTrajectory = None
+    controller._last_start_pose = object()
+    controller.wait_for_services = lambda: True
+    controller._get_arm_joint_positions = lambda timeout_sec=0.0: ([1.0, 1.0, 1.0], [])
+
+    durations: list[float] = []
+
+    def _publish(positions, *, duration_sec, tolerance_rad=0.08):
+        durations.append(float(duration_sec))
+        return True
+
+    controller._publish_arm_joint_trajectory_and_wait = _publish
+
+    result = controller.move_home(speed=0.5)
+
+    assert result["success"] is True
+    assert durations == [pytest.approx(1.0)]
+    assert controller._last_start_pose is None
+
+
+def test_move_home_capability_uses_faster_home_speed():
+    decomposition = robot_task_capability_decompositions(function_name="move_home")
+    steps = list(decomposition.get("bridge_visible_steps") or [])
+
+    assert steps
+    assert steps[0]["primitive"] == "move_to_named_pose"
+    assert steps[0]["params"]["speed"] == pytest.approx(0.25)
+
+
+def test_preview_place_targets_clamps_inserted_mg_origin_to_visible_slot_height():
+    result, error = _preview_place_targets_output(
+        {
+            "part_name": "MG",
+            "product_geometry": {
+                "slot_xy": [0.0, 0.08],
+                "part_height_m": 0.015,
+                "model_name": "gear_medium",
+                "slot_floor_z_m": 1.025,
+                "board_center": {"x": 0.0, "y": 0.0, "z": 1.02},
+                "target_reference": {
+                    "source": "slot_geometry",
+                    "target_point": "inserted_part_origin",
+                    "surface_role": "assembly_slot",
+                },
+            },
+            "pick_ctx": {
+                "part_name": "MG",
+                "model_name": "gear_medium",
+                "pick_tcp_z": 1.076,
+                "tz": 1.474,
+                "tcp_offset_z": -0.218,
+            },
+            "destination_location": "assembly_board-v1",
+        },
+        {},
+        {},
+    )
+
+    assert error is None
+    assert result["slot_x"] == 0.0
+    assert result["slot_y"] == 0.08
+    assert result["place_part_origin_z"] == pytest.approx(1.0325)
 
 
 def test_physical_place_insert_still_fails_when_lift_fails():

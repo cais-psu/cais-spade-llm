@@ -69,6 +69,14 @@ class OnlineFsaMonitor:
             "failed_task_ids": sorted(str(task_id) for task_id in self.failed_task_ids),
         }
 
+    def filter_task_ids(self, task_ids: List[str] | None) -> List[str]:
+        """Keep task ids that still exist in this FSA."""
+        return [
+            str(task_id).strip()
+            for task_id in (task_ids or [])
+            if str(task_id).strip() and str(task_id).strip() in self._all_task_ids
+        ]
+
     def restore_from_prior_monitor(self, prior_monitor: "OnlineFsaMonitor" | None) -> bool:
         """Carry over live runtime state from *prior_monitor* when the state still exists."""
         if prior_monitor is None or not self.has_state(prior_monitor.current_state):

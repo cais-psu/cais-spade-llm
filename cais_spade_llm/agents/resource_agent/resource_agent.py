@@ -707,6 +707,7 @@ class ResourceAgent(LlmAgent):
                     fn_name,
                 )
                 agent._safety_decisions[task_id] = "allow"
+                await self._ack(msg, task_id=task_id, status="running")
                 try:
                     running_msg = Message(to=agent.cca_jid)
                     running_msg.set_metadata("type", "resource_event")

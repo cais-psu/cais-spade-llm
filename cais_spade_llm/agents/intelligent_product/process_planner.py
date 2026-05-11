@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict, deque
 from copy import deepcopy
 from pathlib import Path
@@ -26,6 +27,8 @@ from cais_spade_llm.product.order import (
     part_place_geometry,
     validate_product_order,
 )
+from cais_spade_llm.product.profile import ProductProfile
+
 
 class ProcessPlanner(LlmBridgeReplannerMixin):
     """
@@ -127,16 +130,44 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         }
         ready: list[str] = []
         for part_name in pending:
-            predecessors = [
-                str(constraint.get("before") or "").strip()
-                for constraint in (runtime.get("ordering_constraints") or [])
-                if isinstance(constraint, dict)
-                and constraint.get("type") == "place_before"
-                and str(constraint.get("after") or "").strip() == part_name
-            ]
-            if all(before in completed for before in predecessors if before):
+            if not self._product_order_unmet_place_before_parts(
+                runtime,
+                part_name,
+                completed_parts=completed,
+            ):
                 ready.append(part_name)
         return ready
+
+    def _product_order_unmet_place_before_parts(
+        self,
+        runtime: dict[str, Any],
+        part_name: str,
+        *,
+        completed_parts: set[str] | None = None,
+    ) -> list[str]:
+        """Return unfinished place_before predecessor parts for one selected part."""
+        part_name = str(part_name or "").strip()
+        if not part_name:
+            return []
+        completed = (
+            set(completed_parts)
+            if completed_parts is not None
+            else {
+                str(part or "").strip()
+                for part in (runtime.get("completed_product_order_parts") or [])
+                if str(part or "").strip()
+            }
+        )
+        unmet: list[str] = []
+        for constraint in (runtime.get("ordering_constraints") or []):
+            if not isinstance(constraint, dict) or constraint.get("type") != "place_before":
+                continue
+            if str(constraint.get("after") or "").strip() != part_name:
+                continue
+            before = str(constraint.get("before") or "").strip()
+            if before and before not in completed:
+                unmet.append(before)
+        return list(dict.fromkeys(unmet))
 
     def commit_product_order_part(
         self,
@@ -153,10 +184,18 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         part_name = str(part_name or "").strip()
         if not part_name:
             raise ValueError("product-order part name is required")
+        self._refresh_completed_product_order_parts_from_nodes()
+        runtime = self.product_order_runtime if isinstance(self.product_order_runtime, dict) else {}
         if part_name not in set(runtime.get("pending_product_order_parts") or []):
             raise ValueError(f"product-order part {part_name} is not pending")
         if part_name in set(runtime.get("committed_product_order_parts") or []):
             raise ValueError(f"product-order part {part_name} is already committed")
+        unmet_place_before = self._product_order_unmet_place_before_parts(runtime, part_name)
+        if unmet_place_before:
+            raise ValueError(
+                f"product-order part {part_name} is not ready; unmet place_before predecessor(s): "
+                f"{', '.join(unmet_place_before)}"
+            )
 
         destination_location = str(runtime.get("destination_location") or "").strip()
         product_jid = str(runtime.get("product_jid") or "").strip()
@@ -813,6 +852,149 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 return state
         return completed_states[-1] if completed_states else ""
 
+    def _product_order_source_pose(
+        self,
+        *,
+        part_name: str,
+        source_location: str,
+    ) -> tuple[dict[str, float], str]:
+        robot_env = str(getattr(self.product_agent, "robot_env", "") or "").strip().lower()
+        execution_mode = "physical" if robot_env == "real" else "simulation"
+        geometry = ProductProfile.resolve_place_geometry(
+            part_name=str(part_name or "").strip(),
+            destination_location=str(source_location or "").strip(),
+            product_geometry={},
+            execution_mode=execution_mode,
+        )
+
+        target_origin_pose = dict(geometry.get("target_origin_pose") or {})
+        if {"x", "y", "z"} <= set(target_origin_pose.keys()):
+            x = self._product_order_float(target_origin_pose.get("x"))
+            y = self._product_order_float(target_origin_pose.get("y"))
+            z = self._product_order_float(target_origin_pose.get("z"))
+            if x is not None and y is not None and z is not None:
+                return {"x": x, "y": y, "z": z}, ""
+
+        board_center = dict(geometry.get("board_center") or {})
+        slot_xy = geometry.get("slot_xy")
+        if isinstance(slot_xy, (list, tuple)) and len(slot_xy) >= 2:
+            center_x = self._product_order_float(board_center.get("x"))
+            center_y = self._product_order_float(board_center.get("y"))
+            slot_x = self._product_order_float(slot_xy[0])
+            slot_y = self._product_order_float(slot_xy[1])
+            slot_floor_z = self._product_order_float(geometry.get("slot_floor_z_m"))
+            part_height = self._product_order_float(geometry.get("part_height_m")) or 0.0
+            if center_x is not None and center_y is not None and slot_x is not None and slot_y is not None and slot_floor_z is not None:
+                return {
+                    "x": center_x + slot_x,
+                    "y": center_y + slot_y,
+                    "z": slot_floor_z + (max(0.0, part_height) * 0.5),
+                }, ""
+
+        return {}, f"source pose unavailable for {part_name} at {source_location}"
+
+    @staticmethod
+    def _product_order_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _product_order_source_anchor_violations(
+        self,
+        *,
+        source_location: str,
+        source_pose: dict[str, Any],
+        staging_areas: dict[str, Any],
+    ) -> list[str]:
+        pose_x = self._product_order_float(source_pose.get("x"))
+        pose_y = self._product_order_float(source_pose.get("y"))
+        if pose_x is None or pose_y is None or not isinstance(staging_areas, dict):
+            return []
+
+        distances: dict[str, float] = {}
+        for location, metadata in staging_areas.items():
+            token = str(location or "").strip()
+            if not token or not isinstance(metadata, dict):
+                continue
+            anchor = dict(metadata.get("anchor_pose") or metadata.get("board_center") or {})
+            anchor_x = self._product_order_float(anchor.get("x"))
+            anchor_y = self._product_order_float(anchor.get("y"))
+            if anchor_x is None or anchor_y is None:
+                continue
+            distances[token] = math.hypot(pose_x - anchor_x, pose_y - anchor_y)
+
+        if len(distances) < 2:
+            return []
+        source_token = str(source_location or "").strip()
+        source_distance = distances.get(source_token)
+        if source_distance is None:
+            return []
+        nearest_distance = min(distances.values())
+        tolerance = 1e-6
+        if source_distance <= nearest_distance + tolerance:
+            return []
+        nearest_locations = [
+            token
+            for token, distance in distances.items()
+            if distance <= nearest_distance + tolerance
+        ]
+        nearest_text = ",".join(sorted(nearest_locations))
+        return [
+            f"source_location={source_token} distance_m={source_distance:.4f} "
+            f"is not nearest staging_area={nearest_text} distance_m={nearest_distance:.4f}"
+        ]
+
+    def _product_order_pose_in_gripper_reach(
+        self,
+        *,
+        pose: dict[str, Any],
+        gripper_reach: dict[str, Any],
+    ) -> tuple[bool, list[str], dict[str, Any]]:
+        if not isinstance(gripper_reach, dict) or not gripper_reach:
+            return False, ["gripper_reach metadata unavailable"], {}
+
+        frame = str(gripper_reach.get("frame") or "world").strip()
+        if frame != "world":
+            return False, [f"unsupported gripper_reach frame={frame}"], {"frame": frame}
+
+        origin_pose = dict(gripper_reach.get("origin_pose") or {})
+        origin_x = self._product_order_float(origin_pose.get("x"))
+        origin_y = self._product_order_float(origin_pose.get("y"))
+        max_xy_radius = self._product_order_float(gripper_reach.get("max_xy_radius_m"))
+        pose_x = self._product_order_float(pose.get("x"))
+        pose_y = self._product_order_float(pose.get("y"))
+        if origin_x is None or origin_y is None:
+            return False, ["gripper_reach.origin_pose x/y unavailable"], {}
+        if max_xy_radius is None:
+            return False, ["gripper_reach.max_xy_radius_m unavailable"], {}
+        if pose_x is None or pose_y is None:
+            return False, ["source pose x/y unavailable"], {}
+
+        distance_xy = math.hypot(pose_x - origin_x, pose_y - origin_y)
+        evidence = {
+            "origin_pose": {"x": origin_x, "y": origin_y},
+            "distance_xy_m": distance_xy,
+            "max_xy_radius_m": max_xy_radius,
+        }
+        violations: list[str] = []
+        tolerance = self._product_order_float(gripper_reach.get("tolerance_m")) or 0.0
+        if distance_xy > max_xy_radius + tolerance:
+            violations.append(
+                f"distance_xy_m={distance_xy:.4f} > max_xy_radius_m={max_xy_radius:.4f}"
+            )
+
+        pose_z = self._product_order_float(pose.get("z"))
+        z_min = self._product_order_float(gripper_reach.get("z_min_m"))
+        z_max = self._product_order_float(gripper_reach.get("z_max_m"))
+        if pose_z is not None:
+            evidence["source_z_m"] = pose_z
+            if z_min is not None and pose_z < z_min - tolerance:
+                violations.append(f"z={pose_z:.4f} < z_min_m={z_min:.4f}")
+            if z_max is not None and pose_z > z_max + tolerance:
+                violations.append(f"z={pose_z:.4f} > z_max_m={z_max:.4f}")
+        return len(violations) == 0, violations, evidence
+
     def _select_product_order_bid(
         self,
         *,
@@ -846,12 +1028,34 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     tools_catalog=tools_catalog,
                     goal_state=goal_state,
                     load_count=load_counts.get(resource_jid, 0),
+                    gripper_reach=dict(option.get("gripper_reach") or {}),
+                    staging_areas=dict(option.get("staging_areas") or {}),
                 )
                 candidates.append(candidate)
                 if candidate.get("status") == "complete":
                     complete_candidates.append(candidate)
 
         if not complete_candidates:
+            only_reach_rejections = bool(candidates) and all(
+                str(candidate.get("status") or "").strip() == "incomplete"
+                and (
+                    "source pose outside gripper_reach"
+                    in str(candidate.get("reason") or "")
+                    or "source pose not nearest staging_area"
+                    in str(candidate.get("reason") or "")
+                    or "gripper_reach metadata unavailable"
+                    in str(candidate.get("reason") or "")
+                    or "gripper_reach."
+                    in str(candidate.get("reason") or "")
+                    or "source pose unavailable"
+                    in str(candidate.get("reason") or "")
+                )
+                for candidate in candidates
+            )
+            if only_reach_rejections:
+                raise ValueError(
+                    f"no available product bid resources for part {part_name} to {destination_location}"
+                )
             raise ValueError(
                 f"no complete product bid for part {part_name} to {destination_location}"
             )
@@ -891,6 +1095,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         tools_catalog: list[dict[str, Any]],
         goal_state: str,
         load_count: int,
+        gripper_reach: dict[str, Any] | None = None,
+        staging_areas: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         candidate: dict[str, Any] = {
             "resource_jid": resource_jid,
@@ -899,6 +1105,58 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             "destination_location": destination_location,
             "load_count": int(load_count),
         }
+        source_pose, source_pose_error = self._product_order_source_pose(
+            part_name=part_name,
+            source_location=source_location,
+        )
+        if source_pose:
+            candidate["source_pose"] = deepcopy(source_pose)
+        if source_pose_error:
+            candidate["source_pose_error"] = source_pose_error
+
+        if not source_pose:
+            candidate.update(
+                {
+                    "status": "incomplete",
+                    "reason": source_pose_error or "source pose unavailable",
+                }
+            )
+            return candidate
+
+        source_anchor_violations = self._product_order_source_anchor_violations(
+            source_location=source_location,
+            source_pose=source_pose,
+            staging_areas=dict(staging_areas or {}),
+        )
+        if source_anchor_violations:
+            candidate.update(
+                {
+                    "status": "incomplete",
+                    "reason": "source pose not nearest staging_area: "
+                    + "; ".join(source_anchor_violations),
+                    "source_anchor_violations": source_anchor_violations,
+                }
+            )
+            return candidate
+
+        reach = dict(gripper_reach or {})
+        candidate["gripper_reach"] = deepcopy(reach)
+        reachable, violations, evidence = self._product_order_pose_in_gripper_reach(
+            pose=source_pose,
+            gripper_reach=reach,
+        )
+        if evidence:
+            candidate["gripper_reach_evidence"] = deepcopy(evidence)
+        if not reachable:
+            candidate.update(
+                {
+                    "status": "incomplete",
+                    "reason": "source pose outside gripper_reach: " + "; ".join(violations),
+                    "gripper_reach_violations": violations,
+                }
+            )
+            return candidate
+
         x_c = {
             "resource_state": "idle",
             "current_part": None,
@@ -1081,6 +1339,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     "destination_location": destination,
                     "reachability": reachability,
                     "staging_areas": dict(staging) if isinstance(staging, dict) else {},
+                    "gripper_reach": dict(caps.get("gripper_reach") or {}),
+                    "workspace_bounds": dict(caps.get("workspace_bounds") or {}),
                 }
             )
         return sorted(options, key=lambda item: str(item.get("resource_jid", "")))

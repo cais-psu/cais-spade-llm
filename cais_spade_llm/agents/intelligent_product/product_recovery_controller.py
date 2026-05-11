@@ -18,6 +18,10 @@ from typing import Any, Dict, Iterable, Optional
 from spade.message import Message
 
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.central_controller.online_safety_monitor import (
+    OnlineSafetyMonitor,
+)
+from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
     DEFAULT_BRIDGE_DEBUG_DIR,
     write_bridge_artifacts,
@@ -77,6 +81,9 @@ class ProductRecoveryController:
         '_support_surface_place_pose_from_observations',
         '_part_geometry_for_pick_context',
         '_enrich_observed_pose_recovery_params',
+        '_runtime_safety_fast_path_monitor',
+        '_runtime_safety_ap_sets_for_task',
+        '_runtime_safety_task_ap_empty',
         '_dispatch_params_for_task_node',
         '_runtime_recovery_blocks_execution',
         'get_runtime_recovery',
@@ -1137,6 +1144,124 @@ class ProductRecoveryController:
                 enriched["part_geometry"] = part_geometry
         return enriched
 
+    def _runtime_safety_fast_path_monitor(self) -> Optional[OnlineSafetyMonitor]:
+        logic_path_value = getattr(
+            self,
+            "safety_logic_path",
+            Path("cais_spade_llm/safety/cca_safety_logic.json"),
+        )
+        precomputed_bundle = getattr(self, "precomputed_bundle", {})
+        artifacts = (
+            precomputed_bundle.get("artifacts", {})
+            if isinstance(precomputed_bundle, dict)
+            else {}
+        )
+        precomputed_logic = (
+            artifacts.get("safety_logic_json")
+            if isinstance(artifacts, dict)
+            else None
+        )
+        if precomputed_logic:
+            logic_path_value = precomputed_logic
+        logic_path = Path(logic_path_value)
+        safety_file = getattr(self, "safety_file", None)
+        if not safety_file:
+            return None
+        try:
+            safety_text = Path(safety_file).read_text(encoding="utf-8").strip()
+            expected_hash = SafetyLogic.compute_safety_text_sha256(safety_text)
+            stat = logic_path.stat()
+            cache_key = (
+                str(logic_path.resolve()),
+                int(stat.st_mtime_ns),
+                expected_hash,
+            )
+        except Exception:
+            return None
+
+        cache = getattr(self, "_runtime_safety_fast_path_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._runtime_safety_fast_path_cache = cache
+        if cache.get("cache_key") == cache_key:
+            monitor = cache.get("monitor")
+            return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
+
+        def _store_monitor(monitor: Optional[OnlineSafetyMonitor]) -> Optional[OnlineSafetyMonitor]:
+            cache["cache_key"] = cache_key
+            cache["monitor"] = monitor
+            return monitor
+
+        try:
+            payload = json.loads(logic_path.read_text(encoding="utf-8"))
+            if str(payload.get("safety_text_sha256") or "").strip() != expected_hash:
+                return _store_monitor(None)
+
+            safety_rules = payload.get("rules")
+            if not isinstance(safety_rules, list) or not safety_rules:
+                return _store_monitor(None)
+
+            dfa_map: dict[str, str] = {}
+            for rule in safety_rules:
+                rule_id = str((rule or {}).get("id") or "").strip()
+                if not rule_id:
+                    continue
+                dot_path = logic_path.parent / f"{rule_id}_dfa.dot"
+                if not dot_path.exists():
+                    return _store_monitor(None)
+                dfa_map[rule_id] = dot_path.read_text(encoding="utf-8")
+
+            if not dfa_map:
+                return _store_monitor(None)
+
+            monitor = OnlineSafetyMonitor(
+                dfa_map,
+                safety_rules,
+                tools_catalog=getattr(self, "tools_catalog", []),
+            )
+            return _store_monitor(monitor)
+        except Exception:
+            return _store_monitor(None)
+
+    def _runtime_safety_ap_sets_for_task(
+        self,
+        task_node: dict[str, Any],
+        params: dict[str, Any],
+    ) -> Optional[dict[str, list[str]]]:
+        monitor = self._runtime_safety_fast_path_monitor()
+        if monitor is None:
+            return None
+
+        resource_jid = str(
+            task_node.get("resource_jid")
+            or params.get("resource_jid")
+            or ""
+        ).strip()
+        function_name = str(
+            task_node.get("function_name")
+            or params.get("function_name")
+            or ""
+        ).strip()
+        if not resource_jid or not function_name:
+            return None
+
+        candidate_aps = monitor._map_task_to_aps(resource_jid, function_name, params)
+        predicted_state_aps = monitor._predict_state_aps(resource_jid, function_name, params)
+        return {
+            "candidate_aps": list(candidate_aps),
+            "predicted_state_aps": list(predicted_state_aps),
+        }
+
+    def _runtime_safety_task_ap_empty(
+        self,
+        task_node: dict[str, Any],
+        params: dict[str, Any],
+    ) -> Optional[bool]:
+        ap_sets = self._runtime_safety_ap_sets_for_task(task_node, params)
+        if ap_sets is None:
+            return None
+        return not ap_sets.get("candidate_aps") and not ap_sets.get("predicted_state_aps")
+
     def _dispatch_params_for_task_node(self, task_node: dict[str, Any]) -> dict[str, Any]:
         """Build task params for dispatch without overriding recovery primitive intent."""
         params = dict(task_node.get("params", {}))
@@ -1251,8 +1376,11 @@ class ProductRecoveryController:
                     history_message=message,
                 )
                 raise RuntimeError(message)
-        elif not recovery_safety_task and not bool(getattr(self, "safety_text_has_requirements", False)):
-            params.setdefault("start_safety_mode", "fast_path")
+        elif not recovery_safety_task:
+            if not bool(getattr(self, "safety_text_has_requirements", False)):
+                params.setdefault("start_safety_mode", "fast_path")
+            elif self._runtime_safety_task_ap_empty(task_node, params) is True:
+                params.setdefault("start_safety_mode", "fast_path")
         return params
 
     def _runtime_recovery_blocks_execution(self) -> bool:
@@ -2679,12 +2807,41 @@ class ProductRecoveryController:
         if not candidate_task_ids:
             return 0
 
-        reactivated = self._reactivate_blocked_tasks(candidate_task_ids=candidate_task_ids)
-        if not reactivated:
+        pending_task_retry_ready_ids = getattr(self, "_pending_task_retry_ready_ids", None)
+        if not isinstance(pending_task_retry_ready_ids, set):
+            pending_task_retry_ready_ids = set()
+            self._pending_task_retry_ready_ids = pending_task_retry_ready_ids
+
+        reactivated_task_ids: set[str] = set()
+        retain_task_retry_ready_ids: set[str] = set()
+        for node in self.process_planner.nodes:
+            if node.get("type") != "task":
+                continue
+            node_id = str(node.get("id") or "")
+            if node_id not in candidate_task_ids:
+                continue
+            node_status = str(node.get("status") or "").strip().lower()
+            if node_status in {"dispatched", "accepted"}:
+                retain_task_retry_ready_ids.add(node_id)
+                continue
+            if node_status != "blocked":
+                continue
+
+            node["status"] = "pending"
+            reactivated_task_ids.add(node_id)
+
+        stale_task_retry_ready_ids = candidate_task_ids - retain_task_retry_ready_ids
+        pending_task_retry_ready_ids.difference_update(stale_task_retry_ready_ids)
+        pending_task_retry_ready_ids.update(retain_task_retry_ready_ids)
+
+        if not reactivated_task_ids:
             return 0
 
+        for task_id in reactivated_task_ids:
+            pending_task_retry_ready_ids.discard(task_id)
+
         now_iso = datetime.now(timezone.utc).isoformat()
-        for task_id in candidate_task_ids:
+        for task_id in reactivated_task_ids:
             self.task_states[task_id] = "pending"
             self.execution_timeline.append({
                 "timestamp": now_iso,
@@ -2693,7 +2850,7 @@ class ProductRecoveryController:
                 "resource_jid": str(self.cca_jid),
             })
 
-        return reactivated
+        return len(reactivated_task_ids)
 
     def _reactivate_restored_repair_target_from_context(self) -> str:
         repair_target_task_id = str(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 from copy import deepcopy
 from pathlib import Path
@@ -56,9 +57,14 @@ class SafetyLogic:
         # Optional combined safety spec: {"aps": {label: full}, "formula": "φ_safety"}
         self.global_safety_spec: Dict[str, Any] = {}
         self.preview_interpretation_summary: str = ""
+        self.safety_text_sha256: str = ""
 
         # store one DFA (DOT string) per rule
         self.rule_dfas: Dict[str, str] = {}
+
+    @staticmethod
+    def compute_safety_text_sha256(safety_text: str) -> str:
+        return hashlib.sha256(str(safety_text or "").strip().encode("utf-8")).hexdigest()
 
     @staticmethod
     def _to_dfa_quiet(ltlf_formula) -> str:
@@ -236,375 +242,6 @@ class SafetyLogic:
             "event": str(event).strip(),
             "context": str(context).strip(),
         }
-
-    @staticmethod
-    def _normalized_rule_text(
-        rule: dict[str, Any], refinement_feedback: str = ""
-    ) -> str:
-        pieces = [
-            str(rule.get("constraint_type", "") or ""),
-            str(rule.get("raw_text", "") or ""),
-        ]
-        return " ".join(piece.strip().lower() for piece in pieces if piece).strip()
-
-    @staticmethod
-    def _contains_any(text: str, cues: tuple[str, ...]) -> bool:
-        return any(cue in text for cue in cues)
-
-    @staticmethod
-    def _tokenize_for_overlap(value: str) -> list[str]:
-        return re.findall(r"[a-z0-9]+", str(value or "").lower())
-
-    @classmethod
-    def _term_overlap_score(cls, term: str, text: str) -> int:
-        term_tokens = cls._tokenize_for_overlap(str(term).replace("_", " "))
-        text_tokens = cls._tokenize_for_overlap(text)
-        if not term_tokens or not text_tokens:
-            return 0
-
-        score = 0
-        for needle in term_tokens:
-            for token in text_tokens:
-                if token == needle or token.startswith(needle) or needle.startswith(token):
-                    score += 1
-                    break
-        return score
-
-    @classmethod
-    def _pick_scored_ap(
-        cls,
-        parsed_aps: list[tuple[str, dict[str, str]]],
-        text: str,
-        *,
-        exclude: set[str] | None = None,
-    ) -> Optional[str]:
-        blocked = exclude or set()
-        best_ap: Optional[str] = None
-        best_score = -1
-
-        for ap, segments in parsed_aps:
-            if ap in blocked:
-                continue
-            score = 0
-            score += 4 * cls._term_overlap_score(segments.get("event", ""), text)
-            score += 2 * cls._term_overlap_score(segments.get("product", ""), text)
-            score += cls._term_overlap_score(segments.get("resource", ""), text)
-            score += cls._term_overlap_score(segments.get("context", "").replace("&", " "), text)
-            if score > best_score:
-                best_score = score
-                best_ap = ap
-
-        return best_ap if best_score > 0 else None
-
-    @classmethod
-    def _infer_ltlf_family(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        refinement_feedback: str = "",
-    ) -> Optional[str]:
-        if not aps:
-            return None
-
-        text = cls._normalized_rule_text(rule, refinement_feedback)
-        if not text:
-            return None
-
-        precedence_cues = (
-            "before",
-            "precedence",
-            "precedes",
-            "ordering",
-            "ordered",
-            "prior to",
-        )
-        precedence_gate_cues = (
-            "must not",
-            "should not",
-            "cannot",
-            "can't",
-            "not begin",
-            "not start",
-            "only after",
-        )
-        mutex_cues = (
-            "same time",
-            "simultaneous",
-            "simultaneously",
-            "concurrent",
-            "mutual exclusion",
-            "mutex",
-            "overlap",
-            "together",
-        )
-        response_cues = (
-            " after ",
-            "_after_",
-            "followed by",
-            "follow_up",
-            "follow-up",
-            "response",
-            "post_",
-            "post-",
-        )
-        absence_cues = (
-            "never",
-            "forbidden",
-            "must not",
-            "should not",
-            "cannot",
-            "can't",
-        )
-        until_cues = (" until ", "_until_", "until")
-
-        if len(aps) >= 2 and cls._contains_any(text, precedence_cues):
-            return "precedence"
-        if (
-            len(aps) >= 2
-            and "until" in text
-            and cls._contains_any(text, precedence_gate_cues)
-        ):
-            return "precedence"
-        if len(aps) >= 2 and cls._contains_any(text, mutex_cues):
-            return "mutex"
-        if len(aps) >= 2 and cls._contains_any(text, response_cues):
-            return "response"
-        if len(aps) >= 2 and cls._contains_any(text, until_cues):
-            return "until"
-        if cls._contains_any(text, absence_cues):
-            return "absence"
-        return None
-
-    @classmethod
-    def _pick_precedence_pair(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        refinement_feedback: str = "",
-    ) -> Optional[tuple[str, str]]:
-        parsed_aps = [
-            (ap, segments)
-            for ap in aps
-            if (segments := cls._ap_segments(ap)) is not None
-        ]
-        if len(parsed_aps) < 2:
-            return None
-
-        rule_event = str(rule.get("event", "") or "").strip()
-        products = [
-            str(product).strip().lower()
-            for product in (rule.get("product") or [])
-            if str(product or "").strip()
-        ]
-
-        def select_by_product(product_name: str) -> Optional[str]:
-            candidates = [
-                ap
-                for ap, segments in parsed_aps
-                if segments.get("product") == product_name
-            ]
-            if rule_event:
-                event_candidates = [
-                    ap
-                    for ap in candidates
-                    if (cls._ap_segments(ap) or {}).get("event") == rule_event
-                ]
-                if event_candidates:
-                    return event_candidates[0]
-            return candidates[0] if candidates else None
-
-        if len(products) >= 2:
-            earlier = select_by_product(products[0])
-            later = select_by_product(products[1])
-            if earlier and later and earlier != later:
-                return earlier, later
-
-        text = cls._normalized_rule_text(rule, refinement_feedback)
-        if "before" in text:
-            before_text, after_text = re.split(r"\bbefore\b", text, maxsplit=1)
-            later = cls._pick_scored_ap(parsed_aps, after_text)
-            earlier = cls._pick_scored_ap(
-                parsed_aps,
-                before_text,
-                exclude={later} if later else None,
-            )
-            if earlier and later and earlier != later:
-                return earlier, later
-
-        return parsed_aps[0][0], parsed_aps[1][0]
-
-    @classmethod
-    def _pair_response_aps(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        refinement_feedback: str = "",
-    ) -> list[tuple[str, str]]:
-        parsed_aps = [
-            (ap, segments)
-            for ap in aps
-            if (segments := cls._ap_segments(ap)) is not None
-        ]
-        if len(parsed_aps) < 2:
-            return []
-
-        text = cls._normalized_rule_text(rule, refinement_feedback)
-        response_event = str(rule.get("event", "") or "").strip()
-        if not response_event:
-            before_text = text
-            after_text = ""
-            if "after" in text:
-                before_text, after_text = re.split(r"\bafter\b", text, maxsplit=1)
-            event_counts: dict[str, int] = {}
-            for _, segments in parsed_aps:
-                event_name = segments.get("event", "")
-                if event_name:
-                    event_counts[event_name] = event_counts.get(event_name, 0) + 1
-
-            best_event = ""
-            best_score = 0
-            for event_name in event_counts:
-                score = cls._term_overlap_score(event_name, before_text)
-                score -= cls._term_overlap_score(event_name, after_text)
-                if score > best_score:
-                    best_score = score
-                    best_event = event_name
-            response_event = best_event
-
-        if not response_event:
-            return []
-
-        response_aps = [
-            (ap, segments)
-            for ap, segments in parsed_aps
-            if segments.get("event") == response_event
-        ]
-        trigger_aps = [
-            (ap, segments)
-            for ap, segments in parsed_aps
-            if segments.get("event") != response_event
-        ]
-        if not response_aps or not trigger_aps:
-            return []
-
-        pairs: list[tuple[str, str]] = []
-        used_triggers: set[str] = set()
-
-        for response_ap, response_segments in response_aps:
-            matched_trigger: Optional[str] = None
-            for trigger_ap, trigger_segments in trigger_aps:
-                if trigger_ap in used_triggers:
-                    continue
-                if trigger_segments.get("resource") == response_segments.get("resource"):
-                    matched_trigger = trigger_ap
-                    break
-            if not matched_trigger:
-                for trigger_ap, trigger_segments in trigger_aps:
-                    if trigger_ap in used_triggers:
-                        continue
-                    if (
-                        response_segments.get("product") != "any"
-                        and trigger_segments.get("product") == response_segments.get("product")
-                    ):
-                        matched_trigger = trigger_ap
-                        break
-            if not matched_trigger:
-                for trigger_ap, _ in trigger_aps:
-                    if trigger_ap not in used_triggers:
-                        matched_trigger = trigger_ap
-                        break
-
-            if not matched_trigger:
-                continue
-
-            used_triggers.add(matched_trigger)
-            pairs.append((matched_trigger, response_ap))
-
-        return pairs
-
-    @classmethod
-    def _pick_until_pair(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        refinement_feedback: str = "",
-    ) -> Optional[tuple[str, str]]:
-        parsed_aps = [
-            (ap, segments)
-            for ap in aps
-            if (segments := cls._ap_segments(ap)) is not None
-        ]
-        if len(parsed_aps) < 2:
-            return None
-
-        text = cls._normalized_rule_text(rule, refinement_feedback)
-        if "until" in text:
-            left_text, right_text = re.split(r"\buntil\b", text, maxsplit=1)
-            right = cls._pick_scored_ap(parsed_aps, right_text)
-            left = cls._pick_scored_ap(
-                parsed_aps,
-                left_text,
-                exclude={right} if right else None,
-            )
-            if left and right and left != right:
-                return left, right
-
-        return parsed_aps[0][0], parsed_aps[1][0]
-
-    @classmethod
-    def _compile_ltlf_for_rule(
-        cls,
-        rule: dict[str, Any],
-        aps: list[str],
-        refinement_feedback: str = "",
-    ) -> Optional[str]:
-        family = cls._infer_ltlf_family(rule, aps, refinement_feedback)
-        if family == "precedence":
-            pair = cls._pick_precedence_pair(rule, aps, refinement_feedback)
-            if not pair:
-                return None
-            earlier, later = pair
-            return f"((!{later}) U {earlier})"
-
-        if family == "mutex":
-            if len(aps) < 2:
-                return None
-            if len(aps) == 2:
-                return f"G !({aps[0]} & {aps[1]})"
-            pair_terms: list[str] = []
-            for idx, left in enumerate(aps):
-                for right in aps[idx + 1 :]:
-                    pair_terms.append(f"({left} & {right})")
-            if not pair_terms:
-                return None
-            return f"G !({' | '.join(pair_terms)})"
-
-        if family == "response":
-            pairs = cls._pair_response_aps(rule, aps, refinement_feedback)
-            if not pairs:
-                return None
-            if len(pairs) == 1:
-                trigger, response = pairs[0]
-                return f"G ({trigger} -> F {response})"
-            pair_terms = [
-                f"({trigger} -> F {response})" for trigger, response in pairs
-            ]
-            return f"G ({' & '.join(pair_terms)})"
-
-        if family == "absence":
-            if not aps:
-                return None
-            body = aps[0] if len(aps) == 1 else " | ".join(aps)
-            return f"G !({body})"
-
-        if family == "until":
-            pair = cls._pick_until_pair(rule, aps, refinement_feedback)
-            if not pair:
-                return None
-            left, right = pair
-            return f"({left} U {right})"
-
-        return None
 
     def _tool_grounding(self) -> tuple[set[str], dict[str, str], set[str], set[str]]:
         """
@@ -1369,74 +1006,6 @@ class SafetyLogic:
             "ltlf": formula,
         }
 
-    @classmethod
-    def _resources_for_formula(cls, formula: str, aps: list[str]) -> list[str]:
-        resources: list[str] = []
-        for ap in aps:
-            if ap and ap not in formula:
-                continue
-            segments = cls._ap_segments(ap)
-            if not segments:
-                continue
-            resource = str(segments.get("resource", "")).strip().lower()
-            if resource and resource not in {"any", "robot"}:
-                resources.append(resource)
-        return cls._dedupe_keep_order(resources)
-
-    def _validate_compiled_rule_logic(
-        self,
-        rule: dict[str, Any],
-        compiled: dict[str, Any],
-        *,
-        refinement_feedback: str = "",
-    ) -> None:
-        aps = [
-            str(ap).strip()
-            for ap in (compiled.get("aps") or [])
-            if str(ap or "").strip()
-        ]
-        ltlf = str(compiled.get("ltlf", "") or "").strip()
-        if not aps or not ltlf:
-            return
-
-        family = self._infer_ltlf_family(
-            rule,
-            aps,
-            refinement_feedback=refinement_feedback,
-        )
-        if family != "mutex":
-            return
-
-        concrete_rule_resources = [
-            resource
-            for resource in self._resolve_rule_resources(rule)
-            if resource not in {"any", "robot"}
-        ]
-        if len(concrete_rule_resources) < 2:
-            return
-
-        used_resources = self._resources_for_formula(ltlf, aps)
-        if len(used_resources) < 2:
-            raise RuntimeError(
-                f"compiled mutex rule {rule.get('id')} references fewer than two concrete resources "
-                f"(used_resources={used_resources}, expected_resources={concrete_rule_resources}, ltlf={ltlf})"
-            )
-
-        conjuncts = self._split_ltlf_formula_by_top_level_and(ltlf)
-        conjunct_resource_sets: list[set[str]] = []
-        for conjunct in conjuncts:
-            resources = set(self._resources_for_formula(conjunct, aps))
-            if resources:
-                conjunct_resource_sets.append(resources)
-
-        if conjunct_resource_sets and all(len(resources) <= 1 for resources in conjunct_resource_sets):
-            raise RuntimeError(
-                f"compiled mutex rule {rule.get('id')} degenerates into independent single-resource conjuncts "
-                f"(conjunct_resources={self._debug_json([sorted(resources) for resources in conjunct_resource_sets])}, "
-                f"ltlf={ltlf})"
-            )
-
-
     # ------------------------------------------------------------------ #
     # 1. Load NL safety requirements
     # ------------------------------------------------------------------ #
@@ -1458,6 +1027,7 @@ class SafetyLogic:
                 )
                 return None
 
+            self.safety_text_sha256 = self.compute_safety_text_sha256(txt)
             self.logger.info(
                 "[SafetyLogic] Loaded NL safety text from %s", self.safety_file
             )
@@ -1499,6 +1069,7 @@ class SafetyLogic:
         self.rules.clear()
         self.logic_raw.clear()
         self.global_safety_spec.clear()
+        self.safety_text_sha256 = self.compute_safety_text_sha256(safety_text)
 
         if not self._safety_text_has_requirements(safety_text):
             msg = "[SafetyLogic] Parsed 0 structured safety rule(s): no non-empty safety requirements."
@@ -2057,40 +1628,32 @@ class SafetyLogic:
 
             sanitized_aps = self._dedupe_keep_order(sanitized_aps)
 
-            if not sanitized_aps and rule_event in allowed_functions:
-                fallback_ap = "/".join(
-                    [
-                        "ap_event",
-                        function_process.get(rule_event, rule_process or "any"),
-                        "any",
-                        fallback_resource,
-                        rule_event,
-                        rule_context_token or "any",
-                    ]
-                )
-                sanitized_aps = [fallback_ap]
-                if not ltlf_text or fallback_ap not in ltlf_text:
-                    ltlf_text = fallback_ap
-
             if unresolved_events_for_rule:
                 unresolved[rid] = self._dedupe_keep_order(unresolved_events_for_rule)
+                if not sanitized_aps:
+                    continue
 
-            deterministic_ltlf = self._compile_ltlf_for_rule(
-                rule,
-                sanitized_aps,
-                refinement_feedback=refinement_feedback,
-            )
-            if deterministic_ltlf and all(
-                str(ap).startswith(("ap_event/", "ap/")) for ap in sanitized_aps
-            ):
-                ltlf_text = deterministic_ltlf
-            elif sanitized_aps and (not ltlf_text or not any(ap in ltlf_text for ap in sanitized_aps)):
-                ltlf_text = " & ".join(sanitized_aps) if len(sanitized_aps) > 1 else sanitized_aps[0]
+            if not sanitized_aps:
+                raise RuntimeError(
+                    f"Safety logic rule {rid} produced no grounded APs; "
+                    "the LLM or formula_ast must provide APs that can be grounded to the catalog."
+                )
+            if sanitized_aps and not ltlf_text:
+                raise RuntimeError(
+                    f"Safety logic rule {rid} produced APs but no ltlf; "
+                    "the LLM or formula_ast must provide the temporal formula."
+                )
+            if sanitized_aps and not any(ap in ltlf_text for ap in sanitized_aps):
+                raise RuntimeError(
+                    f"Safety logic rule {rid} ltlf does not reference any grounded AP; "
+                    f"aps={sanitized_aps} ltlf={ltlf_text!r}"
+                )
 
-            result[str(rid)] = {
+            compiled = {
                 "aps": sanitized_aps,
                 "ltlf": ltlf_text,
             }
+            result[str(rid)] = compiled
 
         blocking = {rid: evs for rid, evs in unresolved.items() if not result.get(rid, {}).get("aps")}
         if blocking:
@@ -2100,16 +1663,6 @@ class SafetyLogic:
             raise RuntimeError(
                 "Safety logic references unsupported events that cannot be grounded to catalog actions: "
                 f"{detail}. Supported functions: {sorted(allowed_functions)}"
-            )
-
-        for rid, compiled in result.items():
-            rule = rules_by_id.get(rid, {})
-            if not rule or not isinstance(compiled, dict):
-                continue
-            self._validate_compiled_rule_logic(
-                rule,
-                compiled,
-                refinement_feedback=refinement_feedback,
             )
 
         return result
@@ -2587,6 +2140,7 @@ class SafetyLogic:
 
         payload = {
             "preview_interpretation_summary": self.preview_interpretation_summary,
+            "safety_text_sha256": self.safety_text_sha256,
             "rules": self.rules,
         }
 
@@ -2616,6 +2170,7 @@ class SafetyLogic:
         self.preview_interpretation_summary = str(
             data.get("preview_interpretation_summary", "") or ""
         ).strip()
+        self.safety_text_sha256 = str(data.get("safety_text_sha256") or "").strip()
         self.rules = data.get("rules", [])
 
         # Rebuild global spec if LTLf is already present

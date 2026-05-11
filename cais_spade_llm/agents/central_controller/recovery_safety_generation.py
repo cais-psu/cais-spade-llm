@@ -1116,23 +1116,6 @@ def _recovery_state_rows_relevant_to_rule(
     return relevant
 
 
-def _side_group_formula(aps: list[str]) -> str:
-    return f"({' | '.join(aps)})"
-
-
-def _compile_mutex_side_grouped_ltlf(
-    *,
-    recovery_side_aps: list[str],
-    nominal_side_aps: list[str],
-) -> str:
-    if not recovery_side_aps or not nominal_side_aps:
-        return ""
-    return (
-        f"G !({_side_group_formula(recovery_side_aps)} "
-        f"& {_side_group_formula(nominal_side_aps)})"
-    )
-
-
 def _state_tokens_for_recovery_outline_ids(
     selected_outline_ids: list[str],
     accepted_by_outline_id: dict[str, dict[str, Any]],
@@ -1319,7 +1302,7 @@ def _deterministic_rule_result_from_selection(
         selected_recovery_outline_ids,
         accepted_by_outline_id,
     )
-    family = SafetyLogic._infer_ltlf_family(source_rule, ["ap001", "ap002"], "")
+    family = str(source_rule.get("constraint_type") or "").strip()
     destination_required = _rule_destination(source_rule)
     selected_nominal_task_ids = _nominal_task_ids_for_recovery_selection(
         source_rule=source_rule,
@@ -1560,18 +1543,6 @@ def _deterministic_rule_result_from_selection(
             ]
         )
         aps: list[dict[str, Any]] = _dedupe_ap_rows(recovery_side_aps + nominal_side_aps)
-        deterministic_ltlf = _compile_mutex_side_grouped_ltlf(
-            recovery_side_aps=[
-                str(row.get("full") or "").strip()
-                for row in recovery_side_aps
-                if str(row.get("full") or "").strip()
-            ],
-            nominal_side_aps=[
-                str(row.get("full") or "").strip()
-                for row in nominal_side_aps
-                if str(row.get("full") or "").strip()
-            ],
-        )
         rule_result["status"] = "grounded"
         rule_result["grounded_recovery_events"] = [primary_recovery_event]
         rule_result["grounded_nominal_events"] = [primary_nominal_event]
@@ -1588,7 +1559,6 @@ def _deterministic_rule_result_from_selection(
             if str(row.get("full") or "").strip()
         ]
         rule_result["aps"] = aps
-        rule_result["ltlf"] = deterministic_ltlf
         rule_result["grounded_bindings"] = _grounded_bindings_from_row(rule_result)
         return rule_result
 
@@ -1769,20 +1739,6 @@ def _validate_grounded_rule_result(
     if not recovery_side_present:
         return "grounded rule omitted recovery-side binding"
 
-    aps = [
-        str(item.get("full") or "").strip()
-        for item in normalized_aps
-        if str(item.get("full") or "").strip()
-    ]
-    family = SafetyLogic._infer_ltlf_family(source_rule, aps, "")
-    if family == "precedence":
-        nominal_side_present = bool(nominal_events or nominal_states) or any(
-            str(item.get("source") or "").strip() == "nominal"
-            for item in normalized_aps
-        )
-        if not nominal_side_present:
-            return "precedence grounding omitted nominal-side binding"
-
     return ""
 
 
@@ -1954,13 +1910,10 @@ async def generate_recovery_safety_bundle(
             continue
         deterministic_ltlf = str(rule_result.get("ltlf") or "").strip()
         if not deterministic_ltlf:
-            deterministic_ltlf = SafetyLogic._compile_ltlf_for_rule(
-                source_rule,
-                aps,
-                refinement_feedback="",
+            failure_reason = (
+                f"grounded rule {rule_id} did not provide ltlf; "
+                "recovery safety generation does not synthesize temporal formulas"
             )
-        if not deterministic_ltlf:
-            failure_reason = "deterministic ltlf rebuild failed for grounded rule"
             ungroundable.append(
                 {
                     "rule_id": rule_id,

@@ -1084,13 +1084,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": _sub(_state("_task_ctx", "travel_z"), _state("_position", "z")),
-                            "speed": 0.8,
+                            "speed": 0.45,
                         },
                         public_params={
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": 0.05,
-                            "speed": 0.8,
+                            "speed": 0.45,
                         },
                         note="Positive dz lift/retreat after grasp.",
                         failure_observations={"part_name": _arg("part_name")},
@@ -1413,13 +1413,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": _sub(_state("_task_ctx", "travel_z"), _state("_position", "z")),
-                            "speed": 1.0,
+                            "speed": 0.45,
                         },
                         public_params={
                             "dx": 0.0,
                             "dy": 0.0,
                             "dz": 0.08,
-                            "speed": 1.0,
+                            "speed": 0.45,
                         },
                         note="Positive dz retreat after release.",
                         failure_observations={
@@ -1501,9 +1501,9 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         exposed=True,
                         params={
                             "pose_name": "home",
-                            "speed": 0.8,
+                            "speed": 0.25,
                         },
-                        public_params={"pose_name": "home", "speed": 0.8},
+                        public_params={"pose_name": "home", "speed": 0.25},
                         dry_run_output={
                             "absolute_position": {"x": 0.0, "y": 0.0, "z": 445.0},
                         },
