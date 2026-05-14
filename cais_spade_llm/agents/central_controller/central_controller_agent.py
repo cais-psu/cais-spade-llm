@@ -254,6 +254,362 @@ class CentralControllerAgent(LlmAgent):
         monitor = entry.get("monitor") if isinstance(entry, dict) else None
         return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
 
+    def _tools_catalog_for_safety(self) -> list[dict[str, Any]]:
+        override = self.__dict__.get("_tools_catalog_for_safety_override")
+        if isinstance(override, list):
+            return override
+        return list(getattr(self, "tools_catalog", []) or [])
+
+    @staticmethod
+    def _safety_event_params(event: dict[str, Any]) -> dict[str, Any]:
+        params = dict(event.get("params") or {})
+        task_id = str(event.get("task_id") or params.get("task_id") or "").strip()
+        if task_id:
+            params.setdefault("task_id", task_id)
+        function_name = str(event.get("function_name") or "").strip()
+        if function_name:
+            params.setdefault("function_name", function_name)
+        return params
+
+    @staticmethod
+    def _ap_full_without_task_id_context(full: Any) -> str:
+        token = str(full or "").strip()
+        parts = token.split("/")
+        if len(parts) < 6:
+            return token
+        context = str(parts[5] or "").strip()
+        if not context or context == "any" or "task_id=" not in context:
+            return token
+        kept = []
+        for item in context.split("&"):
+            key = item.split("=", 1)[0].strip()
+            if key == "task_id":
+                continue
+            if item:
+                kept.append(item)
+        parts[5] = "&".join(kept) if kept else "any"
+        return "/".join(parts)
+
+    @classmethod
+    def _ap_full_for_rebound_source_task_ids(
+        cls,
+        full: Any,
+        source_task_ids: list[str],
+    ) -> str:
+        task_ids = [str(task_id or "").strip() for task_id in source_task_ids if str(task_id or "").strip()]
+        token = str(full or "").strip()
+        if len(task_ids) != 1:
+            return cls._ap_full_without_task_id_context(token)
+        parts = token.split("/")
+        if len(parts) < 6:
+            return token
+        context = str(parts[5] or "").strip()
+        if not context or context == "any":
+            return token
+        replaced = False
+        rebound_items: list[str] = []
+        for item in context.split("&"):
+            key = item.split("=", 1)[0].strip()
+            if key == "task_id":
+                rebound_items.append(f"task_id={task_ids[0]}")
+                replaced = True
+            elif item:
+                rebound_items.append(item)
+        if replaced:
+            parts[5] = "&".join(rebound_items) if rebound_items else "any"
+            return "/".join(parts)
+        return token
+
+    @staticmethod
+    def _live_fsa_task_ids(fsa: dict[str, Any]) -> list[str]:
+        raw_transitions = (fsa or {}).get("A", {}).get("Tr", [])
+        if isinstance(raw_transitions, dict):
+            transitions = list(raw_transitions.values())
+        else:
+            transitions = list(raw_transitions or [])
+        task_ids: list[str] = []
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            candidates = [
+                transition.get("task_id"),
+                (transition.get("params") or {}).get("task_id")
+                if isinstance(transition.get("params"), dict)
+                else "",
+            ]
+            event = str(transition.get("event") or "").strip()
+            if event.endswith(".start") or event.endswith(".done") or event.endswith(".finish"):
+                candidates.append(event.rsplit(".", 1)[0])
+            for candidate in candidates:
+                task_id = str(candidate or "").strip()
+                if task_id and task_id not in task_ids:
+                    task_ids.append(task_id)
+        return task_ids
+
+    @staticmethod
+    def _plan_live_task_nodes(
+        plan: dict[str, Any],
+        live_task_ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        allowed = {str(task_id or "").strip() for task_id in live_task_ids if str(task_id or "").strip()}
+        nodes = []
+        raw_nodes = []
+        if isinstance(plan, dict):
+            raw_nodes = list(plan.get("nodes") or plan.get("tasks") or [])
+        for node in raw_nodes:
+            if not isinstance(node, dict):
+                continue
+            params = node.get("params") if isinstance(node.get("params"), dict) else {}
+            task_id = str(
+                node.get("id")
+                or node.get("task_id")
+                or params.get("task_id")
+                or ""
+            ).strip()
+            if task_id and task_id in allowed:
+                nodes.append(node)
+        return nodes
+
+    @staticmethod
+    def _task_node_safety_event(node: dict[str, Any]) -> dict[str, Any]:
+        params = deepcopy(node.get("params") or {}) if isinstance(node.get("params"), dict) else {}
+        task_id = str(
+            node.get("id")
+            or node.get("task_id")
+            or params.get("task_id")
+            or ""
+        ).strip()
+        function_name = str(
+            node.get("function_name")
+            or node.get("function")
+            or params.get("function_name")
+            or params.get("function")
+            or ""
+        ).strip()
+        resource_jid = str(
+            node.get("resource_jid")
+            or node.get("resource")
+            or node.get("assigned_resource")
+            or params.get("resource_jid")
+            or ""
+        ).strip()
+        if task_id:
+            params.setdefault("task_id", task_id)
+        if function_name:
+            params.setdefault("function_name", function_name)
+        for key in (
+            "part_name",
+            "destination_location",
+            "origin_resource_location",
+            "product_jid",
+        ):
+            value = node.get(key)
+            if str(value or "").strip():
+                params.setdefault(key, value)
+        return {
+            "task_id": task_id,
+            "resource_jid": resource_jid,
+            "function_name": function_name,
+            "params": params,
+        }
+
+    def _recovery_safety_ap_matches_live_task(
+        self,
+        *,
+        rule: dict[str, Any],
+        ap: dict[str, Any],
+        node: dict[str, Any],
+    ) -> bool:
+        event = self._task_node_safety_event(node)
+        if not event["resource_jid"] or not event["function_name"]:
+            return False
+        probe_ap = deepcopy(ap)
+        probe_ap["source_task_ids"] = []
+        probe_ap["full"] = self._ap_full_without_task_id_context(probe_ap.get("full"))
+        probe_rule = deepcopy(rule)
+        probe_rule["aps"] = [probe_ap]
+        checker = OnlineSafetyMonitor(
+            {},
+            [probe_rule],
+            tools_catalog=self._tools_catalog_for_safety(),
+        )
+        label = str(probe_ap.get("label") or "").strip()
+        if not label:
+            return False
+        params = dict(event.get("params") or {})
+        candidate_aps = checker._map_task_to_aps(
+            event["resource_jid"],
+            event["function_name"],
+            params,
+        )
+        predicted_state_aps = checker._predict_state_aps(
+            event["resource_jid"],
+            event["function_name"],
+            params,
+        )
+        return label in set(candidate_aps) | set(predicted_state_aps)
+
+    def _rebind_recovery_safety_result_to_live_fsa(
+        self,
+        result: dict[str, Any],
+        plan: dict[str, Any],
+        fsa: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result
+
+        rebound = deepcopy(result)
+        live_task_ids = self._live_fsa_task_ids(fsa if isinstance(fsa, dict) else {})
+        live_nodes = self._plan_live_task_nodes(plan if isinstance(plan, dict) else {}, live_task_ids)
+        rebind_records: list[dict[str, Any]] = []
+
+        for rule in rebound.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            matched_rule_task_ids: list[str] = []
+            for ap in rule.get("aps") or []:
+                if not isinstance(ap, dict):
+                    continue
+                if str(ap.get("source") or "").strip() != "nominal":
+                    continue
+                matches: list[str] = []
+                for node in live_nodes:
+                    event = self._task_node_safety_event(node)
+                    task_id = str(event.get("task_id") or "").strip()
+                    if not task_id:
+                        continue
+                    if self._recovery_safety_ap_matches_live_task(
+                        rule=rule,
+                        ap=ap,
+                        node=node,
+                    ):
+                        matches.append(task_id)
+                deduped_matches: list[str] = []
+                for task_id in matches:
+                    if task_id not in deduped_matches:
+                        deduped_matches.append(task_id)
+                if not deduped_matches:
+                    continue
+                original_source_task_ids = [
+                    str(token).strip()
+                    for token in (ap.get("source_task_ids") or [])
+                    if str(token).strip()
+                ]
+                ap["source_task_ids"] = deduped_matches
+                ap["full"] = self._ap_full_for_rebound_source_task_ids(
+                    ap.get("full"),
+                    deduped_matches,
+                )
+                if len(deduped_matches) == 1:
+                    ap["id"] = deduped_matches[0]
+                ap["live_fsa_rebound_source_task_ids"] = deduped_matches
+                ap["live_fsa_original_source_task_ids"] = original_source_task_ids
+                matched_rule_task_ids.extend(deduped_matches)
+                rebind_records.append(
+                    {
+                        "rule_id": str(rule.get("id") or "").strip(),
+                        "label": str(ap.get("label") or "").strip(),
+                        "source_task_ids": deduped_matches,
+                    }
+                )
+
+            if matched_rule_task_ids:
+                deduped_rule_ids: list[str] = []
+                for task_id in matched_rule_task_ids:
+                    if task_id not in deduped_rule_ids:
+                        deduped_rule_ids.append(task_id)
+                rule["selected_nominal_task_ids"] = deduped_rule_ids
+                bindings = rule.get("grounded_bindings")
+                if isinstance(bindings, dict):
+                    bindings["nominal_task_ids"] = list(deduped_rule_ids)
+                rule["nominal_side_aps"] = [
+                    str(ap.get("full") or "").strip()
+                    for ap in rule.get("aps") or []
+                    if isinstance(ap, dict)
+                    and str(ap.get("source") or "").strip() == "nominal"
+                    and str(ap.get("full") or "").strip()
+                ]
+
+        rebound["live_fsa_rebinding"] = {
+            "live_fsa_task_ids": live_task_ids,
+            "records": rebind_records,
+        }
+        return rebound
+
+    def _active_recovery_safety_scope_checks_for_event(
+        self,
+        event: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if self._recovery_safety_scope_id_from_event(event):
+            return []
+        checks: list[dict[str, Any]] = []
+        params = self._safety_event_params(event)
+        resource_jid = str(event.get("resource_jid") or "").strip()
+        function_name = str(event.get("function_name") or "").strip()
+        if not resource_jid or not function_name:
+            return checks
+        for scope_id, entry in (self.recovery_safety_scopes or {}).items():
+            if not isinstance(entry, dict) or str(entry.get("status") or "").strip() != "ready":
+                continue
+            monitor = entry.get("monitor")
+            if not isinstance(monitor, OnlineSafetyMonitor):
+                continue
+            candidate_aps = monitor._map_task_to_aps(resource_jid, function_name, params)
+            predicted_state_aps = monitor._predict_state_aps(resource_jid, function_name, params)
+            if not candidate_aps and not predicted_state_aps:
+                continue
+            checks.append(
+                {
+                    "scope_id": str(scope_id or "").strip(),
+                    "monitor": monitor,
+                    "candidate_aps": list(candidate_aps),
+                    "predicted_state_aps": list(predicted_state_aps),
+                }
+            )
+        return checks
+
+    def _validate_active_recovery_safety_scopes_for_event(
+        self,
+        event: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+        checks = self._active_recovery_safety_scope_checks_for_event(event)
+        for check in checks:
+            monitor = check["monitor"]
+            allowed, info = monitor.online_safety_validation(
+                check["candidate_aps"],
+                predicted_state_aps=check["predicted_state_aps"],
+            )
+            if not allowed:
+                info = dict(info or {})
+                info["recovery_safety_scope_id"] = check["scope_id"]
+                return False, info, checks
+        return True, {}, checks
+
+    @staticmethod
+    def _commit_active_recovery_safety_scope_starts(
+        checks: list[dict[str, Any]],
+    ) -> None:
+        for check in checks:
+            monitor = check.get("monitor")
+            if not isinstance(monitor, OnlineSafetyMonitor):
+                continue
+            monitor.running_aps.update(check.get("candidate_aps") or [])
+
+    def _finish_active_recovery_safety_scopes_for_event(
+        self,
+        event: dict[str, Any],
+        *,
+        is_failed: bool,
+    ) -> None:
+        for check in self._active_recovery_safety_scope_checks_for_event(event):
+            monitor = check.get("monitor")
+            if not isinstance(monitor, OnlineSafetyMonitor):
+                continue
+            if is_failed:
+                monitor.process_fail_event(event)
+            else:
+                monitor.process_finish_event(event)
+
     def _seed_safety_monitor_resource_states(self) -> None:
         if not self.safety_monitor:
             return
@@ -355,7 +711,7 @@ class CentralControllerAgent(LlmAgent):
                 "monitor": OnlineSafetyMonitor(
                     deepcopy(result.get("rule_dfas") or {}),
                     deepcopy(result.get("rules") or []),
-                    tools_catalog=getattr(self, "tools_catalog", []),
+                    tools_catalog=self._tools_catalog_for_safety(),
                 ),
             }
             return True
@@ -1458,6 +1814,29 @@ class CentralControllerAgent(LlmAgent):
                         diagnosis.get("reason"),
                     )
 
+            recovery_scope_checks: list[dict[str, Any]] = []
+            if not recovery_safety_scope_id:
+                recovery_scope_allowed, recovery_scope_info, recovery_scope_checks = (
+                    agent._validate_active_recovery_safety_scopes_for_event(event)
+                )
+                if not recovery_scope_allowed:
+                    violated_rule = recovery_scope_info.get("violated_rule")
+                    scope_id = recovery_scope_info.get("recovery_safety_scope_id")
+                    agent.logger.warning(
+                        "[CCA] RECOVERY SAFETY VIOLATION: task=%s scope=%s rule=%s (running=%s)",
+                        task_id,
+                        scope_id,
+                        violated_rule,
+                        recovery_scope_info.get("running_snapshot", []),
+                    )
+                    agent.blocked_tasks[task_id] = {
+                        "event": event,
+                        "violated_rule": violated_rule,
+                        "recovery_safety_scope_id": scope_id,
+                    }
+                    await self._send_decision(resource_jid, task_id, "block")
+                    return
+
             allowed, info = monitor.process_start_event(event)
             if not allowed:
                 agent.logger.warning(
@@ -1466,6 +1845,8 @@ class CentralControllerAgent(LlmAgent):
                 )
                 await self._send_decision(resource_jid, task_id, "block")
                 return
+
+            agent._commit_active_recovery_safety_scope_starts(recovery_scope_checks)
 
             # If allowed
             agent.logger.debug("[CCA] Safety OK: task=%s allowed.", task_id)
@@ -1517,10 +1898,20 @@ class CentralControllerAgent(LlmAgent):
                     )
                 if is_failed:
                     monitor.process_fail_event(event)
+                    if not recovery_safety_scope_id:
+                        agent._finish_active_recovery_safety_scopes_for_event(
+                            event,
+                            is_failed=True,
+                        )
                     agent.last_failure_event = event
                     agent.logger.info("[CCA] Task %s failed. State updated.", task_id)
                 else:
                     monitor.process_finish_event(event)
+                    if not recovery_safety_scope_id:
+                        agent._finish_active_recovery_safety_scopes_for_event(
+                            event,
+                            is_failed=False,
+                        )
                     agent.logger.info("[CCA] Task %s finished. State updated.", task_id)
 
                 # Retry any blocked tasks now that state has changed
@@ -1636,6 +2027,8 @@ class CentralControllerAgent(LlmAgent):
                     )
                     if allowed and agent.online_supervisor and not recovery_safety_scope_id:
                         allowed, _ = agent.online_supervisor.check_candidate(event)
+                    if allowed and not recovery_safety_scope_id:
+                        allowed, _, _ = agent._validate_active_recovery_safety_scopes_for_event(event)
                 except Exception:
                     agent.logger.exception(
                         "[CCA] Failed to non-mutating re-check for blocked task=%s; keeping queued.",
@@ -1908,6 +2301,11 @@ class CentralControllerAgent(LlmAgent):
             monitor_ready = await agent._wait_for_safety_monitor_ready()
 
             if isinstance(recovery_safety_result, dict) and recovery_safety_result:
+                recovery_safety_result = agent._rebind_recovery_safety_result_to_live_fsa(
+                    recovery_safety_result,
+                    plan if isinstance(plan, dict) else {},
+                    fsa if isinstance(fsa, dict) else {},
+                )
                 registered = agent._register_recovery_safety_scope_result(
                     recovery_safety_result
                 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from math import isfinite
 from typing import Any
@@ -1244,7 +1245,7 @@ def _preview_place_targets_output(
     else:
         place_gap = -0.0125
         place_part_origin_z = board_top_z + (part_height * 0.5) + place_gap
-        if str(target_reference.get("target_point") or "").strip() == "inserted_part_origin":
+        if str(target_reference.get("target_point") or "").strip() != "part_origin":
             place_part_origin_z = max(
                 place_part_origin_z,
                 board_top_z + (part_height * 0.5),
@@ -1718,6 +1719,22 @@ def _home_steps(compiler: Any, *, resource_jid: str, speed: float = 0.25) -> lis
     return []
 
 
+def _optional_recovery_home_steps(
+    compiler: Any,
+    *,
+    resource_jid: str,
+    speed: float = 0.25,
+) -> list[dict[str, Any]]:
+    if str(os.environ.get("CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return []
+    return _home_steps(compiler, resource_jid=resource_jid, speed=speed)
+
+
 def _bridge_event_fact_ref(compiler: Any, path: str) -> dict[str, Any]:
     normalized = "/".join(token for token in str(path or "").split(".") if token)
     return _bridge_ref(compiler, f"/event_facts/{normalized}")
@@ -1944,7 +1961,7 @@ def _compile_release_macro(
                 },
             },
             {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -2013,7 +2030,7 @@ def _compile_place_macro(
                 },
             },
             {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -2113,7 +2130,7 @@ def _compile_pick_place_macro(
                 },
             },
             {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 

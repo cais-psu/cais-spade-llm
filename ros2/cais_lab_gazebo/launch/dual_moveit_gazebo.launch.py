@@ -20,11 +20,12 @@ from pathlib import Path
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    DeclareLaunchArgument,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -437,9 +438,16 @@ def _build_moveit_params(xarm_prefix, ur5e_prefix, urdf, srdf):
 # Launch
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _launch_arg_enabled(context, name, default='false'):
+    value = LaunchConfiguration(name, default=default).perform(context)
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def launch_setup(context, *args, **kwargs):
     xarm_prefix = 'xarm6_'
     ur5e_prefix = 'ur5e_'
+    fast_sim = LaunchConfiguration('fast_sim')
+    launch_rviz = _launch_arg_enabled(context, 'launch_rviz', default='true')
 
     # 1. Gazebo with combined URDF (both robots have physics)
     gazebo = IncludeLaunchDescription(
@@ -449,6 +457,9 @@ def launch_setup(context, *args, **kwargs):
                 'xarm6_ur5e_gazebo.launch.py',
             ])
         ),
+        launch_arguments={
+            'fast_sim': fast_sim,
+        }.items(),
     )
 
     # 2. Build combined MoveIt config
@@ -493,14 +504,26 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    return [
+    launch_actions = [
         gazebo,
         move_group,
-        rviz,
     ]
+    if launch_rviz:
+        launch_actions.append(rviz)
+    return launch_actions
 
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'fast_sim',
+            default_value='false',
+            description='Use the fast Gazebo world timing profile.',
+        ),
+        DeclareLaunchArgument(
+            'launch_rviz',
+            default_value='true',
+            description='Launch RViz alongside Gazebo and MoveIt.',
+        ),
         OpaqueFunction(function=launch_setup),
     ])

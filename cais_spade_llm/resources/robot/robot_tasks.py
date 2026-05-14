@@ -399,6 +399,10 @@ def _evaluate_guard_predicate(
     if predicate == "task_ctx_key_truthy":
         key = str(dict(resolved_args or {}).get("key") or "").strip()
         return bool(dict(dict(runtime_state or {}).get("_task_ctx") or {}).get(key))
+    if predicate == "execution_mode":
+        expected = str(dict(resolved_args or {}).get("mode") or "").strip().lower()
+        actual = str(getattr(agent, "execution_mode", "") or "").strip().lower() if agent else ""
+        return bool(expected) and actual == expected
     if predicate == "named_pose_available":
         pose_name = str(dict(resolved_args or {}).get("pose_name") or "").strip()
         return _evaluate_named_pose_available(
@@ -714,7 +718,12 @@ async def execute_robot_task(
                 and step.id == "lift"
                 and "release_part" in completed_step_ids
             )
-            if step.continue_on_failure or simulation_lift_after_release:
+            simulation_snap_part_to_slot = (
+                str(getattr(agent, "execution_mode", "") or "").strip().lower() == "simulation"
+                and task.name == "place_insert"
+                and step.id == "snap_part_to_slot"
+            )
+            if (step.continue_on_failure and not simulation_snap_part_to_slot) or simulation_lift_after_release:
                 raw = dict(result.get("raw") or {})
                 agent.logger.warning(
                     "[Robot] %s.%s soft-failed: %s",
@@ -884,6 +893,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "part_height": 0.08,
                             "tcp_offset_z": -0.17,
                             "pick_tcp_z": 0.0,
+                            "gripper_close_position": None,
                             "start_x": 0.0,
                             "start_y": 0.0,
                             "start_z": 0.0,
@@ -1065,6 +1075,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         params={
                             "model_name": _state("_task_ctx", "model_name"),
                             "part_name": _arg("part_name"),
+                            "position": _state("_task_ctx", "gripper_close_position"),
                         },
                         public_params={
                             "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
@@ -1395,14 +1406,23 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "part_height": _state("_task_ctx", "part_height"),
                             "board_top_z": _state("_task_ctx", "board_top_z"),
                             "part_origin_z": _state("_task_ctx", "place_part_origin_z"),
+                            "destination_location": _arg("destination_location"),
                         },
                         when=(
+                            RobotTaskGuard(
+                                predicate="execution_mode",
+                                args={"mode": "simulation"},
+                            ),
                             RobotTaskGuard(
                                 predicate="task_ctx_key_truthy",
                                 args={"key": "model_name"},
                             ),
                         ),
                         continue_on_failure=True,
+                        failure_observations={
+                            "part_name": _state("_held_part"),
+                            "destination_location": _arg("destination_location"),
+                        },
                     ),
                     RobotTaskStep(
                         id="lift",
@@ -1452,7 +1472,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                 dry_run_duration=5.0,
                 failure_part=_first(_arg("part_name"), _state("_held_part")),
                 notes=(
-                    "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches in simulation, snaps/settles as needed, then lifts away.",
+                    "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches and snaps/settles in simulation, then lifts away.",
                     "open_gripper and detach_part are hidden from synthesis; use release_part as the visible composite.",
                 ),
             ),

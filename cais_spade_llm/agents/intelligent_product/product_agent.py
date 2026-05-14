@@ -396,11 +396,17 @@ class ProductAgent(LlmAgent):
             elif status == "failed" or status.startswith("failed"):
                 failed_task_ids.append(task_id)
 
+        safety_event_history_builder = getattr(self, "_build_safety_event_history", None)
+        safety_event_history = (
+            safety_event_history_builder()
+            if callable(safety_event_history_builder)
+            else []
+        )
         return {
             "completed_task_ids": completed_task_ids,
             "running_task_ids": running_task_ids,
             "failed_task_ids": failed_task_ids,
-            "safety_event_history": self._build_safety_event_history(),
+            "safety_event_history": safety_event_history,
         }
 
     def _build_safety_event_history(self) -> list[dict[str, Any]]:

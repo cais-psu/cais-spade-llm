@@ -3025,6 +3025,7 @@ def _approve_case3_archived_bridge(
     verification_only: bool = False,
     recovery_safety_scope_id: str = "",
     recovery_safety_status: str = "none",
+    before_approval: Callable[[FakeProductAgent, ProcessPlanner], None] | None = None,
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any], dict[str, Any]]:
     fixture, product_agent, planner, prepared_bridge_request = asyncio.run(
         _prepare_bridge_dryrun_harness(reasoning_mode="multi_turn")
@@ -3109,6 +3110,8 @@ def _approve_case3_archived_bridge(
         ),
         violations=violations,
     )
+    if before_approval is not None:
+        before_approval(product_agent, planner)
     with patch(
         "cais_spade_llm.agents.intelligent_product.product_recovery_controller.threading.Thread",
         new=_ImmediateThread,
@@ -3228,6 +3231,121 @@ def test_case3_archived_bridge_approval_splices_ur5e_bridge_before_remaining_nom
     assert list(req_1_t3.get("predecessors") or []) == [acquire_entity["id"]]
     assert list(req_1_t4.get("predecessors") or []) == ["REQ_1_T3"]
     assert list(req_1_t5.get("predecessors") or []) == ["REQ_1_T4"]
+
+
+def test_case3_archived_bridge_approval_materializes_approved_recovery_with_one_final_planner_patch(
+    tmp_path: Path,
+) -> None:
+    apply_calls: list[list[dict[str, Any]]] = []
+    validation_graphs: list[list[dict[str, Any]]] = []
+
+    def _graph_signature(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        signature: dict[str, dict[str, Any]] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id") or "").strip()
+            if not node_id:
+                continue
+            if (
+                str(node.get("function_name") or "").strip() != "execute_recovery_macro"
+                and str(node.get("repair_operator") or "").strip() != "acquire_entity"
+                and node_id not in {"REQ_1_T3", "REQ_1_T4", "REQ_1_T5", "REQ_2_T5"}
+            ):
+                continue
+            signature[node_id] = {
+                "function_name": str(node.get("function_name") or "").strip(),
+                "predecessors": list(node.get("predecessors") or []),
+                "successors": list(node.get("successors") or []),
+                "status": str(node.get("status") or "").strip(),
+                "sequence_index": node.get("sequence_index"),
+                "resource_jid": str(node.get("resource_jid") or "").strip(),
+                "bridge_outline_id": str(node.get("bridge_outline_id") or "").strip(),
+                "repair_operator": str(node.get("repair_operator") or "").strip(),
+                "restores_event_id": str(node.get("restores_event_id") or "").strip(),
+            }
+        return signature
+
+    def _before_approval(product_agent: FakeProductAgent, planner: ProcessPlanner) -> None:
+        original_apply = planner._apply_replan_patch
+        original_validation = product_agent.recovery_controller._send_runtime_plan_validation_check_sync
+
+        def _counted_apply(modified_tasks: list[dict[str, Any]]) -> None:
+            apply_calls.append(deepcopy(modified_tasks))
+            original_apply(modified_tasks)
+
+        def _captured_validation(
+            *,
+            skip_revalidation: bool = False,
+            skip_recovery_safety_validation: bool = False,
+        ) -> None:
+            validation_graphs.append(deepcopy(planner.nodes))
+            original_validation(
+                skip_revalidation=skip_revalidation,
+                skip_recovery_safety_validation=skip_recovery_safety_validation,
+            )
+
+        planner._apply_replan_patch = _counted_apply
+        object.__setattr__(
+            product_agent.recovery_controller,
+            "_send_runtime_plan_validation_check_sync",
+            _captured_validation,
+        )
+
+    _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
+        tmp_path,
+        validation_policy="no_validation",
+        before_approval=_before_approval,
+    )
+
+    assert recovery["status"] == "validating"
+    assert len(apply_calls) == 1
+    assert any(
+        str(row.get("function_name") or "").strip() == "execute_recovery_macro"
+        for row in apply_calls[0]
+    )
+    assert any(
+        str(row.get("repair_operator") or "").strip() == "acquire_entity"
+        for row in apply_calls[0]
+    )
+    assert any(
+        str(row.get("id") or "").strip() == FAILED_TASK_ID
+        and bool(row.get("delete"))
+        for row in apply_calls[0]
+    )
+
+    assert len(validation_graphs) == 1
+    validation_signature = _graph_signature(validation_graphs[0])
+    committed_signature = _graph_signature(planner.nodes)
+    assert validation_signature == committed_signature
+
+    bridge_nodes_by_outline_id = {
+        str(node.get("bridge_outline_id") or node.get("params", {}).get("outline_id") or "").strip(): node
+        for node in planner.nodes
+        if isinstance(node, dict)
+        and str(node.get("function_name") or "").strip() == "execute_recovery_macro"
+    }
+    seq4 = dict(bridge_nodes_by_outline_id["RECOVERY_SEQ4"])
+    acquire_entity = next(
+        (
+            dict(node)
+            for node in planner.nodes
+            if isinstance(node, dict)
+            and str(node.get("repair_operator") or "").strip() == "acquire_entity"
+            and str(node.get("restores_event_id") or "").strip() == "REQ_1_T3"
+        ),
+        {},
+    )
+    req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
+
+    assert acquire_entity
+    assert list(acquire_entity.get("predecessors") or []) == [seq4["id"]]
+    assert list(req_1_t3.get("predecessors") or []) == [acquire_entity["id"]]
+    assert "REQ_2_T5" not in {
+        str(node.get("id") or "").strip()
+        for node in validation_graphs[0]
+        if isinstance(node, dict)
+    }
 
 
 def test_case3_archived_bridge_ready_scan_skips_blocked_pending_non_root(
@@ -4122,7 +4240,7 @@ def test_case3_validated_archive_without_recovery_safety_result_defers_approval(
     )
 
 
-def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_and_nominal_tasks(
+def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_tasks_only(
     tmp_path: Path,
 ) -> None:
     _, product_agent, planner, _, recovery = _approve_case3_archived_bridge(
@@ -4144,15 +4262,15 @@ def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_and_nom
     )
     req_1_t3 = dict(planner._find_node("REQ_1_T3") or {})
 
-    assert "REQ_1_T3" in list(active_bridge_sequence.get("recovery_enforced_task_ids") or [])
+    assert "REQ_1_T3" not in list(active_bridge_sequence.get("recovery_enforced_task_ids") or [])
 
     seq1_params = product_agent._dispatch_params_for_task_node(seq1)
     req_1_t3_params = product_agent._dispatch_params_for_task_node(req_1_t3)
 
     assert str(seq1_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
-    assert str(req_1_t3_params.get("recovery_safety_scope_id") or "").strip() == "recovery_scope_case3"
+    assert "recovery_safety_scope_id" not in req_1_t3_params
     assert str(seq1_params.get("start_safety_mode") or "").strip() == "cca_check"
-    assert str(req_1_t3_params.get("start_safety_mode") or "").strip() == "cca_check"
+    assert str(req_1_t3_params.get("start_safety_mode") or "").strip() != "cca_check"
 
 
 def test_case3_recovery_scope_dispatch_params_force_cca_check_for_bridge_task_even_if_enforced_list_is_stale(
@@ -4325,8 +4443,256 @@ def test_case3_recovery_scope_dispatch_params_include_recovery_outline_grounding
     assert str(params.get("llm_outline_id") or "").strip() == "recovery_ur5e_lg_place_004"
     assert str(params.get("event_name") or "").strip() == "recover_place_LG_to_assembly_board-v1"
     assert dict(params.get("outline_expected_start_state") or {}).get("held_part") == "LG"
-    assert dict(params.get("expected_end_state") or {}).get("part_location") == "assembly_board-v1"
-    assert dict(params.get("projected_outline_state") or {}).get("part_state") == "placed"
+
+
+def _case3_recovery_safety_result_for_live_fsa_test() -> dict[str, Any]:
+    root = (
+        ROOT
+        / "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data/imported/worked/1/recovery_safety"
+    )
+    logic = json.loads((root / "cca_safety_logic.json").read_text(encoding="utf-8"))
+    return {
+        "ok": True,
+        "recovery_safety_scope_id": "dryrun_recovery_scope",
+        "rules": logic.get("rules") or [],
+        "rule_dfas": {
+            "SAFE_2": (root / "SAFE_2_dfa.dot").read_text(encoding="utf-8")
+        },
+    }
+
+
+def _case3_live_fsa_rebind_agent() -> CentralControllerAgent:
+    agent = object.__new__(CentralControllerAgent)
+    agent._tools_catalog_for_safety_override = [
+        {
+            "function_owner_agent": "xarm6",
+            "function": "place_approach",
+            "out_state": "positioned",
+        },
+        {
+            "function_owner_agent": "xarm6",
+            "function": "place_insert",
+            "out_state": "placed",
+        },
+        {
+            "function_owner_agent": "ur5e",
+            "function": "execute_recovery_macro",
+            "out_state": "idle",
+        },
+    ]
+    agent.recovery_safety_scopes = {}
+    return agent
+
+
+def _case3_live_fsa_rebind_plan_and_fsa() -> tuple[dict[str, Any], dict[str, Any]]:
+    plan = {
+        "nodes": [
+            {
+                "id": "REQ_3_T3",
+                "resource_jid": "xarm6@localhost",
+                "function_name": "place_approach",
+                "params": {
+                    "task_id": "REQ_3_T3",
+                    "part_name": "LCP",
+                    "destination_location": "assembly_board-v1",
+                },
+            },
+            {
+                "id": "REQ_3_T4",
+                "resource_jid": "xarm6@localhost",
+                "function_name": "place_insert",
+                "params": {
+                    "task_id": "REQ_3_T4",
+                    "part_name": "LCP",
+                    "destination_location": "assembly_board-v1",
+                },
+            },
+            {
+                "id": "REQ_4_T3",
+                "resource_jid": "xarm6@localhost",
+                "function_name": "place_approach",
+                "params": {
+                    "task_id": "REQ_4_T3",
+                    "part_name": "LCP",
+                    "destination_location": "assembly_board-v1",
+                },
+            },
+        ],
+    }
+    fsa = {
+        "A": {
+            "Tr": [
+                {"event": "REQ_3_T3.start", "task_id": "REQ_3_T3"},
+                {"event": "REQ_3_T3.done", "task_id": "REQ_3_T3"},
+                {"event": "REQ_3_T4.start", "task_id": "REQ_3_T4"},
+                {"event": "REQ_3_T4.done", "task_id": "REQ_3_T4"},
+            ],
+        },
+    }
+    return plan, fsa
+
+
+def test_case3_recovery_safety_rebinds_archived_nominal_aps_to_current_live_fsa_ids() -> None:
+    agent = _case3_live_fsa_rebind_agent()
+    result = _case3_recovery_safety_result_for_live_fsa_test()
+    plan, fsa = _case3_live_fsa_rebind_plan_and_fsa()
+
+    rebound = agent._rebind_recovery_safety_result_to_live_fsa(result, plan, fsa)
+
+    rule = next(rule for rule in rebound["rules"] if str(rule.get("id") or "") == "SAFE_2")
+    nominal_aps = [
+        ap
+        for ap in rule.get("aps") or []
+        if isinstance(ap, dict) and str(ap.get("source") or "").strip() == "nominal"
+    ]
+    nominal_source_task_ids = {
+        task_id
+        for ap in nominal_aps
+        for task_id in (ap.get("source_task_ids") or [])
+    }
+
+    assert nominal_source_task_ids == {"REQ_3_T3", "REQ_3_T4"}
+    assert set(rule.get("selected_nominal_task_ids") or []) == {"REQ_3_T3", "REQ_3_T4"}
+    assert "REQ_4_T3" not in nominal_source_task_ids
+    assert not any("task_id=REQ_4_T3" in str(ap.get("full") or "") for ap in nominal_aps)
+    assert any("task_id=REQ_3_T3" in str(ap.get("full") or "") for ap in nominal_aps)
+    assert any("task_id=REQ_3_T4" in str(ap.get("full") or "") for ap in nominal_aps)
+    assert set(rebound["live_fsa_rebinding"]["live_fsa_task_ids"]) == {"REQ_3_T3", "REQ_3_T4"}
+
+
+def test_case3_active_recovery_safety_blocks_rebound_nominal_overlap() -> None:
+    agent = _case3_live_fsa_rebind_agent()
+    result = _case3_recovery_safety_result_for_live_fsa_test()
+    plan, fsa = _case3_live_fsa_rebind_plan_and_fsa()
+    rebound = agent._rebind_recovery_safety_result_to_live_fsa(result, plan, fsa)
+    assert agent._register_recovery_safety_scope_result(rebound) is True
+
+    monitor = agent._recovery_safety_monitor_for_scope("dryrun_recovery_scope")
+    assert monitor is not None
+    recovery_event = {
+        "task_id": "RECOVERY_BRIDGE_8778F5",
+        "resource_jid": "ur5e@localhost",
+        "function_name": "execute_recovery_macro",
+        "params": {
+            "task_id": "RECOVERY_BRIDGE_8778F5",
+            "outline_id": "RECOVERY_SEQ4",
+            "bridge_outline_id": "RECOVERY_SEQ4",
+            "part_name": "LG",
+            "destination_location": "assembly_board-v1",
+            "recovery_safety_scope_id": "dryrun_recovery_scope",
+            "expected_end_state": {
+                "resource_state": "idle",
+                "part_state": "restored",
+                "part_location": "assembly_board-v1",
+            },
+        },
+    }
+    allowed, _ = monitor.process_start_event(recovery_event)
+    assert allowed is True
+
+    xarm_nominal_event = {
+        "task_id": "REQ_3_T3",
+        "resource_jid": "xarm6@localhost",
+        "function_name": "place_approach",
+        "params": {
+            "task_id": "REQ_3_T3",
+            "part_name": "LCP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+    allowed, info, checks = agent._validate_active_recovery_safety_scopes_for_event(
+        xarm_nominal_event
+    )
+
+    assert checks
+    assert allowed is False
+    assert info.get("violated_rule") == "SAFE_2"
+    assert info.get("recovery_safety_scope_id") == "dryrun_recovery_scope"
+
+
+def test_case3_active_recovery_safety_allows_nominal_when_rule_allows_it() -> None:
+    agent = _case3_live_fsa_rebind_agent()
+    result = _case3_recovery_safety_result_for_live_fsa_test()
+    plan, fsa = _case3_live_fsa_rebind_plan_and_fsa()
+    rebound = agent._rebind_recovery_safety_result_to_live_fsa(result, plan, fsa)
+    assert agent._register_recovery_safety_scope_result(rebound) is True
+
+    xarm_nominal_event = {
+        "task_id": "REQ_3_T3",
+        "resource_jid": "xarm6@localhost",
+        "function_name": "place_approach",
+        "params": {
+            "task_id": "REQ_3_T3",
+            "part_name": "LCP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+    allowed, _, checks = agent._validate_active_recovery_safety_scopes_for_event(
+        xarm_nominal_event
+    )
+
+    assert checks
+    assert allowed is True
+
+
+def test_case3_req_2_t3_ordinary_safety_blocks_against_xarm6_nominal_activity() -> None:
+    dot = """
+    digraph MONA_DFA {
+      node [shape = doublecircle]; 1;
+      init -> 1;
+      1 -> 1 [label="~ap001 | ~ap002"];
+      1 -> 2 [label="ap001 & ap002"];
+      2 -> 2 [label="true"];
+    }
+    """
+    rules = [
+        {
+            "id": "SAFE_2",
+            "aps": [
+                {
+                    "label": "ap001",
+                    "full": "ap_event/assembly/lcp/xarm6/place_approach/task_id=REQ_3_T3",
+                    "source": "nominal",
+                    "source_task_ids": ["REQ_3_T3"],
+                    "function": "place_approach",
+                },
+                {
+                    "label": "ap002",
+                    "full": "ap_event/assembly/mcp/ur5e/place_approach/task_id=REQ_2_T3",
+                    "source": "nominal",
+                    "source_task_ids": ["REQ_2_T3"],
+                    "function": "place_approach",
+                },
+            ],
+        }
+    ]
+    monitor = OnlineSafetyMonitor({"SAFE_2": dot}, rules, tools_catalog=[])
+    xarm_event = {
+        "task_id": "REQ_3_T3",
+        "resource_jid": "xarm6@localhost",
+        "function_name": "place_approach",
+        "params": {"task_id": "REQ_3_T3", "part_name": "LCP"},
+    }
+    assert monitor.process_start_event(xarm_event)[0] is True
+
+    ur5e_params = {"task_id": "REQ_2_T3", "part_name": "MCP"}
+    candidate_aps = monitor._map_task_to_aps(
+        "ur5e@localhost",
+        "place_approach",
+        ur5e_params,
+    )
+    predicted_state_aps = monitor._predict_state_aps(
+        "ur5e@localhost",
+        "place_approach",
+        ur5e_params,
+    )
+    allowed, info = monitor.online_safety_validation(
+        candidate_aps,
+        predicted_state_aps=predicted_state_aps,
+    )
+
+    assert allowed is False
+    assert info.get("violated_rule") == "SAFE_2"
 
 
 def test_case3_dryrun_recovery_safety_generation_writes_debug_artifacts(

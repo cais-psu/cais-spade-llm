@@ -506,6 +506,23 @@ def _normalize_destination_token(value: Any) -> str:
     return token.lower()
 
 
+def _rule_constraint_family(source_rule: dict[str, Any]) -> str:
+    family = str(source_rule.get("constraint_type") or "").strip()
+    if family in {"precedence", "mutex"}:
+        return family
+    ltlf = str(source_rule.get("ltlf") or "").strip()
+    resources = [
+        _normalize_resource_token(token)
+        for token in (source_rule.get("resources") or [])
+        if _normalize_resource_token(token)
+    ]
+    if len(resources) >= 2 and "G" in ltlf and "!" in ltlf and "&" in ltlf:
+        return "mutex"
+    if " U " in ltlf or ltlf.startswith("U ") or ltlf.endswith(" U"):
+        return "precedence"
+    return family
+
+
 def _parse_state_token(token: Any) -> tuple[str, str]:
     text = str(token or "").strip()
     if "=" not in text:
@@ -1302,7 +1319,7 @@ def _deterministic_rule_result_from_selection(
         selected_recovery_outline_ids,
         accepted_by_outline_id,
     )
-    family = str(source_rule.get("constraint_type") or "").strip()
+    family = _rule_constraint_family(source_rule)
     destination_required = _rule_destination(source_rule)
     selected_nominal_task_ids = _nominal_task_ids_for_recovery_selection(
         source_rule=source_rule,
@@ -1435,6 +1452,20 @@ def _deterministic_rule_result_from_selection(
         rule_result["grounded_nominal_states"] = []
         rule_result["aps"] = aps
         rule_result["grounded_bindings"] = _grounded_bindings_from_row(rule_result)
+        recovery_formula_aps = [
+            str(row.get("full") or "").strip()
+            for row in [_recovery_event_ap(source_rule, primary_recovery_event)]
+            if str(row.get("full") or "").strip()
+        ]
+        nominal_formula_aps = [
+            str(row.get("full") or "").strip()
+            for row in [_nominal_event_ap(source_rule, primary_nominal_event)]
+            if str(row.get("full") or "").strip()
+        ]
+        if recovery_formula_aps and nominal_formula_aps:
+            rule_result["ltlf"] = (
+                f"(!({' | '.join(nominal_formula_aps)}) U ({' | '.join(recovery_formula_aps)}))"
+            )
         return rule_result
 
     if family == "mutex":
@@ -1559,6 +1590,11 @@ def _deterministic_rule_result_from_selection(
             if str(row.get("full") or "").strip()
         ]
         rule_result["aps"] = aps
+        if rule_result["recovery_side_aps"] and rule_result["nominal_side_aps"]:
+            rule_result["ltlf"] = (
+                f"G !(({' | '.join(rule_result['recovery_side_aps'])}) "
+                f"& ({' | '.join(rule_result['nominal_side_aps'])}))"
+            )
         rule_result["grounded_bindings"] = _grounded_bindings_from_row(rule_result)
         return rule_result
 

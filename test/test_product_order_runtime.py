@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -402,6 +403,185 @@ def test_runtime_safety_fast_path_keeps_ap_relevant_task_on_cca_check(tmp_path: 
 
     assert ap_sets == {"candidate_aps": ["ap001"], "predicted_state_aps": []}
     assert "start_safety_mode" not in params
+
+
+def test_assembly_board_place_insert_forces_cca_check_when_safety_requirements_loaded(tmp_path: Path):
+    agent = _fast_path_agent(tmp_path)
+    task_node = {
+        "type": "task",
+        "id": "REQ_1_T4",
+        "function_name": "place_insert",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "MG",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+
+    params = agent._dispatch_params_for_task_node(task_node)
+
+    assert params["start_safety_mode"] == "cca_check"
+
+
+def test_assembly_board_place_insert_uses_fast_path_without_safety_requirements(tmp_path: Path):
+    agent = _fast_path_agent(tmp_path)
+    agent.safety_text_has_requirements = False
+    task_node = {
+        "type": "task",
+        "id": "REQ_1_T4",
+        "function_name": "place_insert",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "MG",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+
+    params = agent._dispatch_params_for_task_node(task_node)
+
+    assert params["start_safety_mode"] == "fast_path"
+
+
+def _run_plan_executor_guard_case(
+    *,
+    task_node: dict,
+    planner_nodes: list[dict],
+    safety_text_has_requirements: bool,
+):
+    sent_messages: list[dict] = []
+    fake_agent = SimpleNamespace(
+        resource_jids=["xarm6@localhost", "ur5e@localhost"],
+        logger=logging.getLogger("test.product_order_executor_guard"),
+        task_states={},
+        runtime_recovery={},
+        process_planner=SimpleNamespace(nodes=planner_nodes),
+        safety_text_has_requirements=safety_text_has_requirements,
+        _runtime_recovery_blocks_execution=lambda: False,
+        _next_dispatchable_task_node=lambda: task_node,
+        _active_bridge_blocks_nominal_dispatch=lambda: False,
+        _active_bridge_sequence=lambda: None,
+        _reconstruct_active_bridge_sequence_for_validation=lambda: None,
+        _bridge_sequence_task_ids=lambda ids: list(ids or []),
+        _set_runtime_recovery=lambda **kwargs: None,
+        _compose_task_msg=lambda **kwargs: dict(kwargs),
+        _dispatch_params_for_task_node=lambda task_node: dict(task_node.get("params") or {}),
+    )
+    executor = ProductAgent._PlanExecutor()
+    executor.agent = fake_agent  # type: ignore[attr-defined]
+
+    async def _fake_send(msg: dict) -> None:
+        sent_messages.append(dict(msg))
+
+    executor.send = _fake_send  # type: ignore[method-assign]
+    asyncio.run(executor.run())
+    return sent_messages, fake_agent
+
+
+def test_plan_executor_allows_cross_resource_assembly_board_place_without_safety_requirements():
+    task_node = {
+        "type": "task",
+        "id": "REQ_2_T4",
+        "status": "pending",
+        "function_name": "place_insert",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "MRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+    active_node = {
+        "type": "task",
+        "id": "REQ_4_T3",
+        "status": "running",
+        "function_name": "place_approach",
+        "resource_jid": "xarm6@localhost",
+        "params": {
+            "part_name": "SRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+
+    sent_messages, fake_agent = _run_plan_executor_guard_case(
+        task_node=task_node,
+        planner_nodes=[task_node, active_node],
+        safety_text_has_requirements=False,
+    )
+
+    assert sent_messages
+    assert str(sent_messages[0].get("task_id") or "").strip() == "REQ_2_T4"
+    assert str(task_node.get("status") or "").strip() == "dispatched"
+    assert fake_agent.task_states["REQ_2_T4"] == "dispatched"
+
+
+def test_plan_executor_allows_cross_resource_assembly_board_place_with_safety_requirements():
+    task_node = {
+        "type": "task",
+        "id": "REQ_2_T4",
+        "status": "pending",
+        "function_name": "place_insert",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "MRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+    active_node = {
+        "type": "task",
+        "id": "REQ_4_T3",
+        "status": "running",
+        "function_name": "place_approach",
+        "resource_jid": "xarm6@localhost",
+        "params": {
+            "part_name": "SRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+
+    sent_messages, fake_agent = _run_plan_executor_guard_case(
+        task_node=task_node,
+        planner_nodes=[task_node, active_node],
+        safety_text_has_requirements=True,
+    )
+
+    assert sent_messages
+    assert str(sent_messages[0].get("task_id") or "").strip() == "REQ_2_T4"
+    assert str(task_node.get("status") or "").strip() == "dispatched"
+    assert fake_agent.task_states["REQ_2_T4"] == "dispatched"
+
+
+def test_plan_executor_keeps_same_resource_guard_without_safety_requirements():
+    task_node = {
+        "type": "task",
+        "id": "REQ_2_T4",
+        "status": "pending",
+        "function_name": "place_insert",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "MRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+    active_node = {
+        "type": "task",
+        "id": "REQ_3_T3",
+        "status": "running",
+        "function_name": "place_approach",
+        "resource_jid": "ur5e@localhost",
+        "params": {
+            "part_name": "LRP",
+            "destination_location": "assembly_board-v1",
+        },
+    }
+
+    sent_messages, fake_agent = _run_plan_executor_guard_case(
+        task_node=task_node,
+        planner_nodes=[task_node, active_node],
+        safety_text_has_requirements=False,
+    )
+
+    assert sent_messages == []
+    assert str(task_node.get("status") or "").strip() == "pending"
+    assert "REQ_2_T4" not in fake_agent.task_states
 
 
 def test_runtime_safety_fast_path_fails_closed_for_stale_cache(tmp_path: Path):
@@ -1001,6 +1181,27 @@ def test_dashboard_current_task_dag_nodes_show_only_active_product_order_window(
     assert not set(lg["task_ids"]) & visible_ids
     assert set(mcp["task_ids"]) <= visible_ids
     assert {node.get("product_order_part") for node in nodes} == {"MCP"}
+
+
+def test_gazebo_dual_launch_command_keeps_default_args_without_fast_forward():
+    bridge = SystemBridge()
+
+    assert (
+        bridge._render_ros2_launch_cmd("gazebo_dual")
+        == "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py"
+    )
+
+
+def test_gazebo_dual_launch_command_adds_fast_forward_args():
+    bridge = SystemBridge()
+
+    assert bridge._render_ros2_launch_cmd(
+        "gazebo_dual",
+        fast_forward_simulation=True,
+    ) == (
+        "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+        "fast_sim:=true launch_rviz:=false"
+    )
 
 
 def test_dashboard_current_task_dag_nodes_keep_completed_tasks_for_current_part():

@@ -787,32 +787,68 @@ class OnlineSafetySupervisor:
             }
 
         if self.enforcement_mode == "reactive":
-            matching_safe_edges = [
-                edge for edge in self._safe_edges_from(current)
-                if str(edge.get("event") or "").strip() == event_label
-            ]
             matching_edges = [
-                edge for edge in (self.graph.get(current, []) or [])
+                edge
+                for edge in self._local_edges_from(
+                    current,
+                    resource_states=self._merged_resource_states(),
+                    include_violating=True,
+                )
                 if str(edge.get("event") or "").strip() == event_label
             ]
-            if diagnosis["status"] == "safe" and matching_safe_edges:
-                return True, {
+            if not matching_edges:
+                return False, {
                     **diagnosis,
-                    "status": "safe",
+                    "status": "blocked_candidate",
                     "candidate_event": event_label,
+                    "reason": "Reactive runtime supervision could not match a safe product edge for the candidate event.",
                 }
-            if diagnosis["status"] == "inevitable_violation" or not matching_safe_edges:
-                return True, {
+
+            matching_safe_edges = [
+                edge
+                for edge in matching_edges
+                if not edge.get("_violated_rule_ids")
+            ]
+            if not matching_safe_edges:
+                return False, {
                     **diagnosis,
-                    "status": "deferred_monitoring",
+                    "status": "blocked_candidate",
                     "candidate_event": event_label,
-                    "reason": (
-                        "Reactive runtime supervision is allowing the modeled task to run and will "
-                        "diagnose/replan after subsequent runtime events."
-                        if matching_edges or diagnosis["status"] == "inevitable_violation"
-                        else "Reactive runtime supervision could not match a safe product edge for the candidate event."
-                    ),
+                    "reason": "Candidate task would immediately violate safety.",
                 }
+
+            root_pending_rule_ids = set(self._pending_rule_ids(current[1]))
+            if root_pending_rule_ids:
+                discharge_reaching_edges = []
+                for edge in matching_safe_edges:
+                    successor = edge.get("successor")
+                    if not isinstance(successor, tuple):
+                        continue
+
+                    successor_pending = set(self._pending_rule_ids(successor[1]))
+                    if root_pending_rule_ids - successor_pending:
+                        discharge_reaching_edges.append(edge)
+                        continue
+
+                    successor_analysis = self._online_bfs_analysis(
+                        start=successor,
+                        resource_states=deepcopy(edge.get("_resource_states") or {}),
+                        root_pending_rule_ids=root_pending_rule_ids,
+                    )
+                    if successor_analysis["has_discharge"]:
+                        discharge_reaching_edges.append(edge)
+
+                if not discharge_reaching_edges:
+                    return False, {
+                        **diagnosis,
+                        "status": "blocked_candidate",
+                        "candidate_event": event_label,
+                        "reason": (
+                            "Candidate task would move the system into a reachable subtree "
+                            "with no discharge path for the current open obligation."
+                        ),
+                    }
+
             return True, {
                 **diagnosis,
                 "status": "safe",

@@ -33,21 +33,44 @@ else
   echo "IFRA_LinkAttacher already present at ${ROS2_WS}/src/IFRA_LinkAttacher"
 fi
 
+copy_file_if_not_same() {
+  local src="$1"
+  local dst_dir="$2"
+  local dst="${dst_dir}/$(basename "${src}")"
+  if [[ -e "${dst}" ]] && [[ "$(readlink -f "${src}")" == "$(readlink -f "${dst}")" ]]; then
+    return
+  fi
+  cp "${src}" "${dst_dir}/"
+}
+
+copy_glob_if_not_same() {
+  local src_dir="$1"
+  local pattern="$2"
+  local dst_dir="$3"
+  local src
+  shopt -s nullglob
+  for src in "${src_dir}"/${pattern}; do
+    copy_file_if_not_same "${src}" "${dst_dir}"
+  done
+  shopt -u nullglob
+}
+
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
 
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/worlds/"*.world \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds/"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/launch/"*.py \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch/"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/config/"*.yaml \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config/"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz/"*.rviz \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz/"
-cp "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
-  "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/worlds" "*.world" \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/launch" "*.py" \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/config" "*.yaml" \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz" "*.rviz" \
+  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
+copy_file_if_not_same \
+  "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
+  "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher/src"
 
 # ROS setup scripts are not consistently safe under `set -u`.
 set +u
@@ -64,10 +87,10 @@ colcon build --packages-skip d435i_xarm_setup
 # robot flow also requires `config/` and `rviz/` assets at runtime.
 mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
 mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/config/"*.yaml \
-  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config/"
-cp "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz/"*.rviz \
-  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz/"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/config" "*.yaml" \
+  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz" "*.rviz" \
+  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
 
 cat <<EOF
 

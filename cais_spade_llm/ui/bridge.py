@@ -160,6 +160,7 @@ class SystemBridge:
         # Configuration (set from UI before start).
         self.execution_mode: str = "simulation"
         self.robot_env: str = "gazebo"
+        self.fast_forward_simulation_enabled: bool = False
         self.selected_product: str = ""
         self.selected_requirement_file: str = ""
         self.selected_product_order_file: str = ""
@@ -3809,6 +3810,13 @@ class SystemBridge:
             self._set_startup_phase("prepare_environment")
             os.environ["ROBOT_ENV"] = self.robot_env
             os.environ["EXECUTION_MODE"] = self.execution_mode
+            fast_forward_runtime = self._fast_forward_simulation_runtime_enabled()
+            os.environ["CAIS_GAZEBO_WAIT_SCALE"] = (
+                "0.35" if fast_forward_runtime else "1.0"
+            )
+            os.environ["CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE"] = (
+                "1" if fast_forward_runtime else "0"
+            )
             perception_backend = self._perception_backend_for_mode()
             os.environ["PERCEPTION_BACKEND"] = perception_backend
 
@@ -4578,8 +4586,25 @@ class SystemBridge:
         self._hw_ping_last_ts = now
         return {k: dict(v) for k, v in result.items()}
 
-    def _render_ros2_launch_cmd(self, name: str) -> str:
+    def _fast_forward_simulation_runtime_enabled(self) -> bool:
+        return (
+            bool(getattr(self, "fast_forward_simulation_enabled", False))
+            and str(self.execution_mode or "").strip().lower() == "simulation"
+            and str(self.robot_env or "").strip().lower() == "gazebo"
+        )
+
+    def _render_ros2_launch_cmd(
+        self,
+        name: str,
+        *,
+        fast_forward_simulation: bool | None = None,
+    ) -> str:
         cmd = self.ROS2_LAUNCH_CMDS[name]
+        if (
+            str(name or "").strip().lower() == "gazebo_dual"
+            and bool(fast_forward_simulation)
+        ):
+            cmd = f"{cmd} fast_sim:=true launch_rviz:=false"
         return cmd.format(
             xarm6_ip=self.hardware_ips.get("xarm6", self._HW_IP_DEFAULTS["xarm6"]),
             ur5e_ip=self.hardware_ips.get("ur5e", self._HW_IP_DEFAULTS["ur5e"]),
@@ -5500,7 +5525,12 @@ class SystemBridge:
             )
         time.sleep(2)
 
-    def ros2_start(self, name: str) -> str | None:
+    def ros2_start(
+        self,
+        name: str,
+        *,
+        fast_forward_simulation: bool | None = None,
+    ) -> str | None:
         """Start a ROS2 process by name. Returns error string or None on success."""
         if name not in self.ROS2_LAUNCH_CMDS:
             return f"Unknown process: {name}"
@@ -5542,7 +5572,10 @@ class SystemBridge:
             self._kill_stale_gazebo_helpers()
             self._force_kill_gazebo_core(reason="prelaunch_restart")
 
-        cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
+        cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(
+            name,
+            fast_forward_simulation=fast_forward_simulation,
+        )
         try:
             proc = subprocess.Popen(
                 ["bash", "-c", cmd],

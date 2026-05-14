@@ -16,6 +16,8 @@ import os
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.product.profile import ProductProfile
@@ -61,6 +63,63 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _gazebo_world_file_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_path = str(os.environ.get("CAIS_GAZEBO_WORLD_FILE") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        candidates.append(parent / "ros2/cais_lab_gazebo/worlds/table.world")
+    candidates.append(Path.home() / "ros2_ws/src/xarm_ros2/cais_lab_gazebo/worlds/table.world")
+    return candidates
+
+
+def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
+    target_model = str(model_name or "").strip()
+    if not target_model:
+        return None
+    for world_path in _gazebo_world_file_candidates():
+        if not world_path.is_file():
+            continue
+        try:
+            root = ET.parse(world_path).getroot()
+        except Exception:
+            continue
+        for model in root.iter("model"):
+            if str(model.attrib.get("name") or "").strip() != target_model:
+                continue
+            for geometry in model.iter("geometry"):
+                cylinder = geometry.find("cylinder")
+                if cylinder is not None:
+                    radius = _as_float(
+                        cylinder.findtext("radius"),
+                        0.0,
+                    )
+                    if radius > 0.0:
+                        return radius * 2.0
+                box = geometry.find("box")
+                if box is not None:
+                    tokens = str(box.findtext("size") or "").split()
+                    if len(tokens) >= 2:
+                        try:
+                            return max(float(tokens[0]), float(tokens[1]))
+                        except (TypeError, ValueError):
+                            continue
+    return None
+
+
+def _gazebo_timing_scale_from_env(execution_mode: str) -> float:
+    if str(execution_mode or "").strip().lower() != "simulation":
+        return 1.0
+    if str(os.environ.get("ROBOT_ENV", "gazebo") or "").strip().lower() != "gazebo":
+        return 1.0
+    scale = _as_float(os.environ.get("CAIS_GAZEBO_WAIT_SCALE"), 1.0)
+    if scale <= 0.0:
+        return 1.0
+    return float(scale)
 
 
 class Ros2PickPlaceController:
@@ -207,6 +266,13 @@ class Ros2PickPlaceController:
         else:
             self.attach_link_candidates = []
             self._config_errors.append("controller.attach.attach_link_candidates")
+        raw_release_candidates = attach_cfg.get("release_detach_link_candidates")
+        if isinstance(raw_release_candidates, list):
+            self.release_detach_link_candidates = [
+                str(v) for v in raw_release_candidates if str(v).strip()
+            ]
+        else:
+            self.release_detach_link_candidates = []
         self.primary_attach_link = need_str(
             attach_cfg, "primary_attach_link", "controller.attach.primary_attach_link"
         )
@@ -340,7 +406,6 @@ class Ros2PickPlaceController:
                     self._config_errors.append(
                         f"controller.parts_tuning.pick_z_adjustments_m.{key}"
                     )
-
         if (
             self.pick_tcp_z_bias_min_m > 0.0
             and self.pick_tcp_z_bias_max_m > 0.0
@@ -349,6 +414,8 @@ class Ros2PickPlaceController:
             self._config_errors.append(
                 "controller.motion.pick_tcp_z_bias_min_m<=pick_tcp_z_bias_max_m"
             )
+
+        self._apply_gazebo_fast_timing_profile()
 
         self._config_valid = not self._config_errors
         if not self._config_valid:
@@ -389,6 +456,51 @@ class Ros2PickPlaceController:
 
         # Remembered start pose for move_home (set externally or by UI bridge).
         self._last_start_pose = None
+
+    def _apply_gazebo_fast_timing_profile(self, scale: float | None = None) -> None:
+        resolved_scale = (
+            _gazebo_timing_scale_from_env(self.execution_mode)
+            if scale is None
+            else _as_float(scale, 1.0)
+        )
+        self._gazebo_wait_scale = resolved_scale
+        if resolved_scale <= 0.0 or abs(resolved_scale - 1.0) < 1e-6:
+            return
+
+        def scaled_attr(
+            attr_name: str,
+            *,
+            minimum: float = 0.0,
+            scale_override: float | None = None,
+        ) -> None:
+            current = _as_float(getattr(self, attr_name, 0.0), 0.0)
+            scale_value = resolved_scale if scale_override is None else scale_override
+            setattr(self, attr_name, max(float(minimum), current * scale_value))
+
+        motion_scale = resolved_scale
+        if 0.0 < resolved_scale < 1.0:
+            # Keep Gazebo service waits at the configured scale, but push arm motion
+            # harder. This speeds up motion without shortening attach/detach calls.
+            motion_scale = resolved_scale * (0.25 / 0.35)
+
+        scaled_attr("gripper_move_time_sec", minimum=0.15)
+        scaled_attr("gripper_settle_sec")
+        scaled_attr("release_preopen_settle_sec")
+        scaled_attr("release_postopen_settle_sec")
+        scaled_attr("release_postdetach_settle_sec")
+        scaled_attr("release_detach_retry_delay_sec")
+        scaled_attr("release_detach_verify_timeout_sec", minimum=0.05)
+        scaled_attr("release_detach_verify_poll_sec", minimum=0.01)
+        scaled_attr("snap_to_slot_retry_delay_sec")
+        scaled_attr("trajectory_time_scale", minimum=0.20, scale_override=motion_scale)
+        scaled_attr("named_pose_duration_sec", minimum=0.25, scale_override=motion_scale)
+        scaled_attr("move_home_duration_sec", minimum=0.25, scale_override=motion_scale)
+
+    def _scaled_wall_wait_sec(self, seconds: float, *, minimum: float = 0.0) -> float:
+        scale = _as_float(getattr(self, "_gazebo_wait_scale", 1.0), 1.0)
+        if scale <= 0.0:
+            scale = 1.0
+        return max(float(minimum), float(seconds) * scale)
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -724,8 +836,10 @@ class Ros2PickPlaceController:
             f"move_relative(dx={dx}, dy={dy}, dz={dz})",
             time_scale=time_scale,
         )
+        direct_failure = str(getattr(self, "_last_failure_message", "") or "").strip().lower()
         if (
             not ok
+            and "timed out" not in direct_failure
             and math.isclose(float(dx), 0.0, abs_tol=1e-9)
             and math.isclose(float(dy), 0.0, abs_tol=1e-9)
             and not math.isclose(float(dz), 0.0, abs_tol=1e-9)
@@ -1097,6 +1211,11 @@ class Ros2PickPlaceController:
 
         target_model = str(model_name or "").strip()
         target_part = str(part_name or "").strip()
+        if (
+            not assume_released_if_open
+            and str(getattr(self, "execution_mode", "") or "").strip().lower() == "simulation"
+        ):
+            assume_released_if_open = True
 
         time.sleep(self.release_preopen_settle_sec)
         if not self.open_gripper():
@@ -1123,16 +1242,19 @@ class Ros2PickPlaceController:
             )
         if detached.get("success"):
             time.sleep(self.release_postdetach_settle_sec)
+            release_mode = str(detached.get("release_mode") or "").strip()
+            if release_mode == "verification_unavailable_after_detach_timeout":
+                release_message = str(detached.get("message") or "")
+            elif target_part or target_model:
+                release_message = f"released {target_part or target_model or 'part'}"
+            else:
+                release_message = "released part"
             result = {
                 "success": True,
-                "message": (
-                    f"released {target_part or target_model or 'part'}"
-                    if (target_part or target_model)
-                    else "released part"
-                ),
+                "message": release_message,
             }
-            if detached.get("release_mode"):
-                result["release_mode"] = detached.get("release_mode")
+            if release_mode:
+                result["release_mode"] = release_mode
             return result
 
         if (
@@ -1174,6 +1296,16 @@ class Ros2PickPlaceController:
                 "message": (
                     f"detach failed and release verification kept "
                     f"{fallback_model or 'held part'} near the gripper"
+                ),
+            }
+
+        if used_simulation_release_fallback:
+            return {
+                "success": False,
+                "message": str(detached.get("message") or "failed to detach part"),
+                "release_mode": detached.get(
+                    "release_mode",
+                    "verification_unavailable_after_detach_timeout",
                 ),
             }
 
@@ -1239,6 +1371,7 @@ class Ros2PickPlaceController:
             timeout_log_level="warn",
             break_on_timeout=False,
             prefer_attached_link=False,
+            extra_link_candidates=getattr(self, "release_detach_link_candidates", []),
         )
         if ok:
             return {
@@ -1273,10 +1406,10 @@ class Ros2PickPlaceController:
             }
 
         return {
-            "success": False,
+            "success": True,
             "message": (
-                f"detach failed and release verification is unavailable for "
-                f"{fallback_model or display_name}"
+                f"released {display_name} after gripper opened "
+                "(detach verification unavailable)"
             ),
             "release_mode": "verification_unavailable_after_detach_timeout",
         }
@@ -1362,6 +1495,41 @@ class Ros2PickPlaceController:
             return False
         target = float(position) if position is not None else self.gripper_close
         return self._gripper_command(target, "CLOSE")
+
+    def _derive_gripper_close_position(
+        self,
+        *,
+        model_name: str = "",
+        product_geometry: dict[str, Any] | None = None,
+    ) -> float | None:
+        if not (
+            float(self.gripper_open) > float(self.gripper_close)
+            and 0.0 <= float(self.gripper_close) <= float(self.gripper_open) <= 0.25
+        ):
+            return None
+
+        geometry = product_geometry if isinstance(product_geometry, dict) else {}
+        width = None
+        for key in (
+            "grasp_width_m",
+            "part_width_m",
+            "part_diameter_m",
+            "diameter_m",
+            "width_m",
+        ):
+            if key in geometry:
+                candidate = _as_float(geometry.get(key), 0.0)
+                if candidate > 0.0:
+                    width = candidate
+                    break
+        if width is None:
+            width = _model_footprint_width_from_gazebo_world(str(model_name or ""))
+        if width is None or width <= 0.0:
+            return None
+
+        target = width
+        target = max(float(self.gripper_close), min(float(self.gripper_open), target))
+        return target
 
     # ------------------------------------------------------------------ #
     # Geometry helpers (agent calls these to compute targets, then moves)
@@ -1507,6 +1675,10 @@ class Ros2PickPlaceController:
             if bool(apply_pick_z_adjustments)
             else 0.0
         )
+        gripper_close_position = self._derive_gripper_close_position(
+            model_name=target_model,
+            product_geometry=geo,
+        )
         pick_z = pick_tcp_z - ee_tcp_offset_z
         pick_z += pick_z_adjustment_m
 
@@ -1546,6 +1718,7 @@ class Ros2PickPlaceController:
             "pick_tcp_z_raw": pick_tcp_z_raw,
             "surface_clearance_m": surface_clearance_m,
             "pick_z_adjustment_m": pick_z_adjustment_m,
+            "gripper_close_position": gripper_close_position,
             "apply_pick_z_adjustments": bool(apply_pick_z_adjustments),
             "effective_min_pick_tcp_z": effective_min_tcp_z,
             "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z),
@@ -1669,7 +1842,7 @@ class Ros2PickPlaceController:
         else:
             place_gap = self.place_surface_gap_m - self.insertion_depth_m
             place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
-            if target_point == "inserted_part_origin":
+            if target_point != "part_origin":
                 place_part_origin_z = max(
                     place_part_origin_z,
                     board_top_z + (target_height * 0.5),
@@ -1711,6 +1884,7 @@ class Ros2PickPlaceController:
         part_height: float,
         board_top_z: float,
         part_origin_z: float | None = None,
+        destination_location: str = "",
     ) -> bool:
         """Teleport a Gazebo model to its exact slot pose (post-placement correction)."""
         if not self.wait_for_services():
@@ -1722,6 +1896,7 @@ class Ros2PickPlaceController:
             part_height,
             board_top_z,
             part_origin_z=part_origin_z,
+            destination_location=destination_location,
         )
 
     def detect_parts(self, part_name: str | None = None) -> list[dict[str, Any]]:
@@ -1973,13 +2148,16 @@ class Ros2PickPlaceController:
                 "success": False,
                 "message": self._unavailable_message("services not ready"),
             }
+        target_model = str(model_name or "").strip()
+        if not target_model:
+            return {"success": False, "message": "model name is required"}
         if not self._set_state_client.wait_for_service(timeout_sec=2.0):
             return {"success": False, "message": "set_entity_state service unavailable"}
 
         from gazebo_msgs.msg import EntityState
 
         state = EntityState()
-        state.name = str(model_name)
+        state.name = target_model
         state.pose.position.x = float(x)
         state.pose.position.y = float(y)
         state.pose.position.z = float(z)
@@ -1989,14 +2167,23 @@ class Ros2PickPlaceController:
         state.pose.orientation.w = float(qw)
         state.reference_frame = str(reference_frame or "world")
 
+        if self._link_attacher_enabled:
+            for board_link in (f"anchor_{target_model}", "link"):
+                try:
+                    self._detach_part_from_assembly_board(target_model, board_link)
+                except Exception as exc:
+                    self._log().debug(
+                        f"set_entity_pose board detach ignored for {target_model}:{board_link}: {exc}"
+                    )
+
         req = self._SetEntityState.Request()
         req.state = state
         future = self._set_state_client.call_async(req)
-        response = self._wait_future(future, timeout_sec=5.0, label=f"set_entity_pose:{model_name}")
+        response = self._wait_future(future, timeout_sec=5.0, label=f"set_entity_pose:{target_model}")
         if response and response.success:
-            return {"success": True, "message": f"entity pose reset for {model_name}"}
+            return {"success": True, "message": f"entity pose reset for {target_model}"}
         detail = getattr(response, "status_message", "") if response is not None else ""
-        detail = str(detail or "").strip() or f"failed to set pose for {model_name}"
+        detail = str(detail or "").strip() or f"failed to set pose for {target_model}"
         return {"success": False, "message": detail}
 
     # ------------------------------------------------------------------ #
@@ -2388,7 +2575,7 @@ class Ros2PickPlaceController:
         traj.points = [point]
 
         self._gripper_pub.publish(traj)
-        time.sleep(0.05)
+        time.sleep(self._scaled_wall_wait_sec(0.05))
         self._gripper_pub.publish(traj)
 
         feedback_timeout = max(move_time_s + self.gripper_feedback_timeout_pad_sec, 1.0)
@@ -2554,6 +2741,7 @@ class Ros2PickPlaceController:
         timeout_log_level: str = "error",
         break_on_timeout: bool = True,
         prefer_attached_link: bool = True,
+        extra_link_candidates: list[str] | tuple[str, ...] | None = None,
     ) -> bool:
         if not self._link_attacher_enabled:
             return True
@@ -2576,6 +2764,10 @@ class Ros2PickPlaceController:
             for link in self.attach_link_candidates:
                 if link not in links_to_try:
                     links_to_try.append(link)
+            for link in extra_link_candidates or []:
+                link_name = str(link or "").strip()
+                if link_name and link_name not in links_to_try:
+                    links_to_try.append(link_name)
         if not prefer_attached_link and self._attached_link and self._attached_link not in links_to_try:
             links_to_try.append(self._attached_link)
         max_link_attempts = (
@@ -2624,6 +2816,7 @@ class Ros2PickPlaceController:
         part_height: float,
         board_top_z: float,
         part_origin_z: float | None = None,
+        destination_location: str = "",
     ) -> bool:
         if not self._set_state_client.wait_for_service(timeout_sec=2.0):
             return False
@@ -2639,17 +2832,49 @@ class Ros2PickPlaceController:
             board_top_z + (part_height * 0.5),
         )
         state.pose.orientation.w = 1.0
+        state.twist.linear.x = 0.0
+        state.twist.linear.y = 0.0
+        state.twist.linear.z = 0.0
+        state.twist.angular.x = 0.0
+        state.twist.angular.y = 0.0
+        state.twist.angular.z = 0.0
         state.reference_frame = "world"
 
+        self._detach_part(
+            model_name,
+            timeout_sec=self._simulation_release_detach_timeout_sec(),
+            attached_link_only=False,
+            log_failure=False,
+            timeout_log_level="debug",
+            break_on_timeout=False,
+            prefer_attached_link=False,
+            extra_link_candidates=getattr(self, "release_detach_link_candidates", []),
+        )
+
+        if not self._set_entity_state_for_snap(model_name, state):
+            return False
+        if not self._attach_part_to_assembly_board(
+            model_name,
+            destination_location=destination_location,
+        ):
+            return False
+        if not self._set_entity_state_for_snap(model_name, state):
+            return False
+
+        self._log().info(
+            f"snap_to_slot stabilized {model_name} at "
+            f"({slot_x:.3f}, {slot_y:.3f}, {state.pose.position.z:.3f})"
+        )
+        return True
+
+    def _set_entity_state_for_snap(self, model_name: str, state) -> bool:
         req = self._SetEntityState.Request()
         req.state = state
 
         attempts = max(1, 1 + int(getattr(self, "snap_to_slot_retry_count", 0) or 0))
         timeout_sec = _as_float(getattr(self, "snap_to_slot_timeout_sec", None), 5.0)
-        retry_delay_sec = _as_float(
-            getattr(self, "snap_to_slot_retry_delay_sec", None),
-            0.25,
-        )
+        retry_delay_sec = _as_float(getattr(self, "snap_to_slot_retry_delay_sec", None), 0.25)
+        saw_success = False
         for attempt_idx in range(attempts):
             future = self._set_state_client.call_async(req)
             response = self._wait_future(
@@ -2658,13 +2883,109 @@ class Ros2PickPlaceController:
                 label="snap_to_slot",
             )
             if response and response.success:
-                return True
+                saw_success = True
+                if attempt_idx + 1 < attempts:
+                    time.sleep(retry_delay_sec)
+                continue
             if attempt_idx + 1 < attempts:
                 self._log().warn(
                     f"snap_to_slot retry {attempt_idx + 1}/{attempts - 1} for {model_name}"
                 )
                 time.sleep(retry_delay_sec)
+        if saw_success:
+            return True
         return False
+
+    def _attach_part_to_assembly_board(
+        self,
+        model_name: str,
+        *,
+        destination_location: str = "",
+    ) -> bool:
+        if not self._link_attacher_enabled:
+            return True
+        target_model = str(model_name or "").strip()
+        if not target_model:
+            return False
+        destination = str(destination_location or "").strip()
+        if destination and destination != "assembly_board-v1":
+            return True
+        if not self._attach_client.wait_for_service(timeout_sec=0.5):
+            return False
+
+        board_links = [f"anchor_{target_model}", "link"]
+        for board_link in board_links:
+            self._detach_part_from_assembly_board(target_model, board_link)
+
+        last_message = ""
+        for attempt_idx in range(2):
+            for board_link in board_links:
+                req = self._attach_srv.Request()
+                req.model1_name = "assembly_board_v1"
+                req.link1_name = board_link
+                req.model2_name = target_model
+                req.link2_name = "link"
+
+                future = self._attach_client.call_async(req)
+                response = self._wait_future(
+                    future,
+                    timeout_sec=5.0,
+                    label=f"attach:assembly_board_v1:{board_link}:{target_model}",
+                    timeout_log_level="warn",
+                )
+                if response and response.success:
+                    if self._attached_model == target_model:
+                        self._attached_model = None
+                        self._attached_link = None
+                    return True
+
+                last_message = str(response.message if response else "no response")
+                msg = last_message.lower()
+                if "failed to find link" in msg and board_link != "link":
+                    continue
+                if "already attached" in msg and board_link == f"anchor_{target_model}":
+                    self._detach_part(
+                        target_model,
+                        timeout_sec=self._simulation_release_detach_timeout_sec(),
+                        attached_link_only=False,
+                        log_failure=False,
+                        timeout_log_level="debug",
+                        break_on_timeout=False,
+                        prefer_attached_link=False,
+                        extra_link_candidates=getattr(self, "release_detach_link_candidates", []),
+                    )
+                    self._detach_part_from_assembly_board(target_model, board_link)
+                    break
+            if attempt_idx == 0:
+                time.sleep(self._scaled_wall_wait_sec(0.05))
+        self._log().error(
+            f"Failed to attach {target_model} to assembly_board_v1: {last_message}"
+        )
+        return False
+
+    def _detach_part_from_assembly_board(self, model_name: str, board_link: str) -> bool:
+        if not self._link_attacher_enabled:
+            return True
+        target_model = str(model_name or "").strip()
+        link_name = str(board_link or "").strip()
+        if not target_model or not link_name:
+            return False
+        if not self._detach_client.wait_for_service(timeout_sec=0.5):
+            return False
+
+        req = self._detach_srv.Request()
+        req.model1_name = "assembly_board_v1"
+        req.link1_name = link_name
+        req.model2_name = target_model
+        req.link2_name = "link"
+        future = self._detach_client.call_async(req)
+        response = self._wait_future(
+            future,
+            timeout_sec=0.5,
+            label=f"detach:assembly_board_v1:{link_name}:{target_model}",
+            timeout_log_level="debug",
+        )
+        return bool(response and response.success)
 
     def _cartesian_move(
         self,

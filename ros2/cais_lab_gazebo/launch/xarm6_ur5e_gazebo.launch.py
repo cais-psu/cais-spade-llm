@@ -266,6 +266,11 @@ def _strip_world_links_and_joints(root, extra_link_names=None):
             root.remove(link)
 
 
+def _launch_arg_enabled(context, name, default='false'):
+    value = LaunchConfiguration(name, default=default).perform(context)
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
 
@@ -285,8 +290,9 @@ def launch_setup(context, *args, **kwargs):
         )
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
+    world_name = 'table_fast.world' if _launch_arg_enabled(context, 'fast_sim') else 'table.world'
     gazebo_world = PathJoinSubstitution(
-        [FindPackageShare('xarm_gazebo'), 'worlds', 'table.world']
+        [FindPackageShare('xarm_gazebo'), 'worlds', world_name]
     )
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -622,6 +628,11 @@ def generate_launch_description():
             'run_perception',
             default_value='true',
             description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
+        ),
+        DeclareLaunchArgument(
+            'fast_sim',
+            default_value='false',
+            description='Use the fast Gazebo world timing profile.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

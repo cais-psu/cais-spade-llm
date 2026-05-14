@@ -108,16 +108,12 @@ class AutoLinkAttacher(Node):
         self.ur5e_open_threshold = float(self.get_parameter('ur5e_open_threshold').value)
         self.open_confirm_cycles = int(self.get_parameter('open_confirm_cycles').value)
 
-        # Preferred link order for ATTACH/DETACH. We try prettier grasp-centric links first,
-        # and fall back to robust wrist links if Gazebo doesn't expose a candidate link.
+        # Preferred link order for ATTACH/DETACH. xarm uses link6 as the stable
+        # fixed joint owner; ur5e keeps its configured fallback order.
         self.attach_link_candidates: Dict[str, List[str]] = {
             # link_tcp/link_eef are not exposed as Gazebo physics links in this setup.
-            # Use real gripper collision links first, then fall back to link6.
+            # Use link6 as the fixed joint owner so released parts are not pinned to one finger.
             'xarm': [
-                'xarm6_right_inner_knuckle',
-                'xarm6_left_inner_knuckle',
-                'xarm6_right_finger',
-                'xarm6_left_finger',
                 'xarm6_link6',
             ],
             'ur5e': ['ur5e_rg2_gripper_tcp', 'ur5e_tool0', 'ur5e_wrist_3_link'],

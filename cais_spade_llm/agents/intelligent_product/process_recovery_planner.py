@@ -41,6 +41,7 @@ class ProcessRecoveryPlanner:
         '_gate_tasks_after_recovery_tail',
         '_splice_runtime_des_repair_before_task',
         '_splice_bridge_chain_before_task',
+        'build_bridge_macro_proposal_patch',
         'apply_bridge_macro_proposal',
         '_apply_primitive_bridge_proposal',
         '_task_ids_running_in_fsa_state',
@@ -50,6 +51,7 @@ class ProcessRecoveryPlanner:
         'replan_with_feedback_des',
         '_resolve_goal_part_state',
         '_derive_part_tracker_from_violations',
+        '_preview_replan_patch',
         '_apply_replan_patch',
         '_deduplicate_tools_catalog',
         '_dump_replan_debug',
@@ -1436,13 +1438,31 @@ class ProcessRecoveryPlanner:
         anchor_task_id: str = "",
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
+        tasks, patch_rows = self.build_bridge_macro_proposal_patch(
+            proposal,
+            anchor_task_id=anchor_task_id,
+            splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
+        )
+        self._apply_replan_patch(patch_rows)
+        return [
+            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
+            for task in tasks
+        ]
+
+    def build_bridge_macro_proposal_patch(
+        self,
+        proposal: dict[str, Any],
+        *,
+        anchor_task_id: str = "",
+        splice_before_task_ids_by_resource: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not isinstance(proposal, dict):
             raise ValueError("bridge proposal is missing")
 
         # Primitive-based proposal: compile top-level primitive_steps or ordered macro_tasks[]
         # into one serial execute_recovery_macro chain.
         if self._primitive_bridge_macro_tasks(proposal):
-            return self._apply_primitive_bridge_proposal(
+            return self._build_primitive_bridge_proposal_patch(
                 proposal,
                 anchor_task_id=anchor_task_id,
                 splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
@@ -1502,11 +1522,7 @@ class ProcessRecoveryPlanner:
             if task_id and task_id in spliced_task_ids:
                 continue
             patch_rows.append(task)
-        self._apply_replan_patch(patch_rows)
-        return [
-            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
-            for task in tasks
-        ]
+        return tasks, patch_rows
 
     def _apply_primitive_bridge_proposal(
         self,
@@ -1515,6 +1531,24 @@ class ProcessRecoveryPlanner:
         anchor_task_id: str = "",
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
+        compiled_nodes, patch_rows = self._build_primitive_bridge_proposal_patch(
+            proposal,
+            anchor_task_id=anchor_task_id,
+            splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
+        )
+        self._apply_replan_patch(patch_rows)
+        return [
+            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
+            for task in compiled_nodes
+        ]
+
+    def _build_primitive_bridge_proposal_patch(
+        self,
+        proposal: dict[str, Any],
+        *,
+        anchor_task_id: str = "",
+        splice_before_task_ids_by_resource: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Compile one or more primitive-based bridge macro_tasks into ordered task nodes."""
         from uuid import uuid4
 
@@ -1736,11 +1770,7 @@ class ProcessRecoveryPlanner:
             if task_id and task_id in spliced_task_ids:
                 continue
             patch_rows.append(task)
-        self._apply_replan_patch(patch_rows)
-        return [
-            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
-            for task in compiled_nodes
-        ]
+        return compiled_nodes, patch_rows
 
     async def replan_with_feedback_offline(self, violations: list[dict]) -> None:
         """Offline replan using safety validator feedback."""
@@ -2325,14 +2355,20 @@ class ProcessRecoveryPlanner:
                     entry["_force_keys"] = sorted(force_keys)
         return derived
 
-    def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:
+    def _preview_replan_patch(
+        self,
+        base_nodes: list[dict],
+        modified_tasks: list[dict],
+        *,
+        log_changes: bool = False,
+    ) -> list[dict]:
         """
-        Merge task modifications into self.nodes.
+        Return the graph that would result from applying modified_tasks to base_nodes.
 
-        Supports MODIFICATION, INSERTION, and DELETION.
-        Called by both PDDL replanner and pure-LLM replanner paths.
+        Supports MODIFICATION, INSERTION, and DELETION. This helper validates the
+        resulting graph but does not persist planner files or rebuild the global FSA.
         """
-        original_nodes = deepcopy(self.nodes)
+        original_nodes = deepcopy(base_nodes)
         node_map = {n["id"]: n for n in original_nodes}
 
         for t in modified_tasks:
@@ -2343,7 +2379,8 @@ class ProcessRecoveryPlanner:
             # CASE A: DELETION
             if t.get("delete") is True:
                 if tid in node_map:
-                    self.logger.info(f"[Planner] DELETING task {tid}: {t.get('change_reason')}")
+                    if log_changes:
+                        self.logger.info(f"[Planner] DELETING task {tid}: {t.get('change_reason')}")
                     del node_map[tid]
                     for other in node_map.values():
                         if tid in other.get("predecessors", []):
@@ -2353,9 +2390,9 @@ class ProcessRecoveryPlanner:
                 continue
 
             # CASE B: MODIFICATION / INSERTION
-            params = t.get("params") or {}
+            params = deepcopy(t.get("params") or {})
             if tid in node_map and not t.get("params"):
-                params = node_map[tid].get("params", {})
+                params = deepcopy(node_map[tid].get("params", {}))
 
             params["product_jid"] = str(self.product_agent.jid)
 
@@ -2384,7 +2421,8 @@ class ProcessRecoveryPlanner:
 
             if "change_reason" in t:
                 target["change_reason"] = t["change_reason"]
-                self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
+                if log_changes:
+                    self.logger.info(f"[Planner] Applied fix to {tid}: {t['change_reason']}")
 
             for extra_key in (
                 "part_name",
@@ -2421,6 +2459,20 @@ class ProcessRecoveryPlanner:
         self._normalize_same_resource_chains(tentative_nodes)
         self._validate_task_graph(tentative_nodes)
 
+        return tentative_nodes
+
+    def _apply_replan_patch(self, modified_tasks: list[dict]) -> None:
+        """
+        Merge task modifications into self.nodes.
+
+        Supports MODIFICATION, INSERTION, and DELETION.
+        Called by both PDDL replanner and pure-LLM replanner paths.
+        """
+        tentative_nodes = self._preview_replan_patch(
+            self.nodes,
+            modified_tasks,
+            log_changes=True,
+        )
         self.nodes = tentative_nodes
 
         self.logger.info(

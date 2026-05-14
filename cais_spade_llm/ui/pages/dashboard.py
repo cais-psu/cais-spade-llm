@@ -234,6 +234,10 @@ def render(bridge: SystemBridge) -> None:
                     label="Mode",
                     width_class="w-48",
                 )
+                fast_forward_switch = ui.switch(
+                    "Fast Forward Simulation",
+                    value=bool(getattr(bridge, "fast_forward_simulation_enabled", False)),
+                ).classes("mb-1")
             runtime_bridge_settings = bridge.get_runtime_bridge_settings()
             bridge_archive_options: dict[str, str] = {}
             bridge_archive_entries: dict[str, dict[str, Any]] = {}
@@ -495,6 +499,9 @@ def render(bridge: SystemBridge) -> None:
                     internal = _MODE_MAP[mode_select.value]
                     bridge.execution_mode = internal
                     bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
+                    bridge.fast_forward_simulation_enabled = (
+                        bool(fast_forward_switch.value) and internal == "simulation"
+                    )
 
                     try:
                         bundle_ok, bundle_msg = _bundle_gate(strict=True)
@@ -661,7 +668,16 @@ def render(bridge: SystemBridge) -> None:
                     _update_controls()
                     _set_action_banner("info", "Launching Gazebo + MoveIt...")
                     try:
-                        err = await asyncio.to_thread(bridge.ros2_start, "gazebo_dual")
+                        fast_forward = (
+                            bool(fast_forward_switch.value)
+                            and _MODE_MAP.get(mode_select.value, "dry_run") == "simulation"
+                        )
+                        bridge.fast_forward_simulation_enabled = fast_forward
+                        err = await asyncio.to_thread(
+                            bridge.ros2_start,
+                            "gazebo_dual",
+                            fast_forward_simulation=fast_forward,
+                        )
                         if err:
                             _set_action_banner("warning", err, auto_hide_s=8.0)
                         else:
@@ -816,6 +832,14 @@ def render(bridge: SystemBridge) -> None:
                     internal = _MODE_MAP.get(mode_select.value, "dry_run")
                     bridge.execution_mode = internal
                     bridge.robot_env = "gazebo" if internal in ("dry_run", "simulation") else "real"
+                    bridge.fast_forward_simulation_enabled = (
+                        bool(fast_forward_switch.value) and internal == "simulation"
+                    )
+                    fast_forward_switch.set_enabled(
+                        internal == "simulation"
+                        and not bridge.system_running
+                        and not bridge._starting
+                    )
                     if internal == "physical" and hasattr(bridge, "hardware_connection_statuses"):
                         if not hw_probe["busy"]:
                             async def _probe_hw():
@@ -915,6 +939,13 @@ def render(bridge: SystemBridge) -> None:
             def _handle_mode_or_source_change(e: Any) -> None:
                 _refresh_controls_and_dag()
 
+            def _handle_fast_forward_change(e: Any) -> None:
+                internal = _MODE_MAP.get(mode_select.value, "dry_run")
+                bridge.fast_forward_simulation_enabled = (
+                    bool(getattr(e, "value", False)) and internal == "simulation"
+                )
+                _refresh_controls_and_dag()
+
             def _guard_select_handler(name: str, handler: Callable[[Any], Any]) -> Callable[[Any], Any]:
                 def _wrapped(e: Any) -> Any:
                     select_popup_open["value"] = False
@@ -945,6 +976,7 @@ def render(bridge: SystemBridge) -> None:
             mode_select.on_value_change(
                 _guard_select_handler("mode_select", _handle_mode_or_source_change)
             )
+            fast_forward_switch.on_value_change(_handle_fast_forward_change)
             bridge_mode_select.on_value_change(
                 _guard_select_handler("bridge_mode_select", _handle_bridge_mode_change)
             )

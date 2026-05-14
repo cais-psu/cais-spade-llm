@@ -1319,6 +1319,13 @@ class ProductRecoveryController:
             or self.runtime_recovery.get("recovery_safety_scope_id")
             or ""
         ).strip()
+        bridge_dispatch_session = bool(
+            active_bridge_sequence
+            or self.runtime_recovery.get("active_bridge_sequence")
+            or self.runtime_recovery.get("used_llm_bridge")
+            or self.runtime_recovery.get("bridge_approval_state")
+            or self.runtime_recovery.get("bridge_proposal")
+        )
         sequence_task_id_parser = getattr(self, "_bridge_sequence_task_ids", None)
 
         def _sequence_task_ids(raw_ids: Any) -> list[str]:
@@ -1352,6 +1359,10 @@ class ProductRecoveryController:
             or function_name == "execute_recovery_macro"
             or has_recovery_fields
         )
+        assembly_board_task = (
+            function_name in {"place_approach", "place_insert"}
+            and str(params.get("destination_location") or "").strip() == "assembly_board-v1"
+        )
         if active_validation_policy == "validated" and recovery_safety_task:
             if recovery_safety_scope_id:
                 params["recovery_safety_scope_id"] = recovery_safety_scope_id
@@ -1376,7 +1387,11 @@ class ProductRecoveryController:
                     history_message=message,
                 )
                 raise RuntimeError(message)
+        elif assembly_board_task and bool(getattr(self, "safety_text_has_requirements", False)):
+            params["start_safety_mode"] = "cca_check"
         elif not recovery_safety_task:
+            if active_validation_policy == "no_validation" and bridge_dispatch_session:
+                return params
             if not bool(getattr(self, "safety_text_has_requirements", False)):
                 params.setdefault("start_safety_mode", "fast_path")
             elif self._runtime_safety_task_ap_empty(task_node, params) is True:
@@ -3527,23 +3542,57 @@ class ProductRecoveryController:
         location_key = str(location or "").strip()
         if not location_key:
             return False
+
+        def caps_can_reach(caps: Any) -> tuple[bool, bool]:
+            if not isinstance(caps, dict) or not caps:
+                return False, False
+            reachability = caps.get("reachability")
+            has_reachability = isinstance(reachability, list) and bool(reachability)
+            if has_reachability:
+                normalized = {str(item).strip() for item in reachability if str(item).strip()}
+                if location_key in normalized:
+                    return True, True
+            staging_areas = caps.get("staging_areas")
+            if isinstance(staging_areas, dict) and location_key in staging_areas:
+                return True, has_reachability
+            if isinstance(staging_areas, list):
+                normalized = {str(item).strip() for item in staging_areas if str(item).strip()}
+                if location_key in normalized:
+                    return True, has_reachability
+            return False, has_reachability
+
         resource = self.process_planner._resource_by_jid(resource_jid)
         caps = getattr(resource, "static_capabilities", {}) if resource is not None else {}
         if not isinstance(caps, dict) or not caps:
             return True
-        reachability = caps.get("reachability")
-        if isinstance(reachability, list) and reachability:
-            normalized = {str(item).strip() for item in reachability if str(item).strip()}
-            if location_key in normalized:
-                return True
-        staging_areas = caps.get("staging_areas")
-        if isinstance(staging_areas, dict) and location_key in staging_areas:
+        reachable, has_reachability = caps_can_reach(caps)
+        if reachable:
             return True
-        if isinstance(staging_areas, list):
-            normalized = {str(item).strip() for item in staging_areas if str(item).strip()}
-            if location_key in normalized:
-                return True
-        return not reachability
+
+        bridge_proposal = dict((getattr(self, "runtime_recovery", {}) or {}).get("bridge_proposal") or {})
+        bridge_macro_tasks = []
+        if bridge_proposal and hasattr(self.process_planner, "_primitive_bridge_macro_tasks"):
+            try:
+                bridge_macro_tasks = self.process_planner._primitive_bridge_macro_tasks(
+                    bridge_proposal
+                )
+            except Exception:
+                bridge_macro_tasks = []
+        for task in bridge_macro_tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("resource_jid") or "").strip() != str(resource_jid or "").strip():
+                continue
+            projected_snapshot = dict(task.get("projected_snapshot") or {})
+            for projected_caps in (
+                projected_snapshot.get("static_capabilities"),
+                projected_snapshot,
+            ):
+                projected_reachable, _projected_has_reachability = caps_can_reach(projected_caps)
+                if projected_reachable:
+                    return True
+
+        return not has_reachability
 
     @staticmethod
     def _model_name_from_mapping(value: Any, part_name: str) -> str:
@@ -4479,6 +4528,7 @@ class ProductRecoveryController:
         *,
         tasks: list[dict[str, Any]],
         resume_entry_task_ids_by_resource: dict[str, str],
+        patch_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         task_groups_by_resource: dict[str, list[dict[str, Any]]] = {}
         for task in tasks:
@@ -4552,9 +4602,9 @@ class ProductRecoveryController:
                     f"{resume_task_id}"
                 )
 
-            patch_rows: list[dict[str, Any]] = []
+            repair_patch_rows: list[dict[str, Any]] = []
             self.process_planner._splice_runtime_des_repair_before_task(
-                patch_rows,
+                repair_patch_rows,
                 repair_task=repair_node,
                 target_task_id=resume_task_id,
                 change_prefix="Approved bridge recovery",
@@ -4563,13 +4613,24 @@ class ProductRecoveryController:
                 bridge_task_id = str(bridge_task.get("id") or "").strip()
                 if not bridge_task_id:
                     continue
-                patch_rows.append(
+                repair_patch_rows.append(
                     {
                         "id": bridge_task_id,
                         "bridge_sequence_length": next_bridge_length,
                     }
                 )
-            self.process_planner._apply_replan_patch(patch_rows)
+            if patch_rows is not None:
+                patch_rows.extend(repair_patch_rows)
+                repair_node["bridge_sequence_length"] = next_bridge_length
+                tasks.append(deepcopy(repair_node))
+                task_groups_by_resource.setdefault(resource_jid, []).append(
+                    deepcopy(repair_node)
+                )
+                for bridge_task in tasks:
+                    bridge_task["bridge_sequence_length"] = next_bridge_length
+                continue
+
+            self.process_planner._apply_replan_patch(repair_patch_rows)
             inserted_repair_node = self.process_planner._find_node(
                 str(repair_node.get("id") or "").strip()
             )
@@ -4593,6 +4654,7 @@ class ProductRecoveryController:
         resumable_task_ids_by_resource: dict[str, list[str]],
         resume_entry_task_ids_by_resource: dict[str, str],
         deleted_task_ids: list[str],
+        patch_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         task_groups_by_resource: dict[str, list[dict[str, Any]]] = {}
         for task in tasks:
@@ -4653,19 +4715,19 @@ class ProductRecoveryController:
             if projected_pose_ref != "home" and projected_location != "home":
                 continue
 
-            self.process_planner._apply_replan_patch(
-                [
-                    {
-                        "id": resume_task_id,
-                        "delete": True,
-                        "change_reason": (
-                            "DELETION: Approved bridge recovery already leaves "
-                            f"{resource_jid} at home idle before redundant move_home task "
-                            f"{resume_task_id}"
-                        ),
-                    }
-                ]
-            )
+            delete_row = {
+                "id": resume_task_id,
+                "delete": True,
+                "change_reason": (
+                    "DELETION: Approved bridge recovery already leaves "
+                    f"{resource_jid} at home idle before redundant move_home task "
+                    f"{resume_task_id}"
+                ),
+            }
+            if patch_rows is not None:
+                patch_rows.append(delete_row)
+            else:
+                self.process_planner._apply_replan_patch([delete_row])
             if resume_task_id in resumable_task_ids:
                 resumable_task_ids.remove(resume_task_id)
             if resume_task_id not in deleted_task_ids:
@@ -8880,11 +8942,41 @@ class ProductRecoveryController:
             splice_before_task_ids_by_resource,
         )
         try:
-            tasks = self.process_planner.apply_bridge_macro_proposal(
+            staged_nodes = deepcopy(planner_nodes_snapshot)
+            all_patch_rows: list[dict[str, Any]] = []
+
+            def _stage_approval_patch(patch_rows: list[dict[str, Any]]) -> None:
+                nonlocal staged_nodes
+                rows = [deepcopy(row) for row in patch_rows if isinstance(row, dict)]
+                if not rows:
+                    return
+                all_patch_rows.extend(deepcopy(rows))
+                staged_nodes = self.process_planner._preview_replan_patch(
+                    staged_nodes,
+                    rows,
+                )
+                self.process_planner.nodes = deepcopy(staged_nodes)
+                self.process_planner.global_fsa = None
+
+            def _refresh_staged_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                refreshed: list[dict[str, Any]] = []
+                for task in task_rows:
+                    task_id = str(dict(task or {}).get("id", "")).strip()
+                    if not task_id:
+                        continue
+                    node = self.process_planner._find_node(task_id)
+                    refreshed.append(deepcopy(node if isinstance(node, dict) else task))
+                return refreshed
+
+            self.process_planner.nodes = deepcopy(staged_nodes)
+            self.process_planner.global_fsa = None
+            tasks, bridge_patch_rows = self.process_planner.build_bridge_macro_proposal_patch(
                 proposal,
                 anchor_task_id=anchor_task_id,
                 splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
             )
+            _stage_approval_patch(bridge_patch_rows)
+            tasks = _refresh_staged_tasks(tasks)
             tail_task_ids_by_resource: dict[str, str] = {}
             for task in tasks:
                 if not isinstance(task, dict):
@@ -8919,19 +9011,34 @@ class ProductRecoveryController:
                     recovery_tasks=tasks,
                 )
             if post_updates:
-                self.process_planner._apply_replan_patch(post_updates)
+                _stage_approval_patch(post_updates)
+                tasks = _refresh_staged_tasks(tasks)
             if tasks and splice_before_task_ids_by_resource:
+                prune_patch_rows: list[dict[str, Any]] = []
                 self._prune_redundant_bridge_resume_move_home_if_satisfied(
                     tasks=tasks,
                     resumable_task_ids=resumable_task_ids,
                     resumable_task_ids_by_resource=resumable_task_ids_by_resource,
                     resume_entry_task_ids_by_resource=splice_before_task_ids_by_resource,
                     deleted_task_ids=deleted_task_ids,
+                    patch_rows=prune_patch_rows,
                 )
+                if prune_patch_rows:
+                    _stage_approval_patch(prune_patch_rows)
+                    tasks = _refresh_staged_tasks(tasks)
+                acquire_entity_patch_rows: list[dict[str, Any]] = []
                 self._append_bridge_resume_entry_acquire_entity_repair_if_needed(
                     tasks=tasks,
                     resume_entry_task_ids_by_resource=splice_before_task_ids_by_resource,
+                    patch_rows=acquire_entity_patch_rows,
                 )
+                if acquire_entity_patch_rows:
+                    _stage_approval_patch(acquire_entity_patch_rows)
+                    tasks = _refresh_staged_tasks(tasks)
+            self.process_planner.nodes = deepcopy(planner_nodes_snapshot)
+            self.process_planner.global_fsa = deepcopy(planner_global_fsa_snapshot)
+            self.process_planner._apply_replan_patch(all_patch_rows)
+            tasks = _refresh_staged_tasks(tasks)
             for task_id in deleted_task_ids:
                 self.task_states.pop(task_id, None)
             for task in tasks:
@@ -9105,7 +9212,6 @@ class ProductRecoveryController:
             active_bridge_sequence["execution_policy"] = sequence_execution_policy
             active_bridge_sequence["recovery_enforced_task_ids"] = self._bridge_sequence_task_ids(
                 list(active_bridge_sequence.get("bridge_task_ids") or [])
-                + [str(task_id).strip() for task_id in resumable_task_ids if str(task_id).strip()]
             )
         if isinstance(bridge_debug, dict):
             bridge_debug["validation_policy"] = session_validation_policy

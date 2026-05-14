@@ -79,13 +79,16 @@
         "attach": {
           "robot_model_name": "dual_robot",
           "attach_link_candidates": [
+            "xarm6_link6"
+          ],
+          "release_detach_link_candidates": [
+            "xarm6_link6",
             "xarm6_right_inner_knuckle",
             "xarm6_left_inner_knuckle",
             "xarm6_right_finger",
-            "xarm6_left_finger",
-            "xarm6_link6"
+            "xarm6_left_finger"
           ],
-          "primary_attach_link": "xarm6_right_inner_knuckle",
+          "primary_attach_link": "xarm6_link6",
           "detach_timeout_sec": 2.0,
           "detach_max_link_attempts": 3,
           "release_detach_timeout_sec": 8.0

@@ -4,10 +4,9 @@
   "quantity": 1,
   "objective": "assemble assembly_board-v1",
   "parts": [
-    "MG",
-    "MRP",
-    "LRP",
-    "SRP",
-    "SCP"
+    "LG",
+    "MCP",
+    "LCP",
+    "LRP"
   ]
 }
