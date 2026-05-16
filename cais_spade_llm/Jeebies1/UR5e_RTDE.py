@@ -7,28 +7,26 @@ from scipy.spatial.transform import Rotation
 ROBOT_IP = "192.168.1.172"
 
 
-class RTDECommander:
-    def __init__(self, robot_state=None, hostname=ROBOT_IP, speed=0.3, acceleration=0.5):
-        self.robot_state = robot_state
-        self.rtde = RTDEControlInterface(hostname=hostname)
-        self.speed = speed
-        self.acceleration = acceleration
+class UR5eRTDECommander:
+    def __init__(self):
+        self.rtde = RTDEControlInterface(hostname="192.168.1.172")
+        self.speed = 0.3
+        self.acceleration = 0.5
 
     def build_pose(self, pose_mm_rpy):
         x, y, z, roll, pitch, yaw = [float(value) for value in pose_mm_rpy]
         rotvec = Rotation.from_euler("xyz", [roll, pitch, yaw], degrees=True).as_rotvec()
         return [x / 1000.0, y / 1000.0, z / 1000.0, *rotvec]
 
-    def move_to_pose(self, pose_mm_rpy, blocking=True):
+    def move_to_pose(self, pose_mm_rpy):
         self.rtde.moveL(
             self.build_pose(pose_mm_rpy),
             self.speed,
             self.acceleration,
-            asynchronous=not blocking,
         )
 
-    def move_to_cartesian(self, x, y, z, roll=-180, pitch=0, yaw=0, blocking=True):
-        self.move_to_pose([x, y, z, roll, pitch, yaw], blocking=blocking)
+    def move_to_cartesian(self, x, y, z, roll=-180, pitch=0, yaw=0):
+        self.move_to_pose([x, y, z, roll, pitch, yaw])
 
     def _set_gripper(self, width_mm, force, settle_s, blocking=True):
         body = f"""
@@ -84,7 +82,7 @@ if __name__ == "__main__":
     pick_pose = [-128.47, -510.42, 27.90, -180, 0, 0]
     place_pose = [-100.00, -200.00, 60.00, -180, 0, 0]
 
-    robot = RTDECommander()
+    robot = UR5eRTDECommander()
     try:
         robot.pick_and_place(pick_pose, place_pose)
     finally:

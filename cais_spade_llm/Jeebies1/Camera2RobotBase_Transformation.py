@@ -37,3 +37,5 @@ class Cam2BaseUR5e:
         point_camera = np.array([x, y, z, 1])  # in homogeneous form
         coordinate = T_base_camera @ point_camera
         return coordinate[:2]
+
+
