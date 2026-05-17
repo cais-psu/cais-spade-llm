@@ -1,32 +1,25 @@
 import time
-
 from rtde_control import RTDEControlInterface
 from scipy.spatial.transform import Rotation
-
-
-ROBOT_IP = "192.168.1.172"
-
+from xarmlib.wrapper import XArmAPI
 
 class UR5eRTDECommander:
     def __init__(self):
         self.rtde = RTDEControlInterface(hostname="192.168.1.172")
-        self.speed = 0.3
-        self.acceleration = 0.5
+        self.speed = 0.5
+        self.acceleration = 0.3
+        self.roll = -180
+        self.pitch = 0
+        self.yaw = 0
+        self.approach_offset = 80
 
-    def build_pose(self, pose_mm_rpy):
-        x, y, z, roll, pitch, yaw = [float(value) for value in pose_mm_rpy]
-        rotvec = Rotation.from_euler("xyz", [roll, pitch, yaw], degrees=True).as_rotvec()
+    def build_pose(self, pose):
+        x, y, z = [float(value) for value in pose]
+        rotvec = Rotation.from_euler("xyz", [self.roll, self.pitch, self.yaw], degrees=True).as_rotvec()
         return [x / 1000.0, y / 1000.0, z / 1000.0, *rotvec]
 
-    def move_to_pose(self, pose_mm_rpy):
-        self.rtde.moveL(
-            self.build_pose(pose_mm_rpy),
-            self.speed,
-            self.acceleration,
-        )
-
-    def move_to_cartesian(self, x, y, z, roll=-180, pitch=0, yaw=0):
-        self.move_to_pose([x, y, z, roll, pitch, yaw])
+    def move_to_pose(self, pose):
+        self.rtde.moveL( self.build_pose(pose), self.speed, self.acceleration)
 
     def _set_gripper(self, width_mm, force, settle_s, blocking=True):
         body = f"""
@@ -44,46 +37,88 @@ class UR5eRTDECommander:
     def close_gripper(self, width_mm=10, force=40, blocking=True):
         self._set_gripper(width_mm, force, settle_s=2.0, blocking=blocking)
 
-    def pick(self, pick_pose_mm_rpy, approach_mm=80):
-        above_pick = self._above(pick_pose_mm_rpy, approach_mm)
-        self.move_to_pose(above_pick)
-        self.open_gripper()
-        self.move_to_pose(pick_pose_mm_rpy)
-        self.close_gripper()
-        self.move_to_pose(above_pick)
-
-    def place(self, place_pose_mm_rpy, approach_mm=80):
-        above_place = self._above(place_pose_mm_rpy, approach_mm)
-        self.move_to_pose(above_place)
-        self.move_to_pose(place_pose_mm_rpy)
-        self.open_gripper()
-        self.move_to_pose(above_place)
-
-    def pick_and_place(self, pick_pose_mm_rpy, place_pose_mm_rpy, approach_mm=80):
-        self.pick(pick_pose_mm_rpy, approach_mm)
-        self.place(place_pose_mm_rpy, approach_mm)
-
     def disconnect(self):
         self.rtde.disconnect()
 
-    set_gripper_open = open_gripper
-    set_gripper_close = close_gripper
-
-    @staticmethod
-    def _above(pose_mm_rpy, dz_mm):
-        pose = list(pose_mm_rpy)
-        if len(pose) != 6:
-            raise ValueError("Pose must be [x, y, z, roll, pitch, yaw].")
-        pose[2] += dz_mm
+    def build_intermediate_pose(self, pose):
+        pose[2] += self.approach_offset
         return pose
 
+    def go_home(self):
+        p = [-100, -200, 150, -180, 0, 0]
+        pose = self.build_pose(p)
+        self.rtde.moveL(pose, self.speed, self.acceleration, asynchronous=False)
 
-if __name__ == "__main__":
-    pick_pose = [-128.47, -510.42, 27.90, -180, 0, 0]
-    place_pose = [-100.00, -200.00, 60.00, -180, 0, 0]
+    def pick(self, pose):
+        intermediate_pose = self.build_intermediate_pose(pose)
+        self.rtde.moveL(self.build_pose(intermediate_pose), self.speed, self.acceleration)
+        self.open_gripper()
+        self.rtde.moveL(self.build_pose(pose), self.speed, self.acceleration)
+        self.close_gripper()
+        self.rtde.moveL(self.build_pose(intermediate_pose), self.speed, self.acceleration)
 
-    robot = UR5eRTDECommander()
-    try:
-        robot.pick_and_place(pick_pose, place_pose)
-    finally:
-        robot.disconnect()
+    def place(self, pose):
+        intermediate_pose = self.build_intermediate_pose(pose)
+        self.rtde.moveL(self.build_pose(intermediate_pose), self.speed, self.acceleration)
+        self.rtde.moveL(self.build_pose(pose), self.speed, self.acceleration)
+        self.open_gripper()
+        self.rtde.moveL(self.build_pose(intermediate_pose), self.speed, self.acceleration)
+
+class xArmCommander:
+    def __init__(self):
+        self.arm = XArmAPI("192.168.1.240")
+        self.speed = 280
+        self.acceleration = 10000
+        self.roll = 180
+        self.pitch = 0
+        self.yaw = 0
+        self.approach_offset = 80
+        self.radius = -1
+        self.wait = True
+        self.grip_speed = 1000
+        self.gripper_open_position = 850
+        self.gripper_close_position = 0
+
+
+    def move_to_pose(self, pose):
+        code = self.arm.set_position(
+            *pose,
+            speed=self.speed,
+            mvacc=self.acceleration,
+            radius=self.radius,
+            wait=self.wait,
+        )
+
+    def close_gripper(self):
+        self.arm.set_gripper_position(
+            self.gripper_close_position,
+            speed=self.grip_speed
+        )
+
+    def open_gripper(self):
+        self.arm.gripper_open_position(
+            self.gripper_close_position,
+            speed=self.grip_speed
+        )
+
+    def build_intermediate_pose(self, pose):
+        pose[2] += self.approach_offset
+        return pose
+
+    def go_home(self):
+        self.move_to_pose([250, -150, 445, 180, 0, 0])
+
+    def pick(self, pose):
+        intermediate_pose = self.build_intermediate_pose(pose)
+        self.move_to_pose(intermediate_pose)
+        self.open_gripper()
+        self.move_to_pose(pose)
+        self.close_gripper()
+        self.move_to_pose(intermediate_pose)
+
+    def place(self, pose):
+        intermediate_pose = self.build_intermediate_pose(pose)
+        self.move_to_pose(intermediate_pose)
+        self.move_to_pose(pose)
+        self.open_gripper()
+        self.move_to_pose(intermediate_pose)
