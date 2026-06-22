@@ -517,83 +517,6 @@ def _capability_decomposition_names_for_resource(
     )
 
 
-def _suggested_capability_decomposition_names(
-    *,
-    outline_event: dict[str, Any] | None,
-    available_names: list[str],
-) -> list[str]:
-    if not isinstance(outline_event, dict) or not available_names:
-        return []
-    available = {
-        str(name).strip()
-        for name in available_names
-        if str(name).strip()
-    }
-    action = _primitive_action_token(outline_event)
-    event_name = str(outline_event.get("event_name") or "").strip().lower()
-    expected_start_resource_state = str(
-        dict(outline_event.get("expected_start_state") or {}).get("resource_state")
-        or ""
-    ).strip().lower()
-    expected_end_resource_state = str(
-        dict(outline_event.get("expected_end_state") or {}).get("resource_state")
-        or ""
-    ).strip().lower()
-    suggested: list[str] = []
-
-    def _append_if_available(*names: str) -> None:
-        for name in names:
-            token = str(name or "").strip()
-            if token and token in available and token not in suggested:
-                suggested.append(token)
-
-    if action in {"acquire", "pick"} or any(
-        token in event_name for token in ("acquire", "pick", "grasp")
-    ):
-        _append_if_available("pick_approach", "pick_grasp")
-    if action in {"place", "release"} or any(
-        token in event_name for token in ("place", "release", "stage", "return")
-    ):
-        _append_if_available("place_approach", "place_insert")
-    if (
-        action == "recover"
-        or any(token in event_name for token in ("recover", "home"))
-        or (
-            not _outline_part_name(outline_event)
-            and expected_end_resource_state == "idle"
-            and expected_start_resource_state not in {"", "idle"}
-        )
-    ):
-        _append_if_available("move_home")
-    return suggested
-
-
-def _pending_suggested_capability_context_requests(
-    *,
-    session_state: dict[str, Any],
-    prepared_bridge_request: dict[str, Any],
-    outline_event: dict[str, Any],
-) -> list[str]:
-    resource_jid = _outline_resource_jid(outline_event)
-    if not resource_jid:
-        return []
-    available_names = _capability_decomposition_names_for_resource(
-        prepared_bridge_request=prepared_bridge_request,
-        resource_jid=resource_jid,
-    )
-    suggested_names = _suggested_capability_decomposition_names(
-        outline_event=outline_event,
-        available_names=available_names,
-    )
-    served_context = dict(session_state.get("primitive_served_context") or {})
-    requests: list[str] = []
-    for name in suggested_names:
-        ref = f"/capability_decompositions/{name}"
-        if ref not in served_context and ref not in requests:
-            requests.append(ref)
-    return requests
-
-
 # ---------------------------------------------------------------------------
 # Catalog / snapshot / grounding helpers
 # ---------------------------------------------------------------------------
@@ -2394,12 +2317,10 @@ def build_primitive_generation_prompt_context(
         prepared_bridge_request=prepared_bridge_request,
         resource_jid=resource_jid,
     )
-    context["primitive_suggested_capability_decompositions"] = (
-        _suggested_capability_decomposition_names(
-            outline_event=active_event,
-            available_names=list(context.get("primitive_capability_decomposition_names") or []),
-        )
-    )
+    # Decomposition selection is LLM-driven: the LLM picks from the
+    # "Available Capability Decompositions" list via context_requests, so no
+    # deterministic keyword shortlist is provided.
+    context["primitive_suggested_capability_decompositions"] = []
     return context
 
 
@@ -2643,57 +2564,10 @@ async def _handle_primitive_generation_phase(
                 return escalated
             session_state["status"] = "paused_after_primitive_turn"
             return "need_primitive_revision", turn_entry
-        auto_context_requests = _pending_suggested_capability_context_requests(
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-            outline_event=active_event,
-        )
-        if auto_context_requests:
-            served, errors = _serve_context_requests(
-                session_state=session_state,
-                prepared_bridge_request=prepared_bridge_request,
-                outline_event=active_event,
-                context_requests=auto_context_requests,
-            )
-            existing = dict(session_state.get("primitive_served_context") or {})
-            new_refs = sorted(ref for ref in served if ref not in existing)
-            existing.update(served)
-            session_state["primitive_served_context"] = deepcopy(existing)
-            session_state["primitive_context_errors"] = deepcopy(errors)
-            session_state["primitive_rejection_feedback"] = []
-            turn_entry["primitive_served_context"] = deepcopy(existing)
-            turn_entry["primitive_context_errors"] = deepcopy(errors)
-            turn_entry["newly_served_context_refs"] = deepcopy(new_refs)
-            turn_entry["auto_served_context_refs"] = deepcopy(auto_context_requests)
-            turn_entry["primitive_revision_deferred_for_context"] = True
-            if new_refs:
-                _reset_primitive_event_guard(
-                    session_state,
-                    cursor=cursor,
-                    outline_event=active_event,
-                )
-            else:
-                guard_state = _record_primitive_no_progress(
-                    session_state,
-                    cursor=cursor,
-                    outline_event=active_event,
-                    response_decision=response_decision,
-                    context_errors=errors,
-                    input_diagnostics=input_diagnostics,
-                )
-                escalated = _maybe_escalate_primitive_event(
-                    session_state=session_state,
-                    turn_entry=turn_entry,
-                    cursor=cursor,
-                    active_event=active_event,
-                    guard_state=guard_state,
-                    context_errors=errors,
-                    input_diagnostics=input_diagnostics,
-                )
-                if escalated is not None:
-                    return escalated
-            session_state["status"] = "paused_after_primitive_turn"
-            return "need_context", turn_entry
+        # LLM-driven decomposition selection: no keyword-suggested decompositions
+        # are auto-served. The LLM requests the decomposition it needs via
+        # context_requests (decision=need_context); a need_primitive_revision with
+        # a rationale is therefore handled directly as a revision below.
         feedback = [
             _primitive_feedback_row(
                 outline_event=active_event,
