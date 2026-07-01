@@ -447,6 +447,10 @@ def launch_setup(context, *args, **kwargs):
     xarm_prefix = 'xarm6_'
     ur5e_prefix = 'ur5e_'
     fast_sim = LaunchConfiguration('fast_sim')
+    run_perception = LaunchConfiguration('run_perception')
+    include_assembly_parts = LaunchConfiguration('include_assembly_parts')
+    launch_gazebo = _launch_arg_enabled(context, 'launch_gazebo', default='true')
+    launch_moveit = _launch_arg_enabled(context, 'launch_moveit', default='true')
     launch_rviz = _launch_arg_enabled(context, 'launch_rviz', default='true')
 
     # 1. Gazebo with combined URDF (both robots have physics)
@@ -459,56 +463,60 @@ def launch_setup(context, *args, **kwargs):
         ),
         launch_arguments={
             'fast_sim': fast_sim,
+            'run_perception': run_perception,
+            'include_assembly_parts': include_assembly_parts,
         }.items(),
     )
 
-    # 2. Build combined MoveIt config
-    combined_urdf = _build_combined_urdf(context, xarm_prefix, ur5e_prefix)
-    combined_srdf = _build_combined_srdf(xarm_prefix, ur5e_prefix)
-    moveit_config = _build_moveit_params(
-        xarm_prefix, ur5e_prefix, combined_urdf, combined_srdf)
+    launch_actions = []
+    if launch_gazebo:
+        launch_actions.append(gazebo)
 
-    # 3. Single move_group at ROOT namespace (no namespace prefix issues)
-    move_group = Node(
-        package='moveit_ros_move_group',
-        executable='move_group',
-        name='move_group',
-        output='screen',
-        parameters=[
-            moveit_config,
-            {'use_sim_time': True},
-        ],
-    )
+    if launch_moveit or launch_rviz:
+        # 2. Build combined MoveIt config
+        combined_urdf = _build_combined_urdf(context, xarm_prefix, ur5e_prefix)
+        combined_srdf = _build_combined_srdf(xarm_prefix, ur5e_prefix)
+        moveit_config = _build_moveit_params(
+            xarm_prefix, ur5e_prefix, combined_urdf, combined_srdf)
 
-    # 4. Single RViz — toggle Planning Group dropdown to switch robots:
-    #    xarm6_xarm6, xarm6_xarm_gripper, ur5e_ur_manipulator
-    rviz_config = PathJoinSubstitution([
-        FindPackageShare('xarm_gazebo'), 'rviz', 'dual_moveit.rviz',
-    ])
-    rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        output='log',
-        arguments=['-d', rviz_config],
-        parameters=[
-            {
-                'robot_description': combined_urdf,
-                'robot_description_semantic': combined_srdf,
-                'robot_description_kinematics':
-                    moveit_config['robot_description_kinematics'],
-                'robot_description_planning':
-                    moveit_config.get('robot_description_planning', {}),
-                'use_sim_time': True,
-            },
-        ],
-    )
+    if launch_moveit:
+        # 3. Single move_group at ROOT namespace (no namespace prefix issues)
+        move_group = Node(
+            package='moveit_ros_move_group',
+            executable='move_group',
+            name='move_group',
+            output='screen',
+            parameters=[
+                moveit_config,
+                {'use_sim_time': True},
+            ],
+        )
+        launch_actions.append(move_group)
 
-    launch_actions = [
-        gazebo,
-        move_group,
-    ]
     if launch_rviz:
+        # 4. Single RViz — toggle Planning Group dropdown to switch robots:
+        #    xarm6_xarm6, xarm6_xarm_gripper, ur5e_ur_manipulator
+        rviz_config = PathJoinSubstitution([
+            FindPackageShare('xarm_gazebo'), 'rviz', 'dual_moveit.rviz',
+        ])
+        rviz = Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='log',
+            arguments=['-d', rviz_config],
+            parameters=[
+                {
+                    'robot_description': combined_urdf,
+                    'robot_description_semantic': combined_srdf,
+                    'robot_description_kinematics':
+                        moveit_config['robot_description_kinematics'],
+                    'robot_description_planning':
+                        moveit_config.get('robot_description_planning', {}),
+                    'use_sim_time': True,
+                },
+            ],
+        )
         launch_actions.append(rviz)
     return launch_actions
 
@@ -524,6 +532,26 @@ def generate_launch_description():
             'launch_rviz',
             default_value='true',
             description='Launch RViz alongside Gazebo and MoveIt.',
+        ),
+        DeclareLaunchArgument(
+            'launch_gazebo',
+            default_value='true',
+            description='Launch Gazebo and its controllers.',
+        ),
+        DeclareLaunchArgument(
+            'launch_moveit',
+            default_value='true',
+            description='Launch the combined sim move_group.',
+        ),
+        DeclareLaunchArgument(
+            'run_perception',
+            default_value='true',
+            description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
+        ),
+        DeclareLaunchArgument(
+            'include_assembly_parts',
+            default_value='true',
+            description='Spawn assembly board, gray/black boards, fixtures, and loose parts.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

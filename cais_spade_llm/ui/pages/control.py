@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 
-from nicegui import ui
+from nicegui import context, ui
 from nicegui.client import Client
 from nicegui.events import KeyEventArguments
 
 from cais_spade_llm.ui.bridge import SystemBridge
+
+log = logging.getLogger(__name__)
 
 
 # Gazebo launch variants with friendly labels.
@@ -21,12 +24,13 @@ _GAZEBO_VARIANTS = {
 
 _HARDWARE_STACKS = {
     "xarm6": ("xArm6 Hardware Stack", "Start xArm6 MoveIt realmove stack (includes embedded driver)"),
-    "ur5e": ("UR5e Hardware Stack", "Auto sequence: start driver, wait for ready, then start MoveIt"),
+    "ur5e": ("UR5e Hardware Stack", "Auto sequence: start driver, wait for ready, then start RG2 gripper bridge and MoveIt"),
 }
 _HARDWARE_PROC_NAMES = (
     "hardware_xarm6_driver",
     "hardware_xarm6_moveit",
     "hardware_ur5e_driver",
+    "hardware_ur5e_rg2_gripper",
     "hardware_ur5e_moveit",
 )
 
@@ -43,6 +47,46 @@ def _client_alive(element) -> bool:
         return (client.id in Client.instances) and (not getattr(client, "_deleted", False))
     except RuntimeError:
         return False
+
+
+def _hardware_status_text(status: dict) -> str:
+    robot_bits = []
+    for robot in ("xarm6", "ur5e"):
+        robot_status = status.get(robot)
+        if isinstance(robot_status, dict):
+            robot_bits.append(f"{robot}: {_hardware_status_text(robot_status)}")
+    if robot_bits:
+        return " | ".join(robot_bits)
+    driver_state = str(status.get("driver", "stopped"))
+    moveit_state = str(status.get("moveit", "stopped"))
+    gripper_state = status.get("gripper")
+    if gripper_state is None:
+        return f"Driver: {driver_state} | MoveIt: {moveit_state}"
+    return f"Driver: {driver_state} | Gripper: {str(gripper_state)} | MoveIt: {moveit_state}"
+
+
+def _ur5e_status_sources(status: dict) -> list[tuple[str, dict]]:
+    ur5e_status = status.get("ur5e")
+    if isinstance(ur5e_status, dict):
+        return [("ur5e ", ur5e_status)]
+    return [("", status)]
+
+
+def _render_ur5e_external_control_and_rg2_status(status: dict) -> None:
+    for prefix, source in _ur5e_status_sources(status):
+        external_control = str(source.get("external_control") or "").strip()
+        if external_control:
+            ui.label(f"{prefix}External Control: {external_control}").classes("text-xs text-slate-500")
+            external_error = str(source.get("external_control_error") or "").strip()
+            if external_error:
+                ui.label(f"{prefix}External Control error: {external_error}").classes("text-xs text-red-700")
+
+        gripper_state = source.get("gripper")
+        if gripper_state is not None:
+            ui.label(f"{prefix}RG2 bridge: {str(gripper_state)}").classes("text-xs text-slate-500")
+        gripper_action = str(source.get("gripper_action") or "").strip()
+        if gripper_action:
+            ui.label(f"{prefix}RG2 bridge: action {gripper_action}").classes("text-xs text-slate-500")
 
 
 def _install_control_key_scroll_blocker() -> None:
@@ -75,6 +119,9 @@ def render(bridge: SystemBridge) -> None:
         # ── Gazebo / Hardware Launch ─────────────────────────────────
         _launch_section(bridge)
 
+        # ── Digital Twin Launch ──────────────────────────────────────
+        _digital_twin_launch_section(bridge)
+
         # ── Interactive Teleop ───────────────────────────────────────
         _teleop_section(bridge)
 
@@ -90,7 +137,7 @@ def _launch_section(bridge: SystemBridge) -> None:
             "The environment must be running before starting the agent system from the Dashboard."
         ).classes("text-xs text-slate-500 mb-3")
         ui.label(
-            "Hardware stacks are combined per arm. UR5e starts Driver then MoveIt; xArm6 MoveIt realmove includes its driver."
+            "Hardware stacks are combined per arm. UR5e starts Driver, RG2 gripper bridge, then MoveIt; xArm6 MoveIt realmove includes its driver."
         ).classes("text-xs text-slate-500 mb-2")
 
         hw_refresh_state = {"busy": False}
@@ -331,8 +378,6 @@ def _hardware_stack_row(
     blocked_reason: str | None = None,
 ) -> None:
     overall = str(status.get("overall", "stopped"))
-    driver_state = str(status.get("driver", "stopped"))
-    moveit_state = str(status.get("moveit", "stopped"))
     color = "green" if overall == "running" else ("orange" if overall == "partial" else "grey")
 
     with ui.row().classes("items-center gap-4 w-full"):
@@ -341,7 +386,9 @@ def _hardware_stack_row(
         with ui.column().classes("gap-0 flex-1"):
             ui.label(label).classes("font-semibold text-sm")
             ui.label(desc).classes("text-xs text-slate-400")
-            ui.label(f"Driver: {driver_state} | MoveIt: {moveit_state}").classes("text-xs text-slate-500")
+            ui.label(_hardware_status_text(status)).classes("text-xs text-slate-500")
+            if robot == "ur5e":
+                _render_ur5e_external_control_and_rg2_status(status)
 
         start_blocked = bool(blocked_reason) or overall == "running"
         stop_disabled = overall == "stopped"
@@ -378,6 +425,692 @@ def _hardware_stack_row(
 
 
 # =====================================================================
+# Digital Twin Launch Section
+# =====================================================================
+# Remembers whether each target's Record/Replay expansion is open, so a section
+# rebuild (from the 3 s status timer) reopens it where the operator left it.
+_DT_RECORD_OPEN: dict[str, bool] = {}
+
+# Friendly display labels for the internal sim-mode keys.
+_DT_MODE_LABELS = {"monitor": "Monitor", "teach": "Teach"}
+
+
+def _digital_twin_launch_section(bridge: SystemBridge) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("digital twin launch").classes("text-lg font-semibold mb-1")
+        ui.label(
+            "Monitor = sim mirrors the live robot (hardware drives gazebo). "
+            "Teach = build motions in the sim MoveIt/RViz, capture waypoints, then replay on "
+            "gazebo + hardware together."
+        ).classes("text-xs text-slate-500 mb-3")
+
+        container = ui.column().classes("w-full gap-3")
+        refresh_state = {"signature": None, "busy": False}
+
+        def _signature() -> tuple:
+            rows = bridge.digital_twin_statuses()
+            compact_rows = []
+            for target, row in rows.items():
+                hardware = dict(row.get("hardware") or {})
+                compact_rows.append(
+                    (
+                        target,
+                        bool(row.get("supported", False)),
+                        str(row.get("blocked_reason", "") or ""),
+                        dict(row.get("gazebo") or {}).get("status", "stopped"),
+                        dict(row.get("moviet") or {}).get("status", "stopped"),
+                        dict(row.get("domains") or {}).get("gazebo"),
+                        dict(row.get("domains") or {}).get("hardware"),
+                        str(row.get("direction", "")),
+                        str(row.get("sim_mode", "")),
+                        hardware.get("overall", "unknown"),
+                        repr(dict(hardware.get("status") or {})),
+                        repr(dict(hardware.get("rg2") or {})),
+                        dict(row.get("sync/status") or {}).get("state", "unknown"),
+                        dict(row.get("sync/status") or {}).get("process_status", "unknown"),
+                        # status_age_ms / latency_ms are intentionally excluded: they change every
+                        # cycle and would force a rebuild (collapsing open expansions) 3 s apart.
+                        dict(row.get("sync/status") or {}).get("last_error"),
+                    )
+                )
+            return tuple(compact_rows)
+
+        def _refresh(*, force: bool = False) -> None:
+            if not _client_alive(container):
+                return
+            if refresh_state["busy"]:
+                return
+            refresh_state["busy"] = True
+            try:
+                signature = _signature()
+                if not force and signature == refresh_state["signature"]:
+                    return
+                refresh_state["signature"] = signature
+                rows = bridge.digital_twin_statuses()
+            finally:
+                refresh_state["busy"] = False
+
+            container.clear()
+            with container:
+                with ui.row().classes("w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"):
+                    ui.label("target").classes("w-44")
+                    ui.label("gazebo").classes("w-48")
+                    ui.label("moviet").classes("w-36")
+                    ui.label("hardware").classes("w-52")
+                    ui.label("sync/status").classes("flex-1 min-w-64")
+                for target, row in rows.items():
+                    _digital_twin_row(bridge, target, row, _refresh)
+
+        _refresh(force=True)
+        ui.timer(3.0, _refresh)
+
+
+def _digital_twin_status_color(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value in {"running", "mirroring", "applied", "teach"}:
+        return "green"
+    if value in {"partial", "limited", "paused", "waiting", "starting", "stale"}:
+        return "orange"
+    if value in {"unsupported", "unknown", "mixed", "error", "blocked"}:
+        return "red"
+    if value in {"gazebo", "hardware", "ready", "stopped"}:
+        return "blue"
+    return "grey"
+
+
+def _digital_twin_badge(status: str) -> None:
+    ui.badge(str(status or "unknown"), color=_digital_twin_status_color(status)).classes("text-xs")
+
+
+def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_callback) -> None:
+    gazebo = dict(row.get("gazebo") or {})
+    moviet = dict(row.get("moviet") or {})
+    hardware = dict(row.get("hardware") or {})
+    sync = dict(row.get("sync/status") or {})
+    domains = dict(row.get("domains") or {})
+
+    supported = bool(row.get("supported", False))
+    blocked_reason = str(row.get("blocked_reason", "") or "").strip()
+    gazebo_status = str(gazebo.get("status", "stopped"))
+    hardware_status = dict(hardware.get("status") or {})
+    hardware_overall = str(hardware.get("overall", "unknown"))
+    sync_state = str(sync.get("state", "unknown"))
+    sync_process_status = str(sync.get("process_status", "unknown"))
+    sync_message = str(sync.get("message", "") or "").strip()
+    sim_mode = str(row.get("sim_mode", "monitor") or "monitor")
+    sim_modes = list(row.get("sim_modes") or [])
+    is_running = (
+        gazebo_status == "running"
+        or hardware_overall in {"running", "partial"}
+        or sync_process_status == "running"
+    )
+
+    with ui.row().classes("w-full items-stretch gap-3 border-b border-slate-100 px-2 py-3 flex-wrap"):
+        with ui.column().classes("w-44 gap-2"):
+            ui.label(target).classes("font-semibold text-sm")
+            ui.label("digital twin").classes("text-xs text-slate-400")
+            if blocked_reason:
+                ui.label(blocked_reason).classes("text-xs text-amber-700")
+
+            async def _start_twin_async() -> None:
+                try:
+                    err = await asyncio.to_thread(bridge.digital_twin_start, target)
+                    if err:
+                        ui.notify(err, type="warning", timeout=5000)
+                    else:
+                        ui.notify(f"Started {target} digital twin", type="positive")
+                finally:
+                    refresh_callback(force=True)
+
+            async def _stop_twin_async() -> None:
+                try:
+                    err = await asyncio.to_thread(bridge.digital_twin_stop, target)
+                    if err:
+                        ui.notify(err, type="warning", timeout=3000)
+                    else:
+                        ui.notify(f"Stopped {target} digital twin", type="info")
+                finally:
+                    refresh_callback(force=True)
+
+            def _start_twin() -> None:
+                if blocked_reason:
+                    ui.notify(blocked_reason, type="warning", timeout=4500)
+                    return
+                asyncio.create_task(_start_twin_async())
+
+            def _stop_twin() -> None:
+                asyncio.create_task(_stop_twin_async())
+
+            retry_sync = is_running and sync_process_status != "running"
+            start_disabled = (not supported) or (is_running and not retry_sync) or bool(blocked_reason)
+            stop_disabled = (not supported) or not is_running
+            with ui.row().classes("gap-1"):
+                ui.button("Start Twin", on_click=_start_twin, icon="play_arrow").props(
+                    "flat dense" + (" disable" if start_disabled else "")
+                ).classes("text-green-600")
+                ui.button("Stop Twin", on_click=_stop_twin, icon="stop").props(
+                    "flat dense" + (" disable" if stop_disabled else "")
+                ).classes("text-red-600")
+
+            if supported and sim_modes:
+                def _handle_sim_mode_change(e) -> None:
+                    err = bridge.digital_twin_set_sim_mode(target, str(e.value or ""))
+                    if err:
+                        ui.notify(err, type="warning", timeout=3500)
+                    refresh_callback(force=True)
+
+                sim_mode_select = ui.select(
+                    {m: _DT_MODE_LABELS.get(m, m) for m in sim_modes},
+                    value=sim_mode,
+                    label="mode",
+                    on_change=_handle_sim_mode_change,
+                ).props("dense").classes("w-40")
+                if is_running:
+                    sim_mode_select.props("disable")
+                ui.label(
+                    "Teach = build motions in sim MoveIt/RViz, then Capture / Replay (set before Start)"
+                    if sim_mode == "teach"
+                    else "Monitor = sim mirrors the live robot"
+                ).classes("text-xs text-slate-400")
+
+        with ui.column().classes("w-48 gap-1"):
+            with ui.row().classes("items-center gap-2"):
+                _digital_twin_badge(gazebo_status)
+                ui.label(str(gazebo.get("name", ""))).classes("text-xs text-slate-500")
+            ui.label(str(gazebo.get("message", ""))).classes("text-xs text-slate-500")
+            ui.label(f"process: {str(gazebo.get('process', ''))}").classes("text-xs text-slate-500")
+            ui.label(f"ROS_DOMAIN_ID={domains.get('gazebo', '')}").classes("text-xs text-slate-500")
+
+        with ui.column().classes("w-36 gap-1"):
+            _digital_twin_badge(str(moviet.get("status", "stopped")))
+            ui.label(str(moviet.get("message", ""))).classes("text-xs text-slate-500")
+
+        with ui.column().classes("w-52 gap-1"):
+            with ui.row().classes("items-center gap-2"):
+                _digital_twin_badge(hardware_overall)
+                ui.label("hardware").classes("text-xs text-slate-500")
+            if supported:
+                ui.label(_hardware_status_text(hardware_status)).classes("text-xs text-slate-500")
+                _render_ur5e_external_control_and_rg2_status(hardware_status)
+                hardware_domains = dict(hardware.get("domains") or {})
+                if hardware_domains:
+                    domain_text = " | ".join(
+                        f"{robot}: ROS_DOMAIN_ID={domain}"
+                        for robot, domain in hardware_domains.items()
+                    )
+                    ui.label(domain_text).classes("text-xs text-slate-500")
+                else:
+                    ui.label(f"ROS_DOMAIN_ID={domains.get('hardware', '')}").classes("text-xs text-slate-500")
+                rg2 = dict(hardware.get("rg2") or {})
+                if rg2:
+                    state = str(rg2.get("state") or "unknown")
+                    width = rg2.get("width_mm")
+                    source = str(rg2.get("source") or "unknown")
+                    error = str(rg2.get("error") or "").strip()
+                    if width is not None:
+                        msg = f"RG2 last {source}: {state}, width {float(width):.1f} mm"
+                    else:
+                        msg = f"RG2 last {source}: {state}"
+                    ui.label(msg).classes("text-xs text-slate-500")
+                    if error:
+                        ui.label(f"RG2 error: {error}").classes("text-xs text-red-700")
+            else:
+                ui.label(str(hardware.get("message", ""))).classes("text-xs text-amber-700")
+
+        with ui.column().classes("flex-1 min-w-64 gap-1"):
+            with ui.row().classes("items-center gap-2"):
+                _digital_twin_badge(sync_state)
+                ui.label("sync/status").classes("text-xs text-slate-500")
+            ui.label(sync_message).classes("text-xs text-slate-500")
+            ui.label(f"sync process: {sync_process_status}").classes("text-xs text-slate-500")
+
+            status_bits = []
+            status_age_ms = sync.get("status_age_ms")
+            latency_ms = sync.get("latency_ms")
+            max_joint_delta_deg = sync.get("max_joint_delta_deg")
+            if status_age_ms is not None:
+                status_bits.append(f"freshness {float(status_age_ms):.0f} ms")
+            if latency_ms is not None:
+                status_bits.append(f"latency {float(latency_ms):.1f} ms")
+            if max_joint_delta_deg is not None:
+                status_bits.append(f"max delta {float(max_joint_delta_deg):.2f} deg")
+            if status_bits:
+                ui.label(" | ".join(status_bits)).classes("text-xs text-slate-500")
+            if sync.get("last_error"):
+                ui.label(str(sync.get("last_error"))).classes("text-xs text-red-700")
+
+            # Direction is implied by mode (Monitor = hardware→gazebo, Teach =
+            # gazebo→hardware), so there is no direction control.
+            if supported and sim_mode == "teach":
+                _digital_twin_record_replay(bridge, target)
+
+
+def _digital_twin_record_replay(bridge: SystemBridge, target: str) -> None:
+    """Manual record-in-gazebo / replay-on-hardware panel for one target."""
+    is_dual = target == "dual robots"
+    expansion = ui.expansion(
+        "Record / Replay (gazebo → hardware)",
+        icon="fiber_manual_record",
+        value=_DT_RECORD_OPEN.get(target, False),
+    ).classes("w-full text-xs")
+    expansion.on_value_change(lambda e: _DT_RECORD_OPEN.__setitem__(target, bool(e.value)))
+    with expansion:
+        ui.label(
+            "Teach: sim RViz controls Gazebo only. Plan & Execute in the sim RViz window, "
+            "Capture Waypoint at each validated pose, then Replay in Twin commits the saved "
+            "sim waypoint through hardware MoveIt. Save is optional (keeps a named copy)."
+        ).classes("text-xs text-slate-500 mb-1")
+
+        count_label = ui.label(f"waypoints: {bridge.digital_twin_waypoint_count(target)}").classes(
+            "text-xs font-semibold"
+        )
+        waypoints_container = ui.column().classes("w-full gap-0 mb-1")
+        replay_source_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
+        prepared_label = (
+            ui.label("prepared: none").classes("text-xs text-emerald-700")
+            if is_dual
+            else None
+        )
+        prepare_state: dict[str, object] = {
+            "generation": 0,
+            "task": None,
+        }
+
+        def _replay_source() -> tuple[str, str]:
+            """Return (kind, description) of what Replay/Preview will use right now."""
+            n = bridge.digital_twin_waypoint_count(target)
+            if n > 0:
+                return "buffer", f"current capture ({n} waypoints)"
+            sel = str(recordings_select.value or "").strip()
+            if sel:
+                return "saved", f"saved '{sel}'"
+            return "none", "nothing — capture or select a recording"
+
+        def _refresh_replay_source() -> None:
+            _kind, desc = _replay_source()
+            replay_source_label.text = f"▶ Replay will use: {desc}"
+
+        def _set_prepared_status(text: str, *, failed: bool = False) -> None:
+            if prepared_label is None:
+                return
+            prepared_label.text = text
+            prepared_label.classes(
+                replace="text-xs text-red-700" if failed else "text-xs text-emerald-700"
+            )
+
+        def _mark_prepare_stale(reason: str = "") -> None:
+            if not is_dual:
+                return
+            prepare_state["generation"] = int(prepare_state.get("generation") or 0) + 1
+            suffix = f": {reason}" if reason else ""
+            _set_prepared_status(f"prepared: stale{suffix}")
+
+        async def _prepare_current_replay(generation: int, *, client: Client | None = None) -> dict[str, object]:
+            try:
+                kind, _desc = _replay_source()
+                if kind == "buffer":
+                    result = await asyncio.to_thread(
+                        bridge.digital_twin_prepare_replay_buffer,
+                        target,
+                        replay_target="twin",
+                    )
+                elif kind == "saved":
+                    name = str(recordings_select.value or "").strip()
+                    result = await asyncio.to_thread(
+                        bridge.digital_twin_prepare_replay,
+                        target,
+                        name,
+                        replay_target="twin",
+                    )
+                else:
+                    result = {"success": False, "message": "capture or select a recording"}
+                if generation != int(prepare_state.get("generation") or 0):
+                    return result
+                if result.get("success"):
+                    _set_prepared_status("prepared: ready")
+                else:
+                    _set_prepared_status(
+                        f"prepared: failed: {str(result.get('message') or '')}",
+                        failed=True,
+                    )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin replay preparation failed for %s", target)
+                if generation == int(prepare_state.get("generation") or 0):
+                    _set_prepared_status(f"prepared: failed: {exc}", failed=True)
+                return {"success": False, "message": str(exc)}
+
+        def _start_prepare_background() -> None:
+            if not is_dual:
+                return
+            kind, _desc = _replay_source()
+            if kind == "none":
+                _set_prepared_status("prepared: none")
+                return
+            generation = int(prepare_state.get("generation") or 0) + 1
+            prepare_state["generation"] = generation
+            _set_prepared_status("prepared: preparing")
+            prepare_state["task"] = asyncio.create_task(_prepare_current_replay(generation))
+
+        async def _wait_for_prepare_if_running(*, client: Client | None = None) -> None:
+            if not is_dual:
+                return
+            task = prepare_state.get("task")
+            if task is not None and not task.done():
+                _notify("Preparing replay…", type="ongoing", timeout=1500, client=client)
+                await task
+
+        def _current_client() -> Client | None:
+            try:
+                return context.client
+            except RuntimeError:
+                return None
+
+        def _notify(
+            message: object,
+            *,
+            type: str | None = None,
+            timeout: int = 3500,
+            client: Client | None = None,
+        ) -> None:
+            if client is not None:
+                options: dict[str, object] = {"message": str(message), "timeout": timeout}
+                if type is not None:
+                    options["type"] = type
+                try:
+                    client.outbox.enqueue_message("notify", options, client.id)
+                    return
+                except Exception:
+                    log.exception("failed to notify captured NiceGUI client")
+            try:
+                ui.notify(str(message), type=type, timeout=timeout)
+            except RuntimeError:
+                log.warning("could not notify user because NiceGUI slot was deleted: %s", message)
+
+        def _refresh_count() -> None:
+            count_label.text = f"waypoints: {bridge.digital_twin_waypoint_count(target)}"
+            _refresh_replay_source()
+            _refresh_waypoints()
+
+        def _refresh_waypoints() -> None:
+            waypoints = bridge.digital_twin_list_waypoints(target)
+            waypoints_container.clear()
+            with waypoints_container:
+                if not waypoints:
+                    ui.label("no waypoints captured yet").classes("text-xs text-slate-400")
+                    return
+                for wp in waypoints:
+                    idx = int(wp["index"])
+                    robots = dict(wp.get("robots") or {})
+                    if robots:
+                        chunks = []
+                        for robot in ("xarm6", "ur5e"):
+                            body = dict(robots.get(robot) or {})
+                            positions = ", ".join(f"{p:.2f}" for p in (body.get("positions") or []))
+                            chunks.append(f"{robot} [{positions}]")
+                        joints = " | ".join(chunks)
+                    else:
+                        joints = ", ".join(f"{p:.2f}" for p in (wp.get("positions") or []))
+                    with ui.row().classes("items-center gap-1 w-full"):
+                        ui.label(f"#{idx + 1}").classes("text-xs font-semibold w-8")
+                        ui.label(f"[{joints}]").classes("text-xs text-slate-500 flex-1 truncate")
+                        ui.button(icon="arrow_upward", on_click=lambda _e, i=idx: _move_wp(i, -1)).props("flat dense round size=sm")
+                        ui.button(icon="arrow_downward", on_click=lambda _e, i=idx: _move_wp(i, 1)).props("flat dense round size=sm")
+                        ui.button(icon="my_location", on_click=lambda _e, i=idx: _overwrite_wp(i)).props("flat dense round size=sm").tooltip("overwrite with current sim pose")
+                        ui.button(icon="close", on_click=lambda _e, i=idx: _delete_wp(i)).props("flat dense round size=sm").classes("text-red-600")
+
+        def _move_wp(index: int, delta: int) -> None:
+            try:
+                bridge.digital_twin_move_waypoint(target, index, delta)
+                _refresh_count()
+                _mark_prepare_stale("waypoints changed")
+                _start_prepare_background()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin move waypoint failed")
+                ui.notify(f"Move failed: {exc}", type="negative", timeout=6000)
+
+        def _delete_wp(index: int) -> None:
+            try:
+                bridge.digital_twin_delete_waypoint(target, index)
+                _refresh_count()
+                _mark_prepare_stale("waypoints changed")
+                _start_prepare_background()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin delete waypoint failed")
+                ui.notify(f"Delete failed: {exc}", type="negative", timeout=6000)
+
+        async def _overwrite_wp(index: int) -> None:
+            try:
+                ui.notify("Updating waypoint to current sim pose…", type="ongoing", timeout=1500)
+                result = await asyncio.to_thread(bridge.digital_twin_overwrite_waypoint, target, index)
+                ui.notify(
+                    str(result.get("message") or ""),
+                    type="positive" if result.get("success") else "warning",
+                    timeout=3500,
+                )
+                _refresh_count()
+                _mark_prepare_stale("waypoints changed")
+                _start_prepare_background()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin overwrite waypoint failed")
+                ui.notify(f"Overwrite failed: {exc}", type="negative", timeout=6000)
+
+        def _recording_changed(_e) -> None:
+            _refresh_replay_source()
+            _mark_prepare_stale("recording changed")
+            _start_prepare_background()
+
+        def _refresh_recordings() -> None:
+            options = bridge.digital_twin_list_recordings(target)
+            recordings_select.options = options
+            if recordings_select.value not in options:
+                recordings_select.value = options[0] if options else None
+            recordings_select.update()
+            _refresh_replay_source()
+
+        recordings_select = ui.select(
+            [], label="saved recording", on_change=_recording_changed
+        ).props("dense").classes("w-56")
+
+        async def _capture() -> None:
+            try:
+                # Immediate feedback — the snapshot subprocess takes ~1-3s.
+                ui.notify("Capturing…", type="ongoing", timeout=1500)
+                count_label.text = "waypoints: capturing…"
+                result = await asyncio.to_thread(bridge.digital_twin_capture_waypoint, target)
+                ui.notify(
+                    str(result.get("message") or ""),
+                    type="positive" if result.get("success") else "warning",
+                    timeout=3500,
+                )
+                _refresh_count()
+                _mark_prepare_stale("waypoints changed")
+                _start_prepare_background()
+            except Exception as exc:  # noqa: BLE001 - surface any failure to the operator
+                log.exception("digital twin capture failed for %s", target)
+                ui.notify(f"Capture failed: {exc}", type="negative", timeout=6000)
+                _refresh_count()
+
+        def _clear() -> None:
+            try:
+                bridge.digital_twin_clear_waypoints(target)
+                _refresh_count()
+                _mark_prepare_stale("waypoints cleared")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin clear failed for %s", target)
+                ui.notify(f"Clear failed: {exc}", type="negative", timeout=6000)
+
+        async def _delete_recording() -> None:
+            try:
+                name = str(recordings_select.value or "").strip()
+                if not name:
+                    ui.notify("Select a saved recording to delete.", type="warning")
+                    return
+                result = await asyncio.to_thread(bridge.digital_twin_delete_recording, target, name)
+                ui.notify(
+                    str(result.get("message") or ""),
+                    type="positive" if result.get("success") else "warning",
+                    timeout=3500,
+                )
+                if result.get("success"):
+                    _refresh_recordings()
+                    _mark_prepare_stale("recording deleted")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin delete recording failed for %s", target)
+                ui.notify(f"Delete failed: {exc}", type="negative", timeout=6000)
+
+        async def _save() -> None:
+            try:
+                name = str(name_input.value or "").strip()
+                if not name:
+                    ui.notify("Enter a recording name.", type="warning")
+                    return
+                result = await asyncio.to_thread(bridge.digital_twin_save_recording, target, name)
+                ui.notify(
+                    str(result.get("message") or ""),
+                    type="positive" if result.get("success") else "warning",
+                    timeout=3500,
+                )
+                if result.get("success"):
+                    _refresh_recordings()
+                    _mark_prepare_stale("recording saved")
+                    _start_prepare_background()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin save failed for %s", target)
+                ui.notify(f"Save failed: {exc}", type="negative", timeout=6000)
+
+        async def _replay(replay_target: str, *, client: Client | None = None) -> dict[str, object]:
+            notify_client = client or _current_client()
+            try:
+                # Prefer the just-captured buffer (no Save needed); fall back to a saved recording.
+                kind, desc = _replay_source()
+                if kind == "buffer":
+                    if replay_target == "twin":
+                        await _wait_for_prepare_if_running(client=notify_client)
+                    result = await asyncio.to_thread(
+                        bridge.digital_twin_replay_buffer, target, replay_target=replay_target
+                    )
+                elif kind == "saved":
+                    name = str(recordings_select.value or "").strip()
+                    if replay_target == "twin":
+                        await _wait_for_prepare_if_running(client=notify_client)
+                    result = await asyncio.to_thread(
+                        bridge.digital_twin_replay, target, name, replay_target=replay_target
+                    )
+                else:
+                    _notify(
+                        "Capture waypoints (or select a saved recording) first.",
+                        type="warning",
+                        client=notify_client,
+                    )
+                    return {"success": False, "message": "Capture waypoints (or select a saved recording) first."}
+                _notify(
+                    f"{desc} → {str(result.get('message') or '')}",
+                    type="positive" if result.get("success") else "warning",
+                    timeout=5000,
+                    client=notify_client,
+                )
+                return dict(result)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin replay failed for %s", target)
+                _notify(f"Replay failed: {exc}", type="negative", timeout=6000, client=notify_client)
+                return {"success": False, "message": str(exc)}
+
+        async def _preview_gazebo() -> None:
+            result = await _replay("gazebo")
+            if result.get("success"):
+                _start_prepare_background()
+
+        async def _go_home(replay_target: str) -> None:
+            try:
+                ui.notify("Going home…", type="ongoing", timeout=1500)
+                result = await asyncio.to_thread(
+                    bridge.digital_twin_go_home, target, replay_target=replay_target
+                )
+                ui.notify(
+                    str(result.get("message") or "home"),
+                    type="positive" if result.get("success") else "warning",
+                    timeout=5000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("digital twin go home failed for %s", target)
+                ui.notify(f"Go Home failed: {exc}", type="negative", timeout=6000)
+
+        async def _home_sim() -> None:
+            await _go_home("gazebo")
+
+        home_confirm = None
+        if not is_dual:
+            with ui.dialog() as home_dialog, ui.card().classes("gap-3"):
+                home_confirm = home_dialog
+                ui.label("Send the real robot home?").classes("font-semibold")
+                ui.label(
+                    "This moves the real robot AND the gazebo model to the initial/home pose. "
+                    "The approach is speed-limited for safety."
+                ).classes("text-sm text-slate-600")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Cancel", on_click=home_dialog.close).props("flat")
+
+                    async def _home_twin_confirmed() -> None:
+                        home_dialog.close()
+                        await _go_home("twin")
+
+                    ui.button("Go Home", on_click=_home_twin_confirmed, icon="home").props("color=red")
+
+        with ui.row().classes("items-center gap-2 mt-1"):
+            ui.button("Capture Waypoint", on_click=_capture, icon="add_location").props(
+                "flat dense"
+            )
+            ui.button("Clear", on_click=_clear, icon="delete").props("flat dense").classes("text-red-600")
+            if not is_dual and home_confirm is not None:
+                ui.button("Home (sim)", on_click=_home_sim, icon="home").props("flat dense")
+                ui.button("Go Home (twin)", on_click=home_confirm.open, icon="home").props(
+                    "flat dense"
+                ).classes("text-red-600")
+        with ui.row().classes("items-center gap-2"):
+            name_input = ui.input(label="save as").props("dense").classes("w-40")
+            ui.button("Save", on_click=_save, icon="save").props("flat dense")
+            ui.button("Delete", on_click=_delete_recording, icon="delete_forever").props(
+                "flat dense"
+            ).classes("text-red-600")
+        with ui.row().classes("items-center gap-2"):
+            ui.button(
+                "Preview in Gazebo",
+                on_click=_preview_gazebo,
+                icon="visibility",
+            ).props("flat dense")
+
+            with ui.dialog() as replay_confirm, ui.card().classes("gap-3"):
+                ui.label("Replay in Twin: commit through hardware MoveIt?").classes("font-semibold")
+                ui.label(
+                    "This commits the saved sim waypoint through hardware MoveIt, keeps grippers "
+                    "on their working hardware paths, and resumes hardware -> Gazebo mirroring."
+                ).classes("text-sm text-slate-600")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Cancel", on_click=replay_confirm.close).props("flat")
+
+                    async def _replay_twin_confirmed() -> None:
+                        notify_client = _current_client()
+                        replay_confirm.close()
+                        await _replay("twin", client=notify_client)
+
+                    ui.button(
+                        "Replay",
+                        on_click=_replay_twin_confirmed,
+                        icon="send",
+                    ).props("color=red")
+
+            ui.button(
+                "Replay in Twin (commit through hardware MoveIt)",
+                on_click=replay_confirm.open,
+                icon="precision_manufacturing",
+            ).props("outline dense").classes("text-red-600")
+
+        _refresh_recordings()
+        _refresh_waypoints()
+
+
+# =====================================================================
 # Teleop Section
 # =====================================================================
 _AXIS_KEYS = {"x": ("ArrowRight", "ArrowLeft"), "y": ("ArrowUp", "ArrowDown"), "z": ("PageUp", "PageDown")}
@@ -406,6 +1139,7 @@ def _teleop_section(bridge: SystemBridge) -> None:
             with ui.row().classes("items-center gap-2"):
                 teleop_env_icon = ui.icon("circle", color="grey").classes("text-xs")
                 teleop_env_label = ui.label("Teleop environment: checking...").classes("text-xs")
+        teleop_warning_label = ui.label("").classes("text-xs text-amber-700")
 
         # Robot selector.
         with ui.row().classes("items-center gap-4 mb-4"):
@@ -430,9 +1164,12 @@ def _teleop_section(bridge: SystemBridge) -> None:
         def _refresh_teleop_status() -> None:
             if not _client_alive(teleop_backend_label):
                 return
-            status = bridge.teleop_connection_status()
+            status = bridge.teleop_connection_status(str(robot_select.value or "xarm6"))
             connected = bool(status.get("connected", False))
             env = str(status.get("environment", "gazebo")).strip().lower()
+            ros_domain_id = status.get("ros_domain_id")
+            warning = str(status.get("warning") or "").strip()
+            domain_text = f" | ROS_DOMAIN_ID={ros_domain_id}" if ros_domain_id is not None else ""
 
             teleop_backend_icon.props(f"color={'green' if connected else 'red'}")
             if connected:
@@ -444,13 +1181,15 @@ def _teleop_section(bridge: SystemBridge) -> None:
 
             if env == "real":
                 teleop_env_icon.props("color=green")
-                teleop_env_label.set_text("Teleop environment: hardware (real)")
+                teleop_env_label.set_text(f"Teleop environment: hardware (real){domain_text}")
             elif env == "gazebo":
                 teleop_env_icon.props("color=blue")
-                teleop_env_label.set_text("Teleop environment: simulation (gazebo)")
+                teleop_env_label.set_text(f"Teleop environment: simulation (gazebo){domain_text}")
             else:
                 teleop_env_icon.props("color=grey")
-                teleop_env_label.set_text(f"Teleop environment: {env or 'unknown'}")
+                teleop_env_label.set_text(f"Teleop environment: {env or 'unknown'}{domain_text}")
+
+            teleop_warning_label.set_text(warning)
 
             target_label = save_env_label["label"]
             if target_label is not None:
@@ -481,24 +1220,24 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 return
             if state_refresh["busy"]:
                 return
-
-            # Avoid spinning up teleop backend when no environment is running.
-            statuses = bridge.ros2_all_statuses()
-            env_running = any(statuses.get(name) == "running" for name in _GAZEBO_VARIANTS) or any(
-                statuses.get(name) == "running" for name in _HARDWARE_PROC_NAMES
-            )
-            if not env_running:
-                _set_state_unavailable("no environment running")
-                return
-
-            teleop_status = bridge.teleop_connection_status()
-            if not bool(teleop_status.get("connected", False)):
-                _set_state_unavailable("teleop backend disconnected")
-                return
-
             state_refresh["busy"] = True
-            robot = str(robot_select.value or "xarm6")
+
             try:
+                # Avoid spinning up teleop backend when no environment is running.
+                env_running = await asyncio.to_thread(bridge.teleop_environment_running)
+                if not env_running:
+                    _set_state_unavailable("no environment running")
+                    return
+
+                teleop_status = await asyncio.to_thread(
+                    bridge.teleop_connection_status,
+                    str(robot_select.value or "xarm6"),
+                )
+                if not bool(teleop_status.get("connected", False)):
+                    _set_state_unavailable("teleop backend disconnected")
+                    return
+
+                robot = str(robot_select.value or "xarm6")
                 ok, msg, state = await asyncio.to_thread(bridge.teleop_state, robot)
                 if not _client_alive(status_label):
                     return

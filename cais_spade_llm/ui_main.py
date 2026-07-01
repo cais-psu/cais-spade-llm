@@ -105,7 +105,10 @@ _KILL_CMDS: list[str] = [
     "pkill -9 -f keyboard_teleop.py 2>/dev/null",
     "pkill -9 -f 'spawner' 2>/dev/null",
     "pkill -9 -f xarm_driver_node 2>/dev/null",
+    "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
+    "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
     "pkill -9 -f controller_manager 2>/dev/null",
+    "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
     "pkill -9 -f ur_robot_driver 2>/dev/null",
     "pkill -9 -f robot_state_publisher 2>/dev/null",
 ]

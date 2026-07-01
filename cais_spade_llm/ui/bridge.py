@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -67,6 +68,12 @@ _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
+_VENV_PYTHON = _PROJECT_ROOT / ".venv" / "bin" / "python"
+_UR5E_RG2_GRIPPER_SCRIPT = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rg2_rtde_gripper.py"
+_UR5E_RG2_GRIPPER_ACTION = "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
+_UR5E_RG2_GRIPPER_STATUS = Path("/tmp") / "cais_ur5e_rg2_gripper_status.json"
+_UR5E_EXTERNAL_CONTROL_PROGRAM = "ros.urp"
+_UR5E_EXTERNAL_CONTROL_STATUS = Path("/tmp") / "cais_ur5e_external_control_status.json"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
@@ -98,19 +105,150 @@ class SystemBridge:
         "xarm6": "192.168.1.240",
         "ur5e": "192.168.1.172",
     }
-    _GAZEBO_PROCESS_NAMES = {"gazebo_dual", "gazebo_xarm6", "gazebo_ur5e"}
-    _HARDWARE_PROCESS_NAMES = {
+    _BASE_GAZEBO_PROCESS_NAMES = {"gazebo_dual", "gazebo_xarm6", "gazebo_ur5e"}
+    _BASE_HARDWARE_PROCESS_NAMES = {
         "hardware_xarm6_driver",
         "hardware_xarm6_moveit",
         "hardware_ur5e_driver",
+        "hardware_ur5e_rg2_gripper",
         "hardware_ur5e_moveit",
     }
+    _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES = {
+        "digital_twin_xarm_only_gazebo",
+        "digital_twin_ur5e_only_gazebo",
+        "digital_twin_dual_robots_gazebo",
+        "digital_twin_dual_robots_gazebo_moveit",
+    }
+    _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES = {
+        "digital_twin_xarm_only_hardware_xarm6_moveit",
+        "digital_twin_ur5e_only_hardware_ur5e_driver",
+        "digital_twin_ur5e_only_hardware_ur5e_rg2_gripper",
+        "digital_twin_ur5e_only_hardware_ur5e_moveit",
+        "digital_twin_dual_robots_hardware_xarm6_driver",
+        "digital_twin_dual_robots_hardware_ur5e_driver",
+        "digital_twin_dual_robots_hardware_ur5e_rg2_gripper",
+        "digital_twin_dual_robots_hardware_moveit",
+    }
+    _DIGITAL_TWIN_SYNC_PROCESS_NAMES = {
+        "digital_twin_xarm_only_sync",
+        "digital_twin_ur5e_only_sync",
+        "digital_twin_dual_robots_sync_xarm6",
+        "digital_twin_dual_robots_sync_ur5e",
+    }
+    _DIGITAL_TWIN_MARKER_PROCESS_NAMES = {
+        "digital_twin_dual_robots_paired_markers",
+    }
+    _DIGITAL_TWIN_PROCESS_NAMES = (
+        _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
+        | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
+        | _DIGITAL_TWIN_SYNC_PROCESS_NAMES
+        | _DIGITAL_TWIN_MARKER_PROCESS_NAMES
+    )
+    _GAZEBO_PROCESS_NAMES = _BASE_GAZEBO_PROCESS_NAMES | _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
+    _HARDWARE_PROCESS_NAMES = _BASE_HARDWARE_PROCESS_NAMES | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
     _HARDWARE_STACKS = {
         # xArm6 MoveIt realmove includes UFRobotSystemHardware (embedded driver path).
         "xarm6": ("hardware_xarm6_moveit",),
-        # UR5e still uses explicit driver + MoveIt bring-up.
-        "ur5e": ("hardware_ur5e_driver", "hardware_ur5e_moveit"),
+        # UR5e uses explicit driver + RG2 bridge + MoveIt bring-up.
+        "ur5e": ("hardware_ur5e_driver", "hardware_ur5e_rg2_gripper", "hardware_ur5e_moveit"),
     }
+    _DIGITAL_TWIN_TARGETS = {
+        "xarm only": {
+            "slug": "xarm_only",
+            "robot": "xarm6",
+            "gazebo": "gazebo_xarm6_passive",
+            "gazebo_launches": {
+                "monitor": "gazebo_xarm6_passive",
+                "teach": "gazebo_xarm6",
+            },
+            "gazebo_process": "digital_twin_xarm_only_gazebo",
+            "hardware": ("xarm6",),
+            "hardware_processes": {
+                "moveit": "digital_twin_xarm_only_hardware_xarm6_moveit",
+            },
+            "model_name": "xarm6",
+            "sync_process": "digital_twin_xarm_only_sync",
+            "hardware_supported": True,
+        },
+        "ur5e only": {
+            "slug": "ur5e_only",
+            "robot": "ur5e",
+            "gazebo": "gazebo_ur5e_passive",
+            "gazebo_launches": {
+                "monitor": "gazebo_ur5e_passive",
+                "teach": "gazebo_ur5e",
+            },
+            "gazebo_process": "digital_twin_ur5e_only_gazebo",
+            "hardware": ("ur5e",),
+            "hardware_processes": {
+                "driver": "digital_twin_ur5e_only_hardware_ur5e_driver",
+                "gripper": "digital_twin_ur5e_only_hardware_ur5e_rg2_gripper",
+                "moveit": "digital_twin_ur5e_only_hardware_ur5e_moveit",
+            },
+            "model_name": "ur5e_rg2",
+            "sync_process": "digital_twin_ur5e_only_sync",
+            "hardware_supported": True,
+        },
+        "dual robots": {
+            "slug": "dual_robots",
+            "robot": "dual robots",
+            "gazebo": "gazebo_dual_passive",
+            "gazebo_launches": {
+                "monitor": "gazebo_dual_passive",
+                "teach": "gazebo_dual_gazebo_only",
+            },
+            "gazebo_process": "digital_twin_dual_robots_gazebo",
+            "gazebo_moveit_launch": "gazebo_dual_moveit_only",
+            "gazebo_moveit_process": "digital_twin_dual_robots_gazebo_moveit",
+            "paired_marker_process": "digital_twin_dual_robots_paired_markers",
+            "hardware": ("xarm6", "ur5e"),
+            "hardware_processes": {
+                "xarm6": {
+                    "driver": "digital_twin_dual_robots_hardware_xarm6_driver",
+                    "moveit": "digital_twin_dual_robots_hardware_moveit",
+                },
+                "ur5e": {
+                    "driver": "digital_twin_dual_robots_hardware_ur5e_driver",
+                    "gripper": "digital_twin_dual_robots_hardware_ur5e_rg2_gripper",
+                    "moveit": "digital_twin_dual_robots_hardware_moveit",
+                },
+            },
+            "model_name": "dual_robot",
+            "sync_processes": {
+                "xarm6": "digital_twin_dual_robots_sync_xarm6",
+                "ur5e": "digital_twin_dual_robots_sync_ur5e",
+            },
+            "hardware_supported": True,
+            "sim_modes": ("monitor", "teach"),
+        },
+    }
+    _DIGITAL_TWIN_DIRECTIONS = ("hardware -> gazebo", "gazebo -> hardware")
+    _DIGITAL_TWIN_DEFAULT_DIRECTION = "hardware -> gazebo"
+    # Sim side: 'monitor' = lightweight passive gazebo; 'teach' = full MoveIt+RViz gazebo
+    # (on the sim domain) for planning/executing motions to capture as waypoints.
+    _DIGITAL_TWIN_SIM_MODES = ("monitor", "teach")
+    _DIGITAL_TWIN_DEFAULT_SIM_MODE = "monitor"
+    _DIGITAL_TWIN_SIM_MODE_ALIASES = {
+        "mirror": "monitor",
+        "author": "teach",
+    }
+    _DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT = 41
+    _DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT = 42
+    _DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT = 42
+    _DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT = 43
+    # Absolute sanity ceiling for the first-waypoint approach (deg). The replay sizes the
+    # approach by a safe joint speed; this only blocks near-180 deg deltas (encoder/wrap).
+    _DIGITAL_TWIN_MAX_JOINT_DELTA_DEG = 175.0
+    _DIGITAL_TWIN_INITIALIZE_TIMEOUT_S = 90.0
+    # Per-robot home/initial joint pose (arm joints, radians) for the "Go Home" button.
+    # xArm6 matches the dual-boot startup pose injected into the gazebo launch.
+    _DIGITAL_TWIN_HOME: dict[str, list[float]] = {
+        "xarm6": [-1.572631, -1.054702, -0.385494, 0.000322, 1.440603, -1.572544],
+    }
+    _DUAL_HARDWARE_LIMITATION = (
+        "dual robots hardware requires merged dual-hardware MoveIt. "
+        "This first digital twin launch section leaves it disabled until that ROS launch/config is implemented."
+    )
     _GAZEBO_PREWARM_TIMEOUT_S = 60.0
     _GAZEBO_PREWARM_START_DELAY_S = 0.5
     _GAZEBO_PREWARM_READY_WAIT_S = 60.0
@@ -126,8 +264,16 @@ class SystemBridge:
     ).strip().lower() in {"1", "true", "yes", "on"}
     _GAZEBO_WORKSPACE_LAUNCH_FILES = {
         "gazebo_dual": "dual_moveit_gazebo.launch.py",
+        "gazebo_dual_gazebo_only": "dual_moveit_gazebo.launch.py",
+        "gazebo_dual_moveit_only": "dual_moveit_gazebo.launch.py",
+        "gazebo_dual_passive": "xarm6_ur5e_gazebo.launch.py",
         "gazebo_xarm6": "xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ur5e_rg2_moveit_gazebo.launch.py",
+        "gazebo_xarm6_passive": "xarm6_single_gazebo.launch.py",
+        "gazebo_ur5e_passive": "ur5e_rg2_gazebo.launch.py",
+        "hardware_ur5e_moveit": "ur5e_rg2_hardware_moveit.launch.py",
+        "hardware_xarm6_driver": "xarm6_hardware_driver.launch.py",
+        "hardware_dual_robots_moveit": "dual_robots_hardware_moveit.launch.py",
     }
 
     @classmethod
@@ -195,7 +341,17 @@ class SystemBridge:
         # ROS2 subprocess tracking.
         self._ros2_procs: dict[str, subprocess.Popen] = {}
         self._teleop_server_proc: Optional[subprocess.Popen] = None
+        self._teleop_server_ros_domain_id: int | None = None
         self._teleop_server_lock = threading.Lock()
+        self._digital_twin_sim_modes: dict[str, str] = {
+            target: self._DIGITAL_TWIN_DEFAULT_SIM_MODE
+            for target in self._DIGITAL_TWIN_TARGETS
+        }
+        # In-memory capture buffer for the manual record/replay feature (per target).
+        self._digital_twin_waypoints: dict[str, list[dict[str, Any]]] = {}
+        self._digital_twin_record_lock = threading.Lock()
+        self._digital_twin_prepare_lock = threading.Lock()
+        self._digital_twin_prepare_threads: dict[str, threading.Thread] = {}
         self._gazebo_prewarm_lock = threading.Lock()
         self._gazebo_prewarm_thread: Optional[threading.Thread] = None
         self._gazebo_prewarm_pending: set[str] = set()
@@ -4405,19 +4561,57 @@ class SystemBridge:
     )
 
     _TELEOP_SCRIPT = str(_PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "keyboard_teleop.py")
+    _DUAL_DRAG_MARKERS_SCRIPT = str(
+        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "dual_drag_markers.py"
+    )
+    _DIGITAL_TWIN_SYNC_SCRIPT = (
+        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "digital_twin_sync.py"
+    )
 
     # Registry: name → shell command suffix (appended after _ROS2_ENV).
     ROS2_LAUNCH_CMDS: dict[str, str] = {
-        "gazebo_dual": "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py",
+        "gazebo_dual": (
+            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "run_perception:=false include_assembly_parts:=false"
+        ),
+        "gazebo_dual_gazebo_only": (
+            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "launch_moveit:=false launch_rviz:=false "
+            "run_perception:=false include_assembly_parts:=false"
+        ),
+        "gazebo_dual_moveit_only": (
+            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "launch_gazebo:=false launch_moveit:=true launch_rviz:=true "
+            "run_perception:=false include_assembly_parts:=false"
+        ),
+        "gazebo_dual_passive": (
+            "ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py "
+            "passive:=true run_perception:=false include_assembly_parts:=false"
+        ),
         "gazebo_xarm6": "ros2 launch xarm_gazebo xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py",
-        "hardware_xarm6_driver": "ros2 launch xarm_api xarm6_driver.launch.py robot_ip:={xarm6_ip}",
+        "gazebo_xarm6_passive": "ros2 launch xarm_gazebo xarm6_single_gazebo.launch.py passive:=true",
+        "gazebo_ur5e_passive": "ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false",
+        "hardware_xarm6_driver": "ros2 launch xarm_gazebo xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}",
         "hardware_xarm6_moveit": (
             "ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py "
             "robot_ip:={xarm6_ip} add_gripper:=true"
         ),
-        "hardware_ur5e_driver": "ros2 launch ur_robot_driver ur5e.launch.py robot_ip:={ur5e_ip} launch_rviz:=false",
-        "hardware_ur5e_moveit": "ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e launch_rviz:=true use_sim_time:=false",
+        "hardware_ur5e_driver": (
+            "ros2 launch ur_robot_driver ur_control.launch.py "
+            "ur_type:=ur5e robot_ip:={ur5e_ip} launch_rviz:=false "
+            "headless_mode:=false "
+            "runtime_config_package:=xarm_gazebo "
+            "controllers_file:=ur5e_hardware_controllers.yaml "
+            "initial_joint_controller:=scaled_joint_trajectory_controller "
+            "activate_joint_controller:=true"
+        ),
+        "hardware_ur5e_rg2_gripper": (
+            f"{_VENV_PYTHON} {_UR5E_RG2_GRIPPER_SCRIPT} "
+            "--robot-ip {ur5e_ip} --backend xmlrpc"
+        ),
+        "hardware_ur5e_moveit": "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true",
+        "hardware_dual_robots_moveit": "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py launch_rviz:=true",
         "perception": f"python3.10 {_PROJECT_ROOT / 'ros2' / 'cais_lab_gazebo' / 'sensor' / 'gazebo_camera_detector.py'}",
         "teleop_xarm6": f"python3.10 {_TELEOP_SCRIPT} --robot xarm6",
         "teleop_ur5e": f"python3.10 {_TELEOP_SCRIPT} --robot ur5e",
@@ -4434,33 +4628,186 @@ class SystemBridge:
         return "stopped"
 
     def ros2_all_statuses(self) -> dict[str, str]:
-        return {name: self.ros2_proc_status(name) for name in self.ROS2_LAUNCH_CMDS}
+        names = set(self.ROS2_LAUNCH_CMDS) | self._DIGITAL_TWIN_PROCESS_NAMES
+        return {name: self.ros2_proc_status(name) for name in sorted(names)}
+
+    @classmethod
+    def _default_ros_domain_id(cls) -> int:
+        return cls._env_int("ROS_DOMAIN_ID", 0)
+
+    def _normal_gazebo_teleop_process(self, robot: str) -> str | None:
+        key = str(robot).strip().lower()
+        if self.ros2_proc_status("gazebo_dual") == "running":
+            return "gazebo_dual"
+        if key == "xarm6" and self.ros2_proc_status("gazebo_xarm6") == "running":
+            return "gazebo_xarm6"
+        if key == "ur5e" and self.ros2_proc_status("gazebo_ur5e") == "running":
+            return "gazebo_ur5e"
+        return None
+
+    def _normal_hardware_teleop_processes(self, robot: str) -> dict[str, str]:
+        key = str(robot).strip().lower()
+        if key == "xarm6":
+            return {
+                "moveit": "hardware_xarm6_moveit",
+            }
+        if key == "ur5e":
+            return {
+                "driver": "hardware_ur5e_driver",
+                "gripper": "hardware_ur5e_rg2_gripper",
+                "moveit": "hardware_ur5e_moveit",
+            }
+        return {}
+
+    def _digital_twin_teleop_target(self, robot: str) -> tuple[str, dict[str, Any]] | None:
+        key = str(robot).strip().lower()
+        for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
+            hardware_robots = {str(r).strip().lower() for r in (cfg.get("hardware") or ())}
+            if str(cfg.get("robot") or "").strip().lower() != key and key not in hardware_robots:
+                continue
+            process_names = self._digital_twin_process_names(cfg)
+            if self._running_process_names(process_names):
+                return target, cfg
+        return None
+
+    def _any_teleop_environment_running(self) -> bool:
+        names = self._GAZEBO_PROCESS_NAMES | self._HARDWARE_PROCESS_NAMES
+        return self._any_running(names)
+
+    def teleop_environment_running(self) -> bool:
+        return self._any_teleop_environment_running()
+
+    def _teleop_process_running(self, process_name: str | None) -> bool:
+        return bool(process_name) and self.ros2_proc_status(str(process_name)) == "running"
+
+    def teleop_target(self, robot: str | None = None, op: str | None = None) -> dict[str, Any]:
+        """Resolve the ROS graph and process requirements for Interactive Teleop."""
+        key = str(robot or "").strip().lower()
+        op_key = str(op or "").strip().lower()
+        default_domain = self._default_ros_domain_id()
+        domains = self._digital_twin_domain_ids()
+
+        result: dict[str, Any] = {
+            "environment": "real" if str(self.robot_env).strip().lower() == "real" else "gazebo",
+            "ros_domain_id": default_domain,
+            "source": "default",
+            "robot": key,
+            "moveit_process": "",
+            "gripper_process": "",
+            "required_processes": [],
+            "ready": False,
+            "warning": "MoveIt is not running. Start the matching Gazebo, Hardware Stack, or Digital Twin launch first.",
+        }
+
+        if key not in {"xarm6", "ur5e"}:
+            if key:
+                result["warning"] = f"unknown robot: {key}"
+            elif self._any_running(self._HARDWARE_PROCESS_NAMES):
+                result.update({"environment": "real", "source": "hardware", "warning": ""})
+            elif self._any_running(self._GAZEBO_PROCESS_NAMES):
+                result.update({"environment": "gazebo", "source": "gazebo", "warning": ""})
+            return result
+
+        digital_twin_target = self._digital_twin_teleop_target(key)
+        if digital_twin_target is not None:
+            target, cfg = digital_twin_target
+            hardware_processes = self._digital_twin_hardware_processes_for_robot(cfg, key)
+            gripper_process = str(
+                hardware_processes.get("gripper")
+                or hardware_processes.get("driver")
+                or hardware_processes.get("moveit")
+                or ""
+            ).strip()
+            result.update(
+                {
+                    "environment": "real",
+                    "ros_domain_id": self._digital_twin_hardware_domain_id(cfg, key, domains),
+                    "source": f"digital_twin:{target}",
+                    "moveit_process": str(hardware_processes.get("moveit") or "").strip(),
+                    "gripper_process": gripper_process,
+                }
+            )
+        else:
+            hardware_processes = self._normal_hardware_teleop_processes(key)
+            if any(self._teleop_process_running(name) for name in hardware_processes.values()):
+                result.update(
+                    {
+                        "environment": "real",
+                        "ros_domain_id": default_domain,
+                        "source": "hardware",
+                        "moveit_process": str(hardware_processes.get("moveit") or "").strip(),
+                        "gripper_process": str(hardware_processes.get("gripper") or "").strip(),
+                    }
+                )
+            else:
+                gazebo_process = self._normal_gazebo_teleop_process(key)
+                if gazebo_process:
+                    result.update(
+                        {
+                            "environment": "gazebo",
+                            "ros_domain_id": default_domain,
+                            "source": "gazebo",
+                            "moveit_process": gazebo_process,
+                            "gripper_process": gazebo_process,
+                        }
+                    )
+
+        moveit_process = str(result.get("moveit_process") or "").strip()
+        gripper_process = str(result.get("gripper_process") or "").strip()
+        required: list[str] = []
+        warning = ""
+
+        if op_key == "gripper":
+            if result.get("environment") == "real" and key == "ur5e":
+                required = [gripper_process]
+                if not self._teleop_process_running(gripper_process):
+                    warning = "RG2 gripper bridge is not running. Start UR5e Hardware Stack, ur5e only Digital Twin, or dual robots Digital Twin first."
+            elif result.get("environment") == "real" and key == "xarm6":
+                required = [gripper_process or moveit_process]
+                if not self._teleop_process_running(gripper_process or moveit_process):
+                    warning = "xArm6 gripper driver is not running. Start xArm6 Hardware Stack or dual robots Digital Twin first."
+            else:
+                required = [moveit_process]
+                if not self._teleop_process_running(moveit_process):
+                    warning = f"MoveIt for {key} is not running. Start the matching {key} launch first."
+        elif op_key in {"cartesian", "joint", "home", "move_joints", "save_position", "state"}:
+            required = [moveit_process]
+            if not self._teleop_process_running(moveit_process):
+                warning = f"MoveIt for {key} is not running. Start the matching {key} launch first."
+        else:
+            required = [moveit_process] if moveit_process else []
+            if moveit_process and not self._teleop_process_running(moveit_process):
+                warning = f"MoveIt for {key} is not running. Start the matching {key} launch first."
+
+        if not moveit_process and not gripper_process:
+            if self._any_teleop_environment_running():
+                warning = f"MoveIt for {key} is not running. Start the matching {key} launch first."
+            else:
+                warning = "MoveIt is not running. Start the matching Gazebo, Hardware Stack, or Digital Twin launch first."
+
+        required = [name for name in required if name]
+        ready = bool(required) and all(self._teleop_process_running(name) for name in required)
+        result["required_processes"] = required
+        result["ready"] = ready
+        result["warning"] = "" if ready else warning
+        return result
 
     def teleop_target_environment(self) -> str:
         """Infer teleop target environment from active ROS2 stacks."""
-        hardware_names = (
-            "hardware_xarm6_driver",
-            "hardware_xarm6_moveit",
-            "hardware_ur5e_driver",
-            "hardware_ur5e_moveit",
-        )
-        gazebo_names = ("gazebo_dual", "gazebo_xarm6", "gazebo_ur5e")
+        return str(self.teleop_target().get("environment") or "gazebo")
 
-        if any(self.ros2_proc_status(name) == "running" for name in hardware_names):
-            return "real"
-        if any(self.ros2_proc_status(name) == "running" for name in gazebo_names):
-            return "gazebo"
-        return "real" if str(self.robot_env).strip().lower() == "real" else "gazebo"
-
-    def teleop_connection_status(self) -> dict[str, Any]:
+    def teleop_connection_status(self, robot: str | None = None) -> dict[str, Any]:
         """Return teleop backend connectivity and resolved target environment."""
+        target = self.teleop_target(robot, "state") if robot else self.teleop_target()
         with self._teleop_server_lock:
             proc = self._teleop_server_proc
             connected = proc is not None and proc.poll() is None
             pid = proc.pid if connected else None
         return {
             "connected": bool(connected),
-            "environment": self.teleop_target_environment(),
+            "environment": str(target.get("environment") or self.teleop_target_environment()),
+            "ros_domain_id": target.get("ros_domain_id"),
+            "warning": str(target.get("warning") or ""),
             "pid": pid,
         }
 
@@ -4611,6 +4958,47 @@ class SystemBridge:
         )
 
     @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = str(os.environ.get(name, "")).strip()
+        if not raw:
+            return int(default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return int(default)
+
+    @classmethod
+    def _digital_twin_domain_ids(cls) -> dict[str, int]:
+        return {
+            "gazebo": cls._env_int(
+                "CAIS_DIGITAL_TWIN_GAZEBO_DOMAIN_ID",
+                cls._DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT,
+            ),
+            "hardware": cls._env_int(
+                "CAIS_DIGITAL_TWIN_HARDWARE_DOMAIN_ID",
+                cls._DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT,
+            ),
+            "hardware_xarm6": cls._env_int(
+                "CAIS_DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_ID",
+                cls._DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT,
+            ),
+            "hardware_ur5e": cls._env_int(
+                "CAIS_DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_ID",
+                cls._DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT,
+            ),
+        }
+
+    @staticmethod
+    def _ros2_domain_export(ros_domain_id: int | None) -> str:
+        if ros_domain_id is None:
+            return ""
+        try:
+            domain = int(ros_domain_id)
+        except (TypeError, ValueError):
+            return ""
+        return f"export ROS_DOMAIN_ID={domain}; "
+
+    @staticmethod
     def _ros2_setup_path() -> Path:
         return Path("/opt/ros/humble/setup.bash")
 
@@ -4699,19 +5087,79 @@ class SystemBridge:
                 "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
             ),
         )
+        dual_passive_assets = (
+            (
+                xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
+                "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
+                "ROS2 workspace is missing the UR5e initial positions config. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        xarm_hardware_driver_assets = (
+            (
+                xarm_gazebo_share / "launch" / "xarm6_hardware_driver.launch.py",
+                "ROS2 workspace is missing the xArm6 hardware driver launch file. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        dual_hardware_moveit_assets = (
+            (
+                xarm_gazebo_share / "launch" / "dual_robots_hardware_moveit.launch.py",
+                "ROS2 workspace is missing the dual robots hardware MoveIt launch file. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                xarm_gazebo_share / "rviz" / "dual_robots_hardware_moveit.rviz",
+                "ROS2 workspace is missing the dual robots hardware RViz config. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
         ur_assets = (
             (
                 xarm_gazebo_share / "config" / "ur5e_rg2_controllers.yaml",
                 "ROS2 workspace is missing the UR5e RG2 controller config. Re-run `make bootstrap-gazebo`.",
             ),
         )
+        ur_hardware_rg2_assets = (
+            (
+                xarm_gazebo_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
+                "ROS2 workspace is missing the UR5e RG2 hardware MoveIt launch file. Re-run `make bootstrap-gazebo`.",
+            ),
+            (
+                xarm_gazebo_share / "rviz" / "ur5e_rg2_hardware_moveit.rviz",
+                "ROS2 workspace is missing the UR5e RG2 hardware RViz config. Re-run `make bootstrap-gazebo`.",
+            ),
+        )
+        ur_rg2_bridge_assets = (
+            (
+                _VENV_PYTHON,
+                f"Python venv is missing at {_VENV_PYTHON}. Create the project venv before starting the UR5e RG2 bridge.",
+            ),
+            (
+                _UR5E_RG2_GRIPPER_SCRIPT,
+                f"UR5e RG2 bridge script is missing at {_UR5E_RG2_GRIPPER_SCRIPT}.",
+            ),
+        )
 
         if launch_key == "gazebo_dual":
             return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *dual_assets]
+        if launch_key == "gazebo_dual_passive":
+            return [*workspace_xarm, *ur_stack, *onrobot_ws, *dual_passive_assets]
         if launch_key == "gazebo_xarm6":
             return [*workspace_xarm, *moveit_core, *link_attacher_ws]
         if launch_key == "gazebo_ur5e":
             return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *ur_assets]
+        if launch_key == "gazebo_xarm6_passive":
+            return [*workspace_xarm]
+        if launch_key == "gazebo_ur5e_passive":
+            return [*workspace_xarm, *ur_stack, *onrobot_ws, *ur_assets]
+        if launch_key == "hardware_xarm6_driver":
+            return [*workspace_xarm, *xarm_hardware_driver_assets]
+        if launch_key == "hardware_dual_robots_moveit":
+            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *dual_hardware_moveit_assets]
+        if launch_key == "hardware_ur5e_moveit":
+            return [*moveit_core, *ur_stack, *onrobot_ws, *ur_hardware_rg2_assets]
+        if launch_key == "hardware_ur5e_rg2_gripper":
+            return [*ur_rg2_bridge_assets]
         return []
 
     def _ros2_launch_prereq_error(self, name: str) -> str | None:
@@ -4845,7 +5293,10 @@ class SystemBridge:
         )
 
     def _probe_sim_services(self, timeout_sec: float = 3.0) -> tuple[bool, str]:
-        ok, out = self._ros2_command_output("ros2 service list", timeout_sec=timeout_sec)
+        ok, out = self._ros2_command_output(
+            "ros2 service list --no-daemon --spin-time 2.0",
+            timeout_sec=timeout_sec,
+        )
         if not ok:
             return (
                 False,
@@ -4943,11 +5394,12 @@ class SystemBridge:
         command: str,
         timeout_sec: float = 8.0,
         *,
+        ros_domain_id: int | None = None,
         emit_slow_diag: bool = True,
         emit_failure_diag: bool = True,
         emit_timeout_diag: bool = True,
     ) -> tuple[bool, str]:
-        full_cmd = self._ROS2_ENV + command
+        full_cmd = self._ROS2_ENV + self._ros2_domain_export(ros_domain_id) + command
         t0 = time.monotonic()
         try:
             cp = subprocess.run(
@@ -4975,18 +5427,98 @@ class SystemBridge:
             self._diag_emit(f"ros2 command slow elapsed={elapsed:.2f}s: {command}")
         return True, cp.stdout or ""
 
+    def _restart_ros2_daemon_for_discovery(
+        self,
+        *,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        ok, out = self._ros2_command_output(
+            "ros2 daemon stop",
+            timeout_sec=5.0,
+            ros_domain_id=ros_domain_id,
+            emit_slow_diag=False,
+            emit_failure_diag=False,
+            emit_timeout_diag=False,
+        )
+        if not ok:
+            detail = self._tail_output(out) or str(out or "").strip()
+            if detail:
+                self._diag_emit(f"ros2 daemon stop during discovery retry: {detail}")
+
+        time.sleep(0.4)
+        ok, out = self._ros2_command_output(
+            "ros2 daemon start",
+            timeout_sec=5.0,
+            ros_domain_id=ros_domain_id,
+            emit_slow_diag=False,
+            emit_failure_diag=False,
+            emit_timeout_diag=False,
+        )
+        if not ok:
+            detail = self._tail_output(out) or str(out or "").strip()
+            return detail or "ros2 daemon restart failed"
+        time.sleep(0.4)
+        self._diag_emit("ros2 daemon restarted for ROS discovery retry")
+        return None
+
+    @staticmethod
+    def _ros2_discovery_wait_can_retry(error_message: str) -> bool:
+        text = str(error_message or "").strip().lower()
+        if not text:
+            return False
+        return not any(
+            token in text
+            for token in (
+                "exited before",
+                "wait cancelled",
+                "controller name is empty",
+                "service name is empty",
+                "action name is empty",
+                "topic name must be absolute",
+                "invalid controller name",
+                "ok=false",
+            )
+        )
+
+    def _wait_with_ros2_daemon_retry(
+        self,
+        label: str,
+        wait_fn: Callable[[], str | None],
+        *,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        err = wait_fn()
+        if err is None:
+            return None
+        if not self._ros2_discovery_wait_can_retry(err):
+            return err
+
+        restart_err = self._restart_ros2_daemon_for_discovery(
+            ros_domain_id=ros_domain_id,
+        )
+        if restart_err:
+            return f"{err}; ros2 daemon restart failed: {restart_err}"
+
+        retry_err = wait_fn()
+        if retry_err is None:
+            self._diag_emit(f"{label} recovered after ros2 daemon restart")
+            return None
+        return f"{err}; after ros2 daemon restart: {retry_err}"
+
     def _wait_for_ros_service(
         self,
         service_name: str,
         timeout_sec: float = 20.0,
         process_name: str | None = None,
         cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
     ) -> str | None:
         return self._wait_for_ros_services(
             [service_name],
             timeout_sec=timeout_sec,
             process_name=process_name,
             cancel_event=cancel_event,
+            ros_domain_id=ros_domain_id,
         )
 
     def _wait_for_ros_services(
@@ -4995,6 +5527,7 @@ class SystemBridge:
         timeout_sec: float = 20.0,
         process_name: str | None = None,
         cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
         poll_interval_sec: float = 0.5,
         progress_cb: Callable[[str, float], None] | None = None,
         pending_cb: Callable[[list[str], float], None] | None = None,
@@ -5014,8 +5547,9 @@ class SystemBridge:
                 return f"{process_name} exited before {', '.join(targets)} became available"
 
             ok, out = self._ros2_command_output(
-                "ros2 service list",
-                timeout_sec=3.0,
+                "ros2 service list --no-daemon --spin-time 2.0",
+                timeout_sec=7.0,
+                ros_domain_id=ros_domain_id,
                 emit_slow_diag=False,
                 emit_failure_diag=False,
                 emit_timeout_diag=False,
@@ -5049,14 +5583,567 @@ class SystemBridge:
         missing_text = ", ".join(last_missing or targets)
         return f"{missing_text} not available within {timeout_sec:.0f}s"
 
-    def _wait_for_driver_ready(self, robot: str, timeout_sec: float = 18.0) -> str | None:
+    def _wait_for_ros_action(
+        self,
+        action_name: str,
+        timeout_sec: float = 12.0,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
+        poll_interval_sec: float = 0.5,
+    ) -> str | None:
+        target = str(action_name or "").strip()
+        if not target:
+            return "action name is empty"
+
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return f"{target} wait cancelled"
+
+            if process_name and self.ros2_proc_status(process_name) != "running":
+                return f"{process_name} exited before {target} became available"
+
+            ok, out = self._ros2_command_output(
+                "ros2 action list",
+                timeout_sec=3.0,
+                ros_domain_id=ros_domain_id,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
+            if ok:
+                actions = [line.strip() for line in out.splitlines() if line.strip()]
+                if any(action == target or action.endswith(target) for action in actions):
+                    return None
+            time.sleep(max(0.1, float(poll_interval_sec)))
+
+        if process_name and self.ros2_proc_status(process_name) != "running":
+            return f"{process_name} exited before {target} became available"
+        return f"{target} not available within {timeout_sec:.0f}s"
+
+    @staticmethod
+    def _topic_publisher_count_from_output(output: str) -> int | None:
+        match = re.search(r"\bPublisher count:\s*(\d+)\b", str(output or ""))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _wait_for_ros_topic_publisher(
+        self,
+        topic_name: str,
+        timeout_sec: float = 12.0,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
+        poll_interval_sec: float = 0.5,
+    ) -> str | None:
+        target = str(topic_name or "").strip()
+        if not target:
+            return "topic name is empty"
+        if not target.startswith("/"):
+            return f"topic name must be absolute: {target}"
+
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        last_count: int | None = None
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return f"{target} publisher wait cancelled"
+
+            if process_name and self.ros2_proc_status(process_name) != "running":
+                return f"{process_name} exited before {target} had a publisher"
+
+            ok, out = self._ros2_command_output(
+                "ros2 topic info -v "
+                + shlex.quote(target)
+                + " --no-daemon --spin-time 2.0",
+                timeout_sec=7.0,
+                ros_domain_id=ros_domain_id,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
+            if ok:
+                last_count = self._topic_publisher_count_from_output(out)
+                if last_count is not None and last_count > 0:
+                    return None
+            time.sleep(max(0.1, float(poll_interval_sec)))
+
+        if process_name and self.ros2_proc_status(process_name) != "running":
+            return f"{process_name} exited before {target} had a publisher"
+        if last_count == 0:
+            return f"{target} has no publishers"
+        return f"{target} publisher state not available within {timeout_sec:.0f}s"
+
+    @staticmethod
+    def _controller_state_from_list_controllers_output(
+        output: str,
+        controller_name: str,
+    ) -> str | None:
+        target = str(controller_name or "").strip()
+        if not target:
+            return None
+        pattern = (
+            r"ControllerState\(name=['\"]"
+            + re.escape(target)
+            + r"['\"], state=['\"]([^'\"]+)['\"]"
+        )
+        match = re.search(pattern, str(output or ""))
+        if match:
+            return str(match.group(1) or "").strip()
+        return None
+
+    @staticmethod
+    def _switch_controller_ok_from_output(output: str) -> bool | None:
+        text = str(output or "")
+        if re.search(r"\bok\s*=\s*True\b", text) or re.search(r"\bok\s*:\s*true\b", text, re.IGNORECASE):
+            return True
+        if re.search(r"\bok\s*=\s*False\b", text) or re.search(r"\bok\s*:\s*false\b", text, re.IGNORECASE):
+            return False
+        return None
+
+    @staticmethod
+    def _ur_program_running_from_output(output: str) -> bool | None:
+        text = str(output or "")
+        if re.search(r"\bprogram_running\s*=\s*True\b", text) or re.search(
+            r"\bprogram_running\s*:\s*true\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.search(r"\bprogram_running\s*=\s*False\b", text) or re.search(
+            r"\bprogram_running\s*:\s*false\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        return None
+
+    @staticmethod
+    def _ros_service_success_from_output(output: str) -> bool | None:
+        text = str(output or "")
+        if re.search(r"\bsuccess\s*=\s*True\b", text) or re.search(
+            r"\bsuccess\s*:\s*true\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.search(r"\bsuccess\s*=\s*False\b", text) or re.search(
+            r"\bsuccess\s*:\s*false\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        return None
+
+    def _write_ur5e_external_control_status(
+        self,
+        *,
+        state: str,
+        message: str = "",
+        success: bool | None = None,
+        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
+        ros_domain_id: int | None = None,
+        error: str = "",
+    ) -> None:
+        payload: dict[str, Any] = {
+            "state": str(state or "unknown"),
+            "message": str(message or ""),
+            "program": str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM),
+            "error": str(error or ""),
+            "updated_at": time.time(),
+        }
+        if success is not None:
+            payload["success"] = bool(success)
+        if ros_domain_id is not None:
+            payload["ros_domain_id"] = int(ros_domain_id)
+        atomic_json_write(_UR5E_EXTERNAL_CONTROL_STATUS, payload)
+
+    def _ur5e_external_control_status(self) -> dict[str, Any]:
+        return self._read_json_file(_UR5E_EXTERNAL_CONTROL_STATUS)
+
+    def _call_dashboard_service(
+        self,
+        service_name: str,
+        service_type: str,
+        request: str,
+        *,
+        ros_domain_id: int | None = None,
+        timeout_sec: float = 6.0,
+    ) -> tuple[bool, str]:
+        return self._ros2_command_output(
+            "ros2 service call "
+            + shlex.quote(service_name)
+            + " "
+            + shlex.quote(service_type)
+            + " "
+            + shlex.quote(request),
+            timeout_sec=timeout_sec,
+            ros_domain_id=ros_domain_id,
+            emit_slow_diag=False,
+            emit_failure_diag=False,
+            emit_timeout_diag=False,
+        )
+
+    def _ur5e_program_running_once(
+        self,
+        *,
+        ros_domain_id: int | None = None,
+    ) -> tuple[bool | None, str]:
+        ok, out = self._call_dashboard_service(
+            "/dashboard_client/program_running",
+            "ur_dashboard_msgs/srv/IsProgramRunning",
+            "{}",
+            ros_domain_id=ros_domain_id,
+            timeout_sec=5.0,
+        )
+        if not ok:
+            return None, self._tail_output(out) or str(out or "").strip()
+        return self._ur_program_running_from_output(out), out
+
+    def _refresh_ur5e_external_control_running_status(
+        self,
+        *,
+        ros_domain_id: int | None = None,
+        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
+    ) -> bool:
+        program_name = str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM).strip()
+        running, _detail = self._ur5e_program_running_once(ros_domain_id=ros_domain_id)
+        if running is not True:
+            return False
+        self._write_ur5e_external_control_status(
+            state="running",
+            message="External Control: running",
+            program=program_name,
+            ros_domain_id=ros_domain_id,
+            success=True,
+        )
+        return True
+
+    def _ensure_ur5e_external_control_running(
+        self,
+        *,
+        process_name: str,
+        ros_domain_id: int | None = None,
+        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
+        timeout_sec: float = 18.0,
+    ) -> str | None:
+        program_name = str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM).strip()
+        if not program_name:
+            return "UR5e External Control program name is empty"
+
+        self._write_ur5e_external_control_status(
+            state="reconnecting",
+            message=f"External Control: reconnecting {program_name}",
+            program=program_name,
+            ros_domain_id=ros_domain_id,
+        )
+
+        services_err = self._wait_for_ros_services(
+            (
+                "/dashboard_client/program_running",
+                "/dashboard_client/load_program",
+                "/dashboard_client/play",
+            ),
+            timeout_sec=14.0,
+            process_name=process_name,
+            ros_domain_id=ros_domain_id,
+        )
+        if services_err:
+            message = (
+                "External Control: manual Play required. "
+                "Set pendant to Remote Control or press Play on ros.urp manually."
+            )
+            self._write_ur5e_external_control_status(
+                state="manual Play required",
+                message=message,
+                program=program_name,
+                ros_domain_id=ros_domain_id,
+                error=services_err,
+                success=False,
+            )
+            return f"UR5e External Control dashboard services are not ready: {services_err}"
+
+        running, detail = self._ur5e_program_running_once(ros_domain_id=ros_domain_id)
+        if running is True:
+            self._write_ur5e_external_control_status(
+                state="running",
+                message="External Control: running",
+                program=program_name,
+                ros_domain_id=ros_domain_id,
+                success=True,
+            )
+            return None
+
+        load_request = "{filename: " + program_name + "}"
+        ok, out = self._call_dashboard_service(
+            "/dashboard_client/load_program",
+            "ur_dashboard_msgs/srv/Load",
+            load_request,
+            ros_domain_id=ros_domain_id,
+            timeout_sec=8.0,
+        )
+        if not ok or self._ros_service_success_from_output(out) is False:
+            detail_text = self._tail_output(out) or str(out or detail or "").strip()
+            if self._refresh_ur5e_external_control_running_status(
+                ros_domain_id=ros_domain_id,
+                program=program_name,
+            ):
+                return None
+            message = (
+                "External Control: manual Play required. "
+                "Set pendant to Remote Control or press Play on ros.urp manually."
+            )
+            self._write_ur5e_external_control_status(
+                state="manual Play required",
+                message=message,
+                program=program_name,
+                ros_domain_id=ros_domain_id,
+                error=detail_text,
+                success=False,
+            )
+            return f"UR5e External Control auto reconnect failed loading {program_name}: {detail_text or 'load_program failed'}. Set pendant to Remote Control or press Play on ros.urp manually."
+
+        ok, out = self._call_dashboard_service(
+            "/dashboard_client/play",
+            "std_srvs/srv/Trigger",
+            "{}",
+            ros_domain_id=ros_domain_id,
+            timeout_sec=8.0,
+        )
+        if not ok or self._ros_service_success_from_output(out) is False:
+            detail_text = self._tail_output(out) or str(out or "").strip()
+            if self._refresh_ur5e_external_control_running_status(
+                ros_domain_id=ros_domain_id,
+                program=program_name,
+            ):
+                return None
+            message = (
+                "External Control: manual Play required. "
+                "Set pendant to Remote Control or press Play on ros.urp manually."
+            )
+            self._write_ur5e_external_control_status(
+                state="manual Play required",
+                message=message,
+                program=program_name,
+                ros_domain_id=ros_domain_id,
+                error=detail_text,
+                success=False,
+            )
+            return f"UR5e External Control auto reconnect failed playing {program_name}: {detail_text or 'play failed'}. Set pendant to Remote Control or press Play on ros.urp manually."
+
+        err = self._wait_for_ur_program_running(
+            timeout_sec=timeout_sec,
+            process_name=process_name,
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            if self._refresh_ur5e_external_control_running_status(
+                ros_domain_id=ros_domain_id,
+                program=program_name,
+            ):
+                return None
+            message = (
+                "External Control: manual Play required. "
+                "Set pendant to Remote Control or press Play on ros.urp manually."
+            )
+            self._write_ur5e_external_control_status(
+                state="manual Play required",
+                message=message,
+                program=program_name,
+                ros_domain_id=ros_domain_id,
+                error=err,
+                success=False,
+            )
+            return f"UR5e External Control did not become running after play: {err}. Set pendant to Remote Control or press Play on ros.urp manually."
+
+        self._write_ur5e_external_control_status(
+            state="running",
+            message="External Control: running",
+            program=program_name,
+            ros_domain_id=ros_domain_id,
+            success=True,
+        )
+        return None
+
+    def _activate_ros_controller(
+        self,
+        controller_name: str,
+        timeout_sec: float = 5.0,
+        *,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        target = str(controller_name or "").strip()
+        if not target:
+            return "controller name is empty"
+        if not re.fullmatch(r"[-A-Za-z0-9_./]+", target):
+            return f"invalid controller name: {target}"
+        switch_timeout_sec = max(1, int(math.ceil(float(timeout_sec))))
+        request = (
+            "{activate_controllers: ["
+            + target
+            + "], deactivate_controllers: [], strictness: 2, activate_asap: true, timeout: {sec: "
+            + str(switch_timeout_sec)
+            + ", nanosec: 0}}"
+        )
+        ok, out = self._ros2_command_output(
+            "ros2 service call /controller_manager/switch_controller "
+            "controller_manager_msgs/srv/SwitchController "
+            + shlex.quote(request),
+            timeout_sec=max(6.0, float(timeout_sec) + 4.0),
+            ros_domain_id=ros_domain_id,
+            emit_slow_diag=False,
+            emit_failure_diag=False,
+            emit_timeout_diag=False,
+        )
+        if not ok:
+            return self._tail_output(out) or f"failed to activate {target}"
+        switched = self._switch_controller_ok_from_output(out)
+        if switched is True:
+            return None
+        if switched is False:
+            return f"switch_controller returned ok=False for {target}"
+        return f"could not parse switch_controller response for {target}"
+
+    def _wait_for_ur_program_running(
+        self,
+        timeout_sec: float = 12.0,
+        *,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
+        poll_interval_sec: float = 0.6,
+    ) -> str | None:
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        last_state: bool | None = None
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return "UR program-running wait cancelled"
+
+            if process_name and self.ros2_proc_status(process_name) != "running":
+                return f"{process_name} exited before UR program became running"
+
+            ok, out = self._ros2_command_output(
+                'ros2 service call /dashboard_client/program_running ur_dashboard_msgs/srv/IsProgramRunning "{}"',
+                timeout_sec=4.0,
+                ros_domain_id=ros_domain_id,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
+            if ok:
+                last_state = self._ur_program_running_from_output(out)
+                if last_state is True:
+                    return None
+            time.sleep(max(0.1, float(poll_interval_sec)))
+
+        if process_name and self.ros2_proc_status(process_name) != "running":
+            return f"{process_name} exited before UR program became running"
+        if last_state is False:
+            return "UR program is not running"
+        return f"UR program-running state not available within {timeout_sec:.0f}s"
+
+    def _wait_for_ros_controller_active(
+        self,
+        controller_name: str,
+        timeout_sec: float = 20.0,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
+        poll_interval_sec: float = 0.5,
+    ) -> str | None:
+        target = str(controller_name or "").strip()
+        if not target:
+            return "controller name is empty"
+
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        last_state: str | None = None
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return f"{target} wait cancelled"
+
+            if process_name and self.ros2_proc_status(process_name) != "running":
+                return f"{process_name} exited before {target} became active"
+
+            ok, out = self._ros2_command_output(
+                'ros2 service call /controller_manager/list_controllers controller_manager_msgs/srv/ListControllers "{}"',
+                timeout_sec=5.0,
+                ros_domain_id=ros_domain_id,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
+            if ok:
+                last_state = self._controller_state_from_list_controllers_output(out, target)
+                if last_state == "active":
+                    return None
+            time.sleep(max(0.1, float(poll_interval_sec)))
+
+        if process_name and self.ros2_proc_status(process_name) != "running":
+            return f"{process_name} exited before {target} became active"
+        if last_state:
+            return f"{target} is {last_state}, not active"
+        return f"{target} not found active within {timeout_sec:.0f}s"
+
+    def _ensure_ros_controller_active(
+        self,
+        controller_name: str,
+        timeout_sec: float = 20.0,
+        *,
+        process_name: str | None = None,
+        cancel_event: threading.Event | None = None,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        target = str(controller_name or "").strip()
+        if not target:
+            return "controller name is empty"
+
+        err = self._wait_for_ros_controller_active(
+            target,
+            timeout_sec=1.5,
+            process_name=process_name,
+            cancel_event=cancel_event,
+            ros_domain_id=ros_domain_id,
+            poll_interval_sec=0.25,
+        )
+        if err is None:
+            return None
+
+        err = self._activate_ros_controller(
+            target,
+            timeout_sec=min(8.0, max(3.0, float(timeout_sec) / 2.0)),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            return err
+
+        return self._wait_for_ros_controller_active(
+            target,
+            timeout_sec=timeout_sec,
+            process_name=process_name,
+            cancel_event=cancel_event,
+            ros_domain_id=ros_domain_id,
+            poll_interval_sec=0.35,
+        )
+
+    def _wait_for_driver_ready(
+        self,
+        robot: str,
+        timeout_sec: float = 18.0,
+        *,
+        process_name: str | None = None,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
         key = str(robot).strip().lower()
         stack = self._HARDWARE_STACKS.get(key)
         if not stack:
             return f"unknown hardware robot: {robot}"
         if len(stack) < 2:
             return None
-        driver_name = stack[0]
+        driver_name = str(process_name or stack[0])
 
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         stable_since: float | None = None
@@ -5072,7 +6159,11 @@ class SystemBridge:
                 stable_since = now
 
             # Prefer explicit driver-service detection when available.
-            ok, out = self._ros2_command_output("ros2 service list", timeout_sec=3.0)
+            ok, out = self._ros2_command_output(
+                "ros2 service list --no-daemon --spin-time 2.0",
+                timeout_sec=7.0,
+                ros_domain_id=ros_domain_id,
+            )
             if ok:
                 services = [line.strip() for line in out.splitlines() if line.strip()]
                 if any(self._driver_service_hint_matches(key, service_name) for service_name in services):
@@ -5098,16 +6189,2387 @@ class SystemBridge:
             overall = "running" if moveit_state == "running" else "stopped"
             return {"overall": overall, "driver": "embedded", "moveit": moveit_state}
 
-        driver_name, moveit_name = stack[0], stack[1]
+        driver_name = stack[0]
+        moveit_name = stack[-1]
+        gripper_name = next((name for name in stack if "rg2_gripper" in name), "")
         driver_state = self.ros2_proc_status(driver_name)
         moveit_state = self.ros2_proc_status(moveit_name)
-        if driver_state == "running" and moveit_state == "running":
+        gripper_state = self.ros2_proc_status(gripper_name) if gripper_name else ""
+        states = [driver_state, moveit_state]
+        if gripper_name:
+            states.insert(1, gripper_state)
+        if all(state == "running" for state in states):
             overall = "running"
-        elif driver_state == "stopped" and moveit_state == "stopped":
+        elif all(state == "stopped" for state in states):
             overall = "stopped"
         else:
             overall = "partial"
-        return {"overall": overall, "driver": driver_state, "moveit": moveit_state}
+        result = {"overall": overall, "driver": driver_state, "moveit": moveit_state}
+        if gripper_name:
+            result["gripper"] = gripper_state
+            result["gripper_action"] = "ready" if gripper_state == "running" else gripper_state
+        if key == "ur5e":
+            external_control = self._ur5e_external_control_status()
+            result["external_control"] = str(external_control.get("state") or "unknown")
+            result["external_control_message"] = str(external_control.get("message") or "")
+            result["external_control_error"] = str(external_control.get("error") or "")
+        return result
+
+    def _digital_twin_target(self, target: str) -> dict[str, Any] | None:
+        return self._DIGITAL_TWIN_TARGETS.get(str(target or "").strip().lower())
+
+    @staticmethod
+    def _digital_twin_slug(cfg: dict[str, Any]) -> str:
+        return str(cfg.get("slug") or "digital_twin").strip()
+
+    def _digital_twin_status_path(self, target: str) -> Path:
+        cfg = self._digital_twin_target(target) or {}
+        return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}.json"
+
+    def _digital_twin_direction_path(self, target: str) -> Path:
+        cfg = self._digital_twin_target(target) or {}
+        return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}_direction.json"
+
+    def _digital_twin_sync_status_path(self, target: str, robot: str = "") -> Path:
+        cfg = self._digital_twin_target(target) or {}
+        robot_key = str(robot or "").strip().lower()
+        if robot_key:
+            return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}_{robot_key}.json"
+        return self._digital_twin_status_path(target)
+
+    @staticmethod
+    def _read_json_file(path: Path) -> dict[str, Any]:
+        try:
+            with Path(path).open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _ur5e_rg2_gripper_status(self) -> dict[str, Any]:
+        return self._read_json_file(_UR5E_RG2_GRIPPER_STATUS)
+
+    @staticmethod
+    def _digital_twin_hardware_processes_for_robot(
+        cfg: dict[str, Any],
+        robot: str,
+    ) -> dict[str, str]:
+        hardware_processes = cfg.get("hardware_processes") or {}
+        if not isinstance(hardware_processes, dict):
+            return {}
+        robot_key = str(robot or "").strip().lower()
+        per_robot = hardware_processes.get(robot_key)
+        if isinstance(per_robot, dict):
+            return {
+                str(key): str(value)
+                for key, value in per_robot.items()
+                if str(value or "").strip()
+            }
+        return {
+            str(key): str(value)
+            for key, value in hardware_processes.items()
+            if isinstance(value, str) and str(value or "").strip()
+        }
+
+    @staticmethod
+    def _digital_twin_sync_process_items(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+        sync_processes = cfg.get("sync_processes") or {}
+        if isinstance(sync_processes, dict) and sync_processes:
+            return [
+                (str(robot).strip().lower(), str(process).strip())
+                for robot, process in sync_processes.items()
+                if str(robot).strip() and str(process).strip()
+            ]
+        sync_process = str(cfg.get("sync_process") or "").strip()
+        robot = str(cfg.get("robot") or "").strip()
+        return [(robot, sync_process)] if sync_process else []
+
+    @staticmethod
+    def _digital_twin_allowed_sim_modes(cfg: dict[str, Any]) -> tuple[str, ...]:
+        modes = tuple(
+            SystemBridge._normalize_digital_twin_sim_mode(mode)
+            for mode in (cfg.get("sim_modes") or ())
+        )
+        canonical_modes = tuple(dict.fromkeys(mode for mode in modes if mode))
+        return canonical_modes or SystemBridge._DIGITAL_TWIN_SIM_MODES
+
+    @classmethod
+    def _normalize_digital_twin_sim_mode(cls, mode: object) -> str:
+        value = str(mode or "").strip()
+        return cls._DIGITAL_TWIN_SIM_MODE_ALIASES.get(value, value)
+
+    @staticmethod
+    def _digital_twin_has_multiple_hardware_domains(cfg: dict[str, Any]) -> bool:
+        return bool(cfg.get("multiple_hardware_domains", False))
+
+    @staticmethod
+    def _digital_twin_has_per_robot_hardware_processes(cfg: dict[str, Any]) -> bool:
+        hardware_processes = cfg.get("hardware_processes") or {}
+        return isinstance(hardware_processes, dict) and any(
+            isinstance(value, dict) for value in hardware_processes.values()
+        )
+
+    def _digital_twin_hardware_domain_id(
+        self,
+        cfg: dict[str, Any],
+        robot: str,
+        domains: dict[str, int],
+    ) -> int:
+        if self._digital_twin_has_multiple_hardware_domains(cfg):
+            robot_key = str(robot or "").strip().lower()
+            return int(domains.get(f"hardware_{robot_key}", domains["hardware"]))
+        return int(domains["hardware"])
+
+    @staticmethod
+    def _digital_twin_process_names(cfg: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        for key in ("gazebo_process", "gazebo_moveit_process", "paired_marker_process"):
+            value = str(cfg.get(key) or "").strip()
+            if value:
+                names.append(value)
+        for _robot, process in SystemBridge._digital_twin_sync_process_items(cfg):
+            if process:
+                names.append(process)
+        hardware_processes = cfg.get("hardware_processes") or {}
+        if isinstance(hardware_processes, dict):
+            for value in hardware_processes.values():
+                if isinstance(value, dict):
+                    for nested_value in value.values():
+                        name = str(nested_value or "").strip()
+                        if name and name not in names:
+                            names.append(name)
+                else:
+                    name = str(value or "").strip()
+                    if name and name not in names:
+                        names.append(name)
+        return names
+
+    def _digital_twin_direction(self, target: str) -> str:
+        # Direction is implied by sim mode: teach = sim leads (gazebo -> hardware),
+        # monitor = hardware leads (hardware -> gazebo). There is no separate toggle.
+        return (
+            "gazebo -> hardware"
+            if self._digital_twin_sim_mode(target) == "teach"
+            else "hardware -> gazebo"
+        )
+
+    def _digital_twin_sim_mode(self, target: str) -> str:
+        cfg = self._digital_twin_target(target) or {}
+        allowed_modes = self._digital_twin_allowed_sim_modes(cfg)
+        mode = self._normalize_digital_twin_sim_mode(
+            self._digital_twin_sim_modes.get(target, self._DIGITAL_TWIN_DEFAULT_SIM_MODE)
+        )
+        if mode in allowed_modes:
+            return mode
+        if self._DIGITAL_TWIN_DEFAULT_SIM_MODE in allowed_modes:
+            return self._DIGITAL_TWIN_DEFAULT_SIM_MODE
+        if allowed_modes:
+            return allowed_modes[0]
+        return self._DIGITAL_TWIN_DEFAULT_SIM_MODE
+
+    def _digital_twin_gazebo_launch(self, target: str, cfg: dict[str, Any]) -> str:
+        launches = cfg.get("gazebo_launches") or {}
+        if isinstance(launches, dict):
+            mode = self._digital_twin_sim_mode(target)
+            key = str(launches.get(mode) or "").strip()
+            if not key:
+                legacy_key = "mirror" if mode == "monitor" else "author"
+                key = str(launches.get(legacy_key) or "").strip()
+            if key:
+                return key
+        return str(cfg.get("gazebo") or "").strip()
+
+    def digital_twin_set_sim_mode(self, target: str, mode: str) -> str | None:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return f"unknown digital twin target: {target}"
+        value = self._normalize_digital_twin_sim_mode(mode)
+        if value not in self._digital_twin_allowed_sim_modes(cfg):
+            return f"unknown digital twin sim mode: {mode}"
+        if self._running_process_names(self._digital_twin_process_names(cfg)):
+            return "Stop the twin before changing sim mode."
+        self._digital_twin_sim_modes[target] = value
+        return None
+
+    def _write_digital_twin_direction(self, target: str, direction: str) -> None:
+        atomic_json_write(
+            self._digital_twin_direction_path(target),
+            {
+                "target": target,
+                "direction": direction,
+                "updated_at": time.time(),
+            },
+        )
+
+    def _write_digital_twin_status(self, target: str, payload: dict[str, Any]) -> None:
+        body = dict(payload)
+        body.setdefault("target", target)
+        body.setdefault("updated_at", time.time())
+        atomic_json_write(self._digital_twin_status_path(target), body)
+
+    def _write_digital_twin_sync_status(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        body = dict(payload)
+        body.setdefault("target", target)
+        body.setdefault("updated_at", time.time())
+        items = self._digital_twin_sync_process_items(cfg)
+        if len(items) <= 1:
+            atomic_json_write(self._digital_twin_status_path(target), body)
+            return
+        for robot, _process in items:
+            robot_key = str(robot or "").strip().lower()
+            robot_body = dict(body)
+            robot_body.setdefault("robot", robot_key)
+            atomic_json_write(
+                self._digital_twin_sync_status_path(target, robot_key),
+                robot_body,
+            )
+
+    def _running_process_names(self, names: set[str] | list[str] | tuple[str, ...]) -> list[str]:
+        return [str(name) for name in names if self.ros2_proc_status(str(name)) == "running"]
+
+    def _active_digital_twin_target(self) -> str | None:
+        for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
+            if not bool(cfg.get("hardware_supported", False)):
+                continue
+            if self._running_process_names(self._digital_twin_process_names(cfg)):
+                return target
+        return None
+
+    def _digital_twin_hardware_status(self, cfg: dict[str, Any]) -> dict[str, str]:
+        hardware_processes = cfg.get("hardware_processes") or {}
+        if not bool(cfg.get("hardware_supported", False)) or not isinstance(hardware_processes, dict):
+            return {"overall": "unsupported", "driver": "unsupported", "moveit": "unsupported"}
+
+        def _status_for_processes(processes: dict[str, str]) -> dict[str, str]:
+            driver_name = str(processes.get("driver") or "").strip()
+            gripper_name = str(processes.get("gripper") or "").strip()
+            moveit_name = str(processes.get("moveit") or "").strip()
+            driver_state = "embedded" if not driver_name else self.ros2_proc_status(driver_name)
+            gripper_state = self.ros2_proc_status(gripper_name) if gripper_name else ""
+            moveit_state = self.ros2_proc_status(moveit_name) if moveit_name else "unknown"
+            states = [driver_state, moveit_state]
+            if gripper_name:
+                states.insert(1, gripper_state)
+            running = all(state in {"running", "embedded"} for state in states)
+            stopped = all(state in {"stopped", "embedded"} for state in states)
+            if running:
+                overall = "running"
+            elif stopped:
+                overall = "stopped"
+            else:
+                overall = "partial"
+            result = {"overall": overall, "driver": driver_state, "moveit": moveit_state}
+            if gripper_name:
+                result["gripper"] = gripper_state
+                result["gripper_action"] = "ready" if gripper_state == "running" else gripper_state
+            return result
+
+        hardware_robots = tuple(str(r).strip().lower() for r in (cfg.get("hardware") or ()))
+        if not self._digital_twin_has_per_robot_hardware_processes(cfg):
+            robot = hardware_robots[0] if hardware_robots else ""
+            status = _status_for_processes(self._digital_twin_hardware_processes_for_robot(cfg, robot))
+            if robot == "ur5e":
+                external_control = self._ur5e_external_control_status()
+                status["external_control"] = str(external_control.get("state") or "unknown")
+                status["external_control_message"] = str(external_control.get("message") or "")
+                status["external_control_error"] = str(external_control.get("error") or "")
+            return status
+
+        result: dict[str, Any] = {}
+        overall_states: list[str] = []
+        moveit_states: list[str] = []
+        driver_states: list[str] = []
+        gripper_states: list[str] = []
+        for robot in hardware_robots:
+            robot_status = _status_for_processes(
+                self._digital_twin_hardware_processes_for_robot(cfg, robot)
+            )
+            if robot == "ur5e":
+                external_control = self._ur5e_external_control_status()
+                robot_status["external_control"] = str(external_control.get("state") or "unknown")
+                robot_status["external_control_message"] = str(external_control.get("message") or "")
+                robot_status["external_control_error"] = str(external_control.get("error") or "")
+            result[robot] = robot_status
+            overall_states.append(str(robot_status.get("overall", "unknown")))
+            moveit_states.append(str(robot_status.get("moveit", "unknown")))
+            driver_states.append(str(robot_status.get("driver", "unknown")))
+            if "gripper" in robot_status:
+                gripper_states.append(str(robot_status.get("gripper", "unknown")))
+
+        if overall_states and all(state == "running" for state in overall_states):
+            overall = "running"
+        elif overall_states and all(state == "stopped" for state in overall_states):
+            overall = "stopped"
+        else:
+            overall = "partial"
+        result["overall"] = overall
+        result["driver"] = "running" if driver_states and all(state in {"running", "embedded"} for state in driver_states) else overall
+        result["moveit"] = "running" if moveit_states and all(state == "running" for state in moveit_states) else overall
+        if gripper_states:
+            result["gripper"] = "running" if all(state == "running" for state in gripper_states) else overall
+        return result
+
+    def _digital_twin_blocked_reason(self, target: str, cfg: dict[str, Any]) -> str:
+        if not bool(cfg.get("hardware_supported", False)):
+            return self._DUAL_HARDWARE_LIMITATION
+
+        active_target = self._active_digital_twin_target()
+        if active_target and active_target != target:
+            return f"Blocked: {active_target} digital twin is running. Stop it first."
+
+        normal_running = self._running_process_names(
+            sorted(self._BASE_GAZEBO_PROCESS_NAMES | self._BASE_HARDWARE_PROCESS_NAMES)
+        )
+        if normal_running:
+            return "Blocked: stop Launch Environment processes first: " + ", ".join(normal_running)
+        return ""
+
+    def _digital_twin_sync_status_snapshot(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        now: float,
+    ) -> dict[str, Any]:
+        items = self._digital_twin_sync_process_items(cfg)
+        process_names = [process for _robot, process in items if process]
+        process_states = [self.ros2_proc_status(process) for process in process_names]
+        if not process_names:
+            process_status = "unknown"
+        elif all(state == "running" for state in process_states):
+            process_status = "running"
+        elif all(state == "stopped" for state in process_states):
+            process_status = "stopped"
+        else:
+            process_status = "partial"
+
+        if len(items) <= 1:
+            status_file = self._digital_twin_status_path(target)
+            status_data = self._read_json_file(status_file)
+            updated_at = float(status_data.get("updated_at") or 0.0)
+            return {
+                "process": process_names[0] if process_names else "",
+                "process_status": process_status,
+                "status_file": str(status_file),
+                "status_files": [str(status_file)],
+                "status_data": status_data,
+                "status_age_ms": (now - updated_at) * 1000.0 if updated_at > 0 else None,
+            }
+
+        entries: list[tuple[str, Path, dict[str, Any]]] = []
+        for robot, _process in items:
+            path = self._digital_twin_sync_status_path(target, robot)
+            entries.append((robot, path, self._read_json_file(path)))
+
+        updated_values = [
+            float(data.get("updated_at") or 0.0)
+            for _robot, _path, data in entries
+            if float(data.get("updated_at") or 0.0) > 0.0
+        ]
+        oldest_updated_at = min(updated_values) if updated_values else 0.0
+        messages: list[str] = []
+        last_errors: list[str] = []
+        states: list[str] = []
+        latency_values: list[float] = []
+        max_delta_values: list[float] = []
+        for robot, _path, data in entries:
+            state = str(data.get("state") or "starting")
+            states.append(state)
+            message = str(data.get("message") or "waiting for sync status.").strip()
+            messages.append(f"{robot}: {message}")
+            last_error = str(data.get("last_error") or "").strip()
+            if last_error:
+                last_errors.append(f"{robot}: {last_error}")
+            latency = data.get("latency_ms")
+            if latency is not None:
+                latency_values.append(float(latency))
+            max_delta = data.get("max_joint_delta_deg")
+            if max_delta is not None:
+                max_delta_values.append(float(max_delta))
+
+        if states and all(state == "mirroring" for state in states):
+            state = "mirroring"
+        elif any(state == "error" for state in states):
+            state = "error"
+        elif any(state == "paused" for state in states):
+            state = "paused"
+        elif any(state == "waiting" for state in states):
+            state = "waiting"
+        else:
+            state = "starting"
+
+        status_data = {
+            "state": state,
+            "message": " | ".join(messages),
+            "last_error": " | ".join(last_errors),
+            "latency_ms": max(latency_values) if latency_values else None,
+            "max_joint_delta_deg": max(max_delta_values) if max_delta_values else None,
+        }
+        return {
+            "process": ", ".join(process_names),
+            "process_status": process_status,
+            "status_file": "",
+            "status_files": [str(path) for _robot, path, _data in entries],
+            "status_data": status_data,
+            "status_age_ms": (now - oldest_updated_at) * 1000.0 if oldest_updated_at > 0 else None,
+        }
+
+    def digital_twin_statuses(self) -> dict[str, dict[str, Any]]:
+        domains = self._digital_twin_domain_ids()
+        now = time.time()
+        result: dict[str, dict[str, Any]] = {}
+
+        for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
+            gazebo_name = self._digital_twin_gazebo_launch(target, cfg)
+            gazebo_process = str(cfg.get("gazebo_process") or "").strip()
+            hardware_supported = bool(cfg.get("hardware_supported", False))
+            hardware_robots = tuple(str(r) for r in (cfg.get("hardware") or ()))
+            hardware_status = self._digital_twin_hardware_status(cfg)
+            hardware_overall = str(hardware_status.get("overall", "unknown"))
+            rg2_status = (
+                self._ur5e_rg2_gripper_status()
+                if "ur5e" in {str(robot).strip().lower() for robot in hardware_robots}
+                else {}
+            )
+            gazebo_status = self.ros2_proc_status(gazebo_process) if gazebo_process else "unknown"
+            sync_snapshot = self._digital_twin_sync_status_snapshot(target, cfg, now)
+            sync_process = str(sync_snapshot.get("process") or "")
+            sync_process_status = str(sync_snapshot.get("process_status") or "unknown")
+            status_data = dict(sync_snapshot.get("status_data") or {})
+            status_age_ms = sync_snapshot.get("status_age_ms")
+            direction = self._digital_twin_direction(target)
+            blocked_reason = self._digital_twin_blocked_reason(target, cfg)
+
+            sim_mode = self._digital_twin_sim_mode(target)
+            if not hardware_supported:
+                sync_state = "limited"
+                sync_message = self._DUAL_HARDWARE_LIMITATION
+            elif sim_mode == "teach":
+                # Teach mode uses sim RViz/Gazebo as the authoring surface. Replay in Twin
+                # commits validated sim waypoints back to hardware.
+                if (
+                    sync_process_status == "running"
+                    and status_age_ms is not None
+                    and status_age_ms <= 3000.0
+                ):
+                    sync_state = str(status_data.get("state") or "teach")
+                    resumed_message = str(status_data.get("message") or "sync process is running.")
+                    sync_message = (
+                        "Teach: sim RViz controls Gazebo only; hardware -> Gazebo sync "
+                        f"resumed after Replay in Twin: {resumed_message}"
+                    )
+                elif gazebo_status == "running" and hardware_overall == "running":
+                    sync_state = "teach"
+                    if self._digital_twin_is_dual_robots(cfg):
+                        sync_message = (
+                            "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
+                            "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
+                            "/scaled_joint_trajectory_controller/follow_joint_trajectory."
+                        )
+                    else:
+                        sync_message = (
+                            "Teach: sim RViz controls Gazebo only; Replay in Twin commits "
+                            "saved sim waypoints through hardware MoveIt."
+                        )
+                elif gazebo_status == "running" or hardware_overall in {"running", "partial"}:
+                    sync_state = "partial"
+                    sync_message = "teach stack is partially up; start or stop the full twin."
+                else:
+                    sync_state = "ready"
+                    sync_message = "Ready to start Teach digital twin (sim RViz authoring + hardware commit)."
+            elif sync_process_status == "running":
+                if status_age_ms is None:
+                    sync_state = "starting"
+                    sync_message = "sync process is starting."
+                elif status_age_ms > 3000.0:
+                    sync_state = "stale"
+                    sync_message = f"sync status is stale ({status_age_ms:.0f} ms old)."
+                else:
+                    sync_state = str(status_data.get("state") or "running")
+                    sync_message = str(status_data.get("message") or "sync process is running.")
+            elif str(status_data.get("state") or "") == "waiting":
+                sync_state = "waiting"
+                sync_message = str(status_data.get("message") or "sync is waiting.")
+            elif gazebo_status == "running" or hardware_overall in {"running", "partial"}:
+                sync_state = "partial"
+                sync_message = "digital twin stack is partially running; start or stop the full twin."
+            else:
+                sync_state = "ready"
+                sync_message = "Ready to start hardware MoveIt + passive gazebo synched digital twin."
+
+            result[target] = {
+                "target": target,
+                "supported": hardware_supported,
+                "blocked_reason": blocked_reason,
+                "domains": {
+                    "gazebo": domains["gazebo"],
+                    "hardware": domains["hardware"],
+                },
+                "direction": direction,
+                "sim_mode": self._digital_twin_sim_mode(target),
+                "sim_modes": list(self._digital_twin_allowed_sim_modes(cfg)) if hardware_supported else [],
+                "max_joint_delta_deg": self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG,
+                "gazebo": {
+                    "name": gazebo_name,
+                    "process": gazebo_process,
+                    "status": gazebo_status,
+                    "domain": domains["gazebo"],
+                    "message": "monitor mode: operator motion should come from hardware MoveIt/RViz.",
+                },
+                "moviet": {
+                    "status": str(hardware_status.get("moveit", hardware_overall)),
+                    "message": "Hardware MoveIt/RViz is the operator control surface.",
+                },
+                "hardware": {
+                    "supported": hardware_supported,
+                    "robots": list(hardware_robots),
+                    "status": hardware_status,
+                    "overall": hardware_overall,
+                    "domain": domains["hardware"],
+                    "domains": {
+                        robot: self._digital_twin_hardware_domain_id(cfg, robot, domains)
+                        for robot in hardware_robots
+                    },
+                    "rg2": rg2_status,
+                    "message": "" if hardware_supported else self._DUAL_HARDWARE_LIMITATION,
+                },
+                "sync/status": {
+                    "state": sync_state,
+                    "process": sync_process,
+                    "process_status": sync_process_status,
+                    "message": sync_message,
+                    "status_file": str(sync_snapshot.get("status_file") or self._digital_twin_status_path(target)),
+                    "status_files": list(sync_snapshot.get("status_files") or []),
+                    "status_age_ms": status_age_ms,
+                    "latency_ms": status_data.get("latency_ms"),
+                    "max_joint_delta_deg": status_data.get("max_joint_delta_deg"),
+                    "last_error": status_data.get("last_error"),
+                },
+            }
+        return result
+
+    def _start_tracked_ros2_command(
+        self,
+        process_name: str,
+        command_suffix: str,
+        *,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        name = str(process_name or "").strip()
+        if not name:
+            return "process name is empty"
+        if self.ros2_proc_status(name) == "running":
+            return f"{name} is already running"
+        cmd = self._ROS2_ENV + self._ros2_domain_export(ros_domain_id) + str(command_suffix)
+        try:
+            proc = subprocess.Popen(
+                ["bash", "-c", cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid,
+            )
+            self._ros2_procs[name] = proc
+            log.info("Started ROS2 process %s (pid=%d)", name, proc.pid)
+            return None
+        except Exception as exc:
+            return str(exc)
+
+    def _start_digital_twin_launch(
+        self,
+        process_name: str,
+        launch_name: str,
+        *,
+        ros_domain_id: int,
+        extra_args: str = "",
+    ) -> str | None:
+        prereq_err = self._ros2_launch_prereq_error(launch_name)
+        if prereq_err:
+            return prereq_err
+        command = self._render_ros2_launch_cmd(launch_name)
+        if extra_args.strip():
+            command = f"{command} {extra_args.strip()}"
+        return self._start_tracked_ros2_command(
+            process_name,
+            command,
+            ros_domain_id=ros_domain_id,
+        )
+
+    def _ensure_digital_twin_launch(
+        self,
+        process_name: str,
+        launch_name: str,
+        *,
+        ros_domain_id: int,
+        extra_args: str = "",
+    ) -> str | None:
+        if self.ros2_proc_status(process_name) == "running":
+            return None
+        return self._start_digital_twin_launch(
+            process_name,
+            launch_name,
+            ros_domain_id=ros_domain_id,
+            extra_args=extra_args,
+        )
+
+    def _start_digital_twin_dual_drag_markers(
+        self,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+        mode: str,
+    ) -> str | None:
+        process_name = str(cfg.get("paired_marker_process") or "").strip()
+        if not process_name:
+            return None
+        if self.ros2_proc_status(process_name) == "running":
+            return None
+        script = Path(self._DUAL_DRAG_MARKERS_SCRIPT)
+        if not script.is_file():
+            return f"dual drag markers script missing: {script}"
+        args = [
+            "python3.10",
+            str(script),
+            "--mode",
+            str(mode or "monitor"),
+        ]
+        if str(mode or "monitor").strip().lower() == "monitor":
+            args.extend(["--execution-policy", "paired"])
+        command = " ".join(shlex.quote(str(part)) for part in args)
+        return self._start_tracked_ros2_command(
+            process_name,
+            command,
+            ros_domain_id=ros_domain_id,
+        )
+
+    def _wait_for_digital_twin_gazebo_controller_actions(
+        self,
+        target: str,
+        *,
+        gazebo_process: str,
+        ros_domain_id: int,
+    ) -> str | None:
+        actions_by_target = {
+            "dual robots": (
+                "/xarm6_xarm6_traj_controller/follow_joint_trajectory",
+                "/xarm6_xarm_gripper_traj_controller/follow_joint_trajectory",
+                "/ur5e_joint_trajectory_controller/follow_joint_trajectory",
+                "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+            ),
+        }
+        actions = actions_by_target.get(target, ())
+        for action in actions:
+            err = self._wait_with_ros2_daemon_retry(
+                f"{target} passive gazebo controller {action}",
+                lambda action=action: self._wait_for_ros_action(
+                    action,
+                    timeout_sec=24.0,
+                    process_name=gazebo_process,
+                    ros_domain_id=ros_domain_id,
+                ),
+                ros_domain_id=ros_domain_id,
+            )
+            if err:
+                return f"{target} gazebo controller is not ready: {err}"
+        return None
+
+    def _digital_twin_dual_robots_processes(
+        self,
+        cfg: dict[str, Any],
+    ) -> tuple[str, str, str, str] | str:
+        xarm_processes = self._digital_twin_hardware_processes_for_robot(cfg, "xarm6")
+        ur5e_processes = self._digital_twin_hardware_processes_for_robot(cfg, "ur5e")
+
+        xarm_driver_process = str(xarm_processes.get("driver") or "").strip()
+        ur5e_driver_process = str(ur5e_processes.get("driver") or "").strip()
+        ur5e_gripper_process = str(ur5e_processes.get("gripper") or "").strip()
+        moveit_process = str(
+            xarm_processes.get("moveit") or ur5e_processes.get("moveit") or ""
+        ).strip()
+        if not xarm_driver_process or not ur5e_driver_process or not moveit_process:
+            return "hardware is not configured for dual robots"
+        return (
+            xarm_driver_process,
+            ur5e_driver_process,
+            ur5e_gripper_process,
+            moveit_process,
+        )
+
+    def _digital_twin_dual_robots_core_process_names(self, cfg: dict[str, Any]) -> list[str]:
+        gazebo_process = str(cfg.get("gazebo_process") or "").strip()
+        processes = self._digital_twin_dual_robots_processes(cfg)
+        if isinstance(processes, str):
+            return [gazebo_process] if gazebo_process else []
+        names = [gazebo_process, *processes]
+        return [name for name in names if name]
+
+    def _digital_twin_dual_robots_core_started(self, cfg: dict[str, Any]) -> bool:
+        names = self._digital_twin_dual_robots_core_process_names(cfg)
+        return bool(names) and all(self.ros2_proc_status(name) == "running" for name in names)
+
+    def _start_digital_twin_dual_robots_hardware_launches(
+        self,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+        launch_rviz: bool = True,
+    ) -> str | None:
+        processes = self._digital_twin_dual_robots_processes(cfg)
+        if isinstance(processes, str):
+            return processes
+        xarm_driver_process, ur5e_driver_process, ur5e_gripper_process, moveit_process = processes
+
+        err = self._ensure_digital_twin_launch(
+            xarm_driver_process,
+            "hardware_xarm6_driver",
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            return err
+        err = self._ensure_digital_twin_launch(
+            ur5e_driver_process,
+            "hardware_ur5e_driver",
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            return err
+        err = self._ensure_ur5e_external_control_running(
+            process_name=ur5e_driver_process,
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            return err
+        if ur5e_gripper_process:
+            err = self._ensure_digital_twin_launch(
+                ur5e_gripper_process,
+                "hardware_ur5e_rg2_gripper",
+                ros_domain_id=ros_domain_id,
+                extra_args="--publish-arm-joint-states",
+            )
+            if err:
+                return err
+        err = self._ensure_digital_twin_launch(
+            moveit_process,
+            "hardware_dual_robots_moveit",
+            ros_domain_id=ros_domain_id,
+            extra_args="" if launch_rviz else "launch_rviz:=false",
+        )
+        if err:
+            return err
+        return None
+
+    def _wait_for_digital_twin_dual_robots_hardware_ready(
+        self,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+        require_moveit: bool = True,
+    ) -> str | None:
+        processes = self._digital_twin_dual_robots_processes(cfg)
+        if isinstance(processes, str):
+            return processes
+        xarm_driver_process, ur5e_driver_process, ur5e_gripper_process, moveit_process = processes
+        readiness_errors: list[str] = []
+
+        self._wait_with_ros2_daemon_retry(
+            "xarm6 controller_manager",
+            lambda: self._wait_for_ros_service(
+                "/xarm6/controller_manager/list_controllers",
+                timeout_sec=12.0,
+                process_name=xarm_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        err = self._wait_with_ros2_daemon_retry(
+            "xarm6 trajectory controller",
+            lambda: self._wait_for_ros_action(
+                "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+                timeout_sec=18.0,
+                process_name=xarm_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            readiness_errors.append(f"xarm6 trajectory controller is not ready: {err}")
+        err = self._wait_with_ros2_daemon_retry(
+            "xarm6 /joint_states relay",
+            lambda: self._wait_for_ros_topic_publisher(
+                "/joint_states",
+                timeout_sec=18.0,
+                process_name=xarm_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            readiness_errors.append(f"xarm6 driver is not publishing relayed /joint_states: {err}")
+
+        err = self._wait_with_ros2_daemon_retry(
+            "ur5e driver ready",
+            lambda: self._wait_for_driver_ready(
+                "ur5e",
+                timeout_sec=18.0,
+                process_name=ur5e_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            readiness_errors.append(err)
+        err = self._wait_with_ros2_daemon_retry(
+            "ur5e /joint_states publisher",
+            lambda: self._wait_for_ros_topic_publisher(
+                "/joint_states",
+                timeout_sec=40.0,
+                process_name=ur5e_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            readiness_errors.append(f"ur5e driver is not publishing /joint_states: {err}")
+
+        controller_err = self._wait_with_ros2_daemon_retry(
+            "ur5e scaled_joint_trajectory_controller",
+            lambda: self._ensure_ros_controller_active(
+                "scaled_joint_trajectory_controller",
+                timeout_sec=12.0,
+                process_name=ur5e_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if controller_err:
+            readiness_errors.append(
+                f"ur5e scaled_joint_trajectory_controller is not active: {controller_err}"
+            )
+        err = self._wait_with_ros2_daemon_retry(
+            "ur5e scaled_joint_trajectory_controller action",
+            lambda: self._wait_for_ros_action(
+                "/scaled_joint_trajectory_controller/follow_joint_trajectory",
+                timeout_sec=18.0,
+                process_name=ur5e_driver_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            readiness_errors.append(
+                f"ur5e scaled_joint_trajectory_controller action is not ready: {err}"
+            )
+
+        if ur5e_gripper_process:
+            err = self._wait_with_ros2_daemon_retry(
+                "ur5e RG2 gripper bridge",
+                lambda: self._wait_for_ros_action(
+                    _UR5E_RG2_GRIPPER_ACTION,
+                    timeout_sec=12.0,
+                    process_name=ur5e_gripper_process,
+                    ros_domain_id=ros_domain_id,
+                ),
+                ros_domain_id=ros_domain_id,
+            )
+            if err:
+                readiness_errors.append(f"ur5e RG2 gripper bridge is not ready: {err}")
+
+        if require_moveit:
+            err = self._wait_with_ros2_daemon_retry(
+                "dual robots MoveIt execute trajectory",
+                lambda: self._wait_for_ros_action(
+                    "/execute_trajectory",
+                    timeout_sec=26.0,
+                    process_name=moveit_process,
+                    ros_domain_id=ros_domain_id,
+                ),
+                ros_domain_id=ros_domain_id,
+            )
+            if err:
+                readiness_errors.append(f"dual robots MoveIt is not ready: {err}")
+        if readiness_errors:
+            return "; ".join(readiness_errors)
+        return None
+
+    def _start_digital_twin_dual_robots_hardware_stack(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+        domain_ids: dict[str, int] | None = None,
+    ) -> str | None:
+        domains = domain_ids or {"hardware": ros_domain_id}
+        hardware_domain_id = int(domains.get("hardware", ros_domain_id))
+        err = self._start_digital_twin_dual_robots_hardware_launches(
+            cfg,
+            ros_domain_id=hardware_domain_id,
+        )
+        if err:
+            return err
+        return self._wait_for_digital_twin_dual_robots_hardware_ready(
+            cfg,
+            ros_domain_id=hardware_domain_id,
+        )
+
+    def _digital_twin_hardware_reachability_error(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+    ) -> str | None:
+        robots = tuple(str(r) for r in (cfg.get("hardware") or ()))
+        if not robots:
+            return f"hardware is not configured for {target}"
+        hw_links = self.hardware_connection_statuses(force=True)
+        for robot in robots:
+            entry = hw_links.get(robot, {})
+            if not entry.get("reachable", False):
+                ip = str(entry.get("ip", "")).strip() or "(unknown IP)"
+                msg = str(entry.get("message", "unreachable")).strip()
+                return f"{robot} hardware is unreachable at {ip} ({msg})"
+        return None
+
+    def _start_digital_twin_hardware_stack(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+        domain_ids: dict[str, int] | None = None,
+    ) -> str | None:
+        robots = tuple(str(r) for r in (cfg.get("hardware") or ()))
+        if not robots:
+            return f"hardware is not configured for {target}"
+        reachability_error = self._digital_twin_hardware_reachability_error(target, cfg)
+        if reachability_error:
+            return reachability_error
+
+        hardware_processes = cfg.get("hardware_processes") or {}
+        if not isinstance(hardware_processes, dict):
+            return f"hardware is not configured for {target}"
+
+        if target == "dual robots":
+            return self._start_digital_twin_dual_robots_hardware_stack(
+                target,
+                cfg,
+                ros_domain_id=ros_domain_id,
+                domain_ids=domain_ids,
+            )
+
+        # In teach mode the sim MoveIt RViz (domain 41) is the authoring surface, so
+        # suppress the redundant hardware-side RViz to avoid two confusing windows.
+        teach_mode = self._digital_twin_sim_mode(target) == "teach"
+
+        domains = domain_ids or {"hardware": ros_domain_id}
+        for robot in robots:
+            robot_domain_id = self._digital_twin_hardware_domain_id(cfg, robot, domains)
+            robot_processes = self._digital_twin_hardware_processes_for_robot(cfg, robot)
+
+            if robot == "xarm6":
+                moveit_process = str(robot_processes.get("moveit") or "").strip()
+                err = self._start_digital_twin_launch(
+                    moveit_process,
+                    "hardware_xarm6_moveit",
+                    ros_domain_id=robot_domain_id,
+                    extra_args="show_rviz:=false" if teach_mode else "",
+                )
+                if err:
+                    return err
+                err = self._wait_for_ros_service(
+                    "/controller_manager/list_controllers",
+                    timeout_sec=22.0,
+                    process_name=moveit_process,
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return f"{robot} MoveIt is not ready: {err}"
+                continue
+
+            if robot == "ur5e":
+                driver_process = str(robot_processes.get("driver") or "").strip()
+                gripper_process = str(robot_processes.get("gripper") or "").strip()
+                moveit_process = str(robot_processes.get("moveit") or "").strip()
+                err = self._start_digital_twin_launch(
+                    driver_process,
+                    "hardware_ur5e_driver",
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return err
+                err = self._wait_with_ros2_daemon_retry(
+                    f"{robot} driver ready",
+                    lambda: self._wait_for_driver_ready(
+                        robot,
+                        timeout_sec=18.0,
+                        process_name=driver_process,
+                        ros_domain_id=robot_domain_id,
+                    ),
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return err
+                err = self._ensure_ur5e_external_control_running(
+                    process_name=driver_process,
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return err
+                err = self._wait_with_ros2_daemon_retry(
+                    f"{robot} /joint_states publisher",
+                    lambda: self._wait_for_ros_topic_publisher(
+                        "/joint_states",
+                        timeout_sec=40.0,
+                        process_name=driver_process,
+                        ros_domain_id=robot_domain_id,
+                    ),
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return f"{robot} driver is not publishing /joint_states: {err}"
+                if gripper_process:
+                    err = self._start_digital_twin_launch(
+                        gripper_process,
+                        "hardware_ur5e_rg2_gripper",
+                        ros_domain_id=robot_domain_id,
+                    )
+                    if err:
+                        return err
+                    err = self._wait_with_ros2_daemon_retry(
+                        f"{robot} RG2 gripper bridge",
+                        lambda: self._wait_for_ros_action(
+                            _UR5E_RG2_GRIPPER_ACTION,
+                            timeout_sec=12.0,
+                            process_name=gripper_process,
+                            ros_domain_id=robot_domain_id,
+                        ),
+                        ros_domain_id=robot_domain_id,
+                    )
+                    if err:
+                        return f"{robot} RG2 gripper bridge is not ready: {err}"
+                err = self._start_digital_twin_launch(
+                    moveit_process,
+                    "hardware_ur5e_moveit",
+                    ros_domain_id=robot_domain_id,
+                    extra_args="launch_rviz:=false" if teach_mode else "",
+                )
+                if err:
+                    return err
+                err = self._wait_with_ros2_daemon_retry(
+                    f"{robot} MoveIt execute trajectory",
+                    lambda: self._wait_for_ros_action(
+                        "/execute_trajectory",
+                        timeout_sec=22.0,
+                        process_name=moveit_process,
+                        ros_domain_id=robot_domain_id,
+                    ),
+                    ros_domain_id=robot_domain_id,
+                )
+                if err:
+                    return f"{robot} MoveIt is not ready: {err}"
+                controller_err = self._wait_with_ros2_daemon_retry(
+                    f"{robot} scaled_joint_trajectory_controller",
+                    lambda: self._ensure_ros_controller_active(
+                        "scaled_joint_trajectory_controller",
+                        timeout_sec=12.0,
+                        process_name=driver_process,
+                        ros_domain_id=robot_domain_id,
+                    ),
+                    ros_domain_id=robot_domain_id,
+                )
+                if controller_err:
+                    return f"{robot} scaled_joint_trajectory_controller is not active: {controller_err}"
+                continue
+
+            return f"unknown hardware robot: {robot}"
+        return None
+
+    def _start_digital_twin_sync_process(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        *,
+        gazebo_domain_id: int,
+        hardware_domain_id: int,
+        domain_ids: dict[str, int] | None = None,
+    ) -> str | None:
+        if not self._DIGITAL_TWIN_SYNC_SCRIPT.is_file():
+            return f"digital twin sync script missing: {self._DIGITAL_TWIN_SYNC_SCRIPT}"
+        model_name = str(cfg.get("model_name") or "").strip()
+        domains = domain_ids or {"hardware": hardware_domain_id, "gazebo": gazebo_domain_id}
+        sync_items = self._digital_twin_sync_process_items(cfg)
+        for robot, sync_process in sync_items:
+            robot_key = str(robot or "").strip().lower()
+            robot_hardware_domain_id = self._digital_twin_hardware_domain_id(cfg, robot_key, domains)
+            status_path = (
+                self._digital_twin_sync_status_path(target, robot_key)
+                if len(sync_items) > 1
+                else self._digital_twin_status_path(target)
+            )
+            args = [
+                "python3.10",
+                str(self._DIGITAL_TWIN_SYNC_SCRIPT),
+                "--mode",
+                "mirror",
+                "--target",
+                target,
+                "--robot",
+                robot_key,
+                "--model-name",
+                model_name,
+                "--gazebo-domain-id",
+                str(gazebo_domain_id),
+                "--hardware-domain-id",
+                str(robot_hardware_domain_id),
+                "--status-file",
+                str(status_path),
+                "--direction-file",
+                str(self._digital_twin_direction_path(target)),
+            ]
+            command = " ".join(shlex.quote(part) for part in args)
+            if self.ros2_proc_status(sync_process) == "running":
+                continue
+            err = self._start_tracked_ros2_command(sync_process, command)
+            if err:
+                return err
+        return None
+
+    def _initialize_digital_twin_gazebo_from_hardware(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        *,
+        gazebo_process: str,
+        domains: dict[str, int],
+    ) -> str | None:
+        if target == "dual robots":
+            processes = self._digital_twin_dual_robots_processes(cfg)
+            if isinstance(processes, str):
+                return processes
+            _xarm_driver_process, ur5e_driver_process, _ur5e_gripper_process, _moveit_process = processes
+
+            err = self._wait_with_ros2_daemon_retry(
+                "ur5e External Control program",
+                lambda: self._wait_for_driver_ready(
+                    "ur5e",
+                    timeout_sec=45.0,
+                    process_name=ur5e_driver_process,
+                    ros_domain_id=domains["hardware"],
+                ),
+                ros_domain_id=domains["hardware"],
+            )
+            if err:
+                return (
+                    "ur5e External Control is not connected for initial gazebo pose: "
+                    f"{err}. Press Play on ros.urp, then press Start Twin again."
+                )
+            self._refresh_ur5e_external_control_running_status(
+                ros_domain_id=domains["hardware"],
+            )
+
+        err = self._wait_for_ros_service(
+            "/controller_manager/list_controllers",
+            timeout_sec=35.0,
+            process_name=gazebo_process,
+            ros_domain_id=domains["gazebo"],
+        )
+        if err:
+            return f"{target} gazebo is not ready for initial hardware pose: {err}"
+
+        model_name = str(cfg.get("model_name") or "").strip()
+        sync_items = self._digital_twin_sync_process_items(cfg)
+        for robot, _sync_process in sync_items:
+            robot_key = str(robot or "").strip().lower()
+            if robot_key not in {"xarm6", "ur5e"}:
+                continue
+            robot_hardware_domain_id = self._digital_twin_hardware_domain_id(
+                cfg,
+                robot_key,
+                domains,
+            )
+            status_path = (
+                self._digital_twin_sync_status_path(target, robot_key)
+                if len(sync_items) > 1
+                else self._digital_twin_status_path(target)
+            )
+            result = self._run_digital_twin_sync(
+                [
+                    "--mode", "initialize-gazebo-from-hardware",
+                    "--target", target,
+                    "--robot", robot_key,
+                    "--model-name", model_name,
+                    "--gazebo-domain-id", str(domains["gazebo"]),
+                    "--hardware-domain-id", str(robot_hardware_domain_id),
+                    "--status-file", str(status_path),
+                    "--direction-file", str(self._digital_twin_direction_path(target)),
+                ],
+                timeout_sec=self._DIGITAL_TWIN_INITIALIZE_TIMEOUT_S,
+            )
+            if not result.get("success"):
+                return (
+                    f"{robot_key} gazebo initial hardware pose failed: "
+                    f"{str(result.get('message') or 'unknown error')}"
+                )
+        return None
+
+    def _start_digital_twin_sync_when_ready(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        *,
+        gazebo_process: str,
+        domains: dict[str, int],
+        direction: str | None = None,
+    ) -> str | None:
+        sync_direction = str(direction or self._digital_twin_direction(target))
+        self._write_digital_twin_direction(target, sync_direction)
+        if target == "dual robots":
+            self._write_digital_twin_sync_status(
+                target,
+                cfg,
+                {
+                    "state": "starting",
+                    "direction": sync_direction,
+                    "message": "starting sync workers",
+                    "last_error": "",
+                },
+            )
+
+        err = self._wait_for_ros_service(
+            "/controller_manager/list_controllers",
+            timeout_sec=35.0,
+            process_name=gazebo_process,
+            ros_domain_id=domains["gazebo"],
+        )
+        if err:
+            message = f"{target} gazebo is not ready for sync: {err}"
+            self._write_digital_twin_sync_status(
+                target,
+                cfg,
+                {
+                    "state": "waiting",
+                    "direction": sync_direction,
+                    "message": message,
+                    "last_error": message,
+                },
+            )
+            return None
+
+        err = self._start_digital_twin_sync_process(
+            target,
+            cfg,
+            gazebo_domain_id=domains["gazebo"],
+            hardware_domain_id=domains["hardware"],
+            domain_ids=domains,
+        )
+        if err:
+            return err
+
+        self._write_digital_twin_sync_status(
+            target,
+            cfg,
+            {
+                "state": "starting",
+                "direction": sync_direction,
+                "message": "sync process running",
+                "last_error": "",
+            },
+        )
+        self._write_digital_twin_status(
+            target,
+            {
+                "state": "running",
+                "direction": sync_direction,
+                "message": "sync process started.",
+            },
+        )
+        return None
+
+    def _digital_twin_dual_robots_already_started(self, cfg: dict[str, Any]) -> bool:
+        return self._digital_twin_dual_robots_core_started(cfg)
+
+    def digital_twin_start(self, target: str) -> str | None:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return f"unknown digital twin target: {target}"
+        if not bool(cfg.get("hardware_supported", False)):
+            return self._DUAL_HARDWARE_LIMITATION
+
+        blocked = self._digital_twin_blocked_reason(target, cfg)
+        if blocked:
+            return blocked
+
+        domains = self._digital_twin_domain_ids()
+        gazebo_name = self._digital_twin_gazebo_launch(target, cfg)
+        gazebo_process = str(cfg.get("gazebo_process") or "").strip()
+
+        self.robot_env = "real"
+        self._stop_teleop_server()
+        self._write_digital_twin_direction(target, self._digital_twin_direction(target))
+        self._write_digital_twin_status(
+            target,
+            {
+                "state": "starting",
+                "direction": self._digital_twin_direction(target),
+                "message": "starting digital twin stack.",
+            },
+        )
+
+        dual_already_started = (
+            target == "dual robots" and self._digital_twin_dual_robots_already_started(cfg)
+        )
+        if dual_already_started:
+            self._write_digital_twin_status(
+                target,
+                {
+                    "state": "starting",
+                    "direction": self._digital_twin_direction(target),
+                    "message": "retrying dual robots sync with existing hardware MoveIt/RViz.",
+                },
+            )
+            self._restart_ros2_daemon_for_discovery(ros_domain_id=domains["hardware"])
+        else:
+            self._shutdown_gazebo_prewarm_controllers()
+            self._force_kill_digital_twin_helpers()
+            self._kill_stale_gazebo_helpers()
+            self._force_kill_gazebo_core(reason="digital_twin_prelaunch_restart")
+
+        if target == "dual robots":
+            teach_mode = self._digital_twin_sim_mode(target) == "teach"
+            if not dual_already_started:
+                reachability_error = self._digital_twin_hardware_reachability_error(target, cfg)
+                if reachability_error:
+                    return reachability_error
+
+            err = self._start_digital_twin_dual_robots_hardware_launches(
+                cfg,
+                ros_domain_id=domains["hardware"],
+                launch_rviz=not teach_mode,
+            )
+            if err:
+                return err
+            if not teach_mode:
+                err = self._start_digital_twin_dual_drag_markers(
+                    cfg,
+                    ros_domain_id=domains["hardware"],
+                    mode="monitor",
+                )
+                if err:
+                    return err
+
+            err = self._ensure_digital_twin_launch(
+                gazebo_process,
+                gazebo_name,
+                ros_domain_id=domains["gazebo"],
+            )
+            if err:
+                return err
+
+            init_err = None
+            if teach_mode or not dual_already_started:
+                init_err = self._initialize_digital_twin_gazebo_from_hardware(
+                    target,
+                    cfg,
+                    gazebo_process=gazebo_process,
+                    domains=domains,
+                )
+
+            if teach_mode:
+                if init_err:
+                    self._write_digital_twin_status(
+                        target,
+                        {
+                            "state": "waiting",
+                            "direction": "gazebo -> hardware",
+                            "message": init_err,
+                        },
+                    )
+                    return init_err
+                gazebo_moveit_process = str(cfg.get("gazebo_moveit_process") or "").strip()
+                gazebo_moveit_launch = str(cfg.get("gazebo_moveit_launch") or "").strip()
+                if gazebo_moveit_process and gazebo_moveit_launch:
+                    err = self._ensure_digital_twin_launch(
+                        gazebo_moveit_process,
+                        gazebo_moveit_launch,
+                        ros_domain_id=domains["gazebo"],
+                    )
+                    if err:
+                        return err
+                err = self._start_digital_twin_dual_drag_markers(
+                    cfg,
+                    ros_domain_id=domains["gazebo"],
+                    mode="teach",
+                )
+                if err:
+                    return err
+                self._write_digital_twin_status(
+                    target,
+                    {
+                        "state": "teach",
+                        "direction": "gazebo -> hardware",
+                        "message": (
+                            "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
+                            "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
+                            "/scaled_joint_trajectory_controller/follow_joint_trajectory."
+                        ),
+                    },
+                )
+                return None
+            if init_err:
+                self._write_digital_twin_sync_status(
+                    target,
+                    cfg,
+                    {
+                        "state": "waiting",
+                        "direction": self._digital_twin_direction(target),
+                        "message": init_err,
+                        "last_error": init_err,
+                    },
+                )
+
+            return self._start_digital_twin_sync_when_ready(
+                target,
+                cfg,
+                gazebo_process=gazebo_process,
+                domains=domains,
+            )
+
+        err = self._start_digital_twin_launch(
+            gazebo_process,
+            gazebo_name,
+            ros_domain_id=domains["gazebo"],
+        )
+        if err:
+            self.digital_twin_stop(target)
+            return err
+
+        err = self._start_digital_twin_hardware_stack(
+            target,
+            cfg,
+            ros_domain_id=domains["hardware"],
+            domain_ids=domains,
+        )
+        if err:
+            self.digital_twin_stop(target)
+            return err
+
+        init_err = self._initialize_digital_twin_gazebo_from_hardware(
+            target,
+            cfg,
+            gazebo_process=gazebo_process,
+            domains=domains,
+        )
+
+        # Teach mode is sim-leads: the operator drives the sim via MoveIt, so the live
+        # hardware -> gazebo mirror must NOT run (it would overwrite MoveIt's motion every
+        # cycle). Capture/replay use their own one-shot sync subprocesses, not this mirror.
+        if self._digital_twin_sim_mode(target) == "teach":
+            if init_err:
+                self._write_digital_twin_status(
+                    target,
+                    {
+                        "state": "waiting",
+                        "direction": "gazebo -> hardware",
+                        "message": init_err,
+                    },
+                )
+                return init_err
+            self._write_digital_twin_status(
+                target,
+                {
+                    "state": "teach",
+                    "direction": "gazebo -> hardware",
+                    "message": (
+                        "Teach: sim RViz controls Gazebo only; Replay in Twin commits "
+                        "saved sim waypoints through hardware MoveIt."
+                    ),
+                },
+            )
+            return None
+        if init_err:
+            self._write_digital_twin_sync_status(
+                target,
+                cfg,
+                {
+                    "state": "waiting",
+                    "direction": self._digital_twin_direction(target),
+                    "message": init_err,
+                    "last_error": init_err,
+                },
+            )
+
+        err = self._start_digital_twin_sync_when_ready(
+            target,
+            cfg,
+            gazebo_process=gazebo_process,
+            domains=domains,
+        )
+        if err:
+            self.digital_twin_stop(target)
+        return err
+
+    def digital_twin_stop(self, target: str) -> str | None:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return f"unknown digital twin target: {target}"
+
+        for process_name in reversed(self._digital_twin_process_names(cfg)):
+            self.ros2_stop(process_name, reason="digital_twin_stop")
+        self._stop_teleop_server()
+        # Force-kill stragglers (move_group/rviz2/sync, gazebo core) so the twin fully
+        # shuts down and the sim mode can be switched without leftovers.
+        self._force_kill_digital_twin_helpers()
+        self._kill_stale_gazebo_helpers()
+        self._force_kill_gazebo_core(reason="digital_twin_stop")
+        self._write_digital_twin_status(
+            target,
+            {
+                "state": "stopped",
+                "direction": self._digital_twin_direction(target),
+                "message": "digital twin stopped.",
+            },
+        )
+        return None
+
+    def digital_twin_apply_gazebo_to_hardware(self, target: str) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        if not bool(cfg.get("hardware_supported", False)):
+            return {"success": False, "message": self._DUAL_HARDWARE_LIMITATION}
+        if self._digital_twin_direction(target) != "gazebo -> hardware":
+            return {
+                "success": False,
+                "message": "Set direction to gazebo -> hardware before applying to hardware.",
+            }
+        if self.ros2_proc_status(str(cfg.get("gazebo_process") or "")) != "running":
+            return {"success": False, "message": f"{target} gazebo is not running."}
+        if self._digital_twin_hardware_status(cfg).get("overall") != "running":
+            return {"success": False, "message": f"{target} hardware is not running."}
+
+        domains = self._digital_twin_domain_ids()
+        args = [
+            "python3.10",
+            str(self._DIGITAL_TWIN_SYNC_SCRIPT),
+            "--mode",
+            "apply-gazebo-to-hardware",
+            "--target",
+            target,
+            "--robot",
+            str(cfg.get("robot") or ""),
+            "--model-name",
+            str(cfg.get("model_name") or ""),
+            "--gazebo-domain-id",
+            str(domains["gazebo"]),
+            "--hardware-domain-id",
+            str(domains["hardware"]),
+            "--status-file",
+            str(self._digital_twin_status_path(target)),
+            "--direction-file",
+            str(self._digital_twin_direction_path(target)),
+            "--max-joint-delta-deg",
+            str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
+        ]
+        command = " ".join(shlex.quote(part) for part in args)
+        full_cmd = self._ROS2_ENV + command
+        try:
+            cp = subprocess.run(
+                ["bash", "-c", full_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": "gazebo -> hardware apply timed out."}
+        except Exception as exc:
+            return {"success": False, "message": str(exc)}
+
+        output = (cp.stdout or "").strip()
+        result: dict[str, Any] = {}
+        if output:
+            try:
+                result = json.loads(output.splitlines()[-1])
+            except Exception:
+                result = {}
+        if not result:
+            detail = self._tail_output(cp.stderr) or self._tail_output(cp.stdout)
+            result = {
+                "success": cp.returncode == 0,
+                "message": detail or f"gazebo -> hardware exited with code {cp.returncode}",
+            }
+        if cp.returncode != 0:
+            result["success"] = False
+        return result
+
+    # ── Manual record & replay (gazebo -> hardware) ──────────────────────────
+    @staticmethod
+    def _sync_arg_value(extra_args: list[str], name: str) -> str:
+        try:
+            index = extra_args.index(name)
+            return str(extra_args[index + 1])
+        except Exception:
+            return ""
+
+    def _run_digital_twin_sync(self, extra_args: list[str], timeout_sec: float = 60.0) -> dict[str, Any]:
+        """Run the digital twin sync helper in a one-shot mode and parse its JSON output."""
+        args = ["python3.10", str(self._DIGITAL_TWIN_SYNC_SCRIPT), *extra_args]
+        command = " ".join(shlex.quote(part) for part in args)
+        full_cmd = self._ROS2_ENV + command
+        try:
+            cp = subprocess.run(
+                ["bash", "-c", full_cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            mode = self._sync_arg_value(extra_args, "--mode")
+            robot = self._sync_arg_value(extra_args, "--robot")
+            detail = " ".join(part for part in (f"mode={mode}" if mode else "", f"robot={robot}" if robot else "") if part)
+            suffix = f" ({detail})" if detail else ""
+            return {
+                "success": False,
+                "message": f"digital twin sync helper timed out after {float(timeout_sec):.0f}s{suffix}.",
+            }
+        except Exception as exc:
+            return {"success": False, "message": str(exc)}
+
+        output = (cp.stdout or "").strip()
+        result: dict[str, Any] = {}
+        if output:
+            try:
+                result = json.loads(output.splitlines()[-1])
+            except Exception:
+                result = {}
+        if not result:
+            detail = self._tail_output(cp.stderr) or self._tail_output(cp.stdout)
+            result = {
+                "success": cp.returncode == 0,
+                "message": detail or f"helper exited with code {cp.returncode}",
+            }
+        if cp.returncode != 0:
+            result["success"] = False
+        return result
+
+    def _digital_twin_recordings_dir(self) -> Path:
+        path = _PROJECT_ROOT / "cais_spade_llm" / "monitor" / "digital_twin" / "recordings"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _digital_twin_buffer_path(self, target: str, cfg: dict[str, Any]) -> Path:
+        slug = self._digital_twin_slug(cfg)
+        return Path("/tmp") / f"cais_digital_twin_{slug}_buffer.json"
+
+    @staticmethod
+    def _digital_twin_recording_hash(recording: dict[str, Any]) -> str:
+        body = json.dumps(recording, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def _digital_twin_prepared_replay_path(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        recording: dict[str, Any],
+        replay_target: str,
+        source: str,
+    ) -> Path:
+        slug = self._digital_twin_slug(cfg)
+        digest = self._digital_twin_recording_hash(recording)[:16]
+        safe_source = "".join(
+            c if (c.isalnum() or c in "-_") else "_"
+            for c in str(source or "recording").strip()
+        ) or "recording"
+        safe_replay = "".join(
+            c if (c.isalnum() or c in "-_") else "_"
+            for c in str(replay_target or "twin").strip()
+        ) or "twin"
+        return Path("/tmp") / f"cais_digital_twin_{slug}_{safe_source}_{safe_replay}_{digest}_prepared.json"
+
+    @staticmethod
+    def _digital_twin_is_dual_robots(cfg: dict[str, Any]) -> bool:
+        return str(cfg.get("robot") or "").strip().lower() == "dual robots"
+
+    @staticmethod
+    def _digital_twin_dual_robot_keys(cfg: dict[str, Any]) -> list[str]:
+        return [
+            str(robot).strip().lower()
+            for robot in (cfg.get("hardware") or ())
+            if str(robot).strip().lower() in {"xarm6", "ur5e"}
+        ]
+
+    @staticmethod
+    def _digital_twin_recovery_metadata(target: str, *, recording_type: str) -> dict[str, Any]:
+        return {
+            "source": "digital_twin_teach",
+            "target": target,
+            "recording_type": recording_type,
+            "dispatch": "manual",
+            "created_at": time.time(),
+        }
+
+    def _waypoints_from_recording(
+        self,
+        cfg: dict[str, Any],
+        recording: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        waypoints: list[dict[str, Any]] = []
+        if self._digital_twin_is_dual_robots(cfg):
+            for waypoint in list(recording.get("waypoints") or []):
+                robots = {
+                    str(robot): dict(body)
+                    for robot, body in dict(waypoint.get("robots") or {}).items()
+                    if isinstance(body, dict)
+                }
+                if robots:
+                    waypoints.append({"robots": robots, "t": time.time()})
+            return waypoints
+
+        joint_names = list(recording.get("joint_names") or [])
+        gripper_joint = recording.get("gripper_joint")
+        for waypoint in list(recording.get("waypoints") or []):
+            body = dict(waypoint or {})
+            positions = list(body.get("positions") or [])
+            if positions:
+                waypoints.append(
+                    {
+                        "positions": positions,
+                        "gripper": body.get("gripper"),
+                        "joint_names": joint_names,
+                        "gripper_joint": gripper_joint,
+                        "t": time.time(),
+                    }
+                )
+        return waypoints
+
+    def _load_digital_twin_buffer_waypoints(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        path = self._digital_twin_buffer_path(target, cfg)
+        data = self._read_json_file(path)
+        if not data:
+            return []
+        return self._waypoints_from_recording(cfg, data)
+
+    def _digital_twin_buffer_waypoints(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        with self._digital_twin_record_lock:
+            buf = list(self._digital_twin_waypoints.get(target, []))
+        if buf:
+            return buf
+
+        persisted = self._load_digital_twin_buffer_waypoints(target, cfg)
+        if persisted:
+            with self._digital_twin_record_lock:
+                if not self._digital_twin_waypoints.get(target):
+                    self._digital_twin_waypoints[target] = list(persisted)
+                buf = list(self._digital_twin_waypoints.get(target, []))
+            return buf
+        return []
+
+    def _persist_digital_twin_buffer(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        waypoints: list[dict[str, Any]],
+    ) -> None:
+        path = self._digital_twin_buffer_path(target, cfg)
+        if waypoints:
+            atomic_json_write(path, self._recording_from_waypoints(target, cfg, waypoints))
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.exception("failed to clear digital twin buffer %s", path)
+
+    def _snapshot_robot_waypoint(self, robot: str) -> dict[str, Any]:
+        """Snapshot one robot's current gazebo pose into a waypoint body."""
+        domains = self._digital_twin_domain_ids()
+        result = self._run_digital_twin_sync(
+            [
+                "--mode", "snapshot",
+                "--robot", robot,
+                "--source", "gazebo",
+                "--gazebo-domain-id", str(domains["gazebo"]),
+                "--hardware-domain-id", str(domains["hardware"]),
+            ],
+            timeout_sec=20.0,
+        )
+        if not result.get("success"):
+            return {"error": str(result.get("message") or "snapshot failed")}
+        return {
+            "positions": [float(v) for v in (result.get("positions") or [])],
+            "gripper": result.get("gripper_position"),
+            "joint_names": list(result.get("joint_names") or []),
+            "gripper_joint": result.get("gripper_joint"),
+        }
+
+    def _snapshot_waypoint(self, target: str, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Snapshot the current gazebo pose into a waypoint dict (or {'error': msg})."""
+        if self.ros2_proc_status(str(cfg.get("gazebo_process") or "")) != "running":
+            return {"error": f"{target} gazebo is not running."}
+
+        if self._digital_twin_is_dual_robots(cfg):
+            robots: dict[str, dict[str, Any]] = {}
+            for robot in self._digital_twin_dual_robot_keys(cfg):
+                waypoint = self._snapshot_robot_waypoint(robot)
+                if "error" in waypoint:
+                    return {"error": f"{robot}: {waypoint['error']}"}
+                robots[robot] = waypoint
+            if not robots:
+                return {"error": f"{target} has no paired robots configured."}
+            return {
+                "robots": robots,
+                "t": time.time(),
+            }
+
+        robot_waypoint = self._snapshot_robot_waypoint(str(cfg.get("robot") or ""))
+        if "error" in robot_waypoint:
+            return robot_waypoint
+        robot_waypoint["t"] = time.time()
+        return robot_waypoint
+
+    def digital_twin_capture_waypoint(self, target: str) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        waypoint = self._snapshot_waypoint(target, cfg)
+        if "error" in waypoint:
+            return {"success": False, "message": waypoint["error"]}
+        with self._digital_twin_record_lock:
+            buf = self._digital_twin_waypoints.setdefault(target, [])
+            buf.append(waypoint)
+            persisted_buf = list(buf)
+            count = len(buf)
+        self._persist_digital_twin_buffer(target, cfg, persisted_buf)
+        return {"success": True, "message": f"captured waypoint {count}", "count": count}
+
+    def digital_twin_list_waypoints(self, target: str) -> list[dict[str, Any]]:
+        cfg = self._digital_twin_target(target) or {}
+        buf = self._digital_twin_buffer_waypoints(target, cfg) if cfg else []
+        return [
+            {
+                "index": i,
+                "positions": [float(v) for v in (wp.get("positions") or [])],
+                "gripper": wp.get("gripper"),
+                "robots": {
+                    str(robot): {
+                        "positions": [float(v) for v in (body.get("positions") or [])],
+                        "gripper": body.get("gripper"),
+                    }
+                    for robot, body in dict(wp.get("robots") or {}).items()
+                    if isinstance(body, dict)
+                },
+            }
+            for i, wp in enumerate(buf)
+        ]
+
+    def digital_twin_delete_waypoint(self, target: str, index: int) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target) or {}
+        if cfg:
+            self._digital_twin_buffer_waypoints(target, cfg)
+        with self._digital_twin_record_lock:
+            buf = self._digital_twin_waypoints.get(target, [])
+            if not (0 <= index < len(buf)):
+                return {"success": False, "message": "waypoint index out of range."}
+            buf.pop(index)
+            persisted_buf = list(buf)
+            count = len(buf)
+        if cfg:
+            self._persist_digital_twin_buffer(target, cfg, persisted_buf)
+        return {"success": True, "message": f"deleted waypoint {index + 1}", "count": count}
+
+    def digital_twin_move_waypoint(self, target: str, index: int, delta: int) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target) or {}
+        if cfg:
+            self._digital_twin_buffer_waypoints(target, cfg)
+        with self._digital_twin_record_lock:
+            buf = self._digital_twin_waypoints.get(target, [])
+            new_index = index + (1 if delta > 0 else -1)
+            if not (0 <= index < len(buf)) or not (0 <= new_index < len(buf)):
+                return {"success": False, "message": "cannot move waypoint."}
+            buf[index], buf[new_index] = buf[new_index], buf[index]
+            persisted_buf = list(buf)
+        if cfg:
+            self._persist_digital_twin_buffer(target, cfg, persisted_buf)
+        return {"success": True, "message": "reordered waypoints."}
+
+    def digital_twin_overwrite_waypoint(self, target: str, index: int) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        self._digital_twin_buffer_waypoints(target, cfg)
+        with self._digital_twin_record_lock:
+            if not (0 <= index < len(self._digital_twin_waypoints.get(target, []))):
+                return {"success": False, "message": "waypoint index out of range."}
+        waypoint = self._snapshot_waypoint(target, cfg)
+        if "error" in waypoint:
+            return {"success": False, "message": waypoint["error"]}
+        with self._digital_twin_record_lock:
+            buf = self._digital_twin_waypoints.get(target, [])
+            if not (0 <= index < len(buf)):
+                return {"success": False, "message": "waypoint index out of range."}
+            buf[index] = waypoint
+            persisted_buf = list(buf)
+        self._persist_digital_twin_buffer(target, cfg, persisted_buf)
+        return {"success": True, "message": f"updated waypoint {index + 1} to current sim pose"}
+
+    def digital_twin_waypoint_count(self, target: str) -> int:
+        cfg = self._digital_twin_target(target) or {}
+        return len(self._digital_twin_buffer_waypoints(target, cfg)) if cfg else 0
+
+    def digital_twin_clear_waypoints(self, target: str) -> None:
+        with self._digital_twin_record_lock:
+            self._digital_twin_waypoints.pop(target, None)
+        cfg = self._digital_twin_target(target) or {}
+        if cfg:
+            self._persist_digital_twin_buffer(target, cfg, [])
+
+    def digital_twin_save_recording(self, target: str, name: str) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(name).strip())
+        if not safe:
+            return {"success": False, "message": "recording name is empty."}
+        buf = self._digital_twin_buffer_waypoints(target, cfg)
+        if not buf:
+            return {"success": False, "message": "no waypoints captured."}
+
+        recording = self._recording_from_waypoints(target, cfg, buf)
+        slug = self._digital_twin_slug(cfg)
+        path = self._digital_twin_recordings_dir() / f"{slug}__{safe}.json"
+        atomic_json_write(path, recording)
+        return {"success": True, "message": f"saved {len(buf)} waypoints to {path.name}", "file": str(path)}
+
+    def digital_twin_list_recordings(self, target: str) -> list[str]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return []
+        slug = self._digital_twin_slug(cfg)
+        prefix = f"{slug}__"
+        return sorted(
+            p.name[len(prefix):-len(".json")]
+            for p in self._digital_twin_recordings_dir().glob(f"{prefix}*.json")
+        )
+
+    def digital_twin_delete_recording(self, target: str, name: str) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        safe = str(name or "").strip()
+        if not safe:
+            return {"success": False, "message": "no recording selected."}
+        slug = self._digital_twin_slug(cfg)
+        path = self._digital_twin_recordings_dir() / f"{slug}__{safe}.json"
+        if not path.is_file():
+            return {"success": False, "message": f"recording not found: {safe}"}
+        try:
+            path.unlink()
+        except Exception as exc:
+            return {"success": False, "message": str(exc)}
+        return {"success": True, "message": f"deleted recording '{safe}'."}
+
+    def _build_buffer_recording(self, target: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
+        """Assemble a recording dict from the in-memory capture buffer (or None if empty)."""
+        buf = self._digital_twin_buffer_waypoints(target, cfg)
+        if not buf:
+            return None
+        return self._recording_from_waypoints(target, cfg, buf)
+
+    def _recording_from_waypoints(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        waypoints: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self._digital_twin_is_dual_robots(cfg):
+            robot_meta: dict[str, dict[str, Any]] = {}
+            first_robots = dict((waypoints[0] or {}).get("robots") or {})
+            for robot in self._digital_twin_dual_robot_keys(cfg):
+                body = dict(first_robots.get(robot) or {})
+                robot_meta[robot] = {
+                    "joint_names": list(body.get("joint_names") or []),
+                    "gripper_joint": body.get("gripper_joint"),
+                }
+            return {
+                "target": target,
+                "robot": "dual robots",
+                "recording_type": "paired_dual_robots",
+                "robots": robot_meta,
+                "recovery_metadata": self._digital_twin_recovery_metadata(
+                    target,
+                    recording_type="paired_dual_robots",
+                ),
+                "waypoints": [
+                    {
+                        "robots": {
+                            robot: {
+                                "positions": list(dict((wp.get("robots") or {}).get(robot) or {}).get("positions") or []),
+                                "gripper": dict((wp.get("robots") or {}).get(robot) or {}).get("gripper"),
+                            }
+                            for robot in self._digital_twin_dual_robot_keys(cfg)
+                        }
+                    }
+                    for wp in waypoints
+                ],
+            }
+
+        return {
+            "target": target,
+            "robot": str(cfg.get("robot") or ""),
+            "recording_type": "single_robot",
+            "joint_names": list(waypoints[0].get("joint_names") or []),
+            "gripper_joint": waypoints[0].get("gripper_joint"),
+            "recovery_metadata": self._digital_twin_recovery_metadata(
+                target,
+                recording_type="single_robot",
+            ),
+            "waypoints": [
+                {"positions": list(wp.get("positions") or []), "gripper": wp.get("gripper")}
+                for wp in waypoints
+            ],
+        }
+
+    def _prepare_replay_recording_file(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        recording_path: Path,
+        replay_target: str,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        if replay_target not in ("twin", "gazebo", "hardware"):
+            return {"success": False, "message": f"unknown replay target: {replay_target}"}
+        if not self._digital_twin_is_dual_robots(cfg):
+            return {"success": False, "message": "prepare replay only supports dual robots."}
+        recording = self._read_json_file(recording_path)
+        if not recording:
+            return {"success": False, "message": f"recording not found: {recording_path.name}"}
+        sync_target = "both" if replay_target == "twin" else replay_target
+        needs_hardware = replay_target in ("twin", "hardware")
+        domains = self._digital_twin_domain_ids()
+        if needs_hardware:
+            err = self._wait_for_digital_twin_dual_robots_hardware_ready(
+                cfg,
+                ros_domain_id=int(domains["hardware"]),
+                require_moveit=False,
+            )
+            if err:
+                message = f"{target} hardware is not ready: {err}"
+                self._write_digital_twin_status(
+                    target,
+                    {
+                        "state": "blocked",
+                        "direction": self._digital_twin_direction(target),
+                        "message": message,
+                        "last_error": message,
+                    },
+                )
+                return {"success": False, "message": message}
+        gazebo_process = str(cfg.get("gazebo_process") or "")
+        if replay_target in ("twin", "gazebo") and self.ros2_proc_status(gazebo_process) != "running":
+            return {"success": False, "message": f"{target} gazebo is not running."}
+
+        prepared_path = self._digital_twin_prepared_replay_path(
+            target,
+            cfg,
+            recording,
+            replay_target,
+            source,
+        )
+        with self._digital_twin_prepare_lock:
+            self._write_digital_twin_status(
+                target,
+                {
+                    "state": "preparing",
+                    "direction": self._digital_twin_direction(target),
+                    "message": "preparing replay without moving gazebo or hardware.",
+                    "last_error": "",
+                },
+            )
+            result = self._run_digital_twin_sync(
+                [
+                    "--mode", "prepare-replay",
+                    "--robot", str(cfg.get("robot") or ""),
+                    "--replay-target", sync_target,
+                    "--recording-file", str(recording_path),
+                    "--prepared-file", str(prepared_path),
+                    "--gazebo-domain-id", str(domains["gazebo"]),
+                    "--hardware-domain-id", str(domains["hardware"]),
+                    "--max-joint-delta-deg", str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
+                    "--status-file", str(self._digital_twin_status_path(target)),
+                    "--direction-file", str(self._digital_twin_direction_path(target)),
+                ],
+                timeout_sec=120.0,
+            )
+        result["prepared_file"] = str(prepared_path)
+        result["recording_hash"] = self._digital_twin_recording_hash(recording)
+        return result
+
+    def _replay_recording_file(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+        recording_path: Path,
+        replay_target: str,
+        *,
+        source: str = "recording",
+    ) -> dict[str, Any]:
+        if replay_target not in ("twin", "gazebo", "hardware"):
+            return {"success": False, "message": f"unknown replay target: {replay_target}"}
+        # "twin" drives gazebo + hardware together; "gazebo" is a sim-only dry run.
+        sync_target = "both" if replay_target == "twin" else replay_target
+        needs_hardware = replay_target in ("twin", "hardware")
+        domains = self._digital_twin_domain_ids()
+        if needs_hardware and self._digital_twin_is_dual_robots(cfg):
+            err = self._wait_for_digital_twin_dual_robots_hardware_ready(
+                cfg,
+                ros_domain_id=int(domains["hardware"]),
+                require_moveit=False,
+            )
+            if err:
+                message = f"{target} hardware is not ready: {err}"
+                self._write_digital_twin_status(
+                    target,
+                    {
+                        "state": "blocked",
+                        "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                        "message": message,
+                        "last_error": message,
+                    },
+                )
+                return {"success": False, "message": message}
+        elif needs_hardware and self._digital_twin_hardware_status(cfg).get("overall") != "running":
+            return {"success": False, "message": f"{target} hardware is not running."}
+        if self.ros2_proc_status(str(cfg.get("gazebo_process") or "")) != "running":
+            return {"success": False, "message": f"{target} gazebo is not running."}
+
+        prepared_args: list[str] = []
+        if replay_target == "twin" and self._digital_twin_is_dual_robots(cfg):
+            recording = self._read_json_file(recording_path)
+            if recording:
+                prepared_path = self._digital_twin_prepared_replay_path(
+                    target,
+                    cfg,
+                    recording,
+                    replay_target,
+                    source,
+                )
+                if prepared_path.is_file():
+                    prepared_data = self._read_json_file(prepared_path)
+                    metadata = dict(prepared_data.get("metadata") or {})
+                    expected = {
+                        "version": 3,
+                        "recording_hash": self._digital_twin_recording_hash(recording),
+                        "replay_target": sync_target,
+                        "gazebo_domain_id": int(domains["gazebo"]),
+                        "hardware_domain_id": int(domains["hardware"]),
+                        "waypoint_count": len(list(recording.get("waypoints") or [])),
+                        "robot": str(recording.get("robot") or ""),
+                        "recording_type": str(recording.get("recording_type") or ""),
+                    }
+                    if all(metadata.get(key) == value for key, value in expected.items()):
+                        prepared_args = ["--prepared-file", str(prepared_path)]
+        init_before_replay = replay_target == "twin" or (
+            replay_target == "gazebo"
+            and self._digital_twin_is_dual_robots(cfg)
+            and self._digital_twin_sim_mode(target) == "teach"
+        )
+        if init_before_replay:
+            init_label = "Replay in Twin" if replay_target == "twin" else "Preview in Gazebo"
+            init_failure_word = "replay" if replay_target == "twin" else "preview"
+            self._write_digital_twin_status(
+                target,
+                {
+                    "state": "replaying",
+                    "direction": "hardware -> gazebo",
+                    "message": f"{init_label}: initializing gazebo from hardware.",
+                    "last_error": "",
+                },
+            )
+            init_err = self._initialize_digital_twin_gazebo_from_hardware(
+                target,
+                cfg,
+                gazebo_process=str(cfg.get("gazebo_process") or ""),
+                domains=domains,
+            )
+            if init_err:
+                return {
+                    "success": False,
+                    "message": f"could not initialize gazebo from hardware before {init_failure_word}: {init_err}",
+                }
+        self._write_digital_twin_status(
+            target,
+            {
+                "state": "replaying",
+                "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                "message": (
+                    "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /scaled_joint_trajectory_controller/follow_joint_trajectory."
+                    if (
+                        prepared_args
+                        and replay_target == "twin"
+                        and self._digital_twin_is_dual_robots(cfg)
+                    )
+                    else (
+                        "Replay in Twin: committing saved sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /scaled_joint_trajectory_controller/follow_joint_trajectory."
+                        if replay_target == "twin" and self._digital_twin_is_dual_robots(cfg)
+                        else (
+                            "Replay in Twin: committing prepared sim waypoint through hardware MoveIt."
+                            if prepared_args and replay_target == "twin"
+                            else (
+                                "Replay in Twin: committing saved sim waypoint through hardware MoveIt."
+                                if replay_target == "twin"
+                                else "Preview in Gazebo: publishing to Gazebo only."
+                            )
+                        )
+                    )
+                ),
+                "last_error": "",
+                },
+            )
+        result = self._run_digital_twin_sync(
+            [
+                "--mode", "replay",
+                "--robot", str(cfg.get("robot") or ""),
+                "--replay-target", sync_target,
+                "--recording-file", str(recording_path),
+                *prepared_args,
+                "--gazebo-domain-id", str(domains["gazebo"]),
+                "--hardware-domain-id", str(domains["hardware"]),
+                "--max-joint-delta-deg", str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
+                "--status-file", str(self._digital_twin_status_path(target)),
+                "--direction-file", str(self._digital_twin_direction_path(target)),
+            ],
+            timeout_sec=120.0,
+        )
+        if replay_target == "twin" and result.get("success"):
+            sync_err = self._start_digital_twin_sync_when_ready(
+                target,
+                cfg,
+                gazebo_process=str(cfg.get("gazebo_process") or ""),
+                domains=domains,
+                direction="hardware -> gazebo",
+            )
+            result["sync_resumed"] = not bool(sync_err)
+            base_message = str(result.get("message") or "")
+            if sync_err:
+                result["sync_resume_error"] = sync_err
+                result["message"] = (
+                    f"{base_message}; hardware -> Gazebo sync resume failed: {sync_err}"
+                    if base_message
+                    else f"hardware -> Gazebo sync resume failed: {sync_err}"
+                )
+            else:
+                result["message"] = (
+                    f"{base_message}; hardware -> Gazebo sync resumed."
+                    if base_message
+                    else "hardware -> Gazebo sync resumed."
+                )
+        message = str(result.get("message") or "")
+        self._write_digital_twin_status(
+            target,
+            {
+                "state": "replayed" if result.get("success") else "blocked",
+                "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                "message": message or "replay finished.",
+                "last_error": "" if result.get("success") else message,
+            },
+        )
+        return result
+
+    def digital_twin_replay(self, target: str, name: str, *, replay_target: str = "twin") -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        slug = self._digital_twin_slug(cfg)
+        path = self._digital_twin_recordings_dir() / f"{slug}__{name}.json"
+        if not path.is_file():
+            return {"success": False, "message": f"recording not found: {name}"}
+        return self._replay_recording_file(target, cfg, path, replay_target, source=f"saved_{name}")
+
+    def digital_twin_replay_buffer(self, target: str, *, replay_target: str = "twin") -> dict[str, Any]:
+        """Replay the just-captured (unsaved) waypoint buffer, without forcing a Save."""
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        recording = self._build_buffer_recording(target, cfg)
+        if recording is None:
+            return {"success": False, "message": "No captured waypoints to replay."}
+        slug = self._digital_twin_slug(cfg)
+        path = Path("/tmp") / f"cais_digital_twin_{slug}_buffer.json"
+        atomic_json_write(path, recording)
+        return self._replay_recording_file(target, cfg, path, replay_target, source="buffer")
+
+    def digital_twin_prepare_replay(
+        self,
+        target: str,
+        name: str,
+        *,
+        replay_target: str = "twin",
+    ) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        slug = self._digital_twin_slug(cfg)
+        path = self._digital_twin_recordings_dir() / f"{slug}__{name}.json"
+        if not path.is_file():
+            return {"success": False, "message": f"recording not found: {name}"}
+        return self._prepare_replay_recording_file(
+            target,
+            cfg,
+            path,
+            replay_target,
+            source=f"saved_{name}",
+        )
+
+    def digital_twin_prepare_replay_buffer(
+        self,
+        target: str,
+        *,
+        replay_target: str = "twin",
+    ) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        recording = self._build_buffer_recording(target, cfg)
+        if recording is None:
+            return {"success": False, "message": "No captured waypoints to prepare."}
+        slug = self._digital_twin_slug(cfg)
+        path = Path("/tmp") / f"cais_digital_twin_{slug}_buffer.json"
+        atomic_json_write(path, recording)
+        return self._prepare_replay_recording_file(
+            target,
+            cfg,
+            path,
+            replay_target,
+            source="buffer",
+        )
+
+    def digital_twin_go_home(self, target: str, *, replay_target: str = "twin") -> dict[str, Any]:
+        """Move the arm to its configured home/initial pose (sim + hardware by default)."""
+        cfg = self._digital_twin_target(target)
+        if not cfg:
+            return {"success": False, "message": f"unknown digital twin target: {target}"}
+        robot = str(cfg.get("robot") or "")
+        home = self._DIGITAL_TWIN_HOME.get(robot)
+        if not home:
+            return {"success": False, "message": f"no home pose configured for {robot}."}
+        # Omit joint_names so the sync defaults to ROBOTS[robot]["gazebo_joints"].
+        recording = {"target": target, "robot": robot, "waypoints": [{"positions": list(home)}]}
+        slug = self._digital_twin_slug(cfg)
+        path = Path("/tmp") / f"cais_digital_twin_{slug}_home.json"
+        atomic_json_write(path, recording)
+        return self._replay_recording_file(target, cfg, path, replay_target, source="home")
 
     def ros2_start_hardware_stack(self, robot: str) -> str | None:
         key = str(robot).strip().lower()
@@ -5148,30 +8610,80 @@ class SystemBridge:
                 )
             return None
 
-        driver_name, moveit_name = stack[0], stack[1]
+        driver_name = stack[0]
+        gripper_names = tuple(name for name in stack[1:-1] if "rg2_gripper" in name)
+        moveit_name = stack[-1]
         if self.ros2_proc_status(driver_name) != "running":
             err = self.ros2_start(driver_name)
             if err:
                 return err
 
-        err = self._wait_for_driver_ready(key, timeout_sec=18.0)
+        err = self._wait_with_ros2_daemon_retry(
+            f"{key} driver ready",
+            lambda: self._wait_for_driver_ready(key, timeout_sec=18.0),
+        )
         if err:
             return err
+        if key == "ur5e":
+            err = self._ensure_ur5e_external_control_running(
+                process_name=driver_name,
+            )
+            if err:
+                return err
+        err = self._wait_with_ros2_daemon_retry(
+            f"{key} /joint_states publisher",
+            lambda: self._wait_for_ros_topic_publisher(
+                "/joint_states",
+                timeout_sec=40.0,
+                process_name=driver_name,
+            ),
+        )
+        if err:
+            return f"{key} driver is not publishing /joint_states: {err}"
+
+        for gripper_name in gripper_names:
+            if self.ros2_proc_status(gripper_name) != "running":
+                err = self.ros2_start(gripper_name)
+                if err:
+                    return err
+            err = self._wait_with_ros2_daemon_retry(
+                f"{key} RG2 gripper bridge",
+                lambda: self._wait_for_ros_action(
+                    _UR5E_RG2_GRIPPER_ACTION,
+                    timeout_sec=12.0,
+                    process_name=gripper_name,
+                ),
+            )
+            if err:
+                return f"{key} RG2 gripper bridge is not ready: {err}"
 
         if self.ros2_proc_status(moveit_name) != "running":
             err = self.ros2_start(moveit_name)
             if err:
                 return err
-        err = self._wait_for_ros_service(
-            "/controller_manager/list_controllers",
-            timeout_sec=22.0,
-            process_name=moveit_name,
+        err = self._wait_with_ros2_daemon_retry(
+            f"{key} MoveIt execute trajectory",
+            lambda: self._wait_for_ros_action(
+                "/execute_trajectory",
+                timeout_sec=22.0,
+                process_name=moveit_name,
+            ),
         )
         if err:
             return (
-                f"{key} hardware stack is not ready: {err}. "
+                f"{key} MoveIt is not ready: {err}. "
                 "MoveIt may have failed to launch correctly."
             )
+        controller_err = self._wait_with_ros2_daemon_retry(
+            f"{key} scaled_joint_trajectory_controller",
+            lambda: self._ensure_ros_controller_active(
+                "scaled_joint_trajectory_controller",
+                timeout_sec=12.0,
+                process_name=driver_name,
+            ),
+        )
+        if controller_err:
+            return f"{key} scaled_joint_trajectory_controller is not active: {controller_err}"
         return None
 
     def ros2_stop_hardware_stack(self, robot: str) -> str | None:
@@ -5184,9 +8696,8 @@ class SystemBridge:
             # Also stop potential legacy standalone driver if user launched it.
             self.ros2_stop("hardware_xarm6_driver")
         else:
-            driver_name, moveit_name = stack[0], stack[1]
-            self.ros2_stop(moveit_name)
-            self.ros2_stop(driver_name)
+            for process_name in reversed(stack):
+                self.ros2_stop(process_name)
         self._stop_teleop_server()
         return None
 
@@ -5496,6 +9007,29 @@ class SystemBridge:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
 
     @staticmethod
+    def _force_kill_digital_twin_helpers() -> None:
+        """Hard-kill digital-twin stragglers that survive ros2 launch shutdown.
+
+        Teach mode spawns sim + hardware MoveIt (two move_group + two rviz2); killing the
+        tracked launch process group does not always take these down. Safe to pattern-kill
+        here because a running digital twin blocks all other stacks (see
+        _digital_twin_blocked_reason), so no unrelated move_group/rviz2 is expected.
+        """
+        for cmd in [
+            "pkill -9 -f move_group 2>/dev/null",
+            "pkill -9 -f rviz2 2>/dev/null",
+            "pkill -9 -f dual_drag_markers.py 2>/dev/null",
+            "pkill -9 -f digital_twin_sync.py 2>/dev/null",
+            "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
+            "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
+            "pkill -9 -f dual_robots_hardware_moveit.launch.py 2>/dev/null",
+            "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",
+            "pkill -9 -f xarm6_moveit_realmove.launch.py 2>/dev/null",
+            "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
+        ]:
+            subprocess.run(["bash", "-c", cmd], capture_output=True)
+
+    @staticmethod
     def _force_kill_gazebo_core(reason: str = "unspecified") -> None:
         """Hard-kill gzserver/gzclient and clean DDS shared memory.
 
@@ -5639,6 +9173,11 @@ class SystemBridge:
             ),
             "pkill -9 -f gazebo 2>/dev/null",
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
+            "pkill -9 -f dual_drag_markers.py 2>/dev/null",
+            "pkill -9 -f digital_twin_sync.py 2>/dev/null",
+            "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
+            "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
+            "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
         self._kill_stale_gazebo_helpers()
@@ -5657,12 +9196,17 @@ class SystemBridge:
             "killall -9 gzserver gzclient 2>/dev/null",
             "killall -9 move_group rviz2 robot_state_publisher joint_state_publisher static_transform_publisher ros2_control_node 2>/dev/null",
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
+            "pkill -9 -f dual_drag_markers.py 2>/dev/null",
             "pkill -9 -f spawn_entity.py 2>/dev/null",
             "pkill -9 -f xarm_driver_node 2>/dev/null",
             "pkill -9 -f controller_manager 2>/dev/null",
             "pkill -9 -f 'spawner' 2>/dev/null",
+            "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
+            "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
             "pkill -9 -f xarm6_moveit_realmove.launch.py 2>/dev/null",
             "pkill -9 -f ur_moveit.launch.py 2>/dev/null",
+            "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",
+            "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
             "pkill -9 -f ur_robot_driver 2>/dev/null",
             "pkill -9 -f gazebo 2>/dev/null",
         ]:
@@ -6007,6 +9551,7 @@ class SystemBridge:
     def _stop_teleop_server_locked(self) -> None:
         proc = self._teleop_server_proc
         if proc is None:
+            self._teleop_server_ros_domain_id = None
             return
         try:
             if proc.poll() is None:
@@ -6019,10 +9564,25 @@ class SystemBridge:
         except Exception:
             pass
         self._teleop_server_proc = None
+        self._teleop_server_ros_domain_id = None
 
     def _stop_teleop_server(self) -> None:
         with self._teleop_server_lock:
             self._stop_teleop_server_locked()
+
+    def _teleop_stderr_excerpt_locked(self, max_chars: int = 2000) -> str:
+        proc = self._teleop_server_proc
+        if proc is None or proc.stderr is None:
+            return ""
+        try:
+            fd = proc.stderr.fileno()
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                return ""
+            data = os.read(fd, max(1, int(max_chars)))
+            return data.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
 
     def _read_teleop_response_locked(self, timeout_sec: float) -> tuple[bool, str, dict[str, Any]]:
         proc = self._teleop_server_proc
@@ -6030,12 +9590,20 @@ class SystemBridge:
             return False, "teleop server not running", {}
         if proc.poll() is not None:
             code = proc.returncode
+            stderr = self._teleop_stderr_excerpt_locked()
             self._stop_teleop_server_locked()
-            return False, f"teleop server exited ({code})", {}
+            detail = f"teleop server exited ({code})"
+            if stderr:
+                detail = f"{detail}: {stderr}"
+            return False, detail, {}
 
         ready, _, _ = select.select([proc.stdout.fileno()], [], [], max(0.1, timeout_sec))
         if not ready:
-            return False, f"teleop response timeout after {timeout_sec:.1f}s", {}
+            stderr = self._teleop_stderr_excerpt_locked()
+            detail = f"teleop response timeout after {timeout_sec:.1f}s"
+            if stderr:
+                detail = f"{detail}: {stderr}"
+            return False, detail, {}
 
         line = proc.stdout.readline()
         if not line:
@@ -6050,9 +9618,17 @@ class SystemBridge:
         msg = str(payload.get("msg", "")).strip()
         return ok, (msg or ("OK" if ok else "teleop command failed")), payload
 
-    def _ensure_teleop_server_locked(self) -> str | None:
+    def _ensure_teleop_server_locked(self, ros_domain_id: int | None) -> str | None:
+        try:
+            resolved_domain_id = int(ros_domain_id) if ros_domain_id is not None else self._default_ros_domain_id()
+        except (TypeError, ValueError):
+            resolved_domain_id = self._default_ros_domain_id()
         proc = self._teleop_server_proc
-        if proc is not None and proc.poll() is None:
+        if (
+            proc is not None
+            and proc.poll() is None
+            and self._teleop_server_ros_domain_id == resolved_domain_id
+        ):
             return None
         self._stop_teleop_server_locked()
 
@@ -6065,7 +9641,7 @@ class SystemBridge:
         )
         try:
             proc = subprocess.Popen(
-                ["bash", "-c", self._ROS2_ENV + cmd],
+                ["bash", "-c", self._ROS2_ENV + self._ros2_domain_export(resolved_domain_id) + cmd],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -6077,6 +9653,7 @@ class SystemBridge:
             return f"failed to start teleop server: {exc}"
 
         self._teleop_server_proc = proc
+        self._teleop_server_ros_domain_id = resolved_domain_id
         ok, msg, _payload = self._read_teleop_response_locked(timeout_sec=25.0)
         if not ok:
             self._stop_teleop_server_locked()
@@ -6090,9 +9667,10 @@ class SystemBridge:
         self,
         payload: dict[str, Any],
         timeout_sec: float,
+        ros_domain_id: int | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         with self._teleop_server_lock:
-            err = self._ensure_teleop_server_locked()
+            err = self._ensure_teleop_server_locked(ros_domain_id)
             if err:
                 return False, err, {}
 
@@ -6110,7 +9688,7 @@ class SystemBridge:
             ok, msg, response_payload = self._read_teleop_response_locked(timeout_sec=timeout_sec)
             if not ok and (self._teleop_server_proc is None or self._teleop_server_proc.poll() is not None):
                 # One transparent restart/retry for crashed backend.
-                err = self._ensure_teleop_server_locked()
+                err = self._ensure_teleop_server_locked(ros_domain_id)
                 if err:
                     return False, err, {}
                 proc = self._teleop_server_proc
@@ -6121,15 +9699,40 @@ class SystemBridge:
                 return self._read_teleop_response_locked(timeout_sec=timeout_sec)
             return ok, msg, response_payload
 
+    def _teleop_preflight(self, robot: str, op: str) -> dict[str, Any]:
+        target = self.teleop_target(robot, op)
+        warning = str(target.get("warning") or "")
+        if warning:
+            return target
+        return target
+
     def _teleop_request(self, payload: dict[str, Any], timeout_sec: float) -> tuple[bool, str]:
-        ok, msg, _payload = self._teleop_request_payload(payload=payload, timeout_sec=timeout_sec)
+        robot = str(payload.get("robot") or "").strip().lower()
+        op = str(payload.get("op") or "").strip().lower()
+        target = self._teleop_preflight(robot, op)
+        warning = str(target.get("warning") or "")
+        if warning:
+            return False, warning
+        ok, msg, _payload = self._teleop_request_payload(
+            payload=payload,
+            timeout_sec=timeout_sec,
+            ros_domain_id=target.get("ros_domain_id"),
+        )
         return ok, msg
 
-    def _run_teleop_once(self, args: list[str], timeout_sec: float) -> tuple[bool, str]:
+    def _run_teleop_once(
+        self,
+        args: list[str],
+        timeout_sec: float,
+        ros_domain_id: int | None = None,
+    ) -> tuple[bool, str]:
         quoted_script = shlex.quote(self._TELEOP_SCRIPT)
         quoted_args = " ".join(shlex.quote(str(arg)) for arg in args)
         cmd = f"python3.10 {quoted_script} {quoted_args}".strip()
-        return self.ros2_exec(cmd, timeout_sec=timeout_sec)
+        return self.ros2_exec(
+            self._ros2_domain_export(ros_domain_id) + cmd,
+            timeout_sec=timeout_sec,
+        )
 
     def teleop_jog(
         self,
@@ -6168,6 +9771,10 @@ class SystemBridge:
             return False, f"unknown robot: {robot}"
         if action not in {"open", "close"}:
             return False, f"unknown gripper action: {action}"
+        target = self._teleop_preflight(robot, "gripper")
+        warning = str(target.get("warning") or "")
+        if warning:
+            return False, warning
         # Fast path: persistent backend for low-latency repeated clicks.
         payload: dict[str, Any] = {
             "op": "gripper",
@@ -6207,7 +9814,11 @@ class SystemBridge:
         ]
         if step is not None:
             once_args += ["--gripper-step", str(float(step))]
-        return self._run_teleop_once(once_args, timeout_sec=10.0)
+        return self._run_teleop_once(
+            once_args,
+            timeout_sec=10.0,
+            ros_domain_id=target.get("ros_domain_id"),
+        )
 
     def teleop_home(self, robot: str) -> tuple[bool, str]:
         robot = str(robot).strip().lower()
@@ -6224,7 +9835,7 @@ class SystemBridge:
     def list_named_positions(self, robot: str) -> dict[str, list[float]]:
         """Return named positions for *robot* in the current environment."""
         robot = str(robot).strip().lower()
-        env = self.teleop_target_environment()
+        env = str(self.teleop_target(robot).get("environment") or self.teleop_target_environment())
         # Map "real" → JSON key "real", "gazebo" → "gazebo"
         env_key = env if env in ("gazebo", "real") else "gazebo"
         path = _RESOURCE_DIR / f"robot_{robot}.json"
@@ -6289,12 +9900,16 @@ class SystemBridge:
             return False, "position name is empty"
         if len(position_name) > 64:
             return False, "position name too long (max 64 chars)"
+        target = self._teleop_preflight(robot, "save_position")
+        warning = str(target.get("warning") or "")
+        if warning:
+            return False, warning
         return self._teleop_request(
             payload={
                 "op": "save_position",
                 "robot": robot,
                 "name": position_name,
-                "env": self.teleop_target_environment(),
+                "env": str(target.get("environment") or self.teleop_target_environment()),
             },
             timeout_sec=6.0,
         )
@@ -6303,12 +9918,17 @@ class SystemBridge:
         robot = str(robot).strip().lower()
         if robot not in {"xarm6", "ur5e"}:
             return False, f"unknown robot: {robot}", {}
+        target = self._teleop_preflight(robot, "state")
+        warning = str(target.get("warning") or "")
+        if warning:
+            return False, warning, {}
         ok, msg, payload = self._teleop_request_payload(
             payload={
                 "op": "state",
                 "robot": robot,
             },
             timeout_sec=4.0,
+            ros_domain_id=target.get("ros_domain_id"),
         )
         if not ok:
             return False, msg, {}

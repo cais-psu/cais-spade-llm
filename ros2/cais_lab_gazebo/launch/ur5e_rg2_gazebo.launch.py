@@ -4,6 +4,7 @@ Gazebo Classic launch: UR5e + OnRobot RG2 in a single-table world.
 
 Usage:
     ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py
+    ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false
 """
 
 import os
@@ -209,6 +210,9 @@ def _build_ur5e_rg2_description(controllers_yaml):
 
 def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
+    passive = LaunchConfiguration('passive').perform(context).strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
 
     controllers_yaml = os.path.join(
         get_package_share_directory('xarm_gazebo'),
@@ -251,12 +255,6 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    controller_spawner = _make_controller_spawner([
-        'joint_state_broadcaster',
-        'ur5e_joint_trajectory_controller',
-        'ur5e_rg2_gripper_traj_controller',
-    ])
-
     perception_candidates = [
         Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
         Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
@@ -293,21 +291,48 @@ def launch_setup(context, *args, **kwargs):
         gazebo,
         state_publisher,
         spawn,
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=spawn,
-                on_exit=[controller_spawner],
-            )
-        ),
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=controller_spawner,
-                on_exit=post_controller_actions,
-            )
-        ),
     ]
-    if perception_log is not None:
-        launch_actions.append(perception_log)
+
+    if passive:
+        # Mirror mode: bring up only the controllers the digital-twin sync needs.
+        # joint_state_broadcaster publishes /joint_states (so gazebo -> hardware can
+        # read the gazebo pose), while the arm and gripper trajectory controllers
+        # actively hold the streamed mirror pose against gravity. No perception.
+        controller_spawner = _make_controller_spawner([
+            'joint_state_broadcaster',
+            'ur5e_joint_trajectory_controller',
+            'ur5e_rg2_gripper_traj_controller',
+        ])
+        launch_actions.append(
+            RegisterEventHandler(
+                event_handler=OnProcessExit(
+                    target_action=spawn,
+                    on_exit=[controller_spawner],
+                )
+            )
+        )
+    else:
+        controller_spawner = _make_controller_spawner([
+            'joint_state_broadcaster',
+            'ur5e_joint_trajectory_controller',
+            'ur5e_rg2_gripper_traj_controller',
+        ])
+        launch_actions.extend([
+            RegisterEventHandler(
+                event_handler=OnProcessExit(
+                    target_action=spawn,
+                    on_exit=[controller_spawner],
+                )
+            ),
+            RegisterEventHandler(
+                event_handler=OnProcessExit(
+                    target_action=controller_spawner,
+                    on_exit=post_controller_actions,
+                )
+            ),
+        ])
+        if perception_log is not None:
+            launch_actions.append(perception_log)
     return launch_actions
 
 
@@ -317,6 +342,11 @@ def generate_launch_description():
             'run_perception',
             default_value='true',
             description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
+        ),
+        DeclareLaunchArgument(
+            'passive',
+            default_value='false',
+            description='Spawn Gazebo as a passive mirror without active trajectory controller spawners.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

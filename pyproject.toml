@@ -19,6 +19,8 @@ ltlf2dfa = "^1.0.2"
 python-dotenv = "^1.2.1"
 graphviz = "^0.21"
 pytest = "^9.0.2"
+scipy = "^1.14.1"
+ur-rtde = "^1.6.0"
 
 [build-system]
 requires = ["poetry-core"]

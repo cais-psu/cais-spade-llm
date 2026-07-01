@@ -1,11 +1,21 @@
 import time
 from rtde_control import RTDEControlInterface
+from rtde_receive import RTDEReceiveInterface
 from scipy.spatial.transform import Rotation
-from xarmlib.wrapper import XArmAPI
+try:
+    from cais_spade_llm.Jeebies1.xarmlib.wrapper import XArmAPI
+except ModuleNotFoundError as exc:
+    if exc.name != "cais_spade_llm":
+        raise
+    from xarmlib.wrapper import XArmAPI
 
 class UR5eRTDECommander:
     def __init__(self):
-        self.rtde = RTDEControlInterface(hostname="192.168.1.172")
+        self.hostname = "192.168.1.172"
+        print(f"Connecting RTDE control/receive to {self.hostname}...")
+        self.rtde = RTDEControlInterface(hostname=self.hostname)
+        self.rtde_receive = RTDEReceiveInterface(hostname=self.hostname)
+        print("RTDE connected.")
         self.speed = 0.5
         self.acceleration = 0.3
         self.roll = -180
@@ -20,6 +30,21 @@ class UR5eRTDECommander:
 
     def move_to_pose(self, pose):
         self.rtde.moveL( self.build_pose(pose), self.speed, self.acceleration)
+
+    def move_tcp_z(self, delta_mm=10.0):
+        start_pose = list(self.rtde_receive.getActualTCPPose())
+        target_pose = list(start_pose)
+        target_pose[2] += float(delta_mm) / 1000.0
+        print(f"Current TCP pose: {start_pose}")
+        print(f"Target TCP pose:  {target_pose}")
+        result = self.rtde.moveL(target_pose, 0.05, 0.1, asynchronous=False)
+        time.sleep(0.2)
+        end_pose = list(self.rtde_receive.getActualTCPPose())
+        actual_delta_mm = (end_pose[2] - start_pose[2]) * 1000.0
+        print(f"moveL result: {result}")
+        print(f"End TCP pose:    {end_pose}")
+        print(f"Actual z delta:  {actual_delta_mm:.3f} mm")
+        print(f"RTDE program running: {self.rtde.isProgramRunning()}")
 
     def _set_gripper(self, width_mm, force, settle_s, blocking=True):
         body = f"""
@@ -38,6 +63,7 @@ class UR5eRTDECommander:
         self._set_gripper(width_mm, force, settle_s=2.0, blocking=blocking)
 
     def disconnect(self):
+        self.rtde_receive.disconnect()
         self.rtde.disconnect()
 
     def build_intermediate_pose(self, pose):
@@ -122,3 +148,11 @@ class xArmCommander:
         self.move_to_pose(pose)
         self.open_gripper()
         self.move_to_pose(intermediate_pose)
+
+if __name__ == "__main__":
+    ur5e_commander = UR5eRTDECommander()
+
+    try:
+        ur5e_commander.move_tcp_z(-100.0)
+    finally:
+        ur5e_commander.disconnect()

@@ -64,8 +64,9 @@ from moveit_msgs.srv import GetCartesianPath
 import tf2_ros
 
 try:
-    from control_msgs.action import GripperCommand
+    from control_msgs.action import FollowJointTrajectory, GripperCommand
 except Exception:
+    FollowJointTrajectory = None
     GripperCommand = None
 
 try:
@@ -106,6 +107,7 @@ ROBOTS = {
         'gripper_joint_candidates': ['xarm6_drive_joint', 'drive_joint'],
         'gripper_controller_topic': '/xarm6_xarm_gripper_traj_controller/joint_trajectory',
         'gripper_controller_topics': [
+            '/xarm6/xarm_gripper_traj_controller/joint_trajectory',
             '/xarm6_xarm_gripper_traj_controller/joint_trajectory',
             '/xarm_gripper_traj_controller/joint_trajectory',
         ],
@@ -172,8 +174,14 @@ HOME_PRELIFT_VELOCITY_SCALE = 1.8
 
 
 class KeyboardTeleop(Node):
-    def __init__(self, cartesian_max_step_mm=30.0, joint_duration_sec=0.25, gripper_duration_sec=0.20):
-        super().__init__('keyboard_teleop')
+    def __init__(
+        self,
+        cartesian_max_step_mm=30.0,
+        joint_duration_sec=0.25,
+        gripper_duration_sec=0.20,
+        node_name='keyboard_teleop',
+    ):
+        super().__init__(str(node_name or 'keyboard_teleop'))
         self.cb_group = ReentrantCallbackGroup()
         self.joint_positions = {}
         self.joint_state_map = {}
@@ -284,7 +292,12 @@ class KeyboardTeleop(Node):
         return pubs[first_topic], first_topic
 
     def _candidate_service_names(self, suffix):
-        names = [f'/xarm/{suffix}', f'/{suffix}']
+        names = [
+            f'/xarm6/xarm/{suffix}',
+            f'/xarm6/{suffix}',
+            f'/xarm/{suffix}',
+            f'/{suffix}',
+        ]
         try:
             for name, _types in self.get_service_names_and_types():
                 if name == f'/{suffix}' or name.endswith(f'/{suffix}'):
@@ -338,7 +351,21 @@ class KeyboardTeleop(Node):
         return response, None
 
     def _candidate_action_names(self, suffix):
-        names = [f'/{suffix}', suffix]
+        if str(suffix) == 'xarm_gripper/gripper_action':
+            names = [
+                '/xarm6/xarm_gripper/gripper_action',
+                '/xarm/xarm_gripper/gripper_action',
+                '/xarm_gripper/gripper_action',
+                'xarm_gripper/gripper_action',
+            ]
+        elif str(suffix) == 'ur5e_rg2_gripper_traj_controller/follow_joint_trajectory':
+            names = [
+                '/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory',
+                'ur5e_rg2_gripper_traj_controller/follow_joint_trajectory',
+                '/rg2_gripper_traj_controller/follow_joint_trajectory',
+            ]
+        else:
+            names = [f'/{suffix}', suffix]
         try:
             for name, _types in self.get_action_names_and_types():
                 if name == f'/{suffix}' or name == suffix or name.endswith(f'/{suffix}'):
@@ -481,6 +508,48 @@ class KeyboardTeleop(Node):
             reached = bool(getattr(result, 'reached_goal', True))
             if stalled and not reached:
                 return False, f'{action_name}: stalled before reaching goal'
+        return True, f'{action_name}: goal accepted'
+
+    def _move_ur5e_rg2_gripper_action(self, joint_name, target_joint, duration_sec):
+        if FollowJointTrajectory is None:
+            return False, 'FollowJointTrajectory action type unavailable'
+        action_name, client = self._get_action_client(
+            FollowJointTrajectory,
+            'ur5e_rg2_gripper_traj_controller/follow_joint_trajectory',
+            wait_timeout_sec=0.1,
+        )
+        if client is None:
+            return False, 'UR5e RG2 action server not available'
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = [joint_name]
+        point = JointTrajectoryPoint()
+        point.positions = [float(target_joint)]
+        point.time_from_start = self._duration_msg(duration_sec)
+        goal.trajectory.points = [point]
+
+        try:
+            send_future = client.send_goal_async(goal)
+        except Exception as exc:
+            return False, f'{action_name}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=1.5):
+            return False, f'{action_name}: send timeout'
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{action_name}: goal rejected'
+
+        result_future = goal_handle.get_result_async()
+        if self._wait_future(result_future, timeout=max(0.5, duration_sec + 0.8)):
+            wrapped = result_future.result()
+            result = getattr(wrapped, 'result', None)
+            error_code = int(getattr(result, 'error_code', 0))
+            if error_code not in (0,):
+                error_string = str(getattr(result, 'error_string', '')).strip()
+                detail = f' error_code={error_code}'
+                if error_string:
+                    detail += f' {error_string}'
+                return False, f'{action_name}:{detail}'
         return True, f'{action_name}: goal accepted'
 
     def _joint_state_cb(self, msg):
@@ -776,13 +845,20 @@ class KeyboardTeleop(Node):
         velocity_scale = self._normalize_velocity_scale(velocity_scale)
         duration = max(0.05, self.gripper_duration_sec / velocity_scale)
 
-        # On xArm hardware, match MoveIt behavior via gripper action first.
+        # On xArm hardware, the service path is repeatable for rapid teleop commands.
         if robot == 'xarm6':
+            ok, msg = self._move_xarm_gripper_service(target, velocity_scale=velocity_scale)
+            if ok:
+                self.joint_state_map[joint_name] = target
+                return True, f'{joint_name}={target:.3f}'
+            service_error = msg
             ok, msg = self._move_xarm_gripper_action(target)
             if ok:
                 self.joint_state_map[joint_name] = target
                 return True, f'{joint_name}={target:.3f}'
-            ok, msg = self._move_xarm_gripper_service(target, velocity_scale=velocity_scale)
+            errors = [service_error, msg]
+        elif robot == 'ur5e':
+            ok, msg = self._move_ur5e_rg2_gripper_action(joint_name, target, duration)
             if ok:
                 self.joint_state_map[joint_name] = target
                 return True, f'{joint_name}={target:.3f}'

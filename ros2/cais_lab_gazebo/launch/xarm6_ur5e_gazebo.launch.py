@@ -13,6 +13,7 @@ TF prefixes:
 
 import os
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -43,6 +44,27 @@ RG2_FINGER_WIDTH_EFFORT = '18'
 RG2_FINGER_WIDTH_VELOCITY = '0.40'
 XARM_GRIPPER_EFFORT = '12'
 XARM_GRIPPER_VELOCITY = '0.60'
+ASSEMBLY_PART_MODELS = {
+    'table_xarm6',
+    'table_ur5e',
+    'gear_small',
+    'rect_pin_small',
+    'circ_pin_small',
+    'gear_medium',
+    'rect_pin_medium',
+    'circ_pin_medium',
+    'gear_large',
+    'rect_pin_large',
+    'circ_pin_large',
+    'assembly_board_v1',
+    'prusa_mk3',
+    'prusa_mk4_1',
+    'prusa_mk4_2',
+    'cam_mk3',
+    'cam_mk4_1',
+    'cam_mk4_2',
+    'cam_assembly',
+}
 
 
 def _strip_gazebo_ros2_control_plugin(root):
@@ -271,8 +293,29 @@ def _launch_arg_enabled(context, name, default='false'):
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _world_without_assembly_parts(world_path):
+    tree = ET.parse(world_path)
+    root = tree.getroot()
+    for world in root.findall('world'):
+        for model in list(world.findall('model')):
+            if model.get('name') in ASSEMBLY_PART_MODELS:
+                world.remove(model)
+    tmp = tempfile.NamedTemporaryFile(
+        mode='w',
+        encoding='utf-8',
+        prefix='cais_dual_passive_no_assembly_parts_',
+        suffix='.world',
+        delete=False,
+    )
+    with tmp:
+        tree.write(tmp, encoding='unicode', xml_declaration=True)
+    return tmp.name
+
+
 def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
+    passive = _launch_arg_enabled(context, 'passive')
+    include_assembly_parts = _launch_arg_enabled(context, 'include_assembly_parts', default='true')
 
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
     append_gazebo_plugin_path = None
@@ -291,9 +334,8 @@ def launch_setup(context, *args, **kwargs):
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
     world_name = 'table_fast.world' if _launch_arg_enabled(context, 'fast_sim') else 'table.world'
-    gazebo_world = PathJoinSubstitution(
-        [FindPackageShare('xarm_gazebo'), 'worlds', world_name]
-    )
+    gazebo_world_path = Path(get_package_share_directory('xarm_gazebo')) / 'worlds' / world_name
+    gazebo_world = str(gazebo_world_path) if include_assembly_parts else _world_without_assembly_parts(gazebo_world_path)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'])
@@ -563,9 +605,9 @@ def launch_setup(context, *args, **kwargs):
         Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
-    post_controller_actions = [auto_link_attacher]
+    post_controller_actions = [] if passive else [auto_link_attacher]
     perception_log = None
-    if perception_script:
+    if perception_script and not passive:
         post_controller_actions.append(
             ExecuteProcess(
                 cmd=[
@@ -608,14 +650,17 @@ def launch_setup(context, *args, **kwargs):
                 on_exit=[controller_spawner],
             )
         ),
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=controller_spawner,
-                on_exit=post_controller_actions,
-            )
-        ),
     ]
-    if perception_log is not None:
+    if post_controller_actions:
+        launch_actions.append(
+            RegisterEventHandler(
+                event_handler=OnProcessExit(
+                    target_action=controller_spawner,
+                    on_exit=post_controller_actions,
+                )
+            )
+        )
+    if perception_log is not None and not passive:
         launch_actions.append(perception_log)
     if append_gazebo_plugin_path is not None:
         launch_actions.insert(0, append_gazebo_plugin_path)
@@ -633,6 +678,16 @@ def generate_launch_description():
             'fast_sim',
             default_value='false',
             description='Use the fast Gazebo world timing profile.',
+        ),
+        DeclareLaunchArgument(
+            'passive',
+            default_value='false',
+            description='Spawn Gazebo as a passive mirror without perception or auto_link_attacher.',
+        ),
+        DeclareLaunchArgument(
+            'include_assembly_parts',
+            default_value='true',
+            description='Spawn assembly board, gray/black boards, fixtures, and loose parts in the dual Gazebo world.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

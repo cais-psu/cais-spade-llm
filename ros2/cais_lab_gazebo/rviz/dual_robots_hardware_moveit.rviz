@@ -6,37 +6,20 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
-    - Class: rviz_default_plugins/RobotModel
-      Description Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot_description
-      Enabled: true
-      Name: RobotModel
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot_description
-      Update Interval: 0
-      Visual Enabled: true
     - Class: moveit_rviz_plugin/MotionPlanning
-      Acceleration_Scaling_Factor: 1
+      Acceleration_Scaling_Factor: 0.40
       Enabled: true
       Name: MotionPlanning
       Move Group Namespace: ""
       Planning Scene Topic: /monitored_planning_scene
       Robot Description: robot_description
-      Velocity_Scaling_Factor: 1
+      Velocity_Scaling_Factor: 0.40
       Scene Geometry:
         Scene Alpha: 0.8999999761581421
       Scene Robot:
-        Robot Alpha: 0.5
+        Robot Alpha: 1
       Planning Request:
-        Planning Group: xarm6_xarm6
+        Planning Group: dual_robots
         Interactive Marker Size: 0.2
         Query Start State: false
         Query Goal State: true

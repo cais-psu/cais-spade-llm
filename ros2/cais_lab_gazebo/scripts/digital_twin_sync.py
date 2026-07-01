@@ -1,0 +1,3806 @@
+#!/usr/bin/env python3.10
+"""Synched gazebo + hardware digital twin helper."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import multiprocessing as mp
+import os
+import queue
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+
+ROBOTS: dict[str, dict[str, Any]] = {
+    "xarm6": {
+        "prefix": "xarm6_",
+        "gazebo_joints": [
+            "xarm6_joint1",
+            "xarm6_joint2",
+            "xarm6_joint3",
+            "xarm6_joint4",
+            "xarm6_joint5",
+            "xarm6_joint6",
+        ],
+        "hardware_joint_candidates": [
+            ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
+            [
+                "xarm6_joint1",
+                "xarm6_joint2",
+                "xarm6_joint3",
+                "xarm6_joint4",
+                "xarm6_joint5",
+                "xarm6_joint6",
+            ],
+        ],
+        "hardware_joint_state_topics": [
+            "/joint_states",
+            "/xarm/joint_states",
+            "/xarm6/joint_states",
+            "/xarm6/xarm/joint_states",
+            "/xarm6/xarm_gripper/joint_states",
+        ],
+        "trajectory_topics": [
+            "/xarm6/xarm6_traj_controller/joint_trajectory",
+            "/xarm6_traj_controller/joint_trajectory",
+            "/xarm_traj_controller/joint_trajectory",
+            "/xarm6_xarm6_traj_controller/joint_trajectory",
+        ],
+        "hardware_trajectory_action": "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+        # Controllers spawned by the passive/mirror gazebo launch (prefix is applied
+        # twice: launch prefix 'xarm6_' + controller name 'xarm6_traj_controller').
+        "gazebo_trajectory_topics": [
+            "/xarm6_xarm6_traj_controller/joint_trajectory",
+            "/xarm6_traj_controller/joint_trajectory",
+        ],
+        # Optional 1-DOF gripper mirror. The xarm gripper trajectory controller drives
+        # the single 'drive_joint'; the finger joints follow via mimic. The hardware
+        # position is resolved with the same prefix/endswith lookup as the arm joints.
+        "gripper": {
+            "gazebo_joint": "xarm6_drive_joint",
+            "gazebo_trajectory_topics": [
+                "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
+            ],
+            "hardware_service": "set_gripper_position",
+            "hardware_action": "/xarm6/xarm_gripper/gripper_action",
+            "open_position": 0.0,
+            "close_position": 0.85,
+            "open_pulse": 850.0,
+            "close_pulse": 0.0,
+        },
+    },
+    "ur5e": {
+        "prefix": "ur5e_",
+        "gazebo_joints": [
+            "ur5e_shoulder_pan_joint",
+            "ur5e_shoulder_lift_joint",
+            "ur5e_elbow_joint",
+            "ur5e_wrist_1_joint",
+            "ur5e_wrist_2_joint",
+            "ur5e_wrist_3_joint",
+        ],
+        "hardware_joint_candidates": [
+            [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+            [
+                "ur5e_shoulder_pan_joint",
+                "ur5e_shoulder_lift_joint",
+                "ur5e_elbow_joint",
+                "ur5e_wrist_1_joint",
+                "ur5e_wrist_2_joint",
+                "ur5e_wrist_3_joint",
+            ],
+        ],
+        "hardware_joint_state_topics": [
+            "/joint_states",
+        ],
+        "trajectory_topics": [
+            "/scaled_joint_trajectory_controller/joint_trajectory",
+            "/joint_trajectory_controller/joint_trajectory",
+            "/ur5e_joint_trajectory_controller/joint_trajectory",
+        ],
+        "hardware_trajectory_action": "/scaled_joint_trajectory_controller/follow_joint_trajectory",
+        # Controller spawned by the passive/mirror gazebo launch.
+        "gazebo_trajectory_topics": [
+            "/ur5e_joint_trajectory_controller/joint_trajectory",
+        ],
+        "gripper": {
+            "gazebo_joint": "ur5e_rg2_finger_width",
+            "gazebo_trajectory_topics": [
+                "/ur5e_rg2_gripper_traj_controller/joint_trajectory",
+            ],
+            "hardware_action": "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+        },
+    },
+}
+
+# Re-target period for streamed mirror trajectory points (seconds). Small enough to
+# track hardware closely, large enough to give the JTC a smooth interpolation window.
+MIRROR_POINT_TIME_SEC = 0.1
+NO_MATCHING_JOINT_STATE_REPORT_SEC = 5.0
+HARDWARE_SNAPSHOT_TIMEOUT_SEC = 20.0
+
+# Replay safety: the approach from the robot's current pose to the first recorded
+# waypoint is time-scaled so no joint exceeds this speed (deg/s). This replaces a
+# hard first-waypoint distance block, which made authored (far) poses un-replayable.
+MAX_REPLAY_JOINT_VEL_DEG_S = 25.0
+UR5E_REPLAY_MAX_JOINT_VEL_DEG_S = 10.0
+INITIALIZE_GAZEBO_TOLERANCE_RAD = 0.02
+INITIALIZE_GAZEBO_ATTEMPTS = 5
+HARDWARE_TRAJECTORY_START_DELAY_SEC = 0.2
+HARDWARE_TRAJECTORY_CURRENT_POINT_SEC = 0.0
+TEACH_REPLAY_OBSERVED_COMPLETION_TOLERANCE_RAD = 0.02
+TEACH_REPLAY_OBSERVED_COMPLETION_TIMEOUT_SEC = 3.0
+TEACH_REPLAY_PREPARED_START_DRIFT_TOLERANCE_RAD = 0.05
+TEACH_REPLAY_PREPARED_START_DRIFT_TIMEOUT_SEC = 3.0
+XARM6_TEACH_REPLAY_FINAL_HOLD_SEC = 0.5
+XARM6_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC = 2.0
+XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC = 12.0
+MOVE_GROUP_ACTION_NAME = "/move_action"
+UR5E_HARDWARE_MOVE_GROUP = "ur_manipulator"
+MOVE_GROUP_JOINT_TOLERANCE_RAD = 0.001
+MOVE_GROUP_ALLOWED_PLANNING_TIME_SEC = 5.0
+MOVE_GROUP_PLAN_TIMEOUT_SEC = 15.0
+UR5E_TEACH_REPLAY_TIME_SCALE = 1.5
+UR5E_TEACH_REPLAY_FINAL_HOLD_SEC = 0.5
+UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC = 0.02
+UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC = 20.0
+UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC = 2.0
+UR5E_FINAL_ERROR_SNAPSHOT_TIMEOUT_SEC = 2.0
+PREPARED_REPLAY_VERSION = 3
+
+
+def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = dict(payload)
+    body.setdefault("updated_at", time.time())
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(body, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _stable_json_hash(payload: dict[str, Any]) -> str:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _recording_hash(recording: dict[str, Any]) -> str:
+    return _stable_json_hash(recording)
+
+
+def _prepared_replay_metadata(args: argparse.Namespace, recording: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": PREPARED_REPLAY_VERSION,
+        "recording_hash": _recording_hash(recording),
+        "replay_target": str(args.replay_target or "hardware"),
+        "gazebo_domain_id": int(args.gazebo_domain_id),
+        "hardware_domain_id": int(args.hardware_domain_id),
+        "waypoint_count": len(list(recording.get("waypoints") or [])),
+        "robot": str(recording.get("robot") or ""),
+        "recording_type": str(recording.get("recording_type") or ""),
+    }
+
+
+def _prepared_replay_validation_error(
+    args: argparse.Namespace,
+    recording: dict[str, Any],
+    prepared: dict[str, Any],
+) -> str:
+    metadata = dict(prepared.get("metadata") or {})
+    expected = _prepared_replay_metadata(args, recording)
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            return f"prepared replay stale: {key} changed."
+    if not isinstance(prepared.get("plans"), dict):
+        return "prepared replay stale: plans missing."
+    if set(dict(prepared.get("plans") or {}).keys()) != {"xarm6", "ur5e"}:
+        return "prepared replay stale: paired plans missing."
+    return ""
+
+
+def _prepared_start_drift_error(
+    args: argparse.Namespace,
+    prepared: dict[str, Any],
+) -> str:
+    plans = dict(prepared.get("plans") or {})
+    for robot, plan_raw in plans.items():
+        robot_key = str(robot)
+        plan = dict(plan_raw or {})
+        joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
+        start_positions = [float(value) for value in list(plan.get("hardware_positions") or [])]
+        if not joint_names or not start_positions:
+            continue
+        snapshot_result = _read_snapshot(
+            int(args.hardware_domain_id),
+            robot_key,
+            "hardware",
+            TEACH_REPLAY_PREPARED_START_DRIFT_TIMEOUT_SEC,
+        )
+        if not snapshot_result.get("success"):
+            return f"prepared replay stale: {robot_key} hardware start pose unavailable: {snapshot_result.get('message') or 'snapshot failed'}"
+        snapshot = dict(snapshot_result.get("snapshot") or {})
+        observed_positions, missing = _positions_for_joint_names(snapshot, robot_key, joint_names)
+        if missing:
+            return f"prepared replay stale: {robot_key} hardware start pose missing joints: {', '.join(missing)}"
+        if len(observed_positions) != len(start_positions):
+            return f"prepared replay stale: {robot_key} hardware start pose joint count changed."
+        max_delta_rad = max(
+            (_angular_delta(actual, expected) for actual, expected in zip(observed_positions, start_positions)),
+            default=0.0,
+        )
+        if max_delta_rad > TEACH_REPLAY_PREPARED_START_DRIFT_TOLERANCE_RAD:
+            return (
+                f"prepared replay stale: {robot_key} hardware moved "
+                f"{math.degrees(max_delta_rad):.3f} deg from prepared start pose "
+                f"(ceiling {math.degrees(TEACH_REPLAY_PREPARED_START_DRIFT_TOLERANCE_RAD):.3f} deg)."
+            )
+    return ""
+
+
+def _write_status(path: Path, **payload: Any) -> None:
+    _atomic_json_write(path, dict(payload))
+
+
+def _write_replay_status(args: argparse.Namespace, *, state: str, message: str, last_error: str = "") -> None:
+    status_file = str(getattr(args, "status_file", "") or "").strip()
+    if not status_file:
+        return
+    direction_file = Path(str(getattr(args, "direction_file", "") or ""))
+    direction = _direction(direction_file) if str(direction_file) else "gazebo -> hardware"
+    _write_status(
+        Path(status_file),
+        target=str(getattr(args, "target", "") or ""),
+        state=state,
+        direction=direction,
+        message=message,
+        last_error=last_error,
+    )
+
+
+def _direction(direction_file: Path) -> str:
+    value = str(_read_json(direction_file).get("direction") or "hardware -> gazebo").strip()
+    if value not in {"hardware -> gazebo", "gazebo -> hardware"}:
+        return "hardware -> gazebo"
+    return value
+
+
+def _strip_prefix(robot: str, joint_name: str) -> str:
+    prefix = str(ROBOTS[robot]["prefix"])
+    name = str(joint_name)
+    return name[len(prefix):] if name.startswith(prefix) else name
+
+
+def _joint_lookup(snapshot: dict[str, float], robot: str, gazebo_joint: str) -> tuple[str | None, float | None]:
+    candidates = [gazebo_joint, _strip_prefix(robot, gazebo_joint)]
+    for candidate in candidates:
+        if candidate in snapshot:
+            return candidate, float(snapshot[candidate])
+    suffix = _strip_prefix(robot, gazebo_joint)
+    for name, value in snapshot.items():
+        if str(name).endswith(suffix):
+            return str(name), float(value)
+    return None, None
+
+
+def _resolve_gazebo_positions(
+    snapshot: dict[str, float],
+    robot: str,
+) -> tuple[list[str], list[float], list[str]]:
+    gazebo_joints = list(ROBOTS[robot]["gazebo_joints"])
+    positions: list[float] = []
+    missing: list[str] = []
+    for gazebo_joint in gazebo_joints:
+        _source_name, value = _joint_lookup(snapshot, robot, gazebo_joint)
+        if value is None:
+            missing.append(gazebo_joint)
+        else:
+            positions.append(float(value))
+    if missing:
+        return gazebo_joints, [], missing
+    return gazebo_joints, positions, []
+
+
+def _gazebo_joint_match_count(snapshot: dict[str, float], robot: str) -> int:
+    count = 0
+    for gazebo_joint in ROBOTS[robot]["gazebo_joints"]:
+        _source_name, value = _joint_lookup(snapshot, robot, gazebo_joint)
+        if value is not None:
+            count += 1
+    return count
+
+
+def _hardware_joint_match_count(snapshot: dict[str, float], robot: str) -> int:
+    best_count = 0
+    for candidate_group in ROBOTS[robot]["hardware_joint_candidates"]:
+        best_count = max(best_count, sum(1 for name in candidate_group if name in snapshot))
+    best_count = max(best_count, _gazebo_joint_match_count(snapshot, robot))
+    return best_count
+
+
+def _joint_match_count(snapshot: dict[str, float], robot: str, source: str) -> int:
+    if source == "gazebo":
+        return _gazebo_joint_match_count(snapshot, robot)
+    return _hardware_joint_match_count(snapshot, robot)
+
+
+def _joint_state_topics(robot: str, source: str) -> list[str]:
+    if source == "hardware":
+        topics = ROBOTS[robot].get("hardware_joint_state_topics") or ["/joint_states"]
+        return [str(topic) for topic in topics if str(topic or "").strip()]
+    return ["/joint_states"]
+
+
+def _resolve_gripper(snapshot: dict[str, float], robot: str) -> tuple[str | None, float | None]:
+    """Resolve the gazebo gripper joint name and its hardware position, if configured."""
+    gripper = ROBOTS[robot].get("gripper")
+    if not gripper:
+        return None, None
+    gazebo_joint = str(gripper.get("gazebo_joint") or "").strip()
+    if not gazebo_joint:
+        return None, None
+    _source_name, value = _joint_lookup(snapshot, robot, gazebo_joint)
+    if value is None:
+        return None, None
+    return gazebo_joint, float(value)
+
+
+def _resolve_hardware_positions(
+    snapshot: dict[str, float],
+    robot: str,
+) -> tuple[list[str], list[float], list[str]]:
+    for candidate_group in ROBOTS[robot]["hardware_joint_candidates"]:
+        if all(name in snapshot for name in candidate_group):
+            return list(candidate_group), [float(snapshot[name]) for name in candidate_group], []
+
+    joint_names: list[str] = []
+    positions: list[float] = []
+    missing: list[str] = []
+    for gazebo_joint in ROBOTS[robot]["gazebo_joints"]:
+        source_name, value = _joint_lookup(snapshot, robot, gazebo_joint)
+        if source_name is None or value is None:
+            missing.append(_strip_prefix(robot, gazebo_joint))
+        else:
+            joint_names.append(source_name)
+            positions.append(float(value))
+    return joint_names, positions, missing
+
+
+def _angular_delta(a: float, b: float) -> float:
+    return abs((float(a) - float(b) + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _positions_for_joint_names(
+    snapshot: dict[str, float],
+    robot: str,
+    joint_names: list[str],
+) -> tuple[list[float], list[str]]:
+    positions: list[float] = []
+    missing: list[str] = []
+    for joint_name in joint_names:
+        name = str(joint_name)
+        if name in snapshot:
+            positions.append(float(snapshot[name]))
+        else:
+            missing.append(name)
+    if not missing:
+        return positions, []
+
+    resolved_names, resolved_positions, resolved_missing = _resolve_hardware_positions(
+        snapshot,
+        robot,
+    )
+    if resolved_missing:
+        return [], missing
+    normalized_resolved = [_strip_prefix(robot, name) for name in resolved_names]
+    normalized_requested = [_strip_prefix(robot, name) for name in joint_names]
+    if normalized_resolved == normalized_requested:
+        return list(resolved_positions), []
+    return [], missing
+
+
+def _observed_completion_from_snapshot(
+    snapshot: dict[str, float],
+    robot: str,
+    joint_names: list[str],
+    target_positions: list[float],
+    tolerance_rad: float,
+) -> dict[str, Any]:
+    positions, missing = _positions_for_joint_names(snapshot, robot, joint_names)
+    if missing:
+        return {
+            "success": False,
+            "message": f"missing observed hardware joints: {', '.join(missing)}",
+            "missing": missing,
+            "seen_names": sorted(snapshot),
+        }
+    if len(positions) != len(target_positions):
+        return {
+            "success": False,
+            "message": "observed hardware joint count does not match target.",
+        }
+    deltas = [
+        _angular_delta(actual, target)
+        for actual, target in zip(positions, target_positions)
+    ]
+    max_delta_rad = max(deltas) if deltas else 0.0
+    max_delta_deg = math.degrees(max_delta_rad)
+    success = max_delta_rad <= tolerance_rad
+    return {
+        "success": success,
+        "message": (
+            f"target reached by hardware /joint_states; final_joint_error_deg={max_delta_deg:.3f}"
+            if success
+            else (
+                "target not reached by hardware /joint_states; "
+                f"final_joint_error_deg={max_delta_deg:.3f}; "
+                f"tolerance_deg={math.degrees(tolerance_rad):.3f}"
+            )
+        ),
+        "final_joint_error_rad": max_delta_rad,
+        "final_joint_error_deg": max_delta_deg,
+        "tolerance_rad": tolerance_rad,
+        "tolerance_deg": math.degrees(tolerance_rad),
+    }
+
+
+def _observed_completion_worker(
+    domain_id: int,
+    robot: str,
+    joint_names: list[str],
+    target_positions: list[float],
+    tolerance_rad: float,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from sensor_msgs.msg import JointState
+    from rclpy.node import Node
+
+    class ObservedCompletionNode(Node):
+        def __init__(self) -> None:
+            super().__init__(f"digital_twin_{robot}_observed_completion")
+            self.result: dict[str, Any] | None = None
+            self.best_result: dict[str, Any] | None = None
+            self._subs = [
+                self.create_subscription(JointState, topic, self._on_joint_state, 10)
+                for topic in _joint_state_topics(robot, "hardware")
+            ]
+
+        def _on_joint_state(self, msg: Any) -> None:
+            snapshot = _snapshot_from_joint_state_msg(msg)
+            result = _observed_completion_from_snapshot(
+                snapshot,
+                robot,
+                joint_names,
+                target_positions,
+                tolerance_rad,
+            )
+            if "final_joint_error_rad" in result:
+                if (
+                    self.best_result is None
+                    or float(result["final_joint_error_rad"])
+                    < float(self.best_result.get("final_joint_error_rad") or math.inf)
+                ):
+                    self.best_result = dict(result)
+            if result.get("success"):
+                self.result = dict(result)
+
+    node = None
+    try:
+        node = ObservedCompletionNode()
+        deadline = time.time() + max(0.1, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline and node.result is None:
+            rclpy.spin_once(node, timeout_sec=0.05)
+        if node.result is not None:
+            result_queue.put(node.result)
+            return
+        if node.best_result is not None:
+            result_queue.put(node.best_result)
+            return
+        result_queue.put(
+            {
+                "success": False,
+                "message": "observed hardware completion timed out before matching joints arrived.",
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"observed hardware completion failed: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_observed_completion(
+    domain_id: int,
+    robot: str,
+    joint_names: list[str],
+    target_positions: list[float],
+    *,
+    tolerance_rad: float = TEACH_REPLAY_OBSERVED_COMPLETION_TOLERANCE_RAD,
+    timeout_sec: float = TEACH_REPLAY_OBSERVED_COMPLETION_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_observed_completion_worker,
+        args=(
+            domain_id,
+            robot,
+            list(joint_names),
+            [float(value) for value in target_positions],
+            float(tolerance_rad),
+            float(timeout_sec),
+            result_queue,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(0.5, float(timeout_sec)) + 1.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "observed hardware completion worker timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "observed hardware completion returned no data."}
+
+
+def _apply_observed_completion_fallback(
+    result: dict[str, Any],
+    *,
+    domain_id: int,
+    robot: str,
+    joint_names: list[str],
+    target_positions: list[float],
+) -> dict[str, Any]:
+    action_result = dict(result)
+    wrapped = dict(result)
+    wrapped["action_result"] = action_result
+    if result.get("success"):
+        wrapped["observed_completion"] = {
+            "success": True,
+            "message": "action succeeded; observed completion fallback not required.",
+        }
+        return wrapped
+
+    observed = _wait_observed_completion(
+        domain_id,
+        robot,
+        joint_names,
+        target_positions,
+    )
+    wrapped["observed_completion"] = observed
+    observed_message = str(observed.get("message") or "")
+    wrapped["message"] = (
+        f"{str(result.get('message') or '').rstrip('. ')}; "
+        f"observed_completion: {observed_message}."
+    )
+    if observed.get("success"):
+        wrapped["success"] = True
+    return wrapped
+
+
+def _init_ros_domain(domain_id: int):
+    os.environ["ROS_DOMAIN_ID"] = str(int(domain_id))
+    import rclpy
+
+    rclpy.init()
+    return rclpy
+
+
+def _snapshot_from_joint_state_msg(msg: Any) -> dict[str, float]:
+    return {str(name): float(pos) for name, pos in zip(msg.name, msg.position)}
+
+
+def _hardware_update_from_snapshot(
+    snapshot: dict[str, float],
+    robot: str,
+    *,
+    remembered_gripper_joint: str | None = None,
+    remembered_gripper_position: float | None = None,
+) -> tuple[dict[str, Any], str | None, float | None]:
+    gripper_joint, gripper_position = _resolve_gripper(snapshot, robot)
+    if gripper_joint is None:
+        gripper_joint = remembered_gripper_joint
+        gripper_position = remembered_gripper_position
+
+    _hardware_names, positions, missing = _resolve_hardware_positions(snapshot, robot)
+    if missing:
+        matched_count = _hardware_joint_match_count(snapshot, robot)
+        if matched_count == 0:
+            return (
+                {
+                    "diagnostic": "no_matching_hardware_joints",
+                    "seen_names": sorted(snapshot),
+                    "source_stamp": time.time(),
+                },
+                gripper_joint,
+                gripper_position,
+            )
+        return (
+            {
+                "diagnostic": "missing_hardware_joints",
+                "missing": list(missing),
+                "seen_names": sorted(snapshot),
+                "source_stamp": time.time(),
+            },
+            gripper_joint,
+            gripper_position,
+        )
+
+    item: dict[str, Any] = {
+        "joint_names": list(ROBOTS[robot]["gazebo_joints"]),
+        "positions": positions,
+        "source_stamp": time.time(),
+    }
+    if gripper_joint is not None and gripper_position is not None:
+        item["gripper_joint"] = gripper_joint
+        item["gripper_position"] = float(gripper_position)
+    return item, gripper_joint, gripper_position
+
+
+def _joint_state_snapshot_worker(
+    domain_id: int,
+    robot: str,
+    source: str,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from sensor_msgs.msg import JointState
+
+    class SnapshotNode(Node):
+        def __init__(self) -> None:
+            super().__init__(f"digital_twin_{source}_snapshot")
+            self.snapshot: dict[str, float] | None = None
+            self.accumulated_snapshot: dict[str, float] = {}
+            self.missing: list[str] = []
+            self.seen_names: list[str] = []
+            self.unmatched_seen_names: list[str] = []
+            for topic in _joint_state_topics(robot, source):
+                self.create_subscription(JointState, topic, self._cb, 10)
+
+        def _cb(self, msg: JointState) -> None:
+            snapshot = _snapshot_from_joint_state_msg(msg)
+            matched_count = _joint_match_count(snapshot, robot, source)
+            if matched_count == 0:
+                seen = set(self.unmatched_seen_names)
+                seen.update(snapshot)
+                self.unmatched_seen_names = sorted(seen)
+                return
+
+            self.accumulated_snapshot.update(snapshot)
+            if source == "gazebo":
+                _names, _positions, missing = _resolve_gazebo_positions(
+                    self.accumulated_snapshot,
+                    robot,
+                )
+            else:
+                _names, _positions, missing = _resolve_hardware_positions(
+                    self.accumulated_snapshot,
+                    robot,
+                )
+            if not missing:
+                self.snapshot = dict(self.accumulated_snapshot)
+                return
+
+            self.missing = list(missing)
+            self.seen_names = sorted(self.accumulated_snapshot)
+
+    node = SnapshotNode()
+    deadline = time.time() + max(0.5, float(timeout_sec))
+    try:
+        while rclpy.ok() and time.time() < deadline and node.snapshot is None:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if node.snapshot is None:
+            missing = getattr(node, "missing", [])
+            seen_names = getattr(node, "seen_names", [])
+            if missing:
+                message = (
+                    f"{source} /joint_states missing required joints."
+                    f" Missing {source} joints for {robot}: {', '.join(missing)}."
+                    f" Seen joints: {', '.join(seen_names)}."
+                )
+            elif getattr(node, "unmatched_seen_names", []):
+                message = (
+                    f"{source} /joint_states has no {robot} arm joints yet."
+                    f" Seen joints: {', '.join(node.unmatched_seen_names)}."
+                )
+            else:
+                message = f"{source} /joint_states has no {robot} arm joints yet."
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": message,
+                }
+            )
+        else:
+            result_queue.put(
+                {
+                    "success": True,
+                    "snapshot": node.snapshot,
+                    "received_at": time.time(),
+                }
+            )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": str(exc)})
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _hardware_joint_state_worker(domain_id: int, robot: str, updates: mp.Queue) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from sensor_msgs.msg import JointState
+
+    def _put_latest(item: dict[str, Any]) -> None:
+        try:
+            updates.put_nowait(item)
+        except queue.Full:
+            try:
+                updates.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                updates.put_nowait(item)
+            except queue.Full:
+                pass
+
+    class HardwareNode(Node):
+        def __init__(self) -> None:
+            super().__init__("digital_twin_hardware_joint_state")
+            for topic in _joint_state_topics(robot, "hardware"):
+                self.create_subscription(JointState, topic, self._cb, 10)
+            # The gripper may be published in a separate /joint_states message from the
+            # arm; remember the latest value so it can ride along with each arm update.
+            self._gripper_joint: str | None = None
+            self._gripper_position: float | None = None
+            self._last_missing_report_ts = 0.0
+            self._last_no_match_report_ts = 0.0
+            self._started_at = time.time()
+            self._seen_arm_match = False
+            self._last_unmatched_seen_names: list[str] = []
+
+        def _cb(self, msg: JointState) -> None:
+            snapshot = _snapshot_from_joint_state_msg(msg)
+            item, self._gripper_joint, self._gripper_position = _hardware_update_from_snapshot(
+                snapshot,
+                robot,
+                remembered_gripper_joint=self._gripper_joint,
+                remembered_gripper_position=self._gripper_position,
+            )
+            diagnostic = str(item.get("diagnostic") or "")
+            if diagnostic:
+                now = time.time()
+                if diagnostic == "no_matching_hardware_joints":
+                    self._last_unmatched_seen_names = list(item.get("seen_names") or [])
+                    if (
+                        not self._seen_arm_match
+                        and now - self._started_at > NO_MATCHING_JOINT_STATE_REPORT_SEC
+                        and now - self._last_no_match_report_ts > NO_MATCHING_JOINT_STATE_REPORT_SEC
+                    ):
+                        _put_latest(
+                            {
+                                "diagnostic": "no_matching_hardware_joints",
+                                "seen_names": list(self._last_unmatched_seen_names),
+                                "source_stamp": now,
+                            }
+                        )
+                        self._last_no_match_report_ts = now
+                    return
+                self._seen_arm_match = True
+                if now - self._last_missing_report_ts > 1.0:
+                    _put_latest(item)
+                    self._last_missing_report_ts = now
+                return
+            self._seen_arm_match = True
+            _put_latest(item)
+
+    node = HardwareNode()
+    try:
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _gazebo_mirror_worker(
+    domain_id: int,
+    robot: str,
+    target: str,
+    status_file: Path,
+    direction_file: Path,
+    updates: mp.Queue,
+) -> None:
+    """Stream hardware joint poses into the passive gazebo trajectory controller.
+
+    Instead of teleporting joints with /gazebo/set_model_configuration (which fights
+    physics and the gazebo_ros2_control plugin), publish a one-point JointTrajectory
+    to the gazebo arm controller each time a new hardware snapshot arrives. The
+    controller actively holds the streamed pose, so the model tracks hardware smoothly.
+    """
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+    gripper_cfg = ROBOTS[robot].get("gripper") or {}
+    gripper_topics = list(gripper_cfg.get("gazebo_trajectory_topics") or [])
+
+    class GazeboMirrorNode(Node):
+        def __init__(self) -> None:
+            super().__init__("digital_twin_gazebo_mirror")
+            self._mirror_publishers = [
+                self.create_publisher(JointTrajectory, topic, 10)
+                for topic in ROBOTS[robot]["gazebo_trajectory_topics"]
+            ]
+            self._gripper_publishers = [
+                self.create_publisher(JointTrajectory, topic, 10)
+                for topic in gripper_topics
+            ]
+
+    node = GazeboMirrorNode()
+
+    def _connected_publishers() -> list[Any]:
+        return [pub for pub in node._mirror_publishers if pub.get_subscription_count() > 0]
+
+    def _make_point_traj(joint_names: list[str], positions: list[float]) -> Any:
+        traj = JointTrajectory()
+        traj.joint_names = list(joint_names)
+        point = JointTrajectoryPoint()
+        point.positions = [float(v) for v in positions]
+        whole = int(MIRROR_POINT_TIME_SEC)
+        point.time_from_start.sec = whole
+        point.time_from_start.nanosec = int((MIRROR_POINT_TIME_SEC - whole) * 1_000_000_000)
+        traj.points = [point]
+        return traj
+
+    try:
+        deadline = time.time() + 30.0
+        connected = _connected_publishers()
+        while rclpy.ok() and time.time() < deadline and not connected:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            connected = _connected_publishers()
+        if not connected:
+            topics = ", ".join(ROBOTS[robot]["gazebo_trajectory_topics"])
+            _write_status(
+                status_file,
+                target=target,
+                state="error",
+                direction=_direction(direction_file),
+                message=f"gazebo trajectory controller not connected for {robot}: {topics}",
+                last_error=f"gazebo trajectory controller not connected for {robot}: {topics}",
+            )
+            return
+
+        latest: dict[str, Any] | None = None
+        last_status_ts = 0.0
+        while rclpy.ok():
+            direction = _direction(direction_file)
+            if direction != "hardware -> gazebo":
+                now = time.time()
+                if now - last_status_ts > 1.0:
+                    _write_status(
+                        status_file,
+                        target=target,
+                        state="paused",
+                        direction=direction,
+                        message="direction is gazebo -> hardware; live hardware -> gazebo mirror is paused.",
+                    )
+                    last_status_ts = now
+                # Drop buffered snapshots so we don't replay a stale pose on resume.
+                try:
+                    while True:
+                        updates.get_nowait()
+                except queue.Empty:
+                    pass
+                latest = None
+                time.sleep(0.1)
+                continue
+
+            try:
+                latest = updates.get(timeout=0.25)
+                while True:
+                    latest = updates.get_nowait()
+            except queue.Empty:
+                pass
+
+            if latest is None:
+                now = time.time()
+                if now - last_status_ts > 1.0:
+                    _write_status(
+                        status_file,
+                        target=target,
+                        state="waiting",
+                        direction=direction,
+                        message="waiting for hardware /joint_states.",
+                    )
+                    last_status_ts = now
+                continue
+
+            if latest.get("diagnostic") == "missing_hardware_joints":
+                missing = ", ".join(str(name) for name in (latest.get("missing") or []))
+                seen_names = ", ".join(str(name) for name in (latest.get("seen_names") or []))
+                message = f"hardware /joint_states missing required {robot} joints: {missing}"
+                if seen_names:
+                    message += f". Seen joints: {seen_names}"
+                _write_status(
+                    status_file,
+                    target=target,
+                    state="waiting",
+                    direction=direction,
+                    message=message,
+                    last_error=message,
+                )
+                last_status_ts = time.time()
+                latest = None
+                continue
+
+            if latest.get("diagnostic") == "no_matching_hardware_joints":
+                seen_names = ", ".join(str(name) for name in (latest.get("seen_names") or []))
+                message = f"hardware /joint_states has no {robot} arm joints yet"
+                if seen_names:
+                    message += f". Seen joints: {seen_names}"
+                _write_status(
+                    status_file,
+                    target=target,
+                    state="waiting",
+                    direction=direction,
+                    message=message,
+                    last_error=message,
+                )
+                last_status_ts = time.time()
+                latest = None
+                continue
+
+            connected = _connected_publishers() or node._mirror_publishers
+
+            arm_traj = _make_point_traj(latest["joint_names"], latest["positions"])
+            for publisher in connected:
+                publisher.publish(arm_traj)
+
+            gripper_joint = latest.get("gripper_joint")
+            gripper_position = latest.get("gripper_position")
+            if node._gripper_publishers and gripper_joint is not None and gripper_position is not None:
+                gripper_traj = _make_point_traj([gripper_joint], [float(gripper_position)])
+                for publisher in node._gripper_publishers:
+                    publisher.publish(gripper_traj)
+
+            rclpy.spin_once(node, timeout_sec=0.0)
+
+            now = time.time()
+            latency_ms = (now - float(latest.get("source_stamp") or now)) * 1000.0
+            if now - last_status_ts > 0.5:
+                _write_status(
+                    status_file,
+                    target=target,
+                    state="mirroring",
+                    direction=direction,
+                    latency_ms=latency_ms,
+                    message="hardware -> gazebo active.",
+                    last_error="",
+                )
+                last_status_ts = now
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_trajectory_worker(
+    domain_id: int,
+    topics: list[str],
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    result_queue: mp.Queue,
+) -> None:
+    """Publish a (possibly multi-point) JointTrajectory to the first connected topic.
+
+    ``points`` is a list of ``{"positions": [...], "time": <sec from start>}`` dicts, so this
+    handles both the one-shot single-pose apply and multi-waypoint recorded replays.
+    """
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+    class TrajectoryNode(Node):
+        def __init__(self) -> None:
+            super().__init__("digital_twin_trajectory_publish")
+            # NB: do not name this `publishers` — rclpy Node has a read-only `publishers`
+            # property and assigning it raises AttributeError (crashes the worker).
+            self._pubs = [
+                self.create_publisher(JointTrajectory, topic, 10)
+                for topic in topics
+            ]
+
+    node = None
+    try:
+        node = TrajectoryNode()
+        deadline = time.time() + 3.0
+        connected: list[Any] = []
+        while time.time() < deadline and not connected:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            connected = [pub for pub in node._pubs if pub.get_subscription_count() > 0]
+        if not connected:
+            result_queue.put({"success": False, "message": "trajectory controller not connected."})
+            return
+
+        traj = JointTrajectory()
+        traj.joint_names = list(joint_names)
+        traj.points = []
+        for entry in points:
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in entry["positions"]]
+            if "velocities" in entry:
+                point.velocities = [float(v) for v in entry["velocities"]]
+            if "accelerations" in entry:
+                point.accelerations = [float(v) for v in entry["accelerations"]]
+            duration_sec = float(entry.get("time") or 0.0)
+            whole = int(duration_sec)
+            point.time_from_start.sec = whole
+            point.time_from_start.nanosec = int((duration_sec - whole) * 1_000_000_000)
+            traj.points.append(point)
+        for _ in range(3):
+            for publisher in connected:
+                publisher.publish(traj)
+            rclpy.spin_once(node, timeout_sec=0.1)
+        result_queue.put({"success": True, "message": "trajectory published."})
+    except Exception as exc:
+        result_queue.put({"success": False, "message": str(exc)})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_trajectory(
+    domain_id: int,
+    topics: list[str],
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_publish_trajectory_worker,
+        args=(domain_id, list(topics), list(joint_names), list(points), result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(join_timeout_sec)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "trajectory publish timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "trajectory publish returned no data."}
+
+
+def _goal_status_label(status: int | None) -> str:
+    labels = {
+        0: "unknown",
+        1: "accepted",
+        2: "executing",
+        3: "canceling",
+        4: "succeeded",
+        5: "canceled",
+        6: "aborted",
+    }
+    if status is None:
+        return "unknown"
+    return labels.get(int(status), f"status {status}")
+
+
+def _wait_follow_joint_trajectory_action_worker(
+    domain_id: int,
+    action_name: str,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from control_msgs.action import FollowJointTrajectory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    node = None
+    try:
+        node = Node("digital_twin_follow_joint_trajectory_preflight")
+        client = ActionClient(node, FollowJointTrajectory, action_name)
+        if not client.wait_for_server(timeout_sec=max(0.5, float(timeout_sec))):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{action_name}: action server available.",
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_follow_joint_trajectory_action(
+    domain_id: int,
+    action_name: str,
+    timeout_sec: float = 5.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_wait_follow_joint_trajectory_action_worker,
+        args=(domain_id, action_name, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": f"{action_name}: action server wait timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{action_name}: action server wait returned no data."}
+
+
+def _send_follow_joint_trajectory_worker(
+    domain_id: int,
+    action_name: str,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    result_timeout_sec: float,
+    result_queue: mp.Queue,
+    start_delay_sec: float,
+    goal_time_tolerance_sec: float,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from control_msgs.action import FollowJointTrajectory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from trajectory_msgs.msg import JointTrajectoryPoint
+
+    def _wait_future(node: Any, future: Any, timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return bool(future.done())
+
+    node = None
+    try:
+        node = Node("digital_twin_follow_joint_trajectory_send")
+        client = ActionClient(node, FollowJointTrajectory, action_name)
+        if not client.wait_for_server(timeout_sec=5.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = list(joint_names)
+        if float(goal_time_tolerance_sec) > 0.0:
+            tolerance = max(0.0, float(goal_time_tolerance_sec))
+            whole_tolerance = int(tolerance)
+            goal.goal_time_tolerance.sec = whole_tolerance
+            goal.goal_time_tolerance.nanosec = int(
+                (tolerance - whole_tolerance) * 1_000_000_000
+            )
+        if float(start_delay_sec) > 0.0:
+            stamp = node.get_clock().now().to_msg()
+            delay = max(0.0, float(start_delay_sec))
+            whole_delay = int(delay)
+            nano_delay = int((delay - whole_delay) * 1_000_000_000)
+            total_nanosec = int(stamp.nanosec) + nano_delay
+            stamp.sec = int(stamp.sec) + whole_delay + total_nanosec // 1_000_000_000
+            stamp.nanosec = total_nanosec % 1_000_000_000
+            goal.trajectory.header.stamp = stamp
+        goal.trajectory.points = []
+        for entry in points:
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in entry["positions"]]
+            duration_sec = float(entry.get("time") or 0.0)
+            whole = int(duration_sec)
+            point.time_from_start.sec = whole
+            point.time_from_start.nanosec = int((duration_sec - whole) * 1_000_000_000)
+            goal.trajectory.points.append(point)
+
+        send_future = client.send_goal_async(goal)
+        if not _wait_future(node, send_future, 8.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal acceptance timed out.",
+                }
+            )
+            return
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, "accepted", False):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal rejected.",
+                }
+            )
+            return
+
+        result_future = goal_handle.get_result_async()
+        if not _wait_future(node, result_future, result_timeout_sec):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action accepted; result timed out.",
+                }
+            )
+            return
+
+        result_response = result_future.result()
+        status = getattr(result_response, "status", None)
+        label = _goal_status_label(status)
+        action_result = getattr(result_response, "result", None)
+        error_code = getattr(action_result, "error_code", None)
+        error_string = str(getattr(action_result, "error_string", "") or "")
+        status_int = int(status) if status is not None else None
+        success = status_int == 4 and (error_code is None or int(error_code) == 0)
+        message = f"{action_name}: action accepted; action {label}"
+        if error_code is not None:
+            message += f"; error_code={int(error_code)}"
+        if error_string:
+            message += f"; {error_string}"
+        result_queue.put(
+            {
+                "success": success,
+                "message": message + ".",
+                "status": status_int,
+                "status_label": label,
+                "error_code": int(error_code) if error_code is not None else None,
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_follow_joint_trajectory_action(
+    domain_id: int,
+    action_name: str,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+    start_delay_sec: float = 0.0,
+    goal_time_tolerance_sec: float = 0.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_send_follow_joint_trajectory_worker,
+        args=(
+            domain_id,
+            action_name,
+            list(joint_names),
+            list(points),
+            join_timeout_sec,
+            result_queue,
+            start_delay_sec,
+            goal_time_tolerance_sec,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(join_timeout_sec)) + 15.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": f"{action_name}: action worker timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{action_name}: action worker returned no data."}
+
+
+def _wait_execute_trajectory_action_worker(
+    domain_id: int,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from moveit_msgs.action import ExecuteTrajectory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    node = None
+    action_name = "/execute_trajectory"
+    try:
+        node = Node("digital_twin_execute_trajectory_preflight")
+        client = ActionClient(node, ExecuteTrajectory, action_name)
+        if not client.wait_for_server(timeout_sec=max(0.5, float(timeout_sec))):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{action_name}: action server available.",
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_execute_trajectory_action(
+    domain_id: int,
+    timeout_sec: float = 5.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_wait_execute_trajectory_action_worker,
+        args=(domain_id, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "/execute_trajectory: action server wait timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "/execute_trajectory: action server wait returned no data."}
+
+
+def _wait_move_group_action_worker(
+    domain_id: int,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from moveit_msgs.action import MoveGroup
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    node = None
+    action_name = MOVE_GROUP_ACTION_NAME
+    try:
+        node = Node("digital_twin_move_group_preflight")
+        client = ActionClient(node, MoveGroup, action_name)
+        if not client.wait_for_server(timeout_sec=max(0.5, float(timeout_sec))):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{action_name}: action server available.",
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_move_group_action(
+    domain_id: int,
+    timeout_sec: float = 5.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_wait_move_group_action_worker,
+        args=(domain_id, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": f"{MOVE_GROUP_ACTION_NAME}: action server wait timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{MOVE_GROUP_ACTION_NAME}: action server wait returned no data."}
+
+
+def _send_execute_trajectory_worker(
+    domain_id: int,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    result_timeout_sec: float,
+    result_queue: mp.Queue,
+    start_delay_sec: float,
+    use_header_stamp: bool,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from moveit_msgs.action import ExecuteTrajectory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from trajectory_msgs.msg import JointTrajectoryPoint
+
+    def _wait_future(node: Any, future: Any, timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return bool(future.done())
+
+    action_name = "/execute_trajectory"
+    node = None
+    try:
+        node = Node("digital_twin_execute_trajectory_send")
+        client = ActionClient(node, ExecuteTrajectory, action_name)
+        if not client.wait_for_server(timeout_sec=5.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory.joint_trajectory.joint_names = list(joint_names)
+        if bool(use_header_stamp) and float(start_delay_sec) > 0.0:
+            stamp = node.get_clock().now().to_msg()
+            delay = max(0.0, float(start_delay_sec))
+            whole_delay = int(delay)
+            nano_delay = int((delay - whole_delay) * 1_000_000_000)
+            total_nanosec = int(stamp.nanosec) + nano_delay
+            stamp.sec = int(stamp.sec) + whole_delay + total_nanosec // 1_000_000_000
+            stamp.nanosec = total_nanosec % 1_000_000_000
+            goal.trajectory.joint_trajectory.header.stamp = stamp
+        goal.trajectory.joint_trajectory.points = []
+        for entry in points:
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in entry["positions"]]
+            if "velocities" in entry:
+                point.velocities = [float(v) for v in entry["velocities"]]
+            if "accelerations" in entry:
+                point.accelerations = [float(v) for v in entry["accelerations"]]
+            duration_sec = float(entry.get("time") or 0.0)
+            whole = int(duration_sec)
+            point.time_from_start.sec = whole
+            point.time_from_start.nanosec = int((duration_sec - whole) * 1_000_000_000)
+            goal.trajectory.joint_trajectory.points.append(point)
+
+        send_future = client.send_goal_async(goal)
+        if not _wait_future(node, send_future, 8.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal acceptance timed out.",
+                }
+            )
+            return
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, "accepted", False):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal rejected.",
+                }
+            )
+            return
+
+        result_future = goal_handle.get_result_async()
+        if not _wait_future(node, result_future, result_timeout_sec):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action accepted; result timed out.",
+                }
+            )
+            return
+
+        result_response = result_future.result()
+        status = getattr(result_response, "status", None)
+        label = _goal_status_label(status)
+        action_result = getattr(result_response, "result", None)
+        error_code = getattr(action_result, "error_code", None)
+        error_val = getattr(error_code, "val", error_code)
+        status_int = int(status) if status is not None else None
+        success = status_int == 4 and (error_val is None or int(error_val) == 1)
+        message = f"{action_name}: action accepted; action {label}"
+        if error_val is not None:
+            message += f"; error_code={int(error_val)}"
+        result_queue.put(
+            {
+                "success": success,
+                "message": message + ".",
+                "status": status_int,
+                "status_label": label,
+                "error_code": int(error_val) if error_val is not None else None,
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_execute_trajectory_action(
+    domain_id: int,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+    start_delay_sec: float = 0.0,
+    use_header_stamp: bool = False,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_send_execute_trajectory_worker,
+        args=(
+            domain_id,
+            list(joint_names),
+            list(points),
+            join_timeout_sec,
+            result_queue,
+            start_delay_sec,
+            use_header_stamp,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(join_timeout_sec)) + 15.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "/execute_trajectory: action worker timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "/execute_trajectory: action worker returned no data."}
+
+
+def _serialize_joint_trajectory(trajectory: Any) -> dict[str, Any]:
+    joint_trajectory = getattr(trajectory, "joint_trajectory", trajectory)
+    points: list[dict[str, Any]] = []
+    for point in list(getattr(joint_trajectory, "points", []) or []):
+        duration = getattr(point, "time_from_start", None)
+        seconds = 0.0
+        if duration is not None:
+            seconds = float(getattr(duration, "sec", 0)) + float(getattr(duration, "nanosec", 0)) / 1_000_000_000.0
+        item: dict[str, Any] = {
+            "positions": [float(v) for v in list(getattr(point, "positions", []) or [])],
+            "time": seconds,
+        }
+        velocities = list(getattr(point, "velocities", []) or [])
+        accelerations = list(getattr(point, "accelerations", []) or [])
+        if velocities:
+            item["velocities"] = [float(v) for v in velocities]
+        if accelerations:
+            item["accelerations"] = [float(v) for v in accelerations]
+        points.append(item)
+    return {
+        "joint_names": [str(name) for name in list(getattr(joint_trajectory, "joint_names", []) or [])],
+        "points": points,
+    }
+
+
+def _prepare_ur5e_teach_replay_trajectory(trajectory: dict[str, Any]) -> dict[str, Any]:
+    joint_names = [str(name) for name in list(trajectory.get("joint_names") or [])]
+    raw_points = [dict(point) for point in list(trajectory.get("points") or [])]
+    if not joint_names or not raw_points:
+        return {
+            "success": False,
+            "message": "UR5e planned trajectory has no joint names or points.",
+        }
+
+    has_velocities = any("velocities" in point for point in raw_points)
+    has_accelerations = any("accelerations" in point for point in raw_points)
+    prepared_points: list[dict[str, Any]] = []
+    last_time = -UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC
+    original_final_time = 0.0
+    for point in raw_points:
+        positions = [float(value) for value in list(point.get("positions") or [])]
+        if len(positions) != len(joint_names):
+            return {
+                "success": False,
+                "message": "UR5e planned trajectory point length does not match joint names.",
+            }
+        original_time = max(0.0, float(point.get("time") or 0.0))
+        original_final_time = max(original_final_time, original_time)
+        scaled_time = original_time * UR5E_TEACH_REPLAY_TIME_SCALE
+        if prepared_points and scaled_time <= last_time:
+            scaled_time = last_time + UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC
+        item: dict[str, Any] = {
+            "positions": positions,
+            "time": scaled_time,
+        }
+        velocities = list(point.get("velocities") or [])
+        accelerations = list(point.get("accelerations") or [])
+        if velocities:
+            item["velocities"] = [
+                float(value) / UR5E_TEACH_REPLAY_TIME_SCALE
+                for value in velocities
+            ]
+        if accelerations:
+            scale_sq = UR5E_TEACH_REPLAY_TIME_SCALE * UR5E_TEACH_REPLAY_TIME_SCALE
+            item["accelerations"] = [float(value) / scale_sq for value in accelerations]
+        prepared_points.append(item)
+        last_time = scaled_time
+
+    final_point = dict(prepared_points[-1])
+    final_positions = [float(value) for value in list(final_point.get("positions") or [])]
+    if has_velocities:
+        final_point["velocities"] = [0.0] * len(joint_names)
+    if has_accelerations:
+        final_point["accelerations"] = [0.0] * len(joint_names)
+    prepared_points[-1] = final_point
+
+    hold_point: dict[str, Any] = {
+        "positions": list(final_positions),
+        "time": float(prepared_points[-1]["time"]) + UR5E_TEACH_REPLAY_FINAL_HOLD_SEC,
+    }
+    if has_velocities:
+        hold_point["velocities"] = [0.0] * len(joint_names)
+    if has_accelerations:
+        hold_point["accelerations"] = [0.0] * len(joint_names)
+    prepared_points.append(hold_point)
+
+    return {
+        "success": True,
+        "joint_names": joint_names,
+        "points": prepared_points,
+        "original_final_time": original_final_time,
+        "scaled_final_time": float(prepared_points[-2]["time"]),
+        "final_hold_sec": UR5E_TEACH_REPLAY_FINAL_HOLD_SEC,
+        "time_scale": UR5E_TEACH_REPLAY_TIME_SCALE,
+        "has_velocities": has_velocities,
+        "has_accelerations": has_accelerations,
+    }
+
+
+def _ur5e_final_joint_error_detail(
+    domain_id: int,
+    joint_names: list[str],
+    target_positions: list[float],
+) -> str:
+    snapshot_result = _read_snapshot(
+        domain_id,
+        "ur5e",
+        "hardware",
+        UR5E_FINAL_ERROR_SNAPSHOT_TIMEOUT_SEC,
+    )
+    if not snapshot_result.get("success"):
+        return f"final_joint_error_deg=unavailable ({snapshot_result.get('message') or 'snapshot failed'})"
+    hardware_names, hardware_positions, missing = _resolve_hardware_positions(
+        dict(snapshot_result.get("snapshot") or {}),
+        "ur5e",
+    )
+    if missing:
+        return f"final_joint_error_deg=unavailable (missing joints: {', '.join(str(name) for name in missing)})"
+    current_by_name = {
+        str(name): float(position)
+        for name, position in zip(hardware_names, hardware_positions)
+    }
+    target_by_name = {
+        str(name): float(position)
+        for name, position in zip(joint_names, target_positions)
+    }
+    deltas = [
+        math.degrees(_angular_delta(current_by_name[name], target_by_name[name]))
+        for name in joint_names
+        if name in current_by_name and name in target_by_name
+    ]
+    if not deltas:
+        return "final_joint_error_deg=unavailable (no matching target joints)"
+    return f"final_joint_error_deg={max(deltas):.3f}"
+
+
+def _plan_move_group_joint_goal_worker(
+    domain_id: int,
+    group_name: str,
+    joint_names: list[str],
+    start_positions: list[float],
+    target_positions: list[float],
+    waypoint_index: int,
+    timeout_sec: float,
+    plan_only: bool,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from moveit_msgs.action import MoveGroup
+    from moveit_msgs.msg import Constraints, JointConstraint
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    def _wait_future(node: Any, future: Any, wait_timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(wait_timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return bool(future.done())
+
+    action_name = MOVE_GROUP_ACTION_NAME
+    node = None
+    try:
+        node = Node(
+            "digital_twin_move_group_plan"
+            if plan_only
+            else "digital_twin_move_group_plan_and_execute"
+        )
+        client = ActionClient(node, MoveGroup, action_name)
+        if not client.wait_for_server(timeout_sec=max(0.5, min(8.0, float(timeout_sec)))):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                    "action_name": action_name,
+                    "group_name": group_name,
+                    "waypoint_index": int(waypoint_index),
+                    "joint_names": list(joint_names),
+                }
+            )
+            return
+
+        goal = MoveGroup.Goal()
+        goal.request.group_name = str(group_name)
+        goal.request.num_planning_attempts = 5
+        goal.request.allowed_planning_time = MOVE_GROUP_ALLOWED_PLANNING_TIME_SEC
+        goal.request.max_velocity_scaling_factor = 0.25
+        goal.request.max_acceleration_scaling_factor = 0.25
+        goal.request.start_state.joint_state.name = list(joint_names)
+        goal.request.start_state.joint_state.position = [float(v) for v in start_positions]
+        goal.request.start_state.is_diff = False
+
+        constraints = Constraints()
+        constraints.name = f"{group_name}_waypoint_{int(waypoint_index)}"
+        for joint_name, position in zip(joint_names, target_positions):
+            constraint = JointConstraint()
+            constraint.joint_name = str(joint_name)
+            constraint.position = float(position)
+            constraint.tolerance_above = MOVE_GROUP_JOINT_TOLERANCE_RAD
+            constraint.tolerance_below = MOVE_GROUP_JOINT_TOLERANCE_RAD
+            constraint.weight = 1.0
+            constraints.joint_constraints.append(constraint)
+        goal.request.goal_constraints = [constraints]
+        goal.planning_options.plan_only = bool(plan_only)
+        goal.planning_options.look_around = False
+        goal.planning_options.replan = False
+
+        send_future = client.send_goal_async(goal)
+        if not _wait_future(node, send_future, 8.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal acceptance timed out.",
+                    "action_name": action_name,
+                    "group_name": group_name,
+                    "waypoint_index": int(waypoint_index),
+                    "joint_names": list(joint_names),
+                }
+            )
+            return
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, "accepted", False):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action goal rejected.",
+                    "action_name": action_name,
+                    "group_name": group_name,
+                    "waypoint_index": int(waypoint_index),
+                    "joint_names": list(joint_names),
+                }
+            )
+            return
+
+        result_future = goal_handle.get_result_async()
+        if not _wait_future(node, result_future, timeout_sec):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action accepted; planning result timed out.",
+                    "action_name": action_name,
+                    "group_name": group_name,
+                    "waypoint_index": int(waypoint_index),
+                    "joint_names": list(joint_names),
+                }
+            )
+            return
+
+        result_response = result_future.result()
+        status = getattr(result_response, "status", None)
+        label = _goal_status_label(status)
+        action_result = getattr(result_response, "result", None)
+        error_code = getattr(action_result, "error_code", None)
+        error_val = getattr(error_code, "val", error_code)
+        trajectory = _serialize_joint_trajectory(getattr(action_result, "planned_trajectory", None))
+        planning_time = float(getattr(action_result, "planning_time", 0.0) or 0.0)
+        status_int = int(status) if status is not None else None
+        if plan_only:
+            success = (
+                status_int == 4
+                and error_val is not None
+                and int(error_val) == 1
+                and bool(trajectory["joint_names"])
+                and bool(trajectory["points"])
+            )
+        else:
+            success = status_int == 4 and error_val is not None and int(error_val) == 1
+        mode_label = "planned" if plan_only else "plan_and_execute"
+        message = (
+            f"{action_name}: {mode_label}; action accepted; action {label}; "
+            f"moveit_error_code={int(error_val) if error_val is not None else 'unknown'}; "
+            f"group={group_name}; waypoint={int(waypoint_index)}; "
+            f"planning_time={planning_time:.3f}; points={len(trajectory['points'])}."
+        )
+        result_queue.put(
+            {
+                "success": success,
+                "message": message,
+                "status": status_int,
+                "status_label": label,
+                "error_code": int(error_val) if error_val is not None else None,
+                "mode": mode_label,
+                "planning_time": planning_time,
+                "trajectory": trajectory,
+                "action_name": action_name,
+                "group_name": group_name,
+                "waypoint_index": int(waypoint_index),
+                "joint_names": list(joint_names),
+            }
+        )
+    except Exception as exc:
+        result_queue.put(
+            {
+                "success": False,
+                "message": f"{action_name}: {exc}",
+                "action_name": action_name,
+                "group_name": group_name,
+                "waypoint_index": int(waypoint_index),
+                "joint_names": list(joint_names),
+            }
+        )
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _plan_move_group_joint_goal(
+    domain_id: int,
+    group_name: str,
+    joint_names: list[str],
+    start_positions: list[float],
+    target_positions: list[float],
+    *,
+    waypoint_index: int,
+    timeout_sec: float = MOVE_GROUP_PLAN_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_plan_move_group_joint_goal_worker,
+        args=(
+            domain_id,
+            str(group_name),
+            list(joint_names),
+            [float(v) for v in start_positions],
+            [float(v) for v in target_positions],
+            int(waypoint_index),
+            float(timeout_sec),
+            True,
+            result_queue,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 10.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: planning worker timed out.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": str(group_name),
+            "waypoint_index": int(waypoint_index),
+            "joint_names": list(joint_names),
+        }
+
+
+def _execute_move_group_joint_goal(
+    domain_id: int,
+    group_name: str,
+    joint_names: list[str],
+    start_positions: list[float],
+    target_positions: list[float],
+    *,
+    waypoint_index: int,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_plan_move_group_joint_goal_worker,
+        args=(
+            domain_id,
+            str(group_name),
+            list(joint_names),
+            [float(v) for v in start_positions],
+            [float(v) for v in target_positions],
+            int(waypoint_index),
+            float(timeout_sec),
+            False,
+            result_queue,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 10.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: plan_and_execute worker timed out.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": str(group_name),
+            "waypoint_index": int(waypoint_index),
+            "joint_names": list(joint_names),
+            "mode": "plan_and_execute",
+        }
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: plan_and_execute worker returned no data.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": str(group_name),
+            "waypoint_index": int(waypoint_index),
+            "joint_names": list(joint_names),
+            "mode": "plan_and_execute",
+        }
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: planning worker returned no data.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": str(group_name),
+            "waypoint_index": int(waypoint_index),
+            "joint_names": list(joint_names),
+        }
+
+
+def _xarm_gripper_service_candidates(suffix: str) -> list[str]:
+    return [
+        f"/xarm6/xarm/{suffix}",
+        f"/xarm6/{suffix}",
+        f"/xarm/{suffix}",
+        f"/{suffix}",
+    ]
+
+
+def _xarm_gripper_joint_to_pulse(joint_position: float) -> int:
+    gripper = ROBOTS["xarm6"].get("gripper") or {}
+    open_pos = float(gripper.get("open_position", 0.0))
+    close_pos = float(gripper.get("close_position", 0.85))
+    open_pulse = float(gripper.get("open_pulse", 850.0))
+    close_pulse = float(gripper.get("close_pulse", 0.0))
+    denom = open_pos - close_pos
+    if abs(denom) < 1e-9:
+        return int(round(close_pulse))
+    ratio = (float(joint_position) - close_pos) / denom
+    ratio = min(max(ratio, 0.0), 1.0)
+    return int(round(close_pulse + (open_pulse - close_pulse) * ratio))
+
+
+def _wait_xarm_gripper_service_worker(
+    domain_id: int,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from xarm_msgs.srv import GripperMove
+
+    node = None
+    try:
+        node = Node("digital_twin_xarm_gripper_preflight")
+        candidates = list(_xarm_gripper_service_candidates("set_gripper_position"))
+        try:
+            for service_name, _types in node.get_service_names_and_types():
+                if service_name.endswith("/set_gripper_position") and service_name not in candidates:
+                    candidates.append(service_name)
+        except Exception:
+            pass
+        clients = [(name, node.create_client(GripperMove, name)) for name in candidates]
+        deadline = time.time() + max(0.5, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline:
+            for name, client in clients:
+                if client.service_is_ready():
+                    result_queue.put(
+                        {
+                            "success": True,
+                            "message": f"{name}: service available.",
+                            "service": name,
+                        }
+                    )
+                    return
+            rclpy.spin_once(node, timeout_sec=0.1)
+            for name, client in clients:
+                if client.wait_for_service(timeout_sec=0.0):
+                    result_queue.put(
+                        {
+                            "success": True,
+                            "message": f"{name}: service available.",
+                            "service": name,
+                        }
+                    )
+                    return
+        result_queue.put(
+            {
+                "success": False,
+                "message": "xarm6 set_gripper_position service unavailable.",
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"xarm6 gripper preflight: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_xarm_gripper_service(domain_id: int, timeout_sec: float = 5.0) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_wait_xarm_gripper_service_worker,
+        args=(domain_id, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "xarm6 set_gripper_position service wait timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "xarm6 set_gripper_position service wait returned no data."}
+
+
+def _wait_gripper_command_action_worker(
+    domain_id: int,
+    action_name: str,
+    timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from control_msgs.action import GripperCommand
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    node = None
+    try:
+        node = Node("digital_twin_gripper_command_preflight")
+        client = ActionClient(node, GripperCommand, action_name)
+        if not client.wait_for_server(timeout_sec=max(0.5, float(timeout_sec))):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{action_name}: action server available.",
+                "action": action_name,
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _wait_gripper_command_action(
+    domain_id: int,
+    action_name: str,
+    timeout_sec: float = 5.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_wait_gripper_command_action_worker,
+        args=(domain_id, action_name, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(timeout_sec)) + 2.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": f"{action_name}: action server wait timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{action_name}: action server wait returned no data."}
+
+
+def _wait_xarm_gripper_endpoint(domain_id: int, timeout_sec: float = 5.0) -> dict[str, Any]:
+    service_result = _wait_xarm_gripper_service(domain_id, timeout_sec=timeout_sec)
+    if service_result.get("success"):
+        out = dict(service_result)
+        out["method"] = "service"
+        return out
+    action_name = str(dict(ROBOTS["xarm6"].get("gripper") or {}).get("hardware_action") or "").strip()
+    action_result = _wait_gripper_command_action(domain_id, action_name, timeout_sec=timeout_sec)
+    if action_result.get("success"):
+        out = dict(action_result)
+        out["method"] = "action"
+        out["fallback_error"] = str(service_result.get("message") or "")
+        return out
+    return {
+        "success": False,
+        "message": (
+            f"xarm6 gripper unavailable: {str(service_result.get('message') or '')}; "
+            f"{str(action_result.get('message') or '')}"
+        ).strip("; "),
+    }
+
+
+def _publish_xarm_gripper_service_sequence_worker(
+    domain_id: int,
+    points: list[dict[str, Any]],
+    result_timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from rclpy.node import Node
+    from xarm_msgs.srv import GripperMove, SetFloat32, SetInt16
+
+    def _candidate_service_names(node: Any, suffix: str) -> list[str]:
+        names = list(_xarm_gripper_service_candidates(suffix))
+        try:
+            for service_name, _types in node.get_service_names_and_types():
+                if service_name.endswith(f"/{suffix}") and service_name not in names:
+                    names.append(service_name)
+        except Exception:
+            pass
+        return names
+
+    def _service_client(node: Any, srv_type: Any, suffix: str, timeout_sec: float) -> tuple[str, Any] | tuple[None, None]:
+        clients = [(name, node.create_client(srv_type, name)) for name in _candidate_service_names(node, suffix)]
+        deadline = time.time() + max(0.1, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline:
+            for name, client in clients:
+                if client.service_is_ready():
+                    return name, client
+            rclpy.spin_once(node, timeout_sec=0.05)
+            for name, client in clients:
+                if client.wait_for_service(timeout_sec=0.0):
+                    return name, client
+        return None, None
+
+    def _call(node: Any, client: Any, request: Any, timeout_sec: float) -> tuple[Any, str]:
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            return None, str(exc)
+        deadline = time.time() + max(0.1, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.05)
+        if not future.done():
+            return None, "timeout"
+        response = future.result()
+        if response is None:
+            return None, "service failed"
+        return response, ""
+
+    node = None
+    try:
+        node = Node("digital_twin_xarm_gripper_replay")
+        service_name, gripper_client = _service_client(node, GripperMove, "set_gripper_position", 5.0)
+        if gripper_client is None:
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": "xarm6 set_gripper_position service unavailable.",
+                }
+            )
+            return
+
+        for suffix, value in (("set_gripper_enable", 1), ("set_gripper_mode", 0)):
+            _name, client = _service_client(node, SetInt16, suffix, 0.3)
+            if client is None:
+                continue
+            req = SetInt16.Request()
+            req.data = int(value)
+            _call(node, client, req, timeout_sec=1.0)
+
+        _name, speed_client = _service_client(node, SetFloat32, "set_gripper_speed", 0.3)
+        if speed_client is not None:
+            req = SetFloat32.Request()
+            req.data = 2000.0
+            _call(node, speed_client, req, timeout_sec=1.0)
+
+        started_at = time.time()
+        sent = 0
+        for entry in points:
+            target_time = float(entry.get("time") or 0.0)
+            while rclpy.ok() and time.time() - started_at < target_time:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            positions = list(entry.get("positions") or [])
+            if not positions:
+                continue
+            pulse = _xarm_gripper_joint_to_pulse(float(positions[0]))
+            req = GripperMove.Request()
+            req.pos = float(pulse)
+            req.wait = False
+            req.timeout = 2.0
+            response, error = _call(node, gripper_client, req, timeout_sec=2.5)
+            if error:
+                result_queue.put(
+                    {
+                        "success": False,
+                        "message": f"{service_name}: {error}",
+                    }
+                )
+                return
+            ret = int(getattr(response, "ret", -1))
+            msg = str(getattr(response, "message", "") or "").strip()
+            if ret != 0:
+                detail = f"ret={ret}"
+                if msg:
+                    detail += f" {msg}"
+                result_queue.put(
+                    {
+                        "success": False,
+                        "message": f"{service_name}: {detail}",
+                    }
+                )
+                return
+            sent += 1
+
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{service_name}: gripper replay sent {sent} commands.",
+                "commands": sent,
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"xarm6 gripper replay: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_xarm_gripper_service_sequence(
+    domain_id: int,
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_publish_xarm_gripper_service_sequence_worker,
+        args=(domain_id, list(points), join_timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(join_timeout_sec)) + 4.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "xarm6 gripper replay timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "xarm6 gripper replay returned no data."}
+
+
+def _publish_gripper_command_action_sequence_worker(
+    domain_id: int,
+    action_name: str,
+    points: list[dict[str, Any]],
+    result_timeout_sec: float,
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from control_msgs.action import GripperCommand
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+
+    def _wait_future(node: Any, future: Any, timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.05)
+        return bool(future.done())
+
+    node = None
+    try:
+        node = Node("digital_twin_gripper_command_replay")
+        client = ActionClient(node, GripperCommand, action_name)
+        if not client.wait_for_server(timeout_sec=5.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": f"{action_name}: action server unavailable.",
+                }
+            )
+            return
+
+        started_at = time.time()
+        sent = 0
+        for entry in points:
+            target_time = float(entry.get("time") or 0.0)
+            while rclpy.ok() and time.time() - started_at < target_time:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            positions = list(entry.get("positions") or [])
+            if not positions:
+                continue
+            goal = GripperCommand.Goal()
+            goal.command.position = float(positions[0])
+            goal.command.max_effort = 0.0
+            send_future = client.send_goal_async(goal)
+            if not _wait_future(node, send_future, 2.0):
+                result_queue.put(
+                    {
+                        "success": False,
+                        "message": f"{action_name}: goal acceptance timed out.",
+                    }
+                )
+                return
+            goal_handle = send_future.result()
+            if goal_handle is None or not getattr(goal_handle, "accepted", False):
+                result_queue.put(
+                    {
+                        "success": False,
+                        "message": f"{action_name}: goal rejected.",
+                    }
+                )
+                return
+            result_future = goal_handle.get_result_async()
+            _wait_future(node, result_future, min(0.5, max(0.1, float(result_timeout_sec))))
+            sent += 1
+
+        result_queue.put(
+            {
+                "success": True,
+                "message": f"{action_name}: gripper action replay accepted {sent} goals.",
+                "commands": sent,
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": f"{action_name}: {exc}"})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_gripper_command_action_sequence(
+    domain_id: int,
+    action_name: str,
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_publish_gripper_command_action_sequence_worker,
+        args=(domain_id, action_name, list(points), join_timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(join_timeout_sec)) + 4.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": f"{action_name}: gripper action replay timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{action_name}: gripper action replay returned no data."}
+
+
+def _publish_xarm_gripper_sequence(
+    domain_id: int,
+    points: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+) -> dict[str, Any]:
+    service_result = _publish_xarm_gripper_service_sequence(
+        domain_id,
+        points,
+        join_timeout_sec=join_timeout_sec,
+    )
+    if service_result.get("success"):
+        return service_result
+    action_name = str(dict(ROBOTS["xarm6"].get("gripper") or {}).get("hardware_action") or "").strip()
+    action_result = _publish_gripper_command_action_sequence(
+        domain_id,
+        action_name,
+        points,
+        join_timeout_sec=join_timeout_sec,
+    )
+    if action_result.get("success"):
+        out = dict(action_result)
+        out["fallback_error"] = str(service_result.get("message") or "")
+        return out
+    return {
+        "success": False,
+        "message": (
+            f"{str(service_result.get('message') or '')}; "
+            f"{str(action_result.get('message') or '')}"
+        ).strip("; "),
+    }
+
+
+def _set_gazebo_model_configuration_worker(
+    domain_id: int,
+    model_name: str,
+    joint_names: list[str],
+    joint_positions: list[float],
+    result_queue: mp.Queue,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from gazebo_msgs.srv import SetModelConfiguration
+    from rclpy.node import Node
+
+    node = None
+    try:
+        node = Node("digital_twin_set_model_configuration")
+        client = node.create_client(SetModelConfiguration, "/gazebo/set_model_configuration")
+        if not client.wait_for_service(timeout_sec=6.0):
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": "/gazebo/set_model_configuration not available.",
+                }
+            )
+            return
+
+        req = SetModelConfiguration.Request()
+        req.model_name = str(model_name or "dual_robot")
+        req.urdf_param_name = ""
+        req.joint_names = list(joint_names)
+        req.joint_positions = [float(value) for value in joint_positions]
+        future = client.call_async(req)
+        deadline = time.time() + 8.0
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if not future.done():
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": "/gazebo/set_model_configuration timed out.",
+                }
+            )
+            return
+
+        response = future.result()
+        success = bool(getattr(response, "success", False))
+        status_message = str(getattr(response, "status_message", "") or "")
+        result_queue.put(
+            {
+                "success": success,
+                "message": status_message or (
+                    "gazebo model configuration set."
+                    if success
+                    else "gazebo model configuration failed."
+                ),
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"success": False, "message": str(exc)})
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _set_gazebo_model_configuration(
+    domain_id: int,
+    model_name: str,
+    joint_names: list[str],
+    joint_positions: list[float],
+    join_timeout_sec: float = 10.0,
+) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_set_gazebo_model_configuration_worker,
+        args=(domain_id, model_name, list(joint_names), list(joint_positions), result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(join_timeout_sec)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {"success": False, "message": "gazebo model configuration timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": "gazebo model configuration returned no data."}
+
+
+def _read_snapshot(domain_id: int, robot: str, source: str, timeout_sec: float) -> dict[str, Any]:
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_joint_state_snapshot_worker,
+        args=(domain_id, robot, source, timeout_sec, result_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(timeout_sec + 2.0)
+    if proc.is_alive():
+        try:
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            result = None
+        proc.terminate()
+        proc.join(timeout=1.0)
+        if result is not None:
+            return result
+        return {"success": False, "message": f"{source} /joint_states timed out."}
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {"success": False, "message": f"{source} /joint_states returned no data."}
+
+
+def _publish_hardware_trajectory(
+    domain_id: int,
+    robot: str,
+    joint_names: list[str],
+    positions: list[float],
+) -> dict[str, Any]:
+    return _publish_trajectory(
+        domain_id,
+        ROBOTS[robot]["trajectory_topics"],
+        joint_names,
+        [{"positions": positions, "time": 2.0}],
+    )
+
+
+def run_mirror(args: argparse.Namespace) -> int:
+    status_file = Path(args.status_file)
+    direction_file = Path(args.direction_file)
+    _write_status(
+        status_file,
+        target=args.target,
+        state="starting",
+        direction=_direction(direction_file),
+        message="starting digital twin sync.",
+    )
+    updates: mp.Queue = mp.Queue(maxsize=4)
+    hardware_proc = mp.Process(
+        target=_hardware_joint_state_worker,
+        args=(int(args.hardware_domain_id), args.robot, updates),
+        daemon=True,
+    )
+    gazebo_proc = mp.Process(
+        target=_gazebo_mirror_worker,
+        args=(
+            int(args.gazebo_domain_id),
+            args.robot,
+            args.target,
+            status_file,
+            direction_file,
+            updates,
+        ),
+        daemon=True,
+    )
+    hardware_proc.start()
+    gazebo_proc.start()
+
+    stopping = False
+
+    def _stop(_signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        while not stopping:
+            if not hardware_proc.is_alive():
+                _write_status(
+                    status_file,
+                    target=args.target,
+                    state="error",
+                    direction=_direction(direction_file),
+                    message="hardware joint-state worker exited.",
+                    last_error="hardware joint-state worker exited.",
+                )
+                return 2
+            if not gazebo_proc.is_alive():
+                _write_status(
+                    status_file,
+                    target=args.target,
+                    state="error",
+                    direction=_direction(direction_file),
+                    message="gazebo configuration worker exited.",
+                    last_error="gazebo configuration worker exited.",
+                )
+                return 2
+            time.sleep(0.25)
+    finally:
+        for proc in (hardware_proc, gazebo_proc):
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+        _write_status(
+            status_file,
+            target=args.target,
+            state="stopped",
+            direction=_direction(direction_file),
+            message="digital twin sync stopped.",
+        )
+    return 0
+
+
+def run_apply_gazebo_to_hardware(args: argparse.Namespace) -> int:
+    status_file = Path(args.status_file)
+    direction_file = Path(args.direction_file)
+    if _direction(direction_file) != "gazebo -> hardware":
+        result = {
+            "success": False,
+            "message": "direction must be gazebo -> hardware.",
+        }
+        print(json.dumps(result))
+        return 3
+
+    _write_status(
+        status_file,
+        target=args.target,
+        state="checking",
+        direction="gazebo -> hardware",
+        message="checking gazebo and hardware joint states.",
+    )
+    gazebo_result = _read_snapshot(int(args.gazebo_domain_id), args.robot, "gazebo", 5.0)
+    if not gazebo_result.get("success"):
+        result = {"success": False, "message": str(gazebo_result.get("message") or "missing gazebo state")}
+        _write_status(status_file, target=args.target, state="blocked", direction="gazebo -> hardware", **result)
+        print(json.dumps(result))
+        return 4
+    hardware_result = _read_snapshot(int(args.hardware_domain_id), args.robot, "hardware", 5.0)
+    if not hardware_result.get("success"):
+        result = {"success": False, "message": str(hardware_result.get("message") or "missing hardware state")}
+        _write_status(status_file, target=args.target, state="blocked", direction="gazebo -> hardware", **result)
+        print(json.dumps(result))
+        return 5
+
+    gazebo_snapshot = dict(gazebo_result.get("snapshot") or {})
+    hardware_snapshot = dict(hardware_result.get("snapshot") or {})
+    _gazebo_names, gazebo_positions, gazebo_missing = _resolve_gazebo_positions(gazebo_snapshot, args.robot)
+    hardware_names, hardware_positions, hardware_missing = _resolve_hardware_positions(hardware_snapshot, args.robot)
+    if gazebo_missing or hardware_missing:
+        missing = ", ".join(gazebo_missing + hardware_missing)
+        result = {"success": False, "message": f"missing joints: {missing}"}
+        _write_status(status_file, target=args.target, state="blocked", direction="gazebo -> hardware", **result)
+        print(json.dumps(result))
+        return 6
+
+    deltas = [_angular_delta(gz, hw) for gz, hw in zip(gazebo_positions, hardware_positions)]
+    max_delta = max(deltas) if deltas else 0.0
+    max_delta_deg = math.degrees(max_delta)
+    guard_deg = float(args.max_joint_delta_deg)
+    if max_delta_deg > guard_deg:
+        result = {
+            "success": False,
+            "message": f"blocked: max joint delta {max_delta_deg:.2f} deg exceeds {guard_deg:.2f} deg.",
+            "max_joint_delta_deg": max_delta_deg,
+        }
+        _write_status(status_file, target=args.target, state="blocked", direction="gazebo -> hardware", **result)
+        print(json.dumps(result))
+        return 7
+
+    publish_result = _publish_hardware_trajectory(
+        int(args.hardware_domain_id),
+        args.robot,
+        hardware_names,
+        gazebo_positions,
+    )
+    result = {
+        "success": bool(publish_result.get("success")),
+        "message": str(publish_result.get("message") or ""),
+        "max_joint_delta_deg": max_delta_deg,
+    }
+    _write_status(
+        status_file,
+        target=args.target,
+        state="applied" if result["success"] else "blocked",
+        direction="gazebo -> hardware",
+        **result,
+    )
+    print(json.dumps(result))
+    return 0 if result["success"] else 8
+
+
+def run_initialize_gazebo_from_hardware(args: argparse.Namespace) -> int:
+    """Copy one robot's current hardware arm/gripper pose into passive Gazebo once."""
+    if args.robot not in ROBOTS:
+        print(json.dumps({"success": False, "message": f"unsupported robot: {args.robot}"}))
+        return 3
+
+    status_file = Path(args.status_file) if str(args.status_file or "").strip() else None
+
+    def write_status(**payload: Any) -> None:
+        if status_file is not None:
+            _write_status(status_file, target=args.target, **payload)
+
+    write_status(
+        state="initializing",
+        direction="hardware -> gazebo",
+        message="initializing gazebo pose from hardware.",
+        last_error="",
+    )
+
+    hardware_result = _read_snapshot(
+        int(args.hardware_domain_id),
+        args.robot,
+        "hardware",
+        HARDWARE_SNAPSHOT_TIMEOUT_SEC,
+    )
+    if not hardware_result.get("success"):
+        result = {
+            "success": False,
+            "message": str(hardware_result.get("message") or "missing hardware state"),
+        }
+        write_status(
+            state="blocked",
+            direction="hardware -> gazebo",
+            message=result["message"],
+            last_error=result["message"],
+        )
+        print(json.dumps(result))
+        return 4
+
+    hardware_snapshot = dict(hardware_result.get("snapshot") or {})
+    _hardware_names, hardware_positions, hardware_missing = _resolve_hardware_positions(
+        hardware_snapshot,
+        args.robot,
+    )
+    if hardware_missing:
+        result = {
+            "success": False,
+            "message": f"missing hardware joints: {', '.join(hardware_missing)}",
+        }
+        write_status(
+            state="blocked",
+            direction="hardware -> gazebo",
+            message=result["message"],
+            last_error=result["message"],
+        )
+        print(json.dumps(result))
+        return 5
+
+    gripper_result: dict[str, Any] | None = None
+    gripper_joint, gripper_position = _resolve_gripper(hardware_snapshot, args.robot)
+    gripper_cfg = ROBOTS[args.robot].get("gripper") or {}
+    gazebo_gripper_joint = str(gripper_cfg.get("gazebo_joint") or gripper_joint or "")
+    gripper_topics = list(gripper_cfg.get("gazebo_trajectory_topics") or [])
+    tolerance = float(getattr(args, "init_tolerance_rad", INITIALIZE_GAZEBO_TOLERANCE_RAD))
+    attempts = max(1, int(getattr(args, "init_attempts", INITIALIZE_GAZEBO_ATTEMPTS)))
+
+    success = False
+    message = ""
+    max_delta_rad: float | None = None
+    configuration_result: dict[str, Any] | None = None
+    model_name = str(args.model_name or "dual_robot")
+    gazebo_joint_names = list(ROBOTS[args.robot]["gazebo_joints"])
+    gazebo_joint_positions = list(hardware_positions)
+    if gazebo_gripper_joint and gripper_position is not None:
+        gazebo_joint_names.append(gazebo_gripper_joint)
+        gazebo_joint_positions.append(float(gripper_position))
+    for attempt in range(1, attempts + 1):
+        configuration_result = _set_gazebo_model_configuration(
+            int(args.gazebo_domain_id),
+            model_name,
+            gazebo_joint_names,
+            gazebo_joint_positions,
+        )
+        arm_result = _publish_trajectory(
+            int(args.gazebo_domain_id),
+            ROBOTS[args.robot]["gazebo_trajectory_topics"],
+            list(ROBOTS[args.robot]["gazebo_joints"]),
+            [{"positions": hardware_positions, "time": 0.75}],
+            join_timeout_sec=8.0,
+        )
+        if not arm_result.get("success"):
+            configuration_message = (
+                str(configuration_result.get("message") or "")
+                if configuration_result is not None
+                else ""
+            )
+            message = (
+                f"{configuration_message}; "
+                f"{str(arm_result.get('message') or 'trajectory publish failed.')}"
+            ).strip("; ")
+            continue
+
+        if gripper_joint is not None and gripper_position is not None and gripper_topics:
+            gripper_result = _publish_trajectory(
+                int(args.gazebo_domain_id),
+                gripper_topics,
+                [gazebo_gripper_joint],
+                [{"positions": [float(gripper_position)], "time": 0.75}],
+                join_timeout_sec=5.0,
+            )
+
+        time.sleep(1.0)
+        gazebo_result = _read_snapshot(int(args.gazebo_domain_id), args.robot, "gazebo", 3.0)
+        if not gazebo_result.get("success"):
+            message = str(gazebo_result.get("message") or "missing gazebo state after publish.")
+            continue
+
+        gazebo_snapshot = dict(gazebo_result.get("snapshot") or {})
+        _gazebo_names, gazebo_positions, gazebo_missing = _resolve_gazebo_positions(
+            gazebo_snapshot,
+            args.robot,
+        )
+        if gazebo_missing:
+            message = f"gazebo missing joints after publish: {', '.join(gazebo_missing)}"
+            continue
+
+        deltas = [_angular_delta(gazebo, hardware) for gazebo, hardware in zip(gazebo_positions, hardware_positions)]
+        max_delta_rad = max(deltas) if deltas else 0.0
+        if max_delta_rad <= tolerance:
+            success = True
+            message = f"gazebo pose initialized from hardware on attempt {attempt}."
+            break
+        message = (
+            f"gazebo pose still differs from hardware by {max_delta_rad:.4f} rad "
+            f"after attempt {attempt}."
+        )
+
+    if gripper_result is not None:
+        gripper_message = str(gripper_result.get("message") or "")
+        if not gripper_result.get("success"):
+            message = f"{message} gripper: {gripper_message}".strip()
+        elif success:
+            message = f"{message} gripper initialized.".strip()
+
+    result = {
+        "success": bool(success),
+        "message": message or ("gazebo pose initialized from hardware." if success else "gazebo initialization failed."),
+        "robot": args.robot,
+        "positions": list(hardware_positions),
+        "joint_names": list(ROBOTS[args.robot]["gazebo_joints"]),
+        "gripper_position": gripper_position,
+        "max_joint_delta_rad": max_delta_rad,
+        "set_model_configuration": configuration_result,
+    }
+    write_status(
+        state="initialized" if success else "blocked",
+        direction="hardware -> gazebo",
+        message=result["message"],
+        last_error="" if success else result["message"],
+    )
+    print(json.dumps(result))
+    return 0 if success else 6
+
+
+def run_snapshot(args: argparse.Namespace) -> int:
+    """Read one joint snapshot and print it as JSON (used by 'Capture Waypoint')."""
+    source = str(args.source or "gazebo")
+    domain_id = int(args.gazebo_domain_id) if source == "gazebo" else int(args.hardware_domain_id)
+    snap = _read_snapshot(domain_id, args.robot, source, 5.0)
+    if not snap.get("success"):
+        print(json.dumps({"success": False, "message": str(snap.get("message") or "no snapshot")}))
+        return 4
+    snapshot = dict(snap.get("snapshot") or {})
+    if source == "gazebo":
+        joint_names, positions, missing = _resolve_gazebo_positions(snapshot, args.robot)
+    else:
+        joint_names, positions, missing = _resolve_hardware_positions(snapshot, args.robot)
+    if missing:
+        print(json.dumps({"success": False, "message": f"missing joints: {', '.join(missing)}"}))
+        return 5
+    gripper_joint, gripper_position = _resolve_gripper(snapshot, args.robot)
+    print(
+        json.dumps(
+            {
+                "success": True,
+                "source": source,
+                "joint_names": joint_names,
+                "positions": positions,
+                "gripper_joint": gripper_joint,
+                "gripper_position": gripper_position,
+            }
+        )
+    )
+    return 0
+
+
+def _paired_replay_robot_plan(
+    args: argparse.Namespace,
+    recording: dict[str, Any],
+    robot: str,
+    *,
+    need_hardware: bool,
+    step: float,
+) -> dict[str, Any]:
+    robot_meta = dict(dict(recording.get("robots") or {}).get(robot) or {})
+    robot_waypoints: list[dict[str, Any]] = []
+    for waypoint in list(recording.get("waypoints") or []):
+        robot_body = dict(dict(waypoint.get("robots") or {}).get(robot) or {})
+        positions = [float(v) for v in (robot_body.get("positions") or [])]
+        if not positions:
+            return {"success": False, "message": f"{robot} recording has an empty waypoint."}
+        item: dict[str, Any] = {"positions": positions}
+        if robot_body.get("gripper") is not None:
+            item["gripper"] = float(robot_body.get("gripper"))
+        robot_waypoints.append(item)
+
+    hardware_names: list[str] = []
+    hardware_positions: list[float] = []
+    max_delta_deg = 0.0
+    approach_time = step
+    if need_hardware:
+        hardware_result = _read_snapshot(
+            int(args.hardware_domain_id),
+            robot,
+            "hardware",
+            HARDWARE_SNAPSHOT_TIMEOUT_SEC,
+        )
+        if not hardware_result.get("success"):
+            return {
+                "success": False,
+                "message": f"{robot}: {str(hardware_result.get('message') or 'missing hardware state')}",
+            }
+        hardware_snapshot = dict(hardware_result.get("snapshot") or {})
+        hardware_names, hardware_positions, hardware_missing = _resolve_hardware_positions(
+            hardware_snapshot,
+            robot,
+        )
+        if hardware_missing:
+            return {
+                "success": False,
+                "message": f"{robot}: missing hardware joints: {', '.join(hardware_missing)}",
+            }
+
+        first = [float(v) for v in robot_waypoints[0]["positions"]]
+        deltas = [_angular_delta(a, b) for a, b in zip(first, hardware_positions)]
+        max_delta_deg = math.degrees(max(deltas)) if deltas else 0.0
+        ceiling_deg = float(args.max_joint_delta_deg)
+        if max_delta_deg > ceiling_deg:
+            return {
+                "success": False,
+                "message": f"{robot}: blocked: first waypoint is {max_delta_deg:.2f} deg from hardware (ceiling {ceiling_deg:.2f}).",
+                "max_joint_delta_deg": max_delta_deg,
+            }
+        max_vel = max(1.0, float(getattr(args, "max_joint_vel_deg_s", MAX_REPLAY_JOINT_VEL_DEG_S)))
+        if robot == "ur5e":
+            max_vel = min(max_vel, UR5E_REPLAY_MAX_JOINT_VEL_DEG_S)
+        approach_time = max(step, max_delta_deg / max_vel)
+
+    return {
+        "success": True,
+        "robot": robot,
+        "joint_names": list(robot_meta.get("joint_names") or ROBOTS[robot]["gazebo_joints"]),
+        "gripper_joint": str(
+            robot_meta.get("gripper_joint")
+            or dict(ROBOTS[robot].get("gripper") or {}).get("gazebo_joint")
+            or ""
+        ),
+        "hardware_names": hardware_names,
+        "hardware_positions": hardware_positions,
+        "waypoints": robot_waypoints,
+        "approach_time": approach_time,
+        "max_joint_delta_deg": max_delta_deg,
+    }
+
+
+def _append_final_hold_point(
+    points: list[dict[str, Any]],
+    hold_sec: float,
+) -> list[dict[str, Any]]:
+    prepared = [dict(point) for point in points]
+    if not prepared or float(hold_sec) <= 0.0:
+        return prepared
+    final_point = dict(prepared[-1])
+    final_time = float(final_point.get("time") or 0.0)
+    hold_point = {
+        "positions": [float(value) for value in list(final_point.get("positions") or [])],
+        "time": final_time + float(hold_sec),
+    }
+    if "velocities" in final_point:
+        hold_point["velocities"] = [0.0 for _ in list(final_point.get("positions") or [])]
+    if "accelerations" in final_point:
+        hold_point["accelerations"] = [0.0 for _ in list(final_point.get("positions") or [])]
+    prepared.append(hold_point)
+    return prepared
+
+
+def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[str, Any]) -> dict[str, Any]:
+    """Build paired replay data and preflight hardware endpoints without commanding motion."""
+    waypoints = list(recording.get("waypoints") or [])
+    if not waypoints:
+        return {"success": False, "message": "recording has no waypoints."}
+
+    step = max(0.2, float(args.waypoint_duration_sec))
+    replay_target = str(args.replay_target or "hardware")
+    need_gazebo = replay_target in ("gazebo", "both")
+    need_hardware = replay_target in ("hardware", "both")
+    robots = [
+        robot
+        for robot in ("xarm6", "ur5e")
+        if robot in dict(recording.get("robots") or {})
+    ]
+    if set(robots) != {"xarm6", "ur5e"}:
+        return {"success": False, "message": "paired recording must contain xarm6 and ur5e."}
+
+    plans: dict[str, dict[str, Any]] = {}
+    for robot in robots:
+        _write_replay_status(
+            args,
+            state="preparing",
+            message=f"preflighting {robot} replay.",
+        )
+        plan = _paired_replay_robot_plan(
+            args,
+            recording,
+            robot,
+            need_hardware=need_hardware,
+            step=step,
+        )
+        if not plan.get("success"):
+            return plan
+        plans[robot] = plan
+
+    if need_hardware:
+        for robot in ("xarm6", "ur5e"):
+            action_name = str(ROBOTS[robot].get("hardware_trajectory_action") or "").strip()
+            action_result = _wait_follow_joint_trajectory_action(
+                int(args.hardware_domain_id),
+                action_name,
+                timeout_sec=8.0,
+            )
+            if not action_result.get("success"):
+                return {
+                    "success": False,
+                    "message": f"{robot}: {str(action_result.get('message') or f'{action_name} unavailable')}",
+                }
+        for robot in robots:
+            plan = plans[robot]
+            gripper_points = [
+                waypoint for waypoint in list(plan.get("waypoints") or [])
+                if "gripper" in dict(waypoint)
+            ]
+            if len(gripper_points) == len(list(plan.get("waypoints") or [])):
+                if robot == "xarm6":
+                    endpoint_result = _wait_xarm_gripper_endpoint(
+                        int(args.hardware_domain_id),
+                        timeout_sec=8.0,
+                    )
+                    if not endpoint_result.get("success"):
+                        return {
+                            "success": False,
+                            "message": f"{robot}: {str(endpoint_result.get('message') or 'xarm6 gripper endpoint unavailable')}",
+                        }
+                elif robot == "ur5e":
+                    gripper_action = str(dict(ROBOTS[robot].get("gripper") or {}).get("hardware_action") or "").strip()
+                    if gripper_action:
+                        gripper_action_result = _wait_follow_joint_trajectory_action(
+                            int(args.hardware_domain_id),
+                            gripper_action,
+                            timeout_sec=8.0,
+                        )
+                        if not gripper_action_result.get("success"):
+                            return {
+                                "success": False,
+                                "message": f"{robot}: {str(gripper_action_result.get('message') or 'RG2 action server unavailable')}",
+                            }
+
+    approach_time = max(float(plan.get("approach_time") or step) for plan in plans.values())
+    timeout = approach_time + step * len(waypoints) + 8.0
+    for plan in plans.values():
+        plan["points"] = [
+            {"positions": list(waypoint["positions"]), "time": approach_time + i * step}
+            for i, waypoint in enumerate(plan["waypoints"])
+        ]
+        plan["hardware_points"] = (
+            [
+                {
+                    "positions": list(plan.get("hardware_positions") or []),
+                    "time": HARDWARE_TRAJECTORY_CURRENT_POINT_SEC,
+                },
+                *list(plan["points"]),
+            ]
+            if need_hardware
+            else []
+        )
+        if need_hardware:
+            if plan.get("robot") == "xarm6":
+                plan["hardware_points"] = _append_final_hold_point(
+                    list(plan["hardware_points"]),
+                    XARM6_TEACH_REPLAY_FINAL_HOLD_SEC,
+                )
+                plan["hardware_final_hold_sec"] = XARM6_TEACH_REPLAY_FINAL_HOLD_SEC
+                plan["hardware_goal_time_tolerance_sec"] = XARM6_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
+            elif plan.get("robot") == "ur5e":
+                plan["hardware_points"] = _append_final_hold_point(
+                    list(plan["hardware_points"]),
+                    UR5E_TEACH_REPLAY_FINAL_HOLD_SEC,
+                )
+                plan["hardware_final_hold_sec"] = UR5E_TEACH_REPLAY_FINAL_HOLD_SEC
+                plan["hardware_goal_time_tolerance_sec"] = UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
+        gripper_waypoints = [
+            waypoint for waypoint in list(plan.get("waypoints") or [])
+            if "gripper" in dict(waypoint)
+        ]
+        first_gripper_time = min(0.5, max(0.1, approach_time))
+        plan["gripper_points"] = (
+            [
+                {
+                    "positions": [float(waypoint["gripper"])],
+                    "time": first_gripper_time if i == 0 else approach_time + i * step,
+                }
+                for i, waypoint in enumerate(plan["waypoints"])
+            ]
+            if len(gripper_waypoints) == len(list(plan.get("waypoints") or []))
+            else []
+        )
+
+    if need_hardware:
+        ur5e_plan = plans["ur5e"]
+        ur5e_joint_names = list(ur5e_plan["hardware_names"])
+        ur5e_action = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        ur5e_plan["hardware_plan_result"] = {
+            "success": True,
+            "message": (
+                f"{ur5e_action}: ready for follow_joint_trajectory "
+                f"joints={','.join(str(name) for name in ur5e_joint_names)}; "
+                f"waypoints={len(list(ur5e_plan.get('waypoints') or []))}; "
+                f"points={len(list(ur5e_plan.get('hardware_points') or []))}; "
+                f"goal_time_tolerance_sec={UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC:.3f}; "
+                f"final_hold_sec={float(ur5e_plan.get('hardware_final_hold_sec') or 0.0):.3f}."
+            ),
+            "action_name": ur5e_action,
+            "joint_names": list(ur5e_joint_names),
+            "mode": "follow_joint_trajectory",
+            "waypoints": len(list(ur5e_plan.get("waypoints") or [])),
+            "points": len(list(ur5e_plan.get("hardware_points") or [])),
+        }
+
+    return {
+        "success": True,
+        "message": f"prepared paired replay to {replay_target}.",
+        "metadata": _prepared_replay_metadata(args, recording),
+        "plans": plans,
+        "robots": robots,
+        "waypoints": len(waypoints),
+        "step": step,
+        "replay_target": replay_target,
+        "need_gazebo": need_gazebo,
+        "need_hardware": need_hardware,
+        "approach_time": approach_time,
+        "timeout": timeout,
+    }
+
+
+def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> int:
+    """Replay paired xArm6 + UR5e waypoints on one shared timeline."""
+    replay_target = str(args.replay_target or "hardware")
+    _write_replay_status(
+        args,
+        state="replaying",
+        message=f"preparing paired replay to {replay_target}.",
+    )
+    prepared: dict[str, Any] = {}
+    using_prepared_file = False
+    prepared_file_raw = str(getattr(args, "prepared_file", "") or "").strip()
+    if prepared_file_raw:
+        prepared_file = Path(prepared_file_raw)
+        prepared_candidate = _read_json(prepared_file)
+        if prepared_candidate:
+            stale_reason = _prepared_replay_validation_error(args, recording, prepared_candidate)
+            if stale_reason:
+                _write_replay_status(
+                    args,
+                    state="replaying",
+                    message=f"{stale_reason} Preparing replay synchronously.",
+                )
+            else:
+                drift_reason = (
+                    _prepared_start_drift_error(args, prepared_candidate)
+                    if replay_target in ("hardware", "both")
+                    else ""
+                )
+                if drift_reason:
+                    _write_replay_status(
+                        args,
+                        state="replaying",
+                        message=f"{drift_reason} Re-preparing because hardware moved.",
+                    )
+                else:
+                    prepared = prepared_candidate
+                    using_prepared_file = True
+
+    if not prepared:
+        _write_replay_status(
+            args,
+            state="preparing",
+            message="preparing paired replay before hardware execution.",
+        )
+        prepared = _build_paired_replay_preparation(args, recording)
+        if not prepared.get("success"):
+            message = str(prepared.get("message") or "replay preflight failed.")
+            _write_replay_status(args, state="blocked", message=message, last_error=message)
+            print(json.dumps(prepared))
+            return 6
+
+    plans = {
+        str(robot): dict(plan)
+        for robot, plan in dict(prepared.get("plans") or {}).items()
+    }
+    robots = [str(robot) for robot in list(prepared.get("robots") or [])]
+    waypoints = list(recording.get("waypoints") or [])
+    need_gazebo = bool(prepared.get("need_gazebo"))
+    need_hardware = bool(prepared.get("need_hardware"))
+    approach_time = float(prepared.get("approach_time") or 0.0)
+    timeout = float(prepared.get("timeout") or 8.0)
+
+    if need_hardware and using_prepared_file:
+        for robot in ("xarm6", "ur5e"):
+            action_name = str(ROBOTS[robot].get("hardware_trajectory_action") or "").strip()
+            action_result = _wait_follow_joint_trajectory_action(
+                int(args.hardware_domain_id),
+                action_name,
+                timeout_sec=3.0,
+            )
+            if not action_result.get("success"):
+                message = f"{robot}: {str(action_result.get('message') or f'{action_name} unavailable')}"
+                _write_replay_status(args, state="blocked", message=message, last_error=message)
+                print(json.dumps({"success": False, "message": message}))
+                return 6
+        for robot in robots:
+            gripper_points = list(dict(plans.get(robot) or {}).get("gripper_points") or [])
+            if not gripper_points:
+                continue
+            if robot == "xarm6":
+                endpoint_result = _wait_xarm_gripper_endpoint(int(args.hardware_domain_id), timeout_sec=3.0)
+                if not endpoint_result.get("success"):
+                    message = f"{robot}: {str(endpoint_result.get('message') or 'xarm6 gripper endpoint unavailable')}"
+                    _write_replay_status(args, state="blocked", message=message, last_error=message)
+                    print(json.dumps({"success": False, "message": message}))
+                    return 6
+            elif robot == "ur5e":
+                gripper_action = str(dict(ROBOTS[robot].get("gripper") or {}).get("hardware_action") or "").strip()
+                if gripper_action:
+                    gripper_action_result = _wait_follow_joint_trajectory_action(
+                        int(args.hardware_domain_id),
+                        gripper_action,
+                        timeout_sec=3.0,
+                    )
+                    if not gripper_action_result.get("success"):
+                        message = f"{robot}: {str(gripper_action_result.get('message') or 'RG2 action server unavailable')}"
+                        _write_replay_status(args, state="blocked", message=message, last_error=message)
+                        print(json.dumps({"success": False, "message": message}))
+                        return 6
+
+    results: dict[str, dict[str, Any]] = {}
+    result_lock = threading.Lock()
+    threads: list[threading.Thread] = []
+    expected_results: list[str] = []
+    _write_replay_status(
+        args,
+        state="replaying",
+        message=(
+            "starting hardware execution from prepared replay."
+            if using_prepared_file and need_hardware
+            else f"publishing paired replay to {replay_target}."
+        ),
+    )
+
+    def _set_result(key: str, value: dict[str, Any]) -> None:
+        with result_lock:
+            results[key] = value
+
+    def _publish_for(robot: str, side: str) -> None:
+        plan = plans[robot]
+        if side == "gazebo":
+            _set_result(f"{robot}/gazebo", _publish_trajectory(
+                int(args.gazebo_domain_id),
+                ROBOTS[robot]["gazebo_trajectory_topics"],
+                list(plan["joint_names"]),
+                list(plan["points"]),
+                join_timeout_sec=timeout,
+            ))
+            return
+
+    def _decorate_hardware_arm_result(
+        result: dict[str, Any],
+        *,
+        robot: str,
+        action_name: str,
+        joint_names: list[str],
+        points: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        plan = plans[robot]
+        result = dict(result)
+        detail = (
+            f"{robot} arm commanded; "
+            f"action={action_name}; "
+            f"joints={','.join(str(name) for name in joint_names)}; "
+            f"max_joint_delta_deg={float(plan.get('max_joint_delta_deg') or 0.0):.3f}; "
+            f"approach_time={float(approach_time):.3f}; "
+            f"points={len(points)}"
+        )
+        if "zero_velocities" in result:
+            detail += f"; zero_velocities={bool(result.get('zero_velocities'))}"
+        if "header_stamp" in result:
+            detail += f"; header_stamp={bool(result.get('header_stamp'))}"
+        if "goal_time_tolerance_sec" in result:
+            detail += f"; goal_time_tolerance_sec={float(result.get('goal_time_tolerance_sec') or 0.0):.3f}"
+        if "final_hold_sec" in result:
+            detail += f"; final_hold_sec={float(result.get('final_hold_sec') or 0.0):.3f}"
+        if "observed_completion" in result:
+            observed = dict(result.get("observed_completion") or {})
+            detail += f"; observed_completion={bool(observed.get('success'))}"
+        result["message"] = f"{str(result.get('message') or '').rstrip('. ')} ({detail})."
+        result["action_name"] = action_name
+        result["joint_names"] = list(joint_names)
+        result["max_joint_delta_deg"] = float(plan.get("max_joint_delta_deg") or 0.0)
+        result["approach_time"] = float(approach_time)
+        result["points"] = len(points)
+        return result
+
+    def _publish_xarm_hardware_arm() -> None:
+        plan = plans["xarm6"]
+        action_name = str(ROBOTS["xarm6"].get("hardware_trajectory_action") or "").strip()
+        joint_names = list(plan["hardware_names"])
+        points = list(plan["hardware_points"])
+        target_positions = [float(value) for value in list(points[-1].get("positions") or [])] if points else []
+        final_time = max((float(point.get("time") or 0.0) for point in points), default=0.0)
+        xarm_timeout = max(
+            timeout,
+            final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
+        )
+        result = _publish_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            action_name,
+            joint_names,
+            points,
+            join_timeout_sec=xarm_timeout,
+            start_delay_sec=HARDWARE_TRAJECTORY_START_DELAY_SEC,
+            goal_time_tolerance_sec=XARM6_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC,
+        )
+        result = _apply_observed_completion_fallback(
+            result,
+            domain_id=int(args.hardware_domain_id),
+            robot="xarm6",
+            joint_names=joint_names,
+            target_positions=target_positions,
+        )
+        result["goal_time_tolerance_sec"] = XARM6_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
+        result["final_hold_sec"] = float(plan.get("hardware_final_hold_sec") or 0.0)
+        _set_result(
+            "xarm6/hardware_arm",
+            _decorate_hardware_arm_result(
+                result,
+                robot="xarm6",
+                action_name=action_name,
+                joint_names=joint_names,
+                points=points,
+            ),
+        )
+
+    def _publish_ur5e_hardware_arm() -> None:
+        plan = plans["ur5e"]
+        action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
+        points = list(plan.get("hardware_points") or [])
+        target_positions = [float(value) for value in list(points[-1].get("positions") or [])] if points else []
+        final_time = max((float(point.get("time") or 0.0) for point in points), default=0.0)
+        ur5e_timeout = max(
+            timeout,
+            final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
+        )
+        _set_result("ur5e/hardware_plan", dict(plan.get("hardware_plan_result") or {}))
+        result = _publish_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            action_name,
+            joint_names,
+            points,
+            join_timeout_sec=ur5e_timeout,
+            start_delay_sec=HARDWARE_TRAJECTORY_START_DELAY_SEC,
+            goal_time_tolerance_sec=UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC,
+        )
+        result = _apply_observed_completion_fallback(
+            result,
+            domain_id=int(args.hardware_domain_id),
+            robot="ur5e",
+            joint_names=joint_names,
+            target_positions=target_positions,
+        )
+        result["goal_time_tolerance_sec"] = UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
+        result["final_hold_sec"] = float(plan.get("hardware_final_hold_sec") or 0.0)
+        result["mode"] = "follow_joint_trajectory"
+        _set_result(
+            "ur5e/hardware_arm",
+            _decorate_hardware_arm_result(
+                result,
+                robot="ur5e",
+                action_name=action_name,
+                joint_names=joint_names,
+                points=points,
+            ),
+        )
+
+    def _publish_gripper_for(robot: str, side: str) -> None:
+        plan = plans[robot]
+        gripper_points = list(plan.get("gripper_points") or [])
+        gripper_joint = str(plan.get("gripper_joint") or "").strip()
+        if not gripper_points or not gripper_joint:
+            _set_result(f"{robot}/{side}_gripper", {"success": True, "message": "no gripper waypoints."})
+            return
+        gripper_cfg = dict(ROBOTS[robot].get("gripper") or {})
+        if side == "gazebo":
+            _set_result(f"{robot}/gazebo_gripper", _publish_trajectory(
+                int(args.gazebo_domain_id),
+                list(gripper_cfg.get("gazebo_trajectory_topics") or []),
+                [gripper_joint],
+                gripper_points,
+                join_timeout_sec=timeout,
+            ))
+            return
+        if robot == "xarm6":
+            _set_result(f"{robot}/hardware_gripper", _publish_xarm_gripper_sequence(
+                int(args.hardware_domain_id),
+                gripper_points,
+                join_timeout_sec=timeout,
+            ))
+            return
+        _set_result(f"{robot}/hardware_gripper", _publish_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            str(gripper_cfg.get("hardware_action") or ""),
+            [gripper_joint],
+            gripper_points,
+            join_timeout_sec=timeout,
+        ))
+
+    for robot in robots:
+        if need_gazebo:
+            expected_results.append(f"{robot}/gazebo")
+            threads.append(threading.Thread(target=_publish_for, args=(robot, "gazebo"), daemon=True))
+            if plans[robot].get("gripper_points"):
+                expected_results.append(f"{robot}/gazebo_gripper")
+                threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "gazebo"), daemon=True))
+        if need_hardware and plans[robot].get("gripper_points"):
+            expected_results.append(f"{robot}/hardware_gripper")
+            threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "hardware"), daemon=True))
+    if need_hardware:
+        expected_results.append("xarm6/hardware_arm")
+        expected_results.append("ur5e/hardware_plan")
+        expected_results.append("ur5e/hardware_arm")
+        threads.append(threading.Thread(target=_publish_xarm_hardware_arm, daemon=True))
+        threads.append(threading.Thread(target=_publish_ur5e_hardware_arm, daemon=True))
+    for thread in threads:
+        thread.start()
+    thread_join_timeout = timeout + 5.0
+    if need_hardware:
+        xarm_points = list(dict(plans.get("xarm6") or {}).get("hardware_points") or [])
+        xarm_final_time = max((float(point.get("time") or 0.0) for point in xarm_points), default=0.0)
+        thread_join_timeout = max(
+            thread_join_timeout,
+            xarm_final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
+        )
+        ur5e_points = list(dict(plans.get("ur5e") or {}).get("hardware_points") or [])
+        ur5e_final_time = max((float(point.get("time") or 0.0) for point in ur5e_points), default=0.0)
+        thread_join_timeout = max(
+            thread_join_timeout,
+            ur5e_final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
+        )
+    for thread in threads:
+        thread.join(thread_join_timeout)
+
+    with result_lock:
+        for key in expected_results:
+            if key not in results:
+                results[key] = {
+                    "success": False,
+                    "message": "replay thread did not finish.",
+                }
+
+    ok = bool(results) and all(bool(result.get("success")) for result in results.values())
+    message = "; ".join(f"{name}: {result.get('message') or ''}" for name, result in sorted(results.items()))
+    out: dict[str, Any] = {
+        "success": ok,
+        "message": message,
+        "waypoints": len(waypoints),
+        "robots": robots,
+        "used_prepared_file": using_prepared_file,
+    }
+    if need_hardware:
+        out["max_joint_delta_deg"] = max(
+            float(plan.get("max_joint_delta_deg") or 0.0) for plan in plans.values()
+        )
+    _write_replay_status(
+        args,
+        state="replayed" if ok else "blocked",
+        message=message,
+        last_error="" if ok else message,
+    )
+    print(json.dumps(out))
+    return 0 if ok else 8
+
+
+def run_prepare_replay(args: argparse.Namespace) -> int:
+    """Prepare paired replay data without commanding gazebo or hardware motion."""
+    try:
+        with Path(args.recording_file).open("r", encoding="utf-8") as f:
+            recording = json.load(f)
+    except Exception as exc:
+        print(json.dumps({"success": False, "message": f"cannot read recording: {exc}"}))
+        return 4
+
+    if not str(getattr(args, "prepared_file", "") or "").strip():
+        print(json.dumps({"success": False, "message": "--prepared-file is required for prepare-replay."}))
+        return 4
+
+    if str(recording.get("robot") or "").strip().lower() != "dual robots" and str(
+        recording.get("recording_type") or ""
+    ).strip() != "paired_dual_robots":
+        print(json.dumps({"success": False, "message": "prepare-replay only supports paired_dual_robots."}))
+        return 4
+
+    _write_replay_status(
+        args,
+        state="preparing",
+        message=f"preparing paired replay to {str(args.replay_target or 'hardware')}.",
+    )
+    prepared = _build_paired_replay_preparation(args, recording)
+    if not prepared.get("success"):
+        message = str(prepared.get("message") or "prepare-replay failed.")
+        _write_replay_status(args, state="blocked", message=message, last_error=message)
+        print(json.dumps(prepared))
+        return 6
+
+    prepared_path = Path(str(args.prepared_file))
+    _atomic_json_write(prepared_path, prepared)
+    out = {
+        "success": True,
+        "message": str(prepared.get("message") or "prepared replay."),
+        "prepared_file": str(prepared_path),
+        "waypoints": int(prepared.get("waypoints") or 0),
+        "robots": list(prepared.get("robots") or []),
+    }
+    _write_replay_status(
+        args,
+        state="prepared",
+        message=out["message"],
+        last_error="",
+    )
+    print(json.dumps(out))
+    return 0
+
+
+def run_replay(args: argparse.Namespace) -> int:
+    """Replay recorded waypoints in gazebo (preview), on hardware, or on both in sync ('both')."""
+    try:
+        with Path(args.recording_file).open("r", encoding="utf-8") as f:
+            recording = json.load(f)
+    except Exception as exc:
+        print(json.dumps({"success": False, "message": f"cannot read recording: {exc}"}))
+        return 4
+
+    if str(recording.get("robot") or "").strip().lower() == "dual robots" or str(
+        recording.get("recording_type") or ""
+    ).strip() == "paired_dual_robots":
+        return run_paired_replay(args, recording)
+
+    waypoints = list(recording.get("waypoints") or [])
+    if not waypoints:
+        print(json.dumps({"success": False, "message": "recording has no waypoints."}))
+        return 5
+
+    step = max(0.2, float(args.waypoint_duration_sec))
+    replay_target = str(args.replay_target or "hardware")
+    need_gazebo = replay_target in ("gazebo", "both")
+    need_hardware = replay_target in ("hardware", "both")
+
+    recorded_joint_names = list(recording.get("joint_names") or ROBOTS[args.robot]["gazebo_joints"])
+
+    # Hardware path: resolve hardware joint names now and size the approach to the first
+    # waypoint by a safe joint speed (not a hard distance block). Checked BEFORE publishing
+    # to either side, so gazebo never moves when hardware would be unsafe.
+    hardware_names: list[str] = []
+    max_delta_deg = 0.0
+    approach_time = step
+    if need_hardware:
+        hardware_result = _read_snapshot(
+            int(args.hardware_domain_id),
+            args.robot,
+            "hardware",
+            HARDWARE_SNAPSHOT_TIMEOUT_SEC,
+        )
+        if not hardware_result.get("success"):
+            print(json.dumps({"success": False, "message": str(hardware_result.get("message") or "missing hardware state")}))
+            return 6
+        hardware_snapshot = dict(hardware_result.get("snapshot") or {})
+        hardware_names, hardware_positions, hardware_missing = _resolve_hardware_positions(hardware_snapshot, args.robot)
+        if hardware_missing:
+            print(json.dumps({"success": False, "message": f"missing hardware joints: {', '.join(hardware_missing)}"}))
+            return 6
+
+        first = [float(v) for v in waypoints[0]["positions"]]
+        deltas = [_angular_delta(a, b) for a, b in zip(first, hardware_positions)]
+        max_delta_deg = math.degrees(max(deltas)) if deltas else 0.0
+
+        # Absolute sanity ceiling only: a near-180 deg single-joint delta usually means an
+        # encoder/wrap problem, not a deliberate authored move.
+        ceiling_deg = float(args.max_joint_delta_deg)
+        if max_delta_deg > ceiling_deg:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "message": f"blocked: first waypoint is {max_delta_deg:.2f} deg from hardware (ceiling {ceiling_deg:.2f}).",
+                        "max_joint_delta_deg": max_delta_deg,
+                    }
+                )
+            )
+            return 7
+
+        max_vel = max(1.0, float(getattr(args, "max_joint_vel_deg_s", MAX_REPLAY_JOINT_VEL_DEG_S)))
+        approach_time = max(step, max_delta_deg / max_vel)
+
+    # First point lands at approach_time (speed-limited); the rest follow at `step` spacing.
+    # Same point times drive gazebo and hardware so they stay in sync in 'both'.
+    points = [
+        {"positions": list(wp["positions"]), "time": approach_time + i * step}
+        for i, wp in enumerate(waypoints)
+    ]
+    timeout = approach_time + step * len(points) + 8.0
+
+    # Publish to the required domains concurrently so sim and hardware move in sync.
+    results: dict[str, dict[str, Any]] = {}
+
+    def _do_gazebo() -> None:
+        results["gazebo"] = _publish_trajectory(
+            int(args.gazebo_domain_id),
+            ROBOTS[args.robot]["gazebo_trajectory_topics"],
+            recorded_joint_names,
+            points,
+            join_timeout_sec=timeout,
+        )
+
+    def _do_hardware() -> None:
+        results["hardware"] = _publish_trajectory(
+            int(args.hardware_domain_id),
+            ROBOTS[args.robot]["trajectory_topics"],
+            hardware_names,
+            points,
+            join_timeout_sec=timeout,
+        )
+
+    threads: list[threading.Thread] = []
+    if need_gazebo:
+        threads.append(threading.Thread(target=_do_gazebo, daemon=True))
+    if need_hardware:
+        threads.append(threading.Thread(target=_do_hardware, daemon=True))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 5.0)
+
+    ok = bool(results) and all(bool(r.get("success")) for r in results.values())
+    message = "; ".join(f"{name}: {r.get('message') or ''}" for name, r in results.items())
+    out: dict[str, Any] = {"success": ok, "message": message, "waypoints": len(points)}
+    if need_hardware:
+        out["max_joint_delta_deg"] = max_delta_deg
+    print(json.dumps(out))
+    return 0 if ok else 8
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Synched gazebo + hardware digital twin helper")
+    parser.add_argument(
+        "--mode",
+        choices=[
+            "mirror",
+            "apply-gazebo-to-hardware",
+            "initialize-gazebo-from-hardware",
+            "snapshot",
+            "prepare-replay",
+            "replay",
+        ],
+        required=True,
+    )
+    parser.add_argument("--target", default="")
+    parser.add_argument("--robot", choices=[*sorted(ROBOTS), "dual robots"], required=True)
+    parser.add_argument("--model-name", default="")
+    parser.add_argument("--gazebo-domain-id", type=int, required=True)
+    parser.add_argument("--hardware-domain-id", type=int, required=True)
+    parser.add_argument("--status-file", default="")
+    parser.add_argument("--direction-file", default="")
+    parser.add_argument("--max-joint-delta-deg", type=float, default=10.0)
+    # snapshot mode
+    parser.add_argument("--source", choices=["gazebo", "hardware"], default="gazebo")
+    # initialize-gazebo-from-hardware mode
+    parser.add_argument("--init-tolerance-rad", type=float, default=INITIALIZE_GAZEBO_TOLERANCE_RAD)
+    parser.add_argument("--init-attempts", type=int, default=INITIALIZE_GAZEBO_ATTEMPTS)
+    # replay mode
+    parser.add_argument("--recording-file", default="")
+    parser.add_argument("--prepared-file", default="")
+    parser.add_argument("--replay-target", choices=["hardware", "gazebo", "both"], default="hardware")
+    parser.add_argument("--waypoint-duration-sec", type=float, default=2.0)
+    parser.add_argument("--max-joint-vel-deg-s", type=float, default=MAX_REPLAY_JOINT_VEL_DEG_S)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.mode == "mirror":
+        return run_mirror(args)
+    if args.mode == "apply-gazebo-to-hardware":
+        return run_apply_gazebo_to_hardware(args)
+    if args.mode == "initialize-gazebo-from-hardware":
+        return run_initialize_gazebo_from_hardware(args)
+    if args.mode == "snapshot":
+        return run_snapshot(args)
+    if args.mode == "prepare-replay":
+        return run_prepare_replay(args)
+    if args.mode == "replay":
+        return run_replay(args)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

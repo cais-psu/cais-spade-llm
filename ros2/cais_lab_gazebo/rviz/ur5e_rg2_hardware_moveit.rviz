@@ -24,19 +24,19 @@ Visualization Manager:
       Update Interval: 0
       Visual Enabled: true
     - Class: moveit_rviz_plugin/MotionPlanning
-      Acceleration_Scaling_Factor: 1
+      Acceleration_Scaling_Factor: 0.30
       Enabled: true
       Name: MotionPlanning
       Move Group Namespace: ""
       Planning Scene Topic: /monitored_planning_scene
       Robot Description: robot_description
-      Velocity_Scaling_Factor: 1
+      Velocity_Scaling_Factor: 0.30
       Scene Geometry:
         Scene Alpha: 0.8999999761581421
       Scene Robot:
         Robot Alpha: 0.5
       Planning Request:
-        Planning Group: xarm6_xarm6
+        Planning Group: ur_manipulator
         Interactive Marker Size: 0.2
         Query Start State: false
         Query Goal State: true
@@ -44,10 +44,6 @@ Visualization Manager:
         Loop Animation: false
         State Display Time: 0.05s
         Trajectory Topic: /move_group/display_planned_path
-    - Class: rviz_default_plugins/InteractiveMarkers
-      Enabled: true
-      Name: Dual Drag Markers
-      Update Topic: /dual_drag_markers/update
     - Class: rviz_default_plugins/TF
       Enabled: false
       Name: TF
@@ -69,11 +65,11 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3
+      Distance: 2.5
       Focal Point:
         X: 0
         Y: 0
-        Z: 1
+        Z: 0.8
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 0.5

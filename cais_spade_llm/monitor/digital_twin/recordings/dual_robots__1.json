@@ -1,0 +1,64 @@
+{
+  "target": "dual robots",
+  "robot": "dual robots",
+  "recording_type": "paired_dual_robots",
+  "robots": {
+    "xarm6": {
+      "joint_names": [
+        "xarm6_joint1",
+        "xarm6_joint2",
+        "xarm6_joint3",
+        "xarm6_joint4",
+        "xarm6_joint5",
+        "xarm6_joint6"
+      ],
+      "gripper_joint": "xarm6_drive_joint"
+    },
+    "ur5e": {
+      "joint_names": [
+        "ur5e_shoulder_pan_joint",
+        "ur5e_shoulder_lift_joint",
+        "ur5e_elbow_joint",
+        "ur5e_wrist_1_joint",
+        "ur5e_wrist_2_joint",
+        "ur5e_wrist_3_joint"
+      ],
+      "gripper_joint": "ur5e_rg2_finger_width"
+    }
+  },
+  "recovery_metadata": {
+    "source": "digital_twin_teach",
+    "target": "dual robots",
+    "recording_type": "paired_dual_robots",
+    "dispatch": "manual",
+    "created_at": 1782863134.477405
+  },
+  "waypoints": [
+    {
+      "robots": {
+        "xarm6": {
+          "positions": [
+            -1.1551682664991625,
+            -0.34740065362001715,
+            -1.3050925640796547,
+            -0.048184246483586435,
+            1.6040352938147926,
+            -1.1594004255669557
+          ],
+          "gripper": 0.3809620276099466
+        },
+        "ur5e": {
+          "positions": [
+            -0.49244797679150487,
+            -1.2077354186555276,
+            -1.8079109430608575,
+            -1.6998970832399243,
+            1.5715119135769888,
+            -2.0506154618652137
+          ],
+          "gripper": 0.06499920803896068
+        }
+      }
+    }
+  ]
+}
