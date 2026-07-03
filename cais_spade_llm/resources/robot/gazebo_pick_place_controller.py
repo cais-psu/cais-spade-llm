@@ -1,5 +1,5 @@
 """
-Config-driven ROS2 pick/place controller.
+Config-driven Gazebo pick/place controller.
 
 This module intentionally avoids importing ROS2 packages at module import time.
 All ROS2 imports happen lazily inside `init()` so non-ROS workflows can still
@@ -122,9 +122,9 @@ def _gazebo_timing_scale_from_env(execution_mode: str) -> float:
     return float(scale)
 
 
-class Ros2PickPlaceController:
+class GazeboPickPlaceController:
     """
-    Generic pick/place controller for a single robot.
+    Generic Gazebo pick/place controller for a single robot.
 
     Public phase methods map to framework tool names:
       - pick_approach
@@ -3330,3 +3330,73 @@ class Ros2PickPlaceController:
         orientation.z = float(qz)
         orientation.w = float(qw)
         return orientation
+
+
+UR5E_JOINT_NAMES = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
+UR5E_TRAJECTORY_TOPIC = "/scaled_joint_trajectory_controller/joint_trajectory"
+UR5E_JOINT_STATES_TOPIC = "/joint_states"
+
+XARM6_JOINT_NAMES = [
+    "xarm6_joint1",
+    "xarm6_joint2",
+    "xarm6_joint3",
+    "xarm6_joint4",
+    "xarm6_joint5",
+    "xarm6_joint6",
+]
+XARM6_JOINT_STATES_TOPIC = "/joint_states"
+
+
+class UR5eGazeboController(GazeboPickPlaceController):
+    """Config-driven UR5e Gazebo controller."""
+
+    def __init__(
+        self,
+        trajectory_topic: str = UR5E_TRAJECTORY_TOPIC,
+        joint_states_topic: str = UR5E_JOINT_STATES_TOPIC,
+        *,
+        controller_config: dict[str, Any] | None = None,
+        named_positions: dict[str, Any] | None = None,
+        execution_mode: str = "simulation",
+    ) -> None:
+        super().__init__(
+            robot_name="ur5e",
+            node_name=f"ur5e_controller_{os.getpid()}",
+            controller_config=controller_config or {},
+            named_positions=named_positions,
+            execution_mode=execution_mode,
+            arm_joint_names=UR5E_JOINT_NAMES,
+            arm_trajectory_topic=trajectory_topic,
+            joint_states_topic=joint_states_topic,
+        )
+
+
+class XArm6GazeboController(GazeboPickPlaceController):
+    """Config-driven xArm6 Gazebo controller."""
+
+    def __init__(
+        self,
+        *,
+        trajectory_topic: str | None = None,
+        joint_states_topic: str = XARM6_JOINT_STATES_TOPIC,
+        controller_config: dict[str, Any] | None = None,
+        named_positions: dict[str, Any] | None = None,
+        execution_mode: str = "simulation",
+    ) -> None:
+        super().__init__(
+            robot_name="xarm6",
+            node_name=f"xarm6_controller_{os.getpid()}",
+            controller_config=controller_config or {},
+            named_positions=named_positions,
+            execution_mode=execution_mode,
+            arm_joint_names=XARM6_JOINT_NAMES,
+            arm_trajectory_topic=trajectory_topic,
+            joint_states_topic=joint_states_topic,
+        )

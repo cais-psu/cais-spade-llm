@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import threading
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ class DualDragMarkers(KeyboardTeleop):
         cartesian_max_step_mm: float,
         service_timeout_sec: float,
         execution_policy: str,
+        status_file: str = "",
     ) -> None:
         super().__init__(
             cartesian_max_step_mm=cartesian_max_step_mm,
@@ -51,6 +53,7 @@ class DualDragMarkers(KeyboardTeleop):
         self.velocity_scale = self._normalize_velocity_scale(velocity_scale)
         self.service_timeout_sec = max(1.0, float(service_timeout_sec))
         self.execution_policy = str(execution_policy or "immediate").strip().lower()
+        self.status_file = Path(status_file) if str(status_file or "").strip() else None
         if self.execution_policy not in {"immediate", "paired"}:
             self.execution_policy = "immediate"
         self.server = InteractiveMarkerServer(self, "dual_drag_markers")
@@ -67,7 +70,46 @@ class DualDragMarkers(KeyboardTeleop):
         self.display_pub = self.create_publisher(DisplayTrajectory, "/move_group/display_planned_path", 10)
         if self.execution_policy == "paired":
             self._install_paired_menu()
+        self._write_status(
+            state="ready",
+            action="",
+            stage="ready",
+            message=(
+                f"dual_drag_markers ready mode={self.mode}; "
+                f"execution-policy={self.execution_policy}"
+            ),
+        )
         self.create_timer(0.5, self._refresh_markers)
+
+    def _write_status(
+        self,
+        *,
+        state: str,
+        action: str,
+        stage: str,
+        message: str,
+        last_error: str = "",
+    ) -> None:
+        if self.status_file is None:
+            return
+        payload = {
+            "updated_at": time.time(),
+            "node": "dual_drag_markers",
+            "mode": self.mode,
+            "execution_policy": self.execution_policy,
+            "state": str(state or "unknown"),
+            "action": str(action or ""),
+            "stage": str(stage or ""),
+            "message": str(message or ""),
+            "last_error": str(last_error or ""),
+        }
+        try:
+            self.status_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.status_file.with_suffix(self.status_file.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            tmp.replace(self.status_file)
+        except Exception as exc:
+            self.get_logger().warn(f"dual_drag_markers status write failed: {exc}")
 
     def _install_paired_menu(self) -> None:
         for label, action in (
@@ -190,30 +232,73 @@ class DualDragMarkers(KeyboardTeleop):
     def _stage_paired_target(self, robot: str, target: Pose) -> None:
         self._paired_targets[robot] = copy.deepcopy(target)
         self._paired_plan = None
-        self.get_logger().info(f"{robot} target staged for dual_robots")
+        message = f"{robot} target staged for dual_robots"
+        self.get_logger().info(message)
+        self._write_status(
+            state="staged",
+            action="stage",
+            stage=robot,
+            message=message,
+        )
         self._refresh_markers()
 
     def _run_paired_menu_action(self, action: str) -> None:
+        action_label = {
+            "plan": "Plan dual_robots",
+            "execute": "Execute dual_robots",
+            "plan_execute": "Plan+Execute dual_robots",
+            "clear": "Clear dual_robots plan",
+        }.get(action, str(action or "unknown dual_robots action"))
+        stage = "starting"
+        final_message = ""
+        ok = False
         try:
+            self._write_status(
+                state="running",
+                action=action_label,
+                stage=stage,
+                message=f"{action_label}: started.",
+            )
             if action == "clear":
                 self._paired_targets.clear()
                 self._paired_plan = None
                 ok, msg = True, "dual_robots plan cleared"
             elif action == "plan":
+                stage = "plan"
                 ok, msg = self.plan_dual_robots()
             elif action == "execute":
+                stage = "execute"
                 ok, msg = self.execute_dual_robots()
             elif action == "plan_execute":
+                stage = "plan"
                 ok, msg = self.plan_dual_robots()
                 if ok:
+                    self._write_status(
+                        state="running",
+                        action=action_label,
+                        stage="execute",
+                        message=f"{action_label}: plan succeeded; executing dual_robots.",
+                    )
+                    stage = "execute"
                     ok, msg = self.execute_dual_robots()
             else:
                 ok, msg = False, f"unknown dual_robots menu action: {action}"
 
             if ok:
-                self.get_logger().info(msg)
+                final_message = f"{action_label}: {msg}"
             else:
-                self.get_logger().warn(msg)
+                final_message = f"{action_label} failed during {stage}: {msg}"
+            self._write_status(
+                state="succeeded" if ok else "failed",
+                action=action_label,
+                stage=stage,
+                message=final_message,
+                last_error="" if ok else final_message,
+            )
+            if ok:
+                self.get_logger().info(final_message)
+            else:
+                self.get_logger().warn(final_message)
         finally:
             self._paired_busy = False
             time.sleep(0.2)
@@ -486,21 +571,35 @@ class DualDragMarkers(KeyboardTeleop):
 
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = self._paired_plan
+        duration = self._trajectory_duration(self._paired_plan)
+        point_count = len(list(self._paired_plan.joint_trajectory.points))
+        joint_names = list(self._paired_plan.joint_trajectory.joint_names)
         future = self.execute_client.send_goal_async(goal)
         if not self._wait_future(future, timeout=10.0):
-            return False, "Execute send timeout"
+            return False, (
+                f"/execute_trajectory send timeout; duration={duration:.2f}s; "
+                f"points={point_count}; joints={','.join(joint_names)}"
+            )
         handle = future.result()
         if handle is None or not handle.accepted:
-            return False, "Execute rejected"
-        duration = self._trajectory_duration(self._paired_plan)
+            return False, (
+                f"/execute_trajectory goal rejected; duration={duration:.2f}s; "
+                f"points={point_count}; joints={','.join(joint_names)}"
+            )
         result_future = handle.get_result_async()
         if not self._wait_future(result_future, timeout=max(30.0, duration + 15.0)):
-            return False, "Execute timeout"
+            return False, (
+                f"/execute_trajectory result timeout; duration={duration:.2f}s; "
+                f"points={point_count}; joints={','.join(joint_names)}"
+            )
         result = result_future.result()
         code = result.result.error_code.val if result else None
         if code == 1:
             return True, "dual_robots executed"
-        return False, f"Error code {code}"
+        return False, (
+            f"/execute_trajectory error_code={code}; duration={duration:.2f}s; "
+            f"points={point_count}; joints={','.join(joint_names)}"
+        )
 
     def move_to_pose(self, robot: str, target: Pose, velocity_scale: float = 1.0) -> tuple[bool, str]:
         if robot not in ROBOTS:
@@ -584,6 +683,7 @@ def main() -> int:
     parser.add_argument("--cart-max-step-mm", type=float, default=30.0)
     parser.add_argument("--service-timeout-sec", type=float, default=8.0)
     parser.add_argument("--execution-policy", choices=("immediate", "paired"), default="immediate")
+    parser.add_argument("--status-file", default="")
     args = parser.parse_args()
 
     rclpy.init()
@@ -594,6 +694,7 @@ def main() -> int:
         cartesian_max_step_mm=args.cart_max_step_mm,
         service_timeout_sec=args.service_timeout_sec,
         execution_policy=args.execution_policy,
+        status_file=args.status_file,
     )
     try:
         node.get_logger().info(

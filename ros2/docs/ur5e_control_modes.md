@@ -89,10 +89,10 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
 **From Python:**
 
 ```python
-from cais_spade_llm.resources.robot.ur5e_controller import UR5eController
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import UR5eGazeboController
 import time
 
-ctrl = UR5eController()
+ctrl = UR5eGazeboController()
 ctrl.init()
 time.sleep(1)
 
@@ -168,7 +168,7 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
     points: [{positions: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0], time_from_start: {sec: 2}}]}"
 ```
 
-**From Python:** Same `UR5eController` code, but note the controller topic is `/joint_trajectory_controller/joint_trajectory` (not `scaled_joint_trajectory_controller`).
+**From Python:** Same `UR5eGazeboController` code, but note the controller topic is `/joint_trajectory_controller/joint_trajectory` (not `scaled_joint_trajectory_controller`).
 
 **Joint sliders GUI (quick test):**
 

@@ -81,6 +81,21 @@ def _render_ur5e_external_control_and_rg2_status(status: dict) -> None:
             if external_error:
                 ui.label(f"{prefix}External Control error: {external_error}").classes("text-xs text-red-700")
 
+        trajectory_controller = str(source.get("trajectory_controller") or "").strip()
+        if trajectory_controller:
+            controller_classes = (
+                "text-xs text-red-700"
+                if trajectory_controller == "inactive"
+                else "text-xs text-slate-500"
+            )
+            ui.label(f"{prefix}UR5e trajectory controller: {trajectory_controller}").classes(controller_classes)
+            controller_warning = str(source.get("trajectory_controller_warning") or "").strip()
+            if controller_warning:
+                ui.label(f"{prefix}{controller_warning}").classes("text-xs text-red-700")
+            controller_error = str(source.get("trajectory_controller_error") or "").strip()
+            if controller_error:
+                ui.label(f"{prefix}UR5e trajectory controller error: {controller_error}").classes("text-xs text-red-700")
+
         gripper_state = source.get("gripper")
         if gripper_state is not None:
             ui.label(f"{prefix}RG2 bridge: {str(gripper_state)}").classes("text-xs text-slate-500")
@@ -121,6 +136,9 @@ def render(bridge: SystemBridge) -> None:
 
         # ── Digital Twin Launch ──────────────────────────────────────
         _digital_twin_launch_section(bridge)
+
+        # ── Function Record / Replay ─────────────────────────────────
+        _function_record_panel(bridge)
 
         # ── Interactive Teleop ───────────────────────────────────────
         _teleop_section(bridge)
@@ -407,6 +425,14 @@ def _hardware_stack_row(
                 return
             ui.notify(f"Stopped {label}", type="info")
 
+        async def _repair_ur5e_async() -> None:
+            result = await asyncio.to_thread(bridge.repair_ur5e_trajectory_controller)
+            ui.notify(
+                str(result.get("message") or "UR5e controller repair finished."),
+                type=("positive" if result.get("success") else "warning"),
+                timeout=5000,
+            )
+
         def _start() -> None:
             if blocked_reason:
                 ui.notify(blocked_reason, type="warning", timeout=3500)
@@ -416,12 +442,19 @@ def _hardware_stack_row(
         def _stop() -> None:
             asyncio.create_task(_stop_async())
 
+        def _repair_ur5e() -> None:
+            asyncio.create_task(_repair_ur5e_async())
+
         ui.button("Start", on_click=_start, icon="play_arrow").props(
             "flat dense" + (" disable" if start_blocked else "")
         ).classes("text-green-600")
         ui.button("Stop", on_click=_stop, icon="stop").props(
             "flat dense" + (" disable" if stop_disabled else "")
         ).classes("text-red-600")
+        if robot == "ur5e":
+            ui.button("Repair UR5e Controller", on_click=_repair_ur5e, icon="build").props(
+                "flat dense" + (" disable" if overall == "stopped" else "")
+            ).classes("text-amber-700")
 
 
 # =====================================================================
@@ -440,8 +473,7 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
         ui.label("digital twin launch").classes("text-lg font-semibold mb-1")
         ui.label(
             "Monitor = sim mirrors the live robot (hardware drives gazebo). "
-            "Teach = build motions in the sim MoveIt/RViz, capture waypoints, then replay on "
-            "gazebo + hardware together."
+            "Use Function Record / Replay to capture, preview, and replay monitor-mode motions."
         ).classes("text-xs text-slate-500 mb-3")
 
         container = ui.column().classes("w-full gap-3")
@@ -468,6 +500,11 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
                         repr(dict(hardware.get("rg2") or {})),
                         dict(row.get("sync/status") or {}).get("state", "unknown"),
                         dict(row.get("sync/status") or {}).get("process_status", "unknown"),
+                        str(dict(row.get("dual_drag_markers") or {}).get("state", "")),
+                        str(dict(row.get("dual_drag_markers") or {}).get("action", "")),
+                        str(dict(row.get("dual_drag_markers") or {}).get("stage", "")),
+                        str(dict(row.get("dual_drag_markers") or {}).get("message", "")),
+                        str(dict(row.get("dual_drag_markers") or {}).get("last_error", "")),
                         # status_age_ms / latency_ms are intentionally excluded: they change every
                         # cycle and would force a rebuild (collapsing open expansions) 3 s apart.
                         dict(row.get("sync/status") or {}).get("last_error"),
@@ -492,6 +529,7 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
 
             container.clear()
             with container:
+                active_target = _digital_twin_active_target(rows)
                 with ui.row().classes("w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"):
                     ui.label("target").classes("w-44")
                     ui.label("gazebo").classes("w-48")
@@ -499,7 +537,7 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
                     ui.label("hardware").classes("w-52")
                     ui.label("sync/status").classes("flex-1 min-w-64")
                 for target, row in rows.items():
-                    _digital_twin_row(bridge, target, row, _refresh)
+                    _digital_twin_row(bridge, target, row, _refresh, active_target=active_target)
 
         _refresh(force=True)
         ui.timer(3.0, _refresh)
@@ -522,7 +560,25 @@ def _digital_twin_badge(status: str) -> None:
     ui.badge(str(status or "unknown"), color=_digital_twin_status_color(status)).classes("text-xs")
 
 
-def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_callback) -> None:
+def _digital_twin_row_is_running(row: dict) -> bool:
+    gazebo_status = str(dict(row.get("gazebo") or {}).get("status", "stopped"))
+    hardware_overall = str(dict(row.get("hardware") or {}).get("overall", "unknown"))
+    sync_process_status = str(dict(row.get("sync/status") or {}).get("process_status", "unknown"))
+    return (
+        gazebo_status == "running"
+        or hardware_overall in {"running", "partial"}
+        or sync_process_status == "running"
+    )
+
+
+def _digital_twin_active_target(rows: dict[str, dict]) -> str:
+    for target, row in rows.items():
+        if _digital_twin_row_is_running(dict(row or {})):
+            return str(target)
+    return ""
+
+
+def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_callback, *, active_target: str = "") -> None:
     gazebo = dict(row.get("gazebo") or {})
     moviet = dict(row.get("moviet") or {})
     hardware = dict(row.get("hardware") or {})
@@ -534,16 +590,15 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
     gazebo_status = str(gazebo.get("status", "stopped"))
     hardware_status = dict(hardware.get("status") or {})
     hardware_overall = str(hardware.get("overall", "unknown"))
+    hardware_robots = [str(robot).strip().lower() for robot in (hardware.get("robots") or [])]
     sync_state = str(sync.get("state", "unknown"))
     sync_process_status = str(sync.get("process_status", "unknown"))
     sync_message = str(sync.get("message", "") or "").strip()
+    dual_drag_markers = dict(row.get("dual_drag_markers") or {})
     sim_mode = str(row.get("sim_mode", "monitor") or "monitor")
     sim_modes = list(row.get("sim_modes") or [])
-    is_running = (
-        gazebo_status == "running"
-        or hardware_overall in {"running", "partial"}
-        or sync_process_status == "running"
-    )
+    is_running = _digital_twin_row_is_running(row)
+    other_target_running = bool(active_target and active_target != target)
 
     with ui.row().classes("w-full items-stretch gap-3 border-b border-slate-100 px-2 py-3 flex-wrap"):
         with ui.column().classes("w-44 gap-2"):
@@ -573,6 +628,13 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                     refresh_callback(force=True)
 
             def _start_twin() -> None:
+                if other_target_running:
+                    ui.notify(
+                        f"Stop {active_target} digital twin before starting {target}.",
+                        type="warning",
+                        timeout=4500,
+                    )
+                    return
                 if blocked_reason:
                     ui.notify(blocked_reason, type="warning", timeout=4500)
                     return
@@ -582,8 +644,8 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                 asyncio.create_task(_stop_twin_async())
 
             retry_sync = is_running and sync_process_status != "running"
-            start_disabled = (not supported) or (is_running and not retry_sync) or bool(blocked_reason)
-            stop_disabled = (not supported) or not is_running
+            start_disabled = (not supported) or other_target_running or (is_running and not retry_sync) or bool(blocked_reason)
+            stop_disabled = (not supported) or not is_running or other_target_running
             with ui.row().classes("gap-1"):
                 ui.button("Start Twin", on_click=_start_twin, icon="play_arrow").props(
                     "flat dense" + (" disable" if start_disabled else "")
@@ -592,7 +654,7 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                     "flat dense" + (" disable" if stop_disabled else "")
                 ).classes("text-red-600")
 
-            if supported and sim_modes:
+            if supported and len(sim_modes) > 1:
                 def _handle_sim_mode_change(e) -> None:
                     err = bridge.digital_twin_set_sim_mode(target, str(e.value or ""))
                     if err:
@@ -612,6 +674,9 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                     if sim_mode == "teach"
                     else "Monitor = sim mirrors the live robot"
                 ).classes("text-xs text-slate-400")
+            elif supported:
+                ui.label("mode: Monitor").classes("text-xs text-slate-500")
+                ui.label("Monitor = sim mirrors the live robot").classes("text-xs text-slate-400")
 
         with ui.column().classes("w-48 gap-1"):
             with ui.row().classes("items-center gap-2"):
@@ -632,6 +697,27 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
             if supported:
                 ui.label(_hardware_status_text(hardware_status)).classes("text-xs text-slate-500")
                 _render_ur5e_external_control_and_rg2_status(hardware_status)
+                if "ur5e" in hardware_robots:
+                    async def _repair_ur5e_async() -> None:
+                        try:
+                            result = await asyncio.to_thread(
+                                bridge.repair_ur5e_trajectory_controller,
+                                target,
+                            )
+                            ui.notify(
+                                str(result.get("message") or "UR5e controller repair finished."),
+                                type=("positive" if result.get("success") else "warning"),
+                                timeout=5000,
+                            )
+                        finally:
+                            refresh_callback(force=True)
+
+                    def _repair_ur5e() -> None:
+                        asyncio.create_task(_repair_ur5e_async())
+
+                    ui.button("Repair UR5e Controller", on_click=_repair_ur5e, icon="build").props(
+                        "flat dense" + (" disable" if (not is_running or hardware_overall == "stopped") else "")
+                    ).classes("text-amber-700")
                 hardware_domains = dict(hardware.get("domains") or {})
                 if hardware_domains:
                     domain_text = " | ".join(
@@ -663,6 +749,12 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                 ui.label("sync/status").classes("text-xs text-slate-500")
             ui.label(sync_message).classes("text-xs text-slate-500")
             ui.label(f"sync process: {sync_process_status}").classes("text-xs text-slate-500")
+            marker_message = str(dual_drag_markers.get("message") or "").strip()
+            marker_last_error = str(dual_drag_markers.get("last_error") or "").strip()
+            if marker_message:
+                ui.label(f"dual_drag_markers: {marker_message}").classes("text-xs text-slate-500")
+            if marker_last_error:
+                ui.label(f"dual_drag_markers last_error: {marker_last_error}").classes("text-xs text-red-700")
 
             status_bits = []
             status_age_ms = sync.get("status_age_ms")
@@ -679,435 +771,667 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
             if sync.get("last_error"):
                 ui.label(str(sync.get("last_error"))).classes("text-xs text-red-700")
 
-            # Direction is implied by mode (Monitor = hardware→gazebo, Teach =
-            # gazebo→hardware), so there is no direction control.
-            if supported and sim_mode == "teach":
-                _digital_twin_record_replay(bridge, target)
+            # Record/replay controls live in the separate Function Record / Replay panel.
 
 
-def _digital_twin_record_replay(bridge: SystemBridge, target: str) -> None:
-    """Manual record-in-gazebo / replay-on-hardware panel for one target."""
-    is_dual = target == "dual robots"
-    expansion = ui.expansion(
-        "Record / Replay (gazebo → hardware)",
-        icon="fiber_manual_record",
-        value=_DT_RECORD_OPEN.get(target, False),
-    ).classes("w-full text-xs")
-    expansion.on_value_change(lambda e: _DT_RECORD_OPEN.__setitem__(target, bool(e.value)))
-    with expansion:
-        ui.label(
-            "Teach: sim RViz controls Gazebo only. Plan & Execute in the sim RViz window, "
-            "Capture Waypoint at each validated pose, then Replay in Twin commits the saved "
-            "sim waypoint through hardware MoveIt. Save is optional (keeps a named copy)."
-        ).classes("text-xs text-slate-500 mb-1")
+def _function_record_panel(bridge: SystemBridge) -> None:
+    rows = bridge.digital_twin_statuses()
+    targets = [target for target, row in rows.items() if bool(row.get("supported", False))]
+    if not targets:
+        return
+    active_target = _digital_twin_active_target(rows)
+    initial_target = active_target if active_target in targets else ("dual robots" if "dual robots" in targets else targets[0])
 
-        count_label = ui.label(f"waypoints: {bridge.digital_twin_waypoint_count(target)}").classes(
-            "text-xs font-semibold"
-        )
-        waypoints_container = ui.column().classes("w-full gap-0 mb-1")
-        replay_source_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
-        prepared_label = (
-            ui.label("prepared: none").classes("text-xs text-emerald-700")
-            if is_dual
-            else None
-        )
-        prepare_state: dict[str, object] = {
-            "generation": 0,
-            "task": None,
-        }
+    with ui.card().classes("w-full"):
+        ui.label("Function Record / Replay").classes("text-lg font-semibold mb-1")
+        with ui.row().classes("items-center gap-2 w-full"):
+            target_select = ui.select(
+                targets,
+                label="target",
+                value=initial_target,
+            ).props("dense").classes("w-44")
+            if active_target:
+                target_select.disable()
 
-        def _replay_source() -> tuple[str, str]:
-            """Return (kind, description) of what Replay/Preview will use right now."""
-            n = bridge.digital_twin_waypoint_count(target)
-            if n > 0:
-                return "buffer", f"current capture ({n} waypoints)"
-            sel = str(recordings_select.value or "").strip()
-            if sel:
-                return "saved", f"saved '{sel}'"
-            return "none", "nothing — capture or select a recording"
+        body = ui.column().classes("w-full gap-2")
 
-        def _refresh_replay_source() -> None:
-            _kind, desc = _replay_source()
-            replay_source_label.text = f"▶ Replay will use: {desc}"
-
-        def _set_prepared_status(text: str, *, failed: bool = False) -> None:
-            if prepared_label is None:
+        def _refresh_body(_e=None) -> None:
+            body.clear()
+            target = str(target_select.value or "").strip()
+            if not target:
                 return
-            prepared_label.text = text
-            prepared_label.classes(
-                replace="text-xs text-red-700" if failed else "text-xs text-emerald-700"
+            with body:
+                _function_record_body(bridge, target)
+
+        target_select.on_value_change(_refresh_body)
+        _refresh_body()
+
+        def _sync_active_target() -> None:
+            if not _client_alive(body):
+                return
+            current_rows = bridge.digital_twin_statuses()
+            current_targets = [
+                target
+                for target, row in current_rows.items()
+                if bool(row.get("supported", False))
+            ]
+            if not current_targets:
+                return
+            current_active = _digital_twin_active_target(current_rows)
+            target_select.options = current_targets
+            desired = (
+                current_active
+                if current_active in current_targets
+                else str(target_select.value or "").strip()
             )
+            if desired not in current_targets:
+                desired = "dual robots" if "dual robots" in current_targets else current_targets[0]
+            changed = target_select.value != desired
+            target_select.value = desired
+            if current_active:
+                target_select.disable()
+            else:
+                target_select.enable()
+            target_select.update()
+            if changed:
+                _refresh_body()
 
-        def _mark_prepare_stale(reason: str = "") -> None:
-            if not is_dual:
+        ui.timer(3.0, _sync_active_target)
+
+
+def _function_record_body(bridge: SystemBridge, target: str) -> None:
+    is_dual = target == "dual robots"
+    robots = bridge.digital_twin_target_robots(target)
+    fixed_name = "default"
+    step_types = [
+        "move_cartesian",
+        "move_relative",
+        "move_to_named_pose",
+        "grasp_part",
+        "release_part",
+    ]
+
+    def _selected_step_index(value: object) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw.split(":", 1)[0])
+        except Exception:
+            return None
+
+    def _current_client() -> Client | None:
+        try:
+            return context.client
+        except RuntimeError:
+            return None
+
+    def _notify(
+        message: object,
+        *,
+        type: str | None = None,
+        timeout: int = 3500,
+        client: Client | None = None,
+    ) -> None:
+        if client is not None:
+            options: dict[str, object] = {"message": str(message), "timeout": timeout}
+            if type is not None:
+                options["type"] = type
+            try:
+                client.outbox.enqueue_message("notify", options, client.id)
                 return
-            prepare_state["generation"] = int(prepare_state.get("generation") or 0) + 1
-            suffix = f": {reason}" if reason else ""
-            _set_prepared_status(f"prepared: stale{suffix}")
+            except Exception:
+                log.exception("failed to notify captured NiceGUI client")
+        try:
+            ui.notify(str(message), type=type, timeout=timeout)
+        except RuntimeError:
+            log.warning("could not notify user because NiceGUI slot was deleted: %s", message)
 
-        async def _prepare_current_replay(generation: int, *, client: Client | None = None) -> dict[str, object]:
-            try:
-                kind, _desc = _replay_source()
-                if kind == "buffer":
-                    result = await asyncio.to_thread(
-                        bridge.digital_twin_prepare_replay_buffer,
-                        target,
-                        replay_target="twin",
-                    )
-                elif kind == "saved":
-                    name = str(recordings_select.value or "").strip()
-                    result = await asyncio.to_thread(
-                        bridge.digital_twin_prepare_replay,
-                        target,
-                        name,
-                        replay_target="twin",
-                    )
-                else:
-                    result = {"success": False, "message": "capture or select a recording"}
-                if generation != int(prepare_state.get("generation") or 0):
-                    return result
-                if result.get("success"):
-                    _set_prepared_status("prepared: ready")
-                else:
-                    _set_prepared_status(
-                        f"prepared: failed: {str(result.get('message') or '')}",
-                        failed=True,
-                    )
-                return result
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin replay preparation failed for %s", target)
-                if generation == int(prepare_state.get("generation") or 0):
-                    _set_prepared_status(f"prepared: failed: {exc}", failed=True)
-                return {"success": False, "message": str(exc)}
+    robot_value = robots[0] if robots else ""
+    with ui.row().classes("items-center gap-2 w-full"):
+        robot_select = ui.select(robots, label="robot", value=robot_value).props("dense").classes("w-32")
+        saved_function_select = ui.select([], label="saved function").props("dense").classes("w-52")
+        function_input = ui.input(label="function name", value="").props("dense").classes("w-52")
 
-        def _start_prepare_background() -> None:
-            if not is_dual:
-                return
-            kind, _desc = _replay_source()
-            if kind == "none":
-                _set_prepared_status("prepared: none")
-                return
-            generation = int(prepare_state.get("generation") or 0) + 1
-            prepare_state["generation"] = generation
-            _set_prepared_status("prepared: preparing")
-            prepare_state["task"] = asyncio.create_task(_prepare_current_replay(generation))
+    info_label = ui.label("").classes("text-xs text-slate-500")
+    path_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
 
-        async def _wait_for_prepare_if_running(*, client: Client | None = None) -> None:
-            if not is_dual:
-                return
-            task = prepare_state.get("task")
-            if task is not None and not task.done():
-                _notify("Preparing replay…", type="ongoing", timeout=1500, client=client)
-                await task
+    with ui.row().classes("items-center gap-2 w-full"):
+        step_name_input = ui.input(label="step name", value="step_1").props("dense").classes("w-44")
+        step_type_select = ui.select(
+            step_types,
+            label="step type",
+            value="move_cartesian",
+        ).props("dense").classes("w-48")
 
-        def _current_client() -> Client | None:
-            try:
-                return context.client
-            except RuntimeError:
-                return None
+    count_label = ui.label("").classes("text-xs font-semibold")
+    saved_count_label = ui.label("").classes("text-xs font-semibold")
+    steps_container = ui.column().classes("w-full gap-0 mb-1")
 
-        def _notify(
-            message: object,
-            *,
-            type: str | None = None,
-            timeout: int = 3500,
-            client: Client | None = None,
-        ) -> None:
-            if client is not None:
-                options: dict[str, object] = {"message": str(message), "timeout": timeout}
-                if type is not None:
-                    options["type"] = type
-                try:
-                    client.outbox.enqueue_message("notify", options, client.id)
-                    return
-                except Exception:
-                    log.exception("failed to notify captured NiceGUI client")
-            try:
-                ui.notify(str(message), type=type, timeout=timeout)
-            except RuntimeError:
-                log.warning("could not notify user because NiceGUI slot was deleted: %s", message)
+    def _current_robot() -> str:
+        return str(robot_select.value or "").strip()
 
-        def _refresh_count() -> None:
-            count_label.text = f"waypoints: {bridge.digital_twin_waypoint_count(target)}"
-            _refresh_replay_source()
-            _refresh_waypoints()
+    def _current_function() -> str:
+        return str(function_input.value or "").strip()
 
-        def _refresh_waypoints() -> None:
-            waypoints = bridge.digital_twin_list_waypoints(target)
-            waypoints_container.clear()
-            with waypoints_container:
-                if not waypoints:
-                    ui.label("no waypoints captured yet").classes("text-xs text-slate-400")
-                    return
-                for wp in waypoints:
-                    idx = int(wp["index"])
-                    robots = dict(wp.get("robots") or {})
-                    if robots:
-                        chunks = []
-                        for robot in ("xarm6", "ur5e"):
-                            body = dict(robots.get(robot) or {})
-                            positions = ", ".join(f"{p:.2f}" for p in (body.get("positions") or []))
-                            chunks.append(f"{robot} [{positions}]")
-                        joints = " | ".join(chunks)
-                    else:
-                        joints = ", ".join(f"{p:.2f}" for p in (wp.get("positions") or []))
-                    with ui.row().classes("items-center gap-1 w-full"):
-                        ui.label(f"#{idx + 1}").classes("text-xs font-semibold w-8")
-                        ui.label(f"[{joints}]").classes("text-xs text-slate-500 flex-1 truncate")
-                        ui.button(icon="arrow_upward", on_click=lambda _e, i=idx: _move_wp(i, -1)).props("flat dense round size=sm")
-                        ui.button(icon="arrow_downward", on_click=lambda _e, i=idx: _move_wp(i, 1)).props("flat dense round size=sm")
-                        ui.button(icon="my_location", on_click=lambda _e, i=idx: _overwrite_wp(i)).props("flat dense round size=sm").tooltip("overwrite with current sim pose")
-                        ui.button(icon="close", on_click=lambda _e, i=idx: _delete_wp(i)).props("flat dense round size=sm").classes("text-red-600")
+    def _saved_function() -> str:
+        return str(saved_function_select.value or "").strip() or _current_function()
 
-        def _move_wp(index: int, delta: int) -> None:
-            try:
-                bridge.digital_twin_move_waypoint(target, index, delta)
-                _refresh_count()
-                _mark_prepare_stale("waypoints changed")
-                _start_prepare_background()
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin move waypoint failed")
-                ui.notify(f"Move failed: {exc}", type="negative", timeout=6000)
+    def _repeat_count(repeat_input) -> int:
+        try:
+            value = int(float(repeat_input.value or 1))
+        except Exception:
+            value = 1
+        return max(1, min(999, value))
 
-        def _delete_wp(index: int) -> None:
-            try:
-                bridge.digital_twin_delete_waypoint(target, index)
-                _refresh_count()
-                _mark_prepare_stale("waypoints changed")
-                _start_prepare_background()
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin delete waypoint failed")
-                ui.notify(f"Delete failed: {exc}", type="negative", timeout=6000)
+    def _saved_step_options(robot: str, function_name: str) -> list[str]:
+        return [
+            (
+                f"{int(step['index'])}: {step.get('step_name')} -> {step.get('primitive')}"
+                + ("" if step.get("has_waypoint") else " [action]")
+            )
+            for step in bridge.digital_twin_list_function_file_steps(
+                target,
+                robot,
+                function_name,
+                fixed_name,
+            )
+        ]
 
-        async def _overwrite_wp(index: int) -> None:
-            try:
-                ui.notify("Updating waypoint to current sim pose…", type="ongoing", timeout=1500)
-                result = await asyncio.to_thread(bridge.digital_twin_overwrite_waypoint, target, index)
-                ui.notify(
-                    str(result.get("message") or ""),
-                    type="positive" if result.get("success") else "warning",
-                    timeout=3500,
+    def _refresh_info() -> None:
+        function_name = _current_function()
+        if not function_name:
+            info_label.text = "function name is empty"
+            path_label.text = ""
+            return
+        info = bridge.digital_twin_function_info(
+            target,
+            _current_robot(),
+            function_name,
+            fixed_name,
+        )
+        if not info.get("success"):
+            info_label.text = str(info.get("message") or "")
+            path_label.text = ""
+            return
+        info_label.text = (
+            f"Current launch: {info.get('launch_mode')} | "
+            f"capture source: {info.get('capture_source')} | "
+            f"storage source: {info.get('storage_source')}"
+        )
+        path_label.text = f"Saving as: {info.get('display_path')}"
+
+    def _refresh_steps() -> int:
+        steps = bridge.digital_twin_list_function_buffer_steps(
+            target,
+            _current_robot(),
+            _current_function(),
+            fixed_name,
+        )
+        count_label.text = f"unsaved steps: {len(steps)}"
+        steps_container.clear()
+        with steps_container:
+            if not steps:
+                ui.label("no unsaved function steps").classes("text-xs text-slate-400")
+                return 0
+            for step in steps:
+                positions = ", ".join(
+                    f"{float(value):.2f}"
+                    for value in list(step.get("joint_positions") or [])
                 )
-                _refresh_count()
-                _mark_prepare_stale("waypoints changed")
-                _start_prepare_background()
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin overwrite waypoint failed")
-                ui.notify(f"Overwrite failed: {exc}", type="negative", timeout=6000)
+                suffix = f" [{positions}]" if positions else ""
+                source = str(step.get("source") or "").strip()
+                source_suffix = f" ({source})" if source else ""
+                with ui.row().classes("items-center gap-1 w-full"):
+                    ui.label(f"#{int(step['index']) + 1}").classes("text-xs font-semibold w-8")
+                    ui.label(
+                        f"{step.get('step_name')} -> {step.get('primitive')}{source_suffix}{suffix}"
+                    ).classes("text-xs text-slate-500 flex-1 truncate")
+                    step_index = int(step["index"])
 
-        def _recording_changed(_e) -> None:
-            _refresh_replay_source()
-            _mark_prepare_stale("recording changed")
-            _start_prepare_background()
+                    async def _delete_step(step_index=step_index) -> None:
+                        await _delete_unsaved_step(step_index)
 
-        def _refresh_recordings() -> None:
-            options = bridge.digital_twin_list_recordings(target)
-            recordings_select.options = options
-            if recordings_select.value not in options:
-                recordings_select.value = options[0] if options else None
-            recordings_select.update()
-            _refresh_replay_source()
+                    ui.button("", on_click=_delete_step, icon="close").props(
+                        "flat dense round"
+                    ).classes("text-red-600")
+        return len(steps)
 
-        recordings_select = ui.select(
-            [], label="saved recording", on_change=_recording_changed
-        ).props("dense").classes("w-56")
+    def _suggest_next_step_name(count: int | None = None) -> None:
+        saved_count = len(
+            bridge.digital_twin_list_function_file_steps(
+                target,
+                _current_robot(),
+                _current_function(),
+                fixed_name,
+            )
+        )
+        unsaved_count = (
+            int(count)
+            if count is not None
+            else bridge.digital_twin_function_step_count(
+                target,
+                _current_robot(),
+                _current_function(),
+                fixed_name,
+            )
+        )
+        step_name_input.value = f"step_{saved_count + unsaved_count + 1}"
+        step_name_input.update()
 
-        async def _capture() -> None:
-            try:
-                # Immediate feedback — the snapshot subprocess takes ~1-3s.
-                ui.notify("Capturing…", type="ongoing", timeout=1500)
-                count_label.text = "waypoints: capturing…"
-                result = await asyncio.to_thread(bridge.digital_twin_capture_waypoint, target)
-                ui.notify(
-                    str(result.get("message") or ""),
-                    type="positive" if result.get("success") else "warning",
-                    timeout=3500,
-                )
-                _refresh_count()
-                _mark_prepare_stale("waypoints changed")
-                _start_prepare_background()
-            except Exception as exc:  # noqa: BLE001 - surface any failure to the operator
-                log.exception("digital twin capture failed for %s", target)
-                ui.notify(f"Capture failed: {exc}", type="negative", timeout=6000)
-                _refresh_count()
+    def _refresh_saved_steps() -> None:
+        options = _saved_step_options(_current_robot(), _saved_function())
+        saved_count_label.text = f"saved steps: {len(options)}"
+        saved_step_select.options = options
+        if saved_step_select.value not in options:
+            saved_step_select.value = options[0] if options else None
+        saved_step_select.update()
 
-        def _clear() -> None:
-            try:
-                bridge.digital_twin_clear_waypoints(target)
-                _refresh_count()
-                _mark_prepare_stale("waypoints cleared")
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin clear failed for %s", target)
-                ui.notify(f"Clear failed: {exc}", type="negative", timeout=6000)
+    def _refresh_saved_functions() -> None:
+        options = bridge.digital_twin_saved_function_names(target, _current_robot())
+        saved_function_select.options = options
+        if saved_function_select.value not in options:
+            saved_function_select.value = _current_function() if _current_function() in options else (options[0] if options else None)
+        if not _current_function() and saved_function_select.value:
+            function_input.value = str(saved_function_select.value)
+            function_input.update()
+        saved_function_select.update()
+        _refresh_saved_steps()
 
-        async def _delete_recording() -> None:
-            try:
-                name = str(recordings_select.value or "").strip()
-                if not name:
-                    ui.notify("Select a saved recording to delete.", type="warning")
-                    return
-                result = await asyncio.to_thread(bridge.digital_twin_delete_recording, target, name)
-                ui.notify(
-                    str(result.get("message") or ""),
-                    type="positive" if result.get("success") else "warning",
-                    timeout=3500,
-                )
-                if result.get("success"):
-                    _refresh_recordings()
-                    _mark_prepare_stale("recording deleted")
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin delete recording failed for %s", target)
-                ui.notify(f"Delete failed: {exc}", type="negative", timeout=6000)
+    def _refresh_all() -> None:
+        _refresh_info()
+        _refresh_steps()
+        _refresh_saved_functions()
 
-        async def _save() -> None:
-            try:
-                name = str(name_input.value or "").strip()
-                if not name:
-                    ui.notify("Enter a recording name.", type="warning")
-                    return
-                result = await asyncio.to_thread(bridge.digital_twin_save_recording, target, name)
-                ui.notify(
-                    str(result.get("message") or ""),
-                    type="positive" if result.get("success") else "warning",
-                    timeout=3500,
-                )
-                if result.get("success"):
-                    _refresh_recordings()
-                    _mark_prepare_stale("recording saved")
-                    _start_prepare_background()
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin save failed for %s", target)
-                ui.notify(f"Save failed: {exc}", type="negative", timeout=6000)
+    def _new_function() -> None:
+        function_input.value = ""
+        function_input.update()
+        saved_function_select.value = None
+        saved_function_select.update()
+        _suggest_next_step_name(0)
+        _refresh_info()
+        _refresh_steps()
+        _refresh_saved_steps()
 
-        async def _replay(replay_target: str, *, client: Client | None = None) -> dict[str, object]:
-            notify_client = client or _current_client()
-            try:
-                # Prefer the just-captured buffer (no Save needed); fall back to a saved recording.
-                kind, desc = _replay_source()
-                if kind == "buffer":
-                    if replay_target == "twin":
-                        await _wait_for_prepare_if_running(client=notify_client)
-                    result = await asyncio.to_thread(
-                        bridge.digital_twin_replay_buffer, target, replay_target=replay_target
-                    )
-                elif kind == "saved":
-                    name = str(recordings_select.value or "").strip()
-                    if replay_target == "twin":
-                        await _wait_for_prepare_if_running(client=notify_client)
-                    result = await asyncio.to_thread(
-                        bridge.digital_twin_replay, target, name, replay_target=replay_target
-                    )
-                else:
-                    _notify(
-                        "Capture waypoints (or select a saved recording) first.",
-                        type="warning",
-                        client=notify_client,
-                    )
-                    return {"success": False, "message": "Capture waypoints (or select a saved recording) first."}
+    def _saved_function_changed(_e=None) -> None:
+        if saved_function_select.value:
+            function_input.value = str(saved_function_select.value)
+            function_input.update()
+        _refresh_info()
+        count = _refresh_steps()
+        _suggest_next_step_name(count)
+        _refresh_saved_steps()
+
+    async def _capture_step(step_name: str, primitive: str, *, busy_message: str) -> None:
+        function_name = _current_function()
+        if not function_name:
+            _notify("function name is empty", type="warning")
+            return
+        if not step_name:
+            _notify("step name is empty", type="warning")
+            return
+        try:
+            _notify(busy_message, type="ongoing", timeout=1500)
+            result = await asyncio.to_thread(
+                bridge.digital_twin_capture_function_step,
+                target,
+                _current_robot(),
+                function_name,
+                fixed_name,
+                step_name,
+                primitive,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=4500,
+            )
+            count = _refresh_steps()
+            if result.get("success"):
+                _suggest_next_step_name(int(result.get("count") or count))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("function waypoint capture failed for %s", target)
+            _notify(f"Capture failed: {exc}", type="negative", timeout=6000)
+
+    async def _capture_current_step() -> None:
+        await _capture_step(
+            str(step_name_input.value or "").strip(),
+            str(step_type_select.value or "move_cartesian"),
+            busy_message="Capturing step...",
+        )
+
+    async def _save_function() -> None:
+        function_name = _current_function()
+        if not function_name:
+            _notify("function name is empty", type="warning")
+            return
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_save_function,
+                target,
+                _current_robot(),
+                function_name,
+                fixed_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=4500,
+            )
+            if result.get("success"):
+                _refresh_saved_functions()
+                _refresh_info()
+                _refresh_steps()
+                _suggest_next_step_name(int(result.get("saved_steps") or 0))
+                _refresh_saved_steps()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("function save failed for %s", target)
+            _notify(f"Save failed: {exc}", type="negative", timeout=6000)
+
+    def _clear_steps() -> None:
+        bridge.digital_twin_clear_function_steps(
+            target,
+            _current_robot(),
+            _current_function(),
+            fixed_name,
+        )
+        _refresh_steps()
+        _suggest_next_step_name(0)
+
+    async def _delete_unsaved_step(step_index: int) -> None:
+        result = await asyncio.to_thread(
+            bridge.digital_twin_delete_function_buffer_step,
+            target,
+            _current_robot(),
+            _current_function(),
+            fixed_name,
+            step_index,
+        )
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=3000,
+        )
+        count = _refresh_steps()
+        _suggest_next_step_name(count)
+
+    async def _delete_function() -> None:
+        function_name = _saved_function()
+        if not function_name:
+            _notify("Select a saved function.", type="warning")
+            return
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_delete_function,
+                target,
+                _current_robot(),
+                function_name,
+                fixed_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=4500,
+            )
+            if result.get("success"):
+                saved_function_select.value = None
+                function_input.value = ""
+                function_input.update()
+                _refresh_saved_functions()
+                _refresh_info()
+                _refresh_steps()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("function delete failed for %s", target)
+            _notify(f"Delete failed: {exc}", type="negative", timeout=6000)
+
+    async def _replay_function(
+        replay_target: str,
+        *,
+        client: Client | None = None,
+        repeat_count: int = 1,
+    ) -> dict[str, object]:
+        notify_client = client or _current_client()
+        function_name = _saved_function()
+        if not function_name:
+            _notify("Select a saved function.", type="warning", client=notify_client)
+            return {"success": False, "message": "Select a saved function."}
+        repeat_total = max(1, int(repeat_count))
+        try:
+            if repeat_total > 1:
                 _notify(
-                    f"{desc} → {str(result.get('message') or '')}",
-                    type="positive" if result.get("success") else "warning",
-                    timeout=5000,
+                    f"Replay Function repeat count {repeat_total}...",
+                    type="ongoing",
+                    timeout=1500,
                     client=notify_client,
                 )
-                return dict(result)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin replay failed for %s", target)
-                _notify(f"Replay failed: {exc}", type="negative", timeout=6000, client=notify_client)
-                return {"success": False, "message": str(exc)}
-
-        async def _preview_gazebo() -> None:
-            result = await _replay("gazebo")
-            if result.get("success"):
-                _start_prepare_background()
-
-        async def _go_home(replay_target: str) -> None:
-            try:
-                ui.notify("Going home…", type="ongoing", timeout=1500)
-                result = await asyncio.to_thread(
-                    bridge.digital_twin_go_home, target, replay_target=replay_target
-                )
-                ui.notify(
-                    str(result.get("message") or "home"),
-                    type="positive" if result.get("success") else "warning",
-                    timeout=5000,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("digital twin go home failed for %s", target)
-                ui.notify(f"Go Home failed: {exc}", type="negative", timeout=6000)
-
-        async def _home_sim() -> None:
-            await _go_home("gazebo")
-
-        home_confirm = None
-        if not is_dual:
-            with ui.dialog() as home_dialog, ui.card().classes("gap-3"):
-                home_confirm = home_dialog
-                ui.label("Send the real robot home?").classes("font-semibold")
-                ui.label(
-                    "This moves the real robot AND the gazebo model to the initial/home pose. "
-                    "The approach is speed-limited for safety."
-                ).classes("text-sm text-slate-600")
-                with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel", on_click=home_dialog.close).props("flat")
-
-                    async def _home_twin_confirmed() -> None:
-                        home_dialog.close()
-                        await _go_home("twin")
-
-                    ui.button("Go Home", on_click=_home_twin_confirmed, icon="home").props("color=red")
-
-        with ui.row().classes("items-center gap-2 mt-1"):
-            ui.button("Capture Waypoint", on_click=_capture, icon="add_location").props(
-                "flat dense"
+            result = await asyncio.to_thread(
+                bridge.digital_twin_replay_function,
+                target,
+                _current_robot(),
+                function_name,
+                fixed_name,
+                replay_target=replay_target,
+                repeat_count=repeat_total,
             )
-            ui.button("Clear", on_click=_clear, icon="delete").props("flat dense").classes("text-red-600")
-            if not is_dual and home_confirm is not None:
-                ui.button("Home (sim)", on_click=_home_sim, icon="home").props("flat dense")
-                ui.button("Go Home (twin)", on_click=home_confirm.open, icon="home").props(
-                    "flat dense"
-                ).classes("text-red-600")
-        with ui.row().classes("items-center gap-2"):
-            name_input = ui.input(label="save as").props("dense").classes("w-40")
-            ui.button("Save", on_click=_save, icon="save").props("flat dense")
-            ui.button("Delete", on_click=_delete_recording, icon="delete_forever").props(
-                "flat dense"
-            ).classes("text-red-600")
-        with ui.row().classes("items-center gap-2"):
-            ui.button(
-                "Preview in Gazebo",
-                on_click=_preview_gazebo,
-                icon="visibility",
-            ).props("flat dense")
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=6000,
+                client=notify_client,
+            )
+            return dict(result)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("function replay failed for %s", target)
+            _notify(f"Replay failed: {exc}", type="negative", timeout=6000, client=notify_client)
+            return {"success": False, "message": str(exc)}
 
-            with ui.dialog() as replay_confirm, ui.card().classes("gap-3"):
-                ui.label("Replay in Twin: commit through hardware MoveIt?").classes("font-semibold")
-                ui.label(
-                    "This commits the saved sim waypoint through hardware MoveIt, keeps grippers "
-                    "on their working hardware paths, and resumes hardware -> Gazebo mirroring."
-                ).classes("text-sm text-slate-600")
+    async def _replay_selected_step(replay_target: str) -> None:
+        step_index = _selected_step_index(saved_step_select.value)
+        function_name = _saved_function()
+        if step_index is None or not function_name:
+            _notify("Select a saved function step.", type="warning")
+            return
+        result = await asyncio.to_thread(
+            bridge.digital_twin_replay_function_step,
+            target,
+            _current_robot(),
+            function_name,
+            fixed_name,
+            step_index,
+            replay_target=replay_target,
+        )
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=6000,
+        )
+
+    async def _preview_gazebo() -> None:
+        await _replay_function("gazebo")
+
+    async def _replay_step_twin() -> None:
+        await _replay_selected_step("twin")
+
+    with ui.row().classes("items-center gap-2 mt-1"):
+        ui.button("New Function", on_click=_new_function, icon="add").props("flat dense")
+        ui.button("Capture Step", on_click=_capture_current_step, icon="fiber_manual_record").props("flat dense")
+        ui.button("Clear Unsaved Steps", on_click=_clear_steps, icon="delete").props("flat dense").classes("text-red-600")
+    with ui.row().classes("items-center gap-2"):
+        ui.button("Save Function", on_click=_save_function, icon="save").props("flat dense")
+        ui.button("Delete Function", on_click=_delete_function, icon="delete_forever").props("flat dense").classes("text-red-600")
+
+    ui.separator().classes("my-2")
+    ui.label("Single Robot Replay").classes("text-xs font-semibold")
+    if is_dual:
+        ui.label(
+            "In dual robots, Replay Function moves only the selected robot. "
+            "Replay Dual Function starts both robots concurrently."
+        ).classes("text-xs text-slate-500")
+    with ui.row().classes("items-center gap-2"):
+        saved_step_select = ui.select([], label="saved step").props("dense").classes("w-56")
+        single_repeat_input = ui.number(
+            label="repeat count",
+            value=1,
+            min=1,
+            max=999,
+            precision=0,
+        ).props("dense").classes("w-32")
+        ui.button("Preview in Gazebo", on_click=_preview_gazebo, icon="visibility").props("flat dense")
+        ui.button("Replay Selected Step", on_click=_replay_step_twin, icon="play_arrow").props("flat dense")
+
+        with ui.dialog() as replay_confirm, ui.card().classes("gap-3"):
+            ui.label("Replay Function in Twin?").classes("font-semibold")
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=replay_confirm.close).props("flat")
+
+                async def _replay_twin_confirmed() -> None:
+                    notify_client = _current_client()
+                    replay_confirm.close()
+                    await _replay_function(
+                        "twin",
+                        client=notify_client,
+                        repeat_count=_repeat_count(single_repeat_input),
+                    )
+
+                ui.button("Replay Function", on_click=_replay_twin_confirmed, icon="send").props("color=red")
+
+        ui.button(
+            "Replay Function",
+            on_click=replay_confirm.open,
+            icon="precision_manufacturing",
+        ).props("outline dense").classes("text-red-600")
+
+    if is_dual:
+        ui.separator().classes("my-2")
+        ui.label("Dual Function Replay").classes("text-xs font-semibold")
+
+        def _dual_saved_options(robot: str) -> list[str]:
+            return bridge.digital_twin_saved_function_names(target, robot)
+
+        def _refresh_dual_steps(robot: str, function_select, step_select) -> None:
+            function_name = str(function_select.value or "").strip()
+            step_options = _saved_step_options(robot, function_name)
+            step_select.options = step_options
+            if step_select.value not in step_options:
+                step_select.value = step_options[0] if step_options else None
+            step_select.update()
+
+        with ui.row().classes("items-center gap-2 w-full"):
+            xarm_saved_select = ui.select(_dual_saved_options("xarm6"), label="xarm6 function").props("dense").classes("w-52")
+            xarm_step_select = ui.select([], label="xarm6 step").props("dense").classes("w-56")
+        with ui.row().classes("items-center gap-2 w-full"):
+            ur5e_saved_select = ui.select(_dual_saved_options("ur5e"), label="ur5e function").props("dense").classes("w-52")
+            ur5e_step_select = ui.select([], label="ur5e step").props("dense").classes("w-56")
+
+        def _refresh_dual_all() -> None:
+            _refresh_dual_steps("xarm6", xarm_saved_select, xarm_step_select)
+            _refresh_dual_steps("ur5e", ur5e_saved_select, ur5e_step_select)
+
+        xarm_saved_select.on_value_change(lambda _e: _refresh_dual_all())
+        ur5e_saved_select.on_value_change(lambda _e: _refresh_dual_all())
+
+        async def _replay_dual_function(
+            replay_target: str,
+            *,
+            client: Client | None = None,
+            repeat_count: int = 1,
+        ) -> dict[str, object]:
+            notify_client = client or _current_client()
+            repeat_total = max(1, int(repeat_count))
+            if repeat_total > 1:
+                _notify(
+                    f"Replay Dual Function repeat count {repeat_total}...",
+                    type="ongoing",
+                    timeout=1500,
+                    client=notify_client,
+                )
+            result = await asyncio.to_thread(
+                bridge.digital_twin_replay_dual_function,
+                target,
+                str(xarm_saved_select.value or ""),
+                fixed_name,
+                str(ur5e_saved_select.value or ""),
+                fixed_name,
+                replay_target=replay_target,
+                repeat_count=repeat_total,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=7000,
+                client=notify_client,
+            )
+            return dict(result)
+
+        async def _replay_dual_step(replay_target: str) -> None:
+            xarm_step = _selected_step_index(xarm_step_select.value)
+            ur5e_step = _selected_step_index(ur5e_step_select.value)
+            if xarm_step is None or ur5e_step is None:
+                _notify("Select one saved step for xarm6 and one saved step for ur5e.", type="warning")
+                return
+            result = await asyncio.to_thread(
+                bridge.digital_twin_replay_dual_step,
+                target,
+                str(xarm_saved_select.value or ""),
+                fixed_name,
+                xarm_step,
+                str(ur5e_saved_select.value or ""),
+                fixed_name,
+                ur5e_step,
+                replay_target=replay_target,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=7000,
+            )
+
+        async def _preview_dual_gazebo() -> None:
+            await _replay_dual_function("gazebo")
+
+        async def _replay_dual_step_twin() -> None:
+            await _replay_dual_step("twin")
+
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Preview Dual in Gazebo", on_click=_preview_dual_gazebo, icon="visibility").props("flat dense")
+            ui.button("Replay Dual Selected Step", on_click=_replay_dual_step_twin, icon="play_arrow").props("flat dense")
+            dual_repeat_input = ui.number(
+                label="repeat count",
+                value=1,
+                min=1,
+                max=999,
+                precision=0,
+            ).props("dense").classes("w-32")
+
+            with ui.dialog() as dual_replay_confirm, ui.card().classes("gap-3"):
+                ui.label("Replay Dual Function in Twin?").classes("font-semibold")
                 with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel", on_click=replay_confirm.close).props("flat")
+                    ui.button("Cancel", on_click=dual_replay_confirm.close).props("flat")
 
-                    async def _replay_twin_confirmed() -> None:
+                    async def _dual_replay_twin_confirmed() -> None:
                         notify_client = _current_client()
-                        replay_confirm.close()
-                        await _replay("twin", client=notify_client)
+                        dual_replay_confirm.close()
+                        await _replay_dual_function(
+                            "twin",
+                            client=notify_client,
+                            repeat_count=_repeat_count(dual_repeat_input),
+                        )
 
-                    ui.button(
-                        "Replay",
-                        on_click=_replay_twin_confirmed,
-                        icon="send",
-                    ).props("color=red")
+                    ui.button("Replay Dual Function", on_click=_dual_replay_twin_confirmed, icon="send").props("color=red")
 
             ui.button(
-                "Replay in Twin (commit through hardware MoveIt)",
-                on_click=replay_confirm.open,
+                "Replay Dual Function",
+                on_click=dual_replay_confirm.open,
                 icon="precision_manufacturing",
             ).props("outline dense").classes("text-red-600")
 
-        _refresh_recordings()
-        _refresh_waypoints()
+        _refresh_dual_all()
+
+    robot_select.on_value_change(lambda _e: _refresh_all())
+    saved_function_select.on_value_change(_saved_function_changed)
+    function_input.on_value_change(lambda _e: (_refresh_info(), _refresh_steps(), _refresh_saved_steps()))
+    _refresh_all()
+
 
 
 # =====================================================================

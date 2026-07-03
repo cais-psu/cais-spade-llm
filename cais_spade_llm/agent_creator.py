@@ -144,7 +144,7 @@ def create_resource_agents(
 
     Args:
         prewarmed_controllers: Optional dict mapping robot key (e.g. "ur5e", "xarm6")
-            to a pre-initialized Ros2PickPlaceController that the RobotAgent can
+            to a pre-initialized GazeboPickPlaceController that the RobotAgent can
             adopt instead of creating a new one.
     """
     prewarmed = prewarmed_controllers or {}

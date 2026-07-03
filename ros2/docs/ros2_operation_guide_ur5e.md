@@ -86,10 +86,10 @@ Rotation: [...]
 
 ### Option A: Python script (direct joint control)
 ```python
-from cais_spade_llm.resources.robot.ur5e_controller import UR5eController
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import UR5eGazeboController
 import math, time
 
-ctrl = UR5eController()
+ctrl = UR5eGazeboController()
 ctrl.init()
 time.sleep(1)  # wait for publisher to register
 

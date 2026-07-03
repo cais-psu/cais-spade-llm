@@ -130,18 +130,29 @@ ROBOTS: dict[str, dict[str, Any]] = {
 # Re-target period for streamed mirror trajectory points (seconds). Small enough to
 # track hardware closely, large enough to give the JTC a smooth interpolation window.
 MIRROR_POINT_TIME_SEC = 0.1
+MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.0
+MIRROR_MIN_JOINT_DELTA_RAD = 0.0
+UR5E_MIRROR_POINT_TIME_SEC = 0.25
+UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.20
+UR5E_MIRROR_MIN_JOINT_DELTA_RAD = 0.0015
 NO_MATCHING_JOINT_STATE_REPORT_SEC = 5.0
 HARDWARE_SNAPSHOT_TIMEOUT_SEC = 20.0
 
 # Replay safety: the approach from the robot's current pose to the first recorded
 # waypoint is time-scaled so no joint exceeds this speed (deg/s). This replaces a
 # hard first-waypoint distance block, which made authored (far) poses un-replayable.
-MAX_REPLAY_JOINT_VEL_DEG_S = 25.0
-UR5E_REPLAY_MAX_JOINT_VEL_DEG_S = 10.0
+REPLAY_SPEED_SCALE = 1.0
+MAX_REPLAY_JOINT_VEL_DEG_S = 25.0 * REPLAY_SPEED_SCALE
+UR5E_REPLAY_MAX_JOINT_VEL_DEG_S = 10.0 * REPLAY_SPEED_SCALE
+MOVE_GROUP_REPLAY_VELOCITY_SCALING = 0.25 * REPLAY_SPEED_SCALE
+MOVE_GROUP_REPLAY_ACCELERATION_SCALING = 0.25
+DEFAULT_REPLAY_WAYPOINT_DURATION_SEC = 2.0 / REPLAY_SPEED_SCALE
 INITIALIZE_GAZEBO_TOLERANCE_RAD = 0.02
 INITIALIZE_GAZEBO_ATTEMPTS = 5
 HARDWARE_TRAJECTORY_START_DELAY_SEC = 0.2
+PAIRED_HARDWARE_TRAJECTORY_START_DELAY_SEC = 1.0
 HARDWARE_TRAJECTORY_CURRENT_POINT_SEC = 0.0
+UR5E_HARDWARE_TRAJECTORY_CURRENT_POINT_SEC = 0.25
 TEACH_REPLAY_OBSERVED_COMPLETION_TOLERANCE_RAD = 0.02
 TEACH_REPLAY_OBSERVED_COMPLETION_TIMEOUT_SEC = 3.0
 TEACH_REPLAY_PREPARED_START_DRIFT_TOLERANCE_RAD = 0.05
@@ -160,7 +171,7 @@ UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC = 0.02
 UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC = 20.0
 UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC = 2.0
 UR5E_FINAL_ERROR_SNAPSHOT_TIMEOUT_SEC = 2.0
-PREPARED_REPLAY_VERSION = 3
+PREPARED_REPLAY_VERSION = 5
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -260,6 +271,41 @@ def _prepared_start_drift_error(
     return ""
 
 
+def _refresh_prepared_hardware_start_from_snapshot(
+    args: argparse.Namespace,
+    prepared: dict[str, Any],
+) -> str:
+    plans = dict(prepared.get("plans") or {})
+    for robot, plan_raw in plans.items():
+        robot_key = str(robot)
+        plan = dict(plan_raw or {})
+        joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
+        if not joint_names:
+            continue
+        snapshot_result = _read_snapshot(
+            int(args.hardware_domain_id),
+            robot_key,
+            "hardware",
+            TEACH_REPLAY_PREPARED_START_DRIFT_TIMEOUT_SEC,
+        )
+        if not snapshot_result.get("success"):
+            return f"prepared replay stale: {robot_key} hardware start pose unavailable: {snapshot_result.get('message') or 'snapshot failed'}"
+        snapshot = dict(snapshot_result.get("snapshot") or {})
+        observed_positions, missing = _positions_for_joint_names(snapshot, robot_key, joint_names)
+        if missing:
+            return f"prepared replay stale: {robot_key} hardware start pose missing joints: {', '.join(missing)}"
+        hardware_points = [dict(point) for point in list(plan.get("hardware_points") or [])]
+        if hardware_points:
+            first_point = dict(hardware_points[0])
+            first_point["positions"] = [float(value) for value in observed_positions]
+            hardware_points[0] = first_point
+            plan["hardware_points"] = hardware_points
+        plan["hardware_positions"] = [float(value) for value in observed_positions]
+        plans[robot_key] = plan
+    prepared["plans"] = plans
+    return ""
+
+
 def _write_status(path: Path, **payload: Any) -> None:
     _atomic_json_write(path, dict(payload))
 
@@ -351,6 +397,63 @@ def _joint_state_topics(robot: str, source: str) -> list[str]:
         topics = ROBOTS[robot].get("hardware_joint_state_topics") or ["/joint_states"]
         return [str(topic) for topic in topics if str(topic or "").strip()]
     return ["/joint_states"]
+
+
+def _mirror_point_time_sec(robot: str) -> float:
+    return (
+        UR5E_MIRROR_POINT_TIME_SEC
+        if str(robot or "").strip().lower() == "ur5e"
+        else MIRROR_POINT_TIME_SEC
+    )
+
+
+def _mirror_min_publish_period_sec(robot: str) -> float:
+    return (
+        UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC
+        if str(robot or "").strip().lower() == "ur5e"
+        else MIRROR_MIN_PUBLISH_PERIOD_SEC
+    )
+
+
+def _mirror_min_joint_delta_rad(robot: str) -> float:
+    return (
+        UR5E_MIRROR_MIN_JOINT_DELTA_RAD
+        if str(robot or "").strip().lower() == "ur5e"
+        else MIRROR_MIN_JOINT_DELTA_RAD
+    )
+
+
+def _max_position_delta_rad(
+    previous_positions: list[float] | None,
+    positions: list[float],
+) -> float:
+    if not previous_positions:
+        return math.inf
+    deltas = [
+        abs(float(current) - float(previous))
+        for previous, current in zip(previous_positions, positions)
+    ]
+    return max(deltas) if deltas else 0.0
+
+
+def _should_publish_mirror_update(
+    robot: str,
+    *,
+    positions: list[float],
+    last_positions: list[float] | None,
+    last_publish_ts: float,
+    now: float,
+) -> tuple[bool, str]:
+    max_delta = _max_position_delta_rad(last_positions, positions)
+    min_delta = max(0.0, _mirror_min_joint_delta_rad(robot))
+    if max_delta < min_delta:
+        return False, "below_delta"
+
+    min_period = max(0.0, _mirror_min_publish_period_sec(robot))
+    if last_publish_ts > 0.0 and now - float(last_publish_ts) < min_period:
+        return False, "rate_limited"
+
+    return True, ""
 
 
 def _resolve_gripper(snapshot: dict[str, float], robot: str) -> tuple[str | None, float | None]:
@@ -586,6 +689,12 @@ def _apply_observed_completion_fallback(
             "message": "action succeeded; observed completion fallback not required.",
         }
         return wrapped
+    if result.get("skip_observed_completion"):
+        wrapped["observed_completion"] = {
+            "success": False,
+            "message": "skipped because action did not enter execution.",
+        }
+        return wrapped
 
     observed = _wait_observed_completion(
         domain_id,
@@ -670,51 +779,53 @@ def _joint_state_snapshot_worker(
     timeout_sec: float,
     result_queue: mp.Queue,
 ) -> None:
-    rclpy = _init_ros_domain(domain_id)
-    from rclpy.node import Node
-    from sensor_msgs.msg import JointState
-
-    class SnapshotNode(Node):
-        def __init__(self) -> None:
-            super().__init__(f"digital_twin_{source}_snapshot")
-            self.snapshot: dict[str, float] | None = None
-            self.accumulated_snapshot: dict[str, float] = {}
-            self.missing: list[str] = []
-            self.seen_names: list[str] = []
-            self.unmatched_seen_names: list[str] = []
-            for topic in _joint_state_topics(robot, source):
-                self.create_subscription(JointState, topic, self._cb, 10)
-
-        def _cb(self, msg: JointState) -> None:
-            snapshot = _snapshot_from_joint_state_msg(msg)
-            matched_count = _joint_match_count(snapshot, robot, source)
-            if matched_count == 0:
-                seen = set(self.unmatched_seen_names)
-                seen.update(snapshot)
-                self.unmatched_seen_names = sorted(seen)
-                return
-
-            self.accumulated_snapshot.update(snapshot)
-            if source == "gazebo":
-                _names, _positions, missing = _resolve_gazebo_positions(
-                    self.accumulated_snapshot,
-                    robot,
-                )
-            else:
-                _names, _positions, missing = _resolve_hardware_positions(
-                    self.accumulated_snapshot,
-                    robot,
-                )
-            if not missing:
-                self.snapshot = dict(self.accumulated_snapshot)
-                return
-
-            self.missing = list(missing)
-            self.seen_names = sorted(self.accumulated_snapshot)
-
-    node = SnapshotNode()
-    deadline = time.time() + max(0.5, float(timeout_sec))
+    rclpy = None
+    node = None
     try:
+        rclpy = _init_ros_domain(domain_id)
+        from rclpy.node import Node
+        from sensor_msgs.msg import JointState
+
+        class SnapshotNode(Node):
+            def __init__(self) -> None:
+                super().__init__(f"digital_twin_{source}_snapshot")
+                self.snapshot: dict[str, float] | None = None
+                self.accumulated_snapshot: dict[str, float] = {}
+                self.missing: list[str] = []
+                self.seen_names: list[str] = []
+                self.unmatched_seen_names: list[str] = []
+                for topic in _joint_state_topics(robot, source):
+                    self.create_subscription(JointState, topic, self._cb, 10)
+
+            def _cb(self, msg: JointState) -> None:
+                snapshot = _snapshot_from_joint_state_msg(msg)
+                matched_count = _joint_match_count(snapshot, robot, source)
+                if matched_count == 0:
+                    seen = set(self.unmatched_seen_names)
+                    seen.update(snapshot)
+                    self.unmatched_seen_names = sorted(seen)
+                    return
+
+                self.accumulated_snapshot.update(snapshot)
+                if source == "gazebo":
+                    _names, _positions, missing = _resolve_gazebo_positions(
+                        self.accumulated_snapshot,
+                        robot,
+                    )
+                else:
+                    _names, _positions, missing = _resolve_hardware_positions(
+                        self.accumulated_snapshot,
+                        robot,
+                    )
+                if not missing:
+                    self.snapshot = dict(self.accumulated_snapshot)
+                    return
+
+                self.missing = list(missing)
+                self.seen_names = sorted(self.accumulated_snapshot)
+
+        node = SnapshotNode()
+        deadline = time.time() + max(0.5, float(timeout_sec))
         while rclpy.ok() and time.time() < deadline and node.snapshot is None:
             rclpy.spin_once(node, timeout_sec=0.1)
         if node.snapshot is None:
@@ -748,10 +859,21 @@ def _joint_state_snapshot_worker(
                 }
             )
     except Exception as exc:
-        result_queue.put({"success": False, "message": str(exc)})
+        topics = ", ".join(_joint_state_topics(robot, source))
+        result_queue.put(
+            {
+                "success": False,
+                "message": (
+                    f"{source} /joint_states snapshot failed for {robot}: {exc}; "
+                    f"ROS_DOMAIN_ID={int(domain_id)}; topics={topics}"
+                ),
+            }
+        )
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy is not None:
+            rclpy.shutdown()
 
 
 def _hardware_joint_state_worker(domain_id: int, robot: str, updates: mp.Queue) -> None:
@@ -870,14 +992,16 @@ def _gazebo_mirror_worker(
     def _connected_publishers() -> list[Any]:
         return [pub for pub in node._mirror_publishers if pub.get_subscription_count() > 0]
 
+    mirror_point_time_sec = _mirror_point_time_sec(robot)
+
     def _make_point_traj(joint_names: list[str], positions: list[float]) -> Any:
         traj = JointTrajectory()
         traj.joint_names = list(joint_names)
         point = JointTrajectoryPoint()
         point.positions = [float(v) for v in positions]
-        whole = int(MIRROR_POINT_TIME_SEC)
+        whole = int(mirror_point_time_sec)
         point.time_from_start.sec = whole
-        point.time_from_start.nanosec = int((MIRROR_POINT_TIME_SEC - whole) * 1_000_000_000)
+        point.time_from_start.nanosec = int((mirror_point_time_sec - whole) * 1_000_000_000)
         traj.points = [point]
         return traj
 
@@ -900,6 +1024,8 @@ def _gazebo_mirror_worker(
             return
 
         latest: dict[str, Any] | None = None
+        last_published_positions: list[float] | None = None
+        last_publish_ts = 0.0
         last_status_ts = 0.0
         while rclpy.ok():
             direction = _direction(direction_file)
@@ -980,10 +1106,26 @@ def _gazebo_mirror_worker(
                 continue
 
             connected = _connected_publishers() or node._mirror_publishers
+            latest_positions = [float(value) for value in list(latest["positions"])]
+            now = time.time()
+            should_publish, skip_reason = _should_publish_mirror_update(
+                robot,
+                positions=latest_positions,
+                last_positions=last_published_positions,
+                last_publish_ts=last_publish_ts,
+                now=now,
+            )
+            if not should_publish:
+                if skip_reason == "below_delta":
+                    latest = None
+                rclpy.spin_once(node, timeout_sec=0.0)
+                continue
 
-            arm_traj = _make_point_traj(latest["joint_names"], latest["positions"])
+            arm_traj = _make_point_traj(latest["joint_names"], latest_positions)
             for publisher in connected:
                 publisher.publish(arm_traj)
+            last_published_positions = list(latest_positions)
+            last_publish_ts = now
 
             gripper_joint = latest.get("gripper_joint")
             gripper_position = latest.get("gripper_position")
@@ -1003,7 +1145,11 @@ def _gazebo_mirror_worker(
                     state="mirroring",
                     direction=direction,
                     latency_ms=latency_ms,
-                    message="hardware -> gazebo active.",
+                    message=(
+                        "hardware -> gazebo active; "
+                        f"mirror_point_time_sec={mirror_point_time_sec:.3f}; "
+                        f"mirror_min_publish_period_sec={_mirror_min_publish_period_sec(robot):.3f}."
+                    ),
                     last_error="",
                 )
                 last_status_ts = now
@@ -1178,6 +1324,94 @@ def _wait_follow_joint_trajectory_action(
         return {"success": False, "message": f"{action_name}: action server wait returned no data."}
 
 
+def _follow_joint_trajectory_time_summary(points: list[dict[str, Any]]) -> dict[str, float | None]:
+    times = [max(0.0, float(dict(point).get("time") or 0.0)) for point in points]
+    spacings = [current - previous for previous, current in zip(times, times[1:])]
+    return {
+        "first_point_time": times[0] if times else None,
+        "second_point_time": times[1] if len(times) > 1 else None,
+        "final_point_time": times[-1] if times else None,
+        "min_point_spacing": min(spacings) if spacings else None,
+    }
+
+
+def _format_optional_time(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.3f}"
+
+
+def _controller_name_from_follow_joint_trajectory_action(action_name: str) -> str:
+    parts = [part for part in str(action_name or "").strip().split("/") if part]
+    if len(parts) >= 2 and parts[-1] == "follow_joint_trajectory":
+        return parts[-2]
+    return ""
+
+
+def _follow_joint_trajectory_metadata(
+    *,
+    domain_id: int,
+    action_name: str,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    start_delay_sec: float,
+    goal_time_tolerance_sec: float,
+    header_stamp: bool,
+    controller_state: str = "",
+) -> dict[str, Any]:
+    timing = _follow_joint_trajectory_time_summary(points)
+    metadata: dict[str, Any] = {
+        "ros_domain_id": int(domain_id),
+        "action_name": str(action_name),
+        "joint_names": [str(name) for name in joint_names],
+        "points": len(points),
+        "header_stamp": bool(header_stamp),
+        "start_delay_sec": float(start_delay_sec),
+        "goal_time_tolerance_sec": float(goal_time_tolerance_sec),
+        **timing,
+    }
+    if controller_state:
+        metadata["controller_state"] = str(controller_state)
+    return metadata
+
+
+def _follow_joint_trajectory_diagnostic_detail(
+    *,
+    domain_id: int,
+    action_name: str,
+    joint_names: list[str],
+    points: list[dict[str, Any]],
+    start_delay_sec: float,
+    goal_time_tolerance_sec: float,
+    header_stamp: bool,
+    controller_state: str = "",
+) -> str:
+    metadata = _follow_joint_trajectory_metadata(
+        domain_id=domain_id,
+        action_name=action_name,
+        joint_names=joint_names,
+        points=points,
+        start_delay_sec=start_delay_sec,
+        goal_time_tolerance_sec=goal_time_tolerance_sec,
+        header_stamp=header_stamp,
+        controller_state=controller_state,
+    )
+    parts = [
+        f"ROS_DOMAIN_ID={metadata['ros_domain_id']}",
+        f"action={metadata['action_name']}",
+        f"joints={','.join(str(name) for name in metadata['joint_names'])}",
+        f"points={metadata['points']}",
+        f"first_point_time={_format_optional_time(metadata.get('first_point_time'))}",
+        f"second_point_time={_format_optional_time(metadata.get('second_point_time'))}",
+        f"final_point_time={_format_optional_time(metadata.get('final_point_time'))}",
+        f"min_point_spacing={_format_optional_time(metadata.get('min_point_spacing'))}",
+        f"header_stamp={bool(metadata['header_stamp'])}",
+        f"start_delay_sec={float(metadata['start_delay_sec']):.3f}",
+        f"goal_time_tolerance_sec={float(metadata['goal_time_tolerance_sec']):.3f}",
+    ]
+    if metadata.get("controller_state"):
+        parts.append(f"controller_state={metadata['controller_state']}")
+    return "; ".join(parts)
+
+
 def _send_follow_joint_trajectory_worker(
     domain_id: int,
     action_name: str,
@@ -1235,6 +1469,10 @@ def _send_follow_joint_trajectory_worker(
         for entry in points:
             point = JointTrajectoryPoint()
             point.positions = [float(v) for v in entry["positions"]]
+            if "velocities" in entry:
+                point.velocities = [float(v) for v in entry["velocities"]]
+            if "accelerations" in entry:
+                point.accelerations = [float(v) for v in entry["accelerations"]]
             duration_sec = float(entry.get("time") or 0.0)
             whole = int(duration_sec)
             point.time_from_start.sec = whole
@@ -1253,10 +1491,29 @@ def _send_follow_joint_trajectory_worker(
 
         goal_handle = send_future.result()
         if goal_handle is None or not getattr(goal_handle, "accepted", False):
+            detail = _follow_joint_trajectory_diagnostic_detail(
+                domain_id=domain_id,
+                action_name=action_name,
+                joint_names=joint_names,
+                points=points,
+                start_delay_sec=start_delay_sec,
+                goal_time_tolerance_sec=goal_time_tolerance_sec,
+                header_stamp=float(start_delay_sec) > 0.0,
+            )
             result_queue.put(
                 {
                     "success": False,
-                    "message": f"{action_name}: action goal rejected.",
+                    "message": f"{action_name}: action goal rejected; {detail}.",
+                    "skip_observed_completion": True,
+                    **_follow_joint_trajectory_metadata(
+                        domain_id=domain_id,
+                        action_name=action_name,
+                        joint_names=joint_names,
+                        points=points,
+                        start_delay_sec=start_delay_sec,
+                        goal_time_tolerance_sec=goal_time_tolerance_sec,
+                        header_stamp=float(start_delay_sec) > 0.0,
+                    ),
                 }
             )
             return
@@ -1291,6 +1548,15 @@ def _send_follow_joint_trajectory_worker(
                 "status": status_int,
                 "status_label": label,
                 "error_code": int(error_code) if error_code is not None else None,
+                **_follow_joint_trajectory_metadata(
+                    domain_id=domain_id,
+                    action_name=action_name,
+                    joint_names=joint_names,
+                    points=points,
+                    start_delay_sec=start_delay_sec,
+                    goal_time_tolerance_sec=goal_time_tolerance_sec,
+                    header_stamp=float(start_delay_sec) > 0.0,
+                ),
             }
         )
     except Exception as exc:
@@ -1335,6 +1601,340 @@ def _publish_follow_joint_trajectory_action(
         return result_queue.get_nowait()
     except queue.Empty:
         return {"success": False, "message": f"{action_name}: action worker returned no data."}
+
+
+def _send_paired_follow_joint_trajectory_worker(
+    domain_id: int,
+    arms: list[dict[str, Any]],
+    result_timeout_sec: float,
+    result_queue: mp.Queue,
+    start_delay_sec: float,
+) -> None:
+    rclpy = _init_ros_domain(domain_id)
+    from control_msgs.action import FollowJointTrajectory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from trajectory_msgs.msg import JointTrajectoryPoint
+
+    def _wait_future(node: Any, future: Any, wait_timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(wait_timeout_sec))
+        while rclpy.ok() and time.time() < deadline and not future.done():
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return bool(future.done())
+
+    def _wait_futures(node: Any, futures: list[Any], wait_timeout_sec: float) -> bool:
+        deadline = time.time() + max(0.5, float(wait_timeout_sec))
+        while rclpy.ok() and time.time() < deadline:
+            if all(future.done() for future in futures):
+                return True
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return all(future.done() for future in futures)
+
+    def _controller_state(node: Any, controller_name: str) -> str:
+        name = str(controller_name or "").strip()
+        if not name:
+            return ""
+        try:
+            from controller_manager_msgs.srv import ListControllers
+
+            client = node.create_client(ListControllers, "/controller_manager/list_controllers")
+            if not client.wait_for_service(timeout_sec=1.0):
+                return "unknown(service_unavailable)"
+            future = client.call_async(ListControllers.Request())
+            if not _wait_future(node, future, 1.5):
+                return "unknown(service_timeout)"
+            response = future.result()
+            for controller in list(getattr(response, "controller", []) or []):
+                if str(getattr(controller, "name", "") or "") == name:
+                    return str(getattr(controller, "state", "") or "unknown")
+            return "unknown(not_listed)"
+        except Exception as exc:
+            return f"unknown({exc})"
+
+    def _metadata(arm: dict[str, Any], *, controller_state: str = "") -> dict[str, Any]:
+        return _follow_joint_trajectory_metadata(
+            domain_id=domain_id,
+            action_name=str(arm.get("action_name") or ""),
+            joint_names=[str(name) for name in list(arm.get("joint_names") or [])],
+            points=[dict(point) for point in list(arm.get("points") or [])],
+            start_delay_sec=start_delay_sec,
+            goal_time_tolerance_sec=float(arm.get("goal_time_tolerance_sec") or 0.0),
+            header_stamp=True,
+            controller_state=controller_state,
+        )
+
+    def _detail(arm: dict[str, Any], *, controller_state: str = "") -> str:
+        return _follow_joint_trajectory_diagnostic_detail(
+            domain_id=domain_id,
+            action_name=str(arm.get("action_name") or ""),
+            joint_names=[str(name) for name in list(arm.get("joint_names") or [])],
+            points=[dict(point) for point in list(arm.get("points") or [])],
+            start_delay_sec=start_delay_sec,
+            goal_time_tolerance_sec=float(arm.get("goal_time_tolerance_sec") or 0.0),
+            header_stamp=True,
+            controller_state=controller_state,
+        )
+
+    def _result(
+        arm: dict[str, Any],
+        *,
+        success: bool,
+        message: str,
+        controller_state: str = "",
+        skip_observed_completion: bool = False,
+        canceled: bool = False,
+        status: int | None = None,
+        status_label: str = "",
+        error_code: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "success": bool(success),
+            "message": message,
+            "status": status,
+            "status_label": status_label,
+            "error_code": error_code,
+            **_metadata(arm, controller_state=controller_state),
+        }
+        if skip_observed_completion:
+            payload["skip_observed_completion"] = True
+        if canceled:
+            payload["canceled"] = True
+        return payload
+
+    def _make_goal(arm: dict[str, Any], stamp_sec: int, stamp_nanosec: int) -> Any:
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = [str(name) for name in list(arm.get("joint_names") or [])]
+        tolerance = max(0.0, float(arm.get("goal_time_tolerance_sec") or 0.0))
+        if tolerance > 0.0:
+            whole_tolerance = int(tolerance)
+            goal.goal_time_tolerance.sec = whole_tolerance
+            goal.goal_time_tolerance.nanosec = int(
+                (tolerance - whole_tolerance) * 1_000_000_000
+            )
+        goal.trajectory.header.stamp.sec = int(stamp_sec)
+        goal.trajectory.header.stamp.nanosec = int(stamp_nanosec)
+        for entry in [dict(point) for point in list(arm.get("points") or [])]:
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in entry["positions"]]
+            if "velocities" in entry:
+                point.velocities = [float(v) for v in entry["velocities"]]
+            if "accelerations" in entry:
+                point.accelerations = [float(v) for v in entry["accelerations"]]
+            duration_sec = float(entry.get("time") or 0.0)
+            whole = int(duration_sec)
+            point.time_from_start.sec = whole
+            point.time_from_start.nanosec = int((duration_sec - whole) * 1_000_000_000)
+            goal.trajectory.points.append(point)
+        return goal
+
+    node = None
+    try:
+        node = Node("digital_twin_paired_follow_joint_trajectory_send")
+        arms_by_key = {
+            str(arm.get("key") or arm.get("robot") or arm.get("action_name")): dict(arm)
+            for arm in arms
+        }
+        clients: dict[str, Any] = {}
+        for key, arm in arms_by_key.items():
+            action_name = str(arm.get("action_name") or "")
+            client = ActionClient(node, FollowJointTrajectory, action_name)
+            clients[key] = client
+            if not client.wait_for_server(timeout_sec=5.0):
+                results = {
+                    item_key: _result(
+                        item_arm,
+                        success=False,
+                        message=(
+                            f"{str(item_arm.get('action_name') or '')}: not sent because paired arm action server "
+                            f"was unavailable; {_detail(item_arm)}."
+                            if item_key != key
+                            else f"{action_name}: action server unavailable; {_detail(item_arm)}."
+                        ),
+                        skip_observed_completion=True,
+                    )
+                    for item_key, item_arm in arms_by_key.items()
+                }
+                result_queue.put(results)
+                return
+
+        stamp = node.get_clock().now().to_msg()
+        delay = max(0.0, float(start_delay_sec))
+        whole_delay = int(delay)
+        nano_delay = int((delay - whole_delay) * 1_000_000_000)
+        total_nanosec = int(stamp.nanosec) + nano_delay
+        stamp_sec = int(stamp.sec) + whole_delay + total_nanosec // 1_000_000_000
+        stamp_nanosec = total_nanosec % 1_000_000_000
+
+        send_futures = {
+            key: clients[key].send_goal_async(_make_goal(arm, stamp_sec, stamp_nanosec))
+            for key, arm in arms_by_key.items()
+        }
+        accepted_handles: dict[str, Any] = {}
+        failed_results: dict[str, dict[str, Any]] = {}
+        _wait_futures(node, list(send_futures.values()), 8.0)
+        for key, future in send_futures.items():
+            arm = arms_by_key[key]
+            action_name = str(arm.get("action_name") or "")
+            controller_name = str(
+                arm.get("controller_name")
+                or _controller_name_from_follow_joint_trajectory_action(action_name)
+            )
+            controller_state = _controller_state(node, controller_name) if key == "ur5e" else ""
+            if not future.done():
+                failed_results[key] = _result(
+                    arm,
+                    success=False,
+                    message=(
+                        f"{action_name}: action goal acceptance timed out; "
+                        f"{_detail(arm, controller_state=controller_state)}."
+                    ),
+                    controller_state=controller_state,
+                    skip_observed_completion=True,
+                )
+                continue
+            goal_handle = future.result()
+            if goal_handle is None or not getattr(goal_handle, "accepted", False):
+                failed_results[key] = _result(
+                    arm,
+                    success=False,
+                    message=(
+                        f"{action_name}: action goal rejected; "
+                        f"{_detail(arm, controller_state=controller_state)}."
+                    ),
+                    controller_state=controller_state,
+                    skip_observed_completion=True,
+                )
+                continue
+            accepted_handles[key] = goal_handle
+
+        if failed_results:
+            results = dict(failed_results)
+            for key, goal_handle in accepted_handles.items():
+                arm = arms_by_key[key]
+                action_name = str(arm.get("action_name") or "")
+                try:
+                    cancel_future = goal_handle.cancel_goal_async()
+                    _wait_future(node, cancel_future, 2.0)
+                except Exception:
+                    pass
+                results[key] = _result(
+                    arm,
+                    success=False,
+                    message=(
+                        f"{action_name}: action accepted; canceled before execution because paired arm goal "
+                        f"was rejected; {_detail(arm)}."
+                    ),
+                    skip_observed_completion=True,
+                    canceled=True,
+                )
+            result_queue.put(results)
+            return
+
+        result_futures = {
+            key: goal_handle.get_result_async()
+            for key, goal_handle in accepted_handles.items()
+        }
+        _wait_futures(node, list(result_futures.values()), result_timeout_sec)
+        results: dict[str, dict[str, Any]] = {}
+        for key, future in result_futures.items():
+            arm = arms_by_key[key]
+            action_name = str(arm.get("action_name") or "")
+            if not future.done():
+                results[key] = _result(
+                    arm,
+                    success=False,
+                    message=f"{action_name}: action accepted; result timed out; {_detail(arm)}.",
+                )
+                continue
+            result_response = future.result()
+            status = getattr(result_response, "status", None)
+            label = _goal_status_label(status)
+            action_result = getattr(result_response, "result", None)
+            error_code = getattr(action_result, "error_code", None)
+            error_string = str(getattr(action_result, "error_string", "") or "")
+            status_int = int(status) if status is not None else None
+            success = status_int == 4 and (error_code is None or int(error_code) == 0)
+            message = f"{action_name}: action accepted; action {label}"
+            if error_code is not None:
+                message += f"; error_code={int(error_code)}"
+            if error_string:
+                message += f"; {error_string}"
+            results[key] = _result(
+                arm,
+                success=success,
+                message=message + ".",
+                status=status_int,
+                status_label=label,
+                error_code=int(error_code) if error_code is not None else None,
+            )
+        result_queue.put(results)
+    except Exception as exc:
+        result_queue.put(
+            {
+                str(arm.get("key") or arm.get("robot") or arm.get("action_name")): {
+                    "success": False,
+                    "message": f"{str(arm.get('action_name') or '')}: {exc}",
+                    "skip_observed_completion": True,
+                }
+                for arm in arms
+            }
+        )
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def _publish_paired_follow_joint_trajectory_actions(
+    domain_id: int,
+    arms: list[dict[str, Any]],
+    join_timeout_sec: float = 8.0,
+    start_delay_sec: float = PAIRED_HARDWARE_TRAJECTORY_START_DELAY_SEC,
+) -> dict[str, dict[str, Any]]:
+    arm_items = [dict(arm) for arm in arms]
+    result_queue: mp.Queue = mp.Queue(maxsize=1)
+    proc = mp.Process(
+        target=_send_paired_follow_joint_trajectory_worker,
+        args=(
+            domain_id,
+            arm_items,
+            join_timeout_sec,
+            result_queue,
+            start_delay_sec,
+        ),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(max(1.0, float(join_timeout_sec)) + 15.0)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=1.0)
+        return {
+            str(arm.get("key") or arm.get("robot") or arm.get("action_name")): {
+                "success": False,
+                "message": f"{str(arm.get('action_name') or '')}: paired action worker timed out.",
+                "skip_observed_completion": True,
+            }
+            for arm in arm_items
+        }
+    try:
+        result = result_queue.get_nowait()
+    except queue.Empty:
+        result = {}
+    if isinstance(result, dict) and result:
+        return {
+            str(key): dict(value)
+            for key, value in result.items()
+            if isinstance(value, dict)
+        }
+    return {
+        str(arm.get("key") or arm.get("robot") or arm.get("action_name")): {
+            "success": False,
+            "message": f"{str(arm.get('action_name') or '')}: paired action worker returned no data.",
+            "skip_observed_completion": True,
+        }
+        for arm in arm_items
+    }
 
 
 def _wait_execute_trajectory_action_worker(
@@ -1792,8 +2392,8 @@ def _plan_move_group_joint_goal_worker(
         goal.request.group_name = str(group_name)
         goal.request.num_planning_attempts = 5
         goal.request.allowed_planning_time = MOVE_GROUP_ALLOWED_PLANNING_TIME_SEC
-        goal.request.max_velocity_scaling_factor = 0.25
-        goal.request.max_acceleration_scaling_factor = 0.25
+        goal.request.max_velocity_scaling_factor = MOVE_GROUP_REPLAY_VELOCITY_SCALING
+        goal.request.max_acceleration_scaling_factor = MOVE_GROUP_REPLAY_ACCELERATION_SCALING
         goal.request.start_state.joint_state.name = list(joint_names)
         goal.request.start_state.joint_state.position = [float(v) for v in start_positions]
         goal.request.start_state.is_diff = False
@@ -1953,6 +2553,17 @@ def _plan_move_group_joint_goal(
             "waypoint_index": int(waypoint_index),
             "joint_names": list(joint_names),
         }
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: planning worker returned no data.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": str(group_name),
+            "waypoint_index": int(waypoint_index),
+            "joint_names": list(joint_names),
+        }
 
 
 def _execute_move_group_joint_goal(
@@ -2006,17 +2617,6 @@ def _execute_move_group_joint_goal(
             "waypoint_index": int(waypoint_index),
             "joint_names": list(joint_names),
             "mode": "plan_and_execute",
-        }
-    try:
-        return result_queue.get_nowait()
-    except queue.Empty:
-        return {
-            "success": False,
-            "message": f"{MOVE_GROUP_ACTION_NAME}: planning worker returned no data.",
-            "action_name": MOVE_GROUP_ACTION_NAME,
-            "group_name": str(group_name),
-            "waypoint_index": int(waypoint_index),
-            "joint_names": list(joint_names),
         }
 
 
@@ -2578,28 +3178,50 @@ def _set_gazebo_model_configuration(
 
 
 def _read_snapshot(domain_id: int, robot: str, source: str, timeout_sec: float) -> dict[str, Any]:
-    result_queue: mp.Queue = mp.Queue(maxsize=1)
-    proc = mp.Process(
-        target=_joint_state_snapshot_worker,
-        args=(domain_id, robot, source, timeout_sec, result_queue),
-        daemon=True,
-    )
-    proc.start()
-    proc.join(timeout_sec + 2.0)
-    if proc.is_alive():
+    attempts = 2
+    for attempt in range(attempts):
+        result_queue: mp.Queue = mp.Queue(maxsize=1)
+        proc = mp.Process(
+            target=_joint_state_snapshot_worker,
+            args=(domain_id, robot, source, timeout_sec, result_queue),
+            daemon=True,
+        )
         try:
-            result = result_queue.get_nowait()
+            proc.start()
+            proc.join(timeout_sec + 2.0)
+        except Exception as exc:
+            topics = ", ".join(_joint_state_topics(robot, source))
+            return {
+                "success": False,
+                "message": (
+                    f"{source} /joint_states snapshot process failed for {robot}: {exc}; "
+                    f"ROS_DOMAIN_ID={int(domain_id)}; topics={topics}"
+                ),
+            }
+        if proc.is_alive():
+            try:
+                result = result_queue.get_nowait()
+            except queue.Empty:
+                result = None
+            proc.terminate()
+            proc.join(timeout=1.0)
+            if result is not None:
+                return result
+            return {"success": False, "message": f"{source} /joint_states timed out."}
+        try:
+            return result_queue.get_nowait()
         except queue.Empty:
-            result = None
-        proc.terminate()
-        proc.join(timeout=1.0)
-        if result is not None:
-            return result
-        return {"success": False, "message": f"{source} /joint_states timed out."}
-    try:
-        return result_queue.get_nowait()
-    except queue.Empty:
-        return {"success": False, "message": f"{source} /joint_states returned no data."}
+            if attempt + 1 < attempts:
+                continue
+            topics = ", ".join(_joint_state_topics(robot, source))
+            return {
+                "success": False,
+                "message": (
+                    f"{source} /joint_states returned no data for {robot} after {attempts} attempts; "
+                    f"ROS_DOMAIN_ID={int(domain_id)}; topics={topics}"
+                ),
+            }
+    return {"success": False, "message": f"{source} /joint_states returned no data."}
 
 
 def _publish_hardware_trajectory(
@@ -2840,7 +3462,9 @@ def run_initialize_gazebo_from_hardware(args: argparse.Namespace) -> int:
     success = False
     message = ""
     max_delta_rad: float | None = None
+    max_delta_joint = ""
     configuration_result: dict[str, Any] | None = None
+    arm_result: dict[str, Any] | None = None
     model_name = str(args.model_name or "dual_robot")
     gazebo_joint_names = list(ROBOTS[args.robot]["gazebo_joints"])
     gazebo_joint_positions = list(hardware_positions)
@@ -2899,13 +3523,16 @@ def run_initialize_gazebo_from_hardware(args: argparse.Namespace) -> int:
 
         deltas = [_angular_delta(gazebo, hardware) for gazebo, hardware in zip(gazebo_positions, hardware_positions)]
         max_delta_rad = max(deltas) if deltas else 0.0
+        if deltas:
+            max_delta_index = max(range(len(deltas)), key=lambda i: deltas[i])
+            max_delta_joint = str(ROBOTS[args.robot]["gazebo_joints"][max_delta_index])
         if max_delta_rad <= tolerance:
             success = True
             message = f"gazebo pose initialized from hardware on attempt {attempt}."
             break
         message = (
             f"gazebo pose still differs from hardware by {max_delta_rad:.4f} rad "
-            f"after attempt {attempt}."
+            f"on {max_delta_joint or 'unknown joint'} after attempt {attempt}."
         )
 
     if gripper_result is not None:
@@ -2923,7 +3550,11 @@ def run_initialize_gazebo_from_hardware(args: argparse.Namespace) -> int:
         "joint_names": list(ROBOTS[args.robot]["gazebo_joints"]),
         "gripper_position": gripper_position,
         "max_joint_delta_rad": max_delta_rad,
+        "max_joint_delta_joint": max_delta_joint,
+        "attempts": attempts,
+        "init_tolerance_rad": tolerance,
         "set_model_configuration": configuration_result,
+        "arm_trajectory_publish": arm_result,
     }
     write_status(
         state="initialized" if success else "blocked",
@@ -2990,6 +3621,7 @@ def _paired_replay_robot_plan(
     hardware_names: list[str] = []
     hardware_positions: list[float] = []
     max_delta_deg = 0.0
+    max_delta_joint = ""
     approach_time = step
     if need_hardware:
         hardware_result = _read_snapshot(
@@ -3017,12 +3649,23 @@ def _paired_replay_robot_plan(
         first = [float(v) for v in robot_waypoints[0]["positions"]]
         deltas = [_angular_delta(a, b) for a, b in zip(first, hardware_positions)]
         max_delta_deg = math.degrees(max(deltas)) if deltas else 0.0
+        if deltas:
+            max_delta_index = max(range(len(deltas)), key=lambda i: deltas[i])
+            max_delta_joint = (
+                str(hardware_names[max_delta_index])
+                if max_delta_index < len(hardware_names)
+                else ""
+            )
         ceiling_deg = float(args.max_joint_delta_deg)
         if max_delta_deg > ceiling_deg:
             return {
                 "success": False,
-                "message": f"{robot}: blocked: first waypoint is {max_delta_deg:.2f} deg from hardware (ceiling {ceiling_deg:.2f}).",
+                "message": (
+                    f"{robot}: blocked: first waypoint is {max_delta_deg:.2f} deg from hardware "
+                    f"on {max_delta_joint or 'unknown joint'} (ceiling {ceiling_deg:.2f})."
+                ),
                 "max_joint_delta_deg": max_delta_deg,
+                "max_joint_delta_joint": max_delta_joint,
             }
         max_vel = max(1.0, float(getattr(args, "max_joint_vel_deg_s", MAX_REPLAY_JOINT_VEL_DEG_S)))
         if robot == "ur5e":
@@ -3043,6 +3686,7 @@ def _paired_replay_robot_plan(
         "waypoints": robot_waypoints,
         "approach_time": approach_time,
         "max_joint_delta_deg": max_delta_deg,
+        "max_joint_delta_joint": max_delta_joint,
     }
 
 
@@ -3104,18 +3748,26 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
         plans[robot] = plan
 
     if need_hardware:
-        for robot in ("xarm6", "ur5e"):
-            action_name = str(ROBOTS[robot].get("hardware_trajectory_action") or "").strip()
-            action_result = _wait_follow_joint_trajectory_action(
-                int(args.hardware_domain_id),
-                action_name,
-                timeout_sec=8.0,
-            )
-            if not action_result.get("success"):
-                return {
-                    "success": False,
-                    "message": f"{robot}: {str(action_result.get('message') or f'{action_name} unavailable')}",
-                }
+        xarm6_action_name = str(ROBOTS["xarm6"].get("hardware_trajectory_action") or "").strip()
+        xarm6_action_result = _wait_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            xarm6_action_name,
+            timeout_sec=8.0,
+        )
+        if not xarm6_action_result.get("success"):
+            return {
+                "success": False,
+                "message": f"xarm6: {str(xarm6_action_result.get('message') or f'{xarm6_action_name} unavailable')}",
+            }
+        ur5e_action_result = _wait_move_group_action(
+            int(args.hardware_domain_id),
+            timeout_sec=8.0,
+        )
+        if not ur5e_action_result.get("success"):
+            return {
+                "success": False,
+                "message": f"ur5e: {str(ur5e_action_result.get('message') or f'{MOVE_GROUP_ACTION_NAME} unavailable')}",
+            }
         for robot in robots:
             plan = plans[robot]
             gripper_points = [
@@ -3154,13 +3806,25 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
             {"positions": list(waypoint["positions"]), "time": approach_time + i * step}
             for i, waypoint in enumerate(plan["waypoints"])
         ]
+        hardware_current_point_sec = (
+            UR5E_HARDWARE_TRAJECTORY_CURRENT_POINT_SEC
+            if plan.get("robot") == "ur5e"
+            else HARDWARE_TRAJECTORY_CURRENT_POINT_SEC
+        )
+        hardware_time_offset = hardware_current_point_sec - HARDWARE_TRAJECTORY_CURRENT_POINT_SEC
         plan["hardware_points"] = (
             [
                 {
                     "positions": list(plan.get("hardware_positions") or []),
-                    "time": HARDWARE_TRAJECTORY_CURRENT_POINT_SEC,
+                    "time": hardware_current_point_sec,
                 },
-                *list(plan["points"]),
+                *[
+                    {
+                        "positions": list(point["positions"]),
+                        "time": float(point.get("time") or 0.0) + hardware_time_offset,
+                    }
+                    for point in list(plan["points"])
+                ],
             ]
             if need_hardware
             else []
@@ -3200,22 +3864,19 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
     if need_hardware:
         ur5e_plan = plans["ur5e"]
         ur5e_joint_names = list(ur5e_plan["hardware_names"])
-        ur5e_action = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
         ur5e_plan["hardware_plan_result"] = {
             "success": True,
             "message": (
-                f"{ur5e_action}: ready for follow_joint_trajectory "
+                f"{MOVE_GROUP_ACTION_NAME}: ready for ur5e MoveIt plan_and_execute; "
                 f"joints={','.join(str(name) for name in ur5e_joint_names)}; "
                 f"waypoints={len(list(ur5e_plan.get('waypoints') or []))}; "
-                f"points={len(list(ur5e_plan.get('hardware_points') or []))}; "
-                f"goal_time_tolerance_sec={UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC:.3f}; "
-                f"final_hold_sec={float(ur5e_plan.get('hardware_final_hold_sec') or 0.0):.3f}."
+                f"group={UR5E_HARDWARE_MOVE_GROUP}."
             ),
-            "action_name": ur5e_action,
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
             "joint_names": list(ur5e_joint_names),
-            "mode": "follow_joint_trajectory",
+            "mode": "plan_and_execute",
             "waypoints": len(list(ur5e_plan.get("waypoints") or [])),
-            "points": len(list(ur5e_plan.get("hardware_points") or [])),
         }
 
     return {
@@ -3231,6 +3892,110 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
         "need_hardware": need_hardware,
         "approach_time": approach_time,
         "timeout": timeout,
+    }
+
+
+def _preflight_ur5e_move_group_replay(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+    *,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    action_result = _wait_move_group_action(int(args.hardware_domain_id), timeout_sec=8.0)
+    if not action_result.get("success"):
+        return {
+            "success": False,
+            "message": (
+                f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight failed: "
+                f"{str(action_result.get('message') or 'action server unavailable')}"
+            ),
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
+            "mode": "plan_only",
+            "move_group_results": [dict(action_result)],
+        }
+
+    joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
+    start_positions = [float(value) for value in list(plan.get("hardware_positions") or [])]
+    waypoints = [dict(waypoint) for waypoint in list(plan.get("waypoints") or [])]
+    if not joint_names or not start_positions or len(joint_names) != len(start_positions):
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight failed: missing ur5e hardware start state.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
+            "mode": "plan_only",
+            "joint_names": list(joint_names),
+            "move_group_results": [],
+        }
+    if not waypoints:
+        return {
+            "success": False,
+            "message": f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight failed: no ur5e waypoints.",
+            "action_name": MOVE_GROUP_ACTION_NAME,
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
+            "mode": "plan_only",
+            "joint_names": list(joint_names),
+            "move_group_results": [],
+        }
+
+    plan_results: list[dict[str, Any]] = []
+    moveit_timeout = max(float(timeout_sec), MOVE_GROUP_PLAN_TIMEOUT_SEC)
+    for index, waypoint in enumerate(waypoints, start=1):
+        target_positions = [float(value) for value in list(waypoint.get("positions") or [])]
+        if len(target_positions) != len(joint_names):
+            result = {
+                "success": False,
+                "message": (
+                    f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight failed waypoint "
+                    f"{index}/{len(waypoints)}: target position count {len(target_positions)} "
+                    f"does not match joint count {len(joint_names)}."
+                ),
+                "action_name": MOVE_GROUP_ACTION_NAME,
+                "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                "mode": "plan_only",
+                "waypoint_index": int(index),
+                "joint_names": list(joint_names),
+            }
+        else:
+            result = _plan_move_group_joint_goal(
+                int(args.hardware_domain_id),
+                UR5E_HARDWARE_MOVE_GROUP,
+                joint_names,
+                start_positions,
+                target_positions,
+                waypoint_index=index,
+                timeout_sec=moveit_timeout,
+            )
+        plan_results.append(dict(result))
+        if not bool(result.get("success")):
+            return {
+                "success": False,
+                "message": (
+                    f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight failed waypoint "
+                    f"{index}/{len(waypoints)}: {str(result.get('message') or 'planning failed')}"
+                ),
+                "action_name": MOVE_GROUP_ACTION_NAME,
+                "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                "mode": "plan_only",
+                "failed_waypoint_index": int(index),
+                "joint_names": list(joint_names),
+                "move_group_results": plan_results,
+            }
+        start_positions = list(target_positions)
+
+    return {
+        "success": True,
+        "message": (
+            f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight planned; "
+            f"group={UR5E_HARDWARE_MOVE_GROUP}; waypoints={len(waypoints)}."
+        ),
+        "action_name": MOVE_GROUP_ACTION_NAME,
+        "group_name": UR5E_HARDWARE_MOVE_GROUP,
+        "mode": "plan_only",
+        "joint_names": list(joint_names),
+        "waypoints": len(waypoints),
+        "move_group_results": plan_results,
     }
 
 
@@ -3269,8 +4034,20 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                         message=f"{drift_reason} Re-preparing because hardware moved.",
                     )
                 else:
-                    prepared = prepared_candidate
-                    using_prepared_file = True
+                    refresh_reason = (
+                        _refresh_prepared_hardware_start_from_snapshot(args, prepared_candidate)
+                        if replay_target in ("hardware", "both")
+                        else ""
+                    )
+                    if refresh_reason:
+                        _write_replay_status(
+                            args,
+                            state="replaying",
+                            message=f"{refresh_reason} Re-preparing because hardware moved.",
+                        )
+                    else:
+                        prepared = prepared_candidate
+                        using_prepared_file = True
 
     if not prepared:
         _write_replay_status(
@@ -3297,18 +4074,26 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
     timeout = float(prepared.get("timeout") or 8.0)
 
     if need_hardware and using_prepared_file:
-        for robot in ("xarm6", "ur5e"):
-            action_name = str(ROBOTS[robot].get("hardware_trajectory_action") or "").strip()
-            action_result = _wait_follow_joint_trajectory_action(
-                int(args.hardware_domain_id),
-                action_name,
-                timeout_sec=3.0,
-            )
-            if not action_result.get("success"):
-                message = f"{robot}: {str(action_result.get('message') or f'{action_name} unavailable')}"
-                _write_replay_status(args, state="blocked", message=message, last_error=message)
-                print(json.dumps({"success": False, "message": message}))
-                return 6
+        xarm6_action_name = str(ROBOTS["xarm6"].get("hardware_trajectory_action") or "").strip()
+        xarm6_action_result = _wait_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            xarm6_action_name,
+            timeout_sec=3.0,
+        )
+        if not xarm6_action_result.get("success"):
+            message = f"xarm6: {str(xarm6_action_result.get('message') or f'{xarm6_action_name} unavailable')}"
+            _write_replay_status(args, state="blocked", message=message, last_error=message)
+            print(json.dumps({"success": False, "message": message}))
+            return 6
+        ur5e_action_result = _wait_move_group_action(
+            int(args.hardware_domain_id),
+            timeout_sec=3.0,
+        )
+        if not ur5e_action_result.get("success"):
+            message = f"ur5e: {str(ur5e_action_result.get('message') or f'{MOVE_GROUP_ACTION_NAME} unavailable')}"
+            _write_replay_status(args, state="blocked", message=message, last_error=message)
+            print(json.dumps({"success": False, "message": message}))
+            return 6
         for robot in robots:
             gripper_points = list(dict(plans.get(robot) or {}).get("gripper_points") or [])
             if not gripper_points:
@@ -3379,6 +4164,7 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
             f"action={action_name}; "
             f"joints={','.join(str(name) for name in joint_names)}; "
             f"max_joint_delta_deg={float(plan.get('max_joint_delta_deg') or 0.0):.3f}; "
+            f"max_joint_delta_joint={str(plan.get('max_joint_delta_joint') or '')}; "
             f"approach_time={float(approach_time):.3f}; "
             f"points={len(points)}"
         )
@@ -3386,6 +4172,20 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
             detail += f"; zero_velocities={bool(result.get('zero_velocities'))}"
         if "header_stamp" in result:
             detail += f"; header_stamp={bool(result.get('header_stamp'))}"
+        if "start_delay_sec" in result:
+            detail += f"; start_delay_sec={float(result.get('start_delay_sec') or 0.0):.3f}"
+        if "first_point_time" in result:
+            detail += f"; first_point_time={_format_optional_time(result.get('first_point_time'))}"
+        if "second_point_time" in result:
+            detail += f"; second_point_time={_format_optional_time(result.get('second_point_time'))}"
+        if "final_point_time" in result:
+            detail += f"; final_point_time={_format_optional_time(result.get('final_point_time'))}"
+        if "min_point_spacing" in result:
+            detail += f"; min_point_spacing={_format_optional_time(result.get('min_point_spacing'))}"
+        if "controller_state" in result:
+            detail += f"; controller_state={str(result.get('controller_state') or '')}"
+        if "canceled" in result:
+            detail += f"; canceled={bool(result.get('canceled'))}"
         if "goal_time_tolerance_sec" in result:
             detail += f"; goal_time_tolerance_sec={float(result.get('goal_time_tolerance_sec') or 0.0):.3f}"
         if "final_hold_sec" in result:
@@ -3397,6 +4197,7 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
         result["action_name"] = action_name
         result["joint_names"] = list(joint_names)
         result["max_joint_delta_deg"] = float(plan.get("max_joint_delta_deg") or 0.0)
+        result["max_joint_delta_joint"] = str(plan.get("max_joint_delta_joint") or "")
         result["approach_time"] = float(approach_time)
         result["points"] = len(points)
         return result
@@ -3443,45 +4244,111 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
 
     def _publish_ur5e_hardware_arm() -> None:
         plan = plans["ur5e"]
-        action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
         joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
-        points = list(plan.get("hardware_points") or [])
-        target_positions = [float(value) for value in list(points[-1].get("positions") or [])] if points else []
-        final_time = max((float(point.get("time") or 0.0) for point in points), default=0.0)
-        ur5e_timeout = max(
-            timeout,
-            final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
-        )
+        points = list(plan.get("points") or [])
+        waypoints_for_moveit = [dict(waypoint) for waypoint in list(plan.get("waypoints") or [])]
+        start_positions = [float(value) for value in list(plan.get("hardware_positions") or [])]
+        move_results: list[dict[str, Any]] = []
+        failed_result: dict[str, Any] | None = None
+        failed_index: int | None = None
+        moveit_timeout = max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC)
         _set_result("ur5e/hardware_plan", dict(plan.get("hardware_plan_result") or {}))
-        result = _publish_follow_joint_trajectory_action(
-            int(args.hardware_domain_id),
-            action_name,
-            joint_names,
-            points,
-            join_timeout_sec=ur5e_timeout,
-            start_delay_sec=HARDWARE_TRAJECTORY_START_DELAY_SEC,
-            goal_time_tolerance_sec=UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC,
-        )
-        result = _apply_observed_completion_fallback(
-            result,
-            domain_id=int(args.hardware_domain_id),
-            robot="ur5e",
-            joint_names=joint_names,
-            target_positions=target_positions,
-        )
-        result["goal_time_tolerance_sec"] = UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
-        result["final_hold_sec"] = float(plan.get("hardware_final_hold_sec") or 0.0)
-        result["mode"] = "follow_joint_trajectory"
+        for index, waypoint in enumerate(waypoints_for_moveit, start=1):
+            target_positions = [float(value) for value in list(waypoint.get("positions") or [])]
+            result = _execute_move_group_joint_goal(
+                int(args.hardware_domain_id),
+                UR5E_HARDWARE_MOVE_GROUP,
+                joint_names,
+                start_positions,
+                target_positions,
+                waypoint_index=index,
+                timeout_sec=moveit_timeout,
+            )
+            move_results.append(dict(result))
+            if not bool(result.get("success")):
+                failed_result = dict(result)
+                failed_index = index
+                break
+            start_positions = list(target_positions)
+        if failed_result is None:
+            result = {
+                "success": True,
+                "message": (
+                    "ur5e/hardware_arm used MoveIt plan_and_execute; "
+                    f"waypoints={len(waypoints_for_moveit)}; group={UR5E_HARDWARE_MOVE_GROUP}."
+                ),
+                "mode": "plan_and_execute",
+                "action_name": MOVE_GROUP_ACTION_NAME,
+                "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                "move_group_results": move_results,
+            }
+        else:
+            result = {
+                "success": False,
+                "message": (
+                    "ur5e/hardware_arm used MoveIt plan_and_execute; "
+                    f"failed waypoint {failed_index}/{len(waypoints_for_moveit)}: "
+                    f"{str(failed_result.get('message') or 'MoveIt execution failed')}"
+                ),
+                "mode": "plan_and_execute",
+                "action_name": MOVE_GROUP_ACTION_NAME,
+                "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                "failed_waypoint_index": failed_index,
+                "move_group_results": move_results,
+            }
         _set_result(
             "ur5e/hardware_arm",
             _decorate_hardware_arm_result(
                 result,
                 robot="ur5e",
-                action_name=action_name,
+                action_name=MOVE_GROUP_ACTION_NAME,
                 joint_names=joint_names,
                 points=points,
             ),
         )
+        if plan.get("gripper_points"):
+            if bool(result.get("success")):
+                _publish_gripper_for("ur5e", "hardware")
+            else:
+                _set_result(
+                    "ur5e/hardware_gripper",
+                    {
+                        "success": True,
+                        "message": "skipped because ur5e hardware arm failed.",
+                    },
+                )
+
+    def _publish_paired_hardware_arms() -> None:
+        arm_threads = [
+            threading.Thread(target=_publish_xarm_hardware_arm, daemon=True),
+            threading.Thread(target=_publish_ur5e_hardware_arm, daemon=True),
+        ]
+        for arm_thread in arm_threads:
+            arm_thread.start()
+        arm_join_timeout = timeout + max(
+            XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
+            UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
+        ) + 20.0
+        for arm_thread in arm_threads:
+            arm_thread.join(arm_join_timeout)
+        with result_lock:
+            decorated_results = {
+                "xarm6": dict(results.get("xarm6/hardware_arm") or {}),
+                "ur5e": dict(results.get("ur5e/hardware_arm") or {}),
+            }
+
+        ur5e_plan = plans["ur5e"]
+        if ur5e_plan.get("gripper_points"):
+            if bool(decorated_results.get("ur5e", {}).get("success")):
+                _publish_gripper_for("ur5e", "hardware")
+            else:
+                _set_result(
+                    "ur5e/hardware_gripper",
+                    {
+                        "success": True,
+                        "message": "skipped because ur5e hardware arm failed.",
+                    },
+                )
 
     def _publish_gripper_for(robot: str, side: str) -> None:
         plan = plans[robot]
@@ -3515,48 +4382,98 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
             join_timeout_sec=timeout,
         ))
 
-    for robot in robots:
-        if need_gazebo:
-            expected_results.append(f"{robot}/gazebo")
-            threads.append(threading.Thread(target=_publish_for, args=(robot, "gazebo"), daemon=True))
-            if plans[robot].get("gripper_points"):
-                expected_results.append(f"{robot}/gazebo_gripper")
-                threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "gazebo"), daemon=True))
-        if need_hardware and plans[robot].get("gripper_points"):
-            expected_results.append(f"{robot}/hardware_gripper")
-            threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "hardware"), daemon=True))
+    thread_launch_blocked = False
     if need_hardware:
-        expected_results.append("xarm6/hardware_arm")
-        expected_results.append("ur5e/hardware_plan")
-        expected_results.append("ur5e/hardware_arm")
-        threads.append(threading.Thread(target=_publish_xarm_hardware_arm, daemon=True))
-        threads.append(threading.Thread(target=_publish_ur5e_hardware_arm, daemon=True))
-    for thread in threads:
-        thread.start()
-    thread_join_timeout = timeout + 5.0
-    if need_hardware:
-        xarm_points = list(dict(plans.get("xarm6") or {}).get("hardware_points") or [])
-        xarm_final_time = max((float(point.get("time") or 0.0) for point in xarm_points), default=0.0)
-        thread_join_timeout = max(
-            thread_join_timeout,
-            xarm_final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
+        ur5e_preflight = _preflight_ur5e_move_group_replay(
+            args,
+            dict(plans["ur5e"]),
+            timeout_sec=max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC),
         )
-        ur5e_points = list(dict(plans.get("ur5e") or {}).get("hardware_points") or [])
-        ur5e_final_time = max((float(point.get("time") or 0.0) for point in ur5e_points), default=0.0)
-        thread_join_timeout = max(
-            thread_join_timeout,
-            ur5e_final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
-        )
-    for thread in threads:
-        thread.join(thread_join_timeout)
-
-    with result_lock:
-        for key in expected_results:
-            if key not in results:
-                results[key] = {
+        plans["ur5e"]["hardware_plan_result"] = dict(ur5e_preflight)
+        _set_result("ur5e/hardware_plan", dict(ur5e_preflight))
+        if not bool(ur5e_preflight.get("success")):
+            thread_launch_blocked = True
+            preflight_message = str(ur5e_preflight.get("message") or "ur5e MoveIt preflight failed")
+            _set_result(
+                "xarm6/hardware_arm",
+                {
                     "success": False,
-                    "message": "replay thread did not finish.",
-                }
+                    "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
+                    "skip_observed_completion": True,
+                },
+            )
+            _set_result(
+                "ur5e/hardware_arm",
+                {
+                    "success": False,
+                    "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
+                    "action_name": MOVE_GROUP_ACTION_NAME,
+                    "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                    "mode": "plan_and_execute",
+                    "skip_observed_completion": True,
+                },
+            )
+            if plans["xarm6"].get("gripper_points"):
+                _set_result(
+                    "xarm6/hardware_gripper",
+                    {
+                        "success": False,
+                        "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
+                    },
+                )
+            if plans["ur5e"].get("gripper_points"):
+                _set_result(
+                    "ur5e/hardware_gripper",
+                    {
+                        "success": True,
+                        "message": "skipped because ur5e hardware arm failed.",
+                    },
+                )
+
+    if not thread_launch_blocked:
+        for robot in robots:
+            if need_gazebo:
+                expected_results.append(f"{robot}/gazebo")
+                threads.append(threading.Thread(target=_publish_for, args=(robot, "gazebo"), daemon=True))
+                if plans[robot].get("gripper_points"):
+                    expected_results.append(f"{robot}/gazebo_gripper")
+                    threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "gazebo"), daemon=True))
+            if need_hardware and plans[robot].get("gripper_points"):
+                expected_results.append(f"{robot}/hardware_gripper")
+                if robot == "xarm6":
+                    threads.append(threading.Thread(target=_publish_gripper_for, args=(robot, "hardware"), daemon=True))
+        if need_hardware:
+            expected_results.append("xarm6/hardware_arm")
+            expected_results.append("ur5e/hardware_plan")
+            expected_results.append("ur5e/hardware_arm")
+            _set_result("ur5e/hardware_plan", dict(plans["ur5e"].get("hardware_plan_result") or {}))
+            threads.append(threading.Thread(target=_publish_paired_hardware_arms, daemon=True))
+        for thread in threads:
+            thread.start()
+        thread_join_timeout = timeout + 5.0
+        if need_hardware:
+            xarm_points = list(dict(plans.get("xarm6") or {}).get("hardware_points") or [])
+            xarm_final_time = max((float(point.get("time") or 0.0) for point in xarm_points), default=0.0)
+            thread_join_timeout = max(
+                thread_join_timeout,
+                xarm_final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
+            )
+            ur5e_points = list(dict(plans.get("ur5e") or {}).get("points") or [])
+            ur5e_final_time = max((float(point.get("time") or 0.0) for point in ur5e_points), default=0.0)
+            thread_join_timeout = max(
+                thread_join_timeout,
+                ur5e_final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
+            )
+        for thread in threads:
+            thread.join(thread_join_timeout)
+
+        with result_lock:
+            for key in expected_results:
+                if key not in results:
+                    results[key] = {
+                        "success": False,
+                        "message": "replay thread did not finish.",
+                    }
 
     ok = bool(results) and all(bool(result.get("success")) for result in results.values())
     message = "; ".join(f"{name}: {result.get('message') or ''}" for name, result in sorted(results.items()))
@@ -3566,11 +4483,17 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
         "waypoints": len(waypoints),
         "robots": robots,
         "used_prepared_file": using_prepared_file,
+        "approach_time": approach_time,
+        "waypoint_duration_sec": float(prepared.get("step") or 0.0),
+        "timeout": timeout,
     }
     if need_hardware:
-        out["max_joint_delta_deg"] = max(
-            float(plan.get("max_joint_delta_deg") or 0.0) for plan in plans.values()
+        max_delta_robot = max(
+            plans.values(),
+            key=lambda plan: float(plan.get("max_joint_delta_deg") or 0.0),
         )
+        out["max_joint_delta_deg"] = float(max_delta_robot.get("max_joint_delta_deg") or 0.0)
+        out["max_joint_delta_joint"] = str(max_delta_robot.get("max_joint_delta_joint") or "")
     _write_replay_status(
         args,
         state="replayed" if ok else "blocked",
@@ -3654,6 +4577,7 @@ def run_replay(args: argparse.Namespace) -> int:
     replay_target = str(args.replay_target or "hardware")
     need_gazebo = replay_target in ("gazebo", "both")
     need_hardware = replay_target in ("hardware", "both")
+    hardware_uses_moveit = need_hardware and str(args.robot) == "ur5e"
 
     recorded_joint_names = list(recording.get("joint_names") or ROBOTS[args.robot]["gazebo_joints"])
 
@@ -3662,6 +4586,7 @@ def run_replay(args: argparse.Namespace) -> int:
     # to either side, so gazebo never moves when hardware would be unsafe.
     hardware_names: list[str] = []
     max_delta_deg = 0.0
+    max_delta_joint = ""
     approach_time = step
     if need_hardware:
         hardware_result = _read_snapshot(
@@ -3682,6 +4607,13 @@ def run_replay(args: argparse.Namespace) -> int:
         first = [float(v) for v in waypoints[0]["positions"]]
         deltas = [_angular_delta(a, b) for a, b in zip(first, hardware_positions)]
         max_delta_deg = math.degrees(max(deltas)) if deltas else 0.0
+        if deltas:
+            max_delta_index = max(range(len(deltas)), key=lambda i: deltas[i])
+            max_delta_joint = (
+                str(hardware_names[max_delta_index])
+                if max_delta_index < len(hardware_names)
+                else ""
+            )
 
         # Absolute sanity ceiling only: a near-180 deg single-joint delta usually means an
         # encoder/wrap problem, not a deliberate authored move.
@@ -3691,8 +4623,12 @@ def run_replay(args: argparse.Namespace) -> int:
                 json.dumps(
                     {
                         "success": False,
-                        "message": f"blocked: first waypoint is {max_delta_deg:.2f} deg from hardware (ceiling {ceiling_deg:.2f}).",
+                        "message": (
+                            f"blocked: first waypoint is {max_delta_deg:.2f} deg from hardware "
+                            f"on {max_delta_joint or 'unknown joint'} (ceiling {ceiling_deg:.2f})."
+                        ),
                         "max_joint_delta_deg": max_delta_deg,
+                        "max_joint_delta_joint": max_delta_joint,
                     }
                 )
             )
@@ -3708,6 +4644,26 @@ def run_replay(args: argparse.Namespace) -> int:
         for i, wp in enumerate(waypoints)
     ]
     timeout = approach_time + step * len(points) + 8.0
+    if hardware_uses_moveit:
+        action_result = _wait_move_group_action(int(args.hardware_domain_id), timeout_sec=8.0)
+        if not action_result.get("success"):
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "message": (
+                            "/move_action unavailable for ur5e plan_and_execute replay: "
+                            f"{str(action_result.get('message') or 'action server unavailable')}"
+                        ),
+                        "waypoints": len(points),
+                        "saved_steps": int(recording.get("saved_steps") or len(points)),
+                        "approach_time": approach_time,
+                        "max_joint_delta_deg": max_delta_deg,
+                        "max_joint_delta_joint": max_delta_joint,
+                    }
+                )
+            )
+            return 6
 
     # Publish to the required domains concurrently so sim and hardware move in sync.
     results: dict[str, dict[str, Any]] = {}
@@ -3722,6 +4678,56 @@ def run_replay(args: argparse.Namespace) -> int:
         )
 
     def _do_hardware() -> None:
+        if hardware_uses_moveit:
+            start_positions = [float(value) for value in hardware_positions]
+            move_results: list[dict[str, Any]] = []
+            failed_result: dict[str, Any] | None = None
+            failed_index: int | None = None
+            moveit_timeout = max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC)
+            for index, waypoint in enumerate(waypoints, start=1):
+                target_positions = [float(value) for value in list(waypoint.get("positions") or [])]
+                result = _execute_move_group_joint_goal(
+                    int(args.hardware_domain_id),
+                    UR5E_HARDWARE_MOVE_GROUP,
+                    hardware_names,
+                    start_positions,
+                    target_positions,
+                    waypoint_index=index,
+                    timeout_sec=moveit_timeout,
+                )
+                move_results.append(dict(result))
+                if not bool(result.get("success")):
+                    failed_result = dict(result)
+                    failed_index = index
+                    break
+                start_positions = list(target_positions)
+            if failed_result is None:
+                results["hardware"] = {
+                    "success": True,
+                    "message": (
+                        "ur5e/hardware_arm used MoveIt plan_and_execute; "
+                        f"waypoints={len(waypoints)}; group={UR5E_HARDWARE_MOVE_GROUP}."
+                    ),
+                    "mode": "plan_and_execute",
+                    "action_name": MOVE_GROUP_ACTION_NAME,
+                    "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                    "move_group_results": move_results,
+                }
+            else:
+                results["hardware"] = {
+                    "success": False,
+                    "message": (
+                        "ur5e/hardware_arm used MoveIt plan_and_execute; "
+                        f"failed waypoint {failed_index}/{len(waypoints)}: "
+                        f"{str(failed_result.get('message') or 'MoveIt execution failed')}"
+                    ),
+                    "mode": "plan_and_execute",
+                    "action_name": MOVE_GROUP_ACTION_NAME,
+                    "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                    "failed_waypoint_index": failed_index,
+                    "move_group_results": move_results,
+                }
+            return
         results["hardware"] = _publish_trajectory(
             int(args.hardware_domain_id),
             ROBOTS[args.robot]["trajectory_topics"],
@@ -3742,9 +4748,18 @@ def run_replay(args: argparse.Namespace) -> int:
 
     ok = bool(results) and all(bool(r.get("success")) for r in results.values())
     message = "; ".join(f"{name}: {r.get('message') or ''}" for name, r in results.items())
-    out: dict[str, Any] = {"success": ok, "message": message, "waypoints": len(points)}
+    out: dict[str, Any] = {
+        "success": ok,
+        "message": message,
+        "waypoints": len(points),
+        "saved_steps": int(recording.get("saved_steps") or len(points)),
+        "approach_time": approach_time,
+        "waypoint_duration_sec": step,
+        "timeout": timeout,
+    }
     if need_hardware:
         out["max_joint_delta_deg"] = max_delta_deg
+        out["max_joint_delta_joint"] = max_delta_joint
     print(json.dumps(out))
     return 0 if ok else 8
 
@@ -3780,7 +4795,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recording-file", default="")
     parser.add_argument("--prepared-file", default="")
     parser.add_argument("--replay-target", choices=["hardware", "gazebo", "both"], default="hardware")
-    parser.add_argument("--waypoint-duration-sec", type=float, default=2.0)
+    parser.add_argument("--waypoint-duration-sec", type=float, default=DEFAULT_REPLAY_WAYPOINT_DURATION_SEC)
     parser.add_argument("--max-joint-vel-deg-s", type=float, default=MAX_REPLAY_JOINT_VEL_DEG_S)
     return parser
 

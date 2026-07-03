@@ -25,7 +25,7 @@ from cais_spade_llm.resources.robot.robot_primitives import (
     robot_capability_decompositions,
     robot_primitive_sequence_validator,
 )
-from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
+from cais_spade_llm.resources.robot import UR5eGazeboController, XArm6GazeboController
 
 
 @dataclass(frozen=True)
@@ -386,9 +386,9 @@ def _robot_primitive_owner(agent: Any) -> Any | None:
     except Exception:
         scope_name = str(getattr(agent, "agent_name", "")).split("@", 1)[0].lower()
     if scope_name.startswith("ur5e"):
-        return UR5eController
+        return UR5eGazeboController
     if scope_name.startswith("xarm6"):
-        return XArm6Controller
+        return XArm6GazeboController
     return None
 
 

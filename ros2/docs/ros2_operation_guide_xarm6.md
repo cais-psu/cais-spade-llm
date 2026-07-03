@@ -90,10 +90,10 @@ Rotation: [...]
 
 ### Option A: Python script (direct joint control)
 ```python
-from cais_spade_llm.resources.robot.xarm6_controller import XArm6Controller
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import XArm6GazeboController
 import time
 
-ctrl = XArm6Controller()
+ctrl = XArm6GazeboController()
 ctrl.init()
 time.sleep(1)  # wait for publisher to register
 
@@ -102,9 +102,6 @@ ctrl.move_joints([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], duration_sec=3)
 time.sleep(4)
 ctrl.shutdown()
 ```
-
-> Note: `XArm6Controller` is currently a **placeholder** (mock). It does not yet
-> communicate with Gazebo or real hardware. See `cais_spade_llm/resources/robot/xarm6_controller.py`.
 
 Run with (do NOT have Poetry venv active):
 ```bash

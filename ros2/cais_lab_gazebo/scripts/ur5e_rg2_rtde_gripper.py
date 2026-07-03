@@ -30,7 +30,7 @@ _PROJECT_ROOT = _project_root()
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from cais_spade_llm.resources.robot.ur5e_rg2_gripper_controller import (  # noqa: E402
+from cais_spade_llm.resources.robot.hardware_pick_place_controller import (  # noqa: E402
     UR5eRG2GripperController,
     UR5eRG2GripperControllerSettings,
 )

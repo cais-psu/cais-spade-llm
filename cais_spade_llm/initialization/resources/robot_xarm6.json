@@ -23,29 +23,58 @@
           "assembly_board-v1"
         ],
         "workspace_bounds": {
-          "x_min_m": -0.60, "x_max_m": 0.60,
-          "y_min_m": -1.00, "y_max_m": 0.10,
-          "z_min_m": 0.90, "z_max_m": 1.50
+          "x_min_m": -0.6,
+          "x_max_m": 0.6,
+          "y_min_m": -1.0,
+          "y_max_m": 0.1,
+          "z_min_m": 0.9,
+          "z_max_m": 1.5
         },
         "gripper_reach": {
           "frame": "world",
-          "origin_pose": {"x": 0.0, "y": -0.50, "z": 1.021},
-          "max_xy_radius_m": 0.70,
-          "z_min_m": 0.90,
-          "z_max_m": 1.50,
+          "origin_pose": {
+            "x": 0.0,
+            "y": -0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.9,
+          "z_max_m": 1.5,
           "tolerance_m": 0.01
         },
         "staging_areas": {
           "prusa-mk3": {
-            "anchor_pose": {"x": -0.4, "y": 0.0, "z": 1.04},
-            "board_center": {"x": -0.4, "y": 0.0, "z": 1.04},
-            "slot_xy": [0.0, 0.0],
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
             "slot_floor_z_m": 1.04
           },
           "prusa-mk4-2": {
-            "anchor_pose": {"x": 0.4, "y": -0.3, "z": 1.04},
-            "board_center": {"x": 0.4, "y": -0.3, "z": 1.04},
-            "slot_xy": [0.0, 0.0],
+            "anchor_pose": {
+              "x": 0.4,
+              "y": -0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": -0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
             "slot_floor_z_m": 1.04
           }
         }
@@ -131,7 +160,16 @@
     "real": {
       "static_capabilities": {},
       "controller": {},
-      "named_positions": {}
+      "named_positions": {
+        "home": [
+          -0.6739,
+          -0.363549,
+          -1.133908,
+          0.000519,
+          1.497461,
+          -0.673809
+        ]
+      }
     }
   }
 }

@@ -19,7 +19,7 @@ planning interface, which is exactly why the current DES layer is reliable for
 modeled recovery.
 
 At the low level, however, the robot also exposes controller primitives in
-`ros2_pick_place_controller.py`, such as:
+`gazebo_pick_place_controller.py` and `hardware_pick_place_controller.py`, such as:
 
 - `move_cartesian`
 - `move_relative`
@@ -116,7 +116,8 @@ mechanism proposes one.
 
 ### Controller primitives are expressive but open-ended
 
-The low-level primitives in `ros2_pick_place_controller.py` include open-ended
+The low-level primitives in `gazebo_pick_place_controller.py` and
+`hardware_pick_place_controller.py` include open-ended
 numeric and observation-driven actions:
 
 - `move_cartesian(x, y, z, ...)`

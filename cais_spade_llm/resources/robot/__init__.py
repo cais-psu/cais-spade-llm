@@ -1,13 +1,23 @@
-from .ur5e_controller import UR5eController
-from .xarm6_controller import XArm6Controller
-from .ur5e_rg2_gripper_controller import (
+from .gazebo_pick_place_controller import (
+    GazeboPickPlaceController,
+    UR5eGazeboController,
+    XArm6GazeboController,
+)
+from .hardware_pick_place_controller import (
+    HardwarePickPlaceController,
+    UR5eHardwareController,
+    XArm6HardwareController,
     UR5eRG2GripperController,
     UR5eRG2GripperControllerSettings,
 )
 
 __all__ = [
-    "UR5eController",
-    "XArm6Controller",
+    "GazeboPickPlaceController",
+    "HardwarePickPlaceController",
+    "UR5eGazeboController",
+    "XArm6GazeboController",
+    "UR5eHardwareController",
+    "XArm6HardwareController",
     "UR5eRG2GripperController",
     "UR5eRG2GripperControllerSettings",
 ]

@@ -1,0 +1,96 @@
+{
+  "robot": "xarm6",
+  "function_name": "test1",
+  "name": "default",
+  "capture_source": "hardware",
+  "replay_targets": [
+    "hardware",
+    "digital_twin"
+  ],
+  "steps": [
+    {
+      "step_name": "step_1",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783030951.2473018,
+      "waypoint": {
+        "joint_names": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "joint_positions": [
+          -1.869274377822876,
+          -0.7913820743560791,
+          -0.8551991581916809,
+          -0.011809894815087318,
+          1.6651602983474731,
+          -1.8737285137176514
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    },
+    {
+      "step_name": "step_1",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783030971.597644,
+      "waypoint": {
+        "joint_names": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "joint_positions": [
+          -0.7727506756782532,
+          -0.4842163324356079,
+          -1.0437794923782349,
+          0.011299327947199345,
+          1.5469551086425781,
+          -0.7764835953712463
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    },
+    {
+      "step_name": "step_1",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783031019.674419,
+      "waypoint": {
+        "joint_names": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "joint_positions": [
+          -2.214489698410034,
+          -0.6236215829849243,
+          -0.9524779319763184,
+          -0.01735009253025055,
+          1.5894445180892944,
+          -2.218096971511841
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    }
+  ]
+}

@@ -27,6 +27,7 @@ from launch.actions import (
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -644,12 +645,7 @@ def launch_setup(context, *args, **kwargs):
         gazebo_launch,
         combined_rsp,
         combined_spawn,
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=combined_spawn,
-                on_exit=[controller_spawner],
-            )
-        ),
+        TimerAction(period=2.0, actions=[controller_spawner]),
     ]
     if post_controller_actions:
         launch_actions.append(

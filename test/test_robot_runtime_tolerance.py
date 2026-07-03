@@ -19,8 +19,8 @@ from cais_spade_llm.resources.robot.robot_tasks import (
     execute_robot_task,
     robot_task_capability_decompositions,
 )
-from cais_spade_llm.resources.robot.ros2_pick_place_controller import (
-    Ros2PickPlaceController,
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+    GazeboPickPlaceController,
     _gazebo_timing_scale_from_env,
 )
 
@@ -343,7 +343,7 @@ def test_lg_slippage_after_place_insert_returns_failed_drop_observation():
 
 
 def test_compute_place_targets_clamps_inserted_mg_origin_to_visible_slot_height():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.place_surface_gap_m = -0.01
     controller.insertion_depth_m = 0.0025
@@ -383,7 +383,7 @@ def test_compute_place_targets_clamps_inserted_mg_origin_to_visible_slot_height(
 
 
 def test_compute_place_targets_clamps_default_mg_origin_to_visible_slot_height():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.place_surface_gap_m = -0.01
     controller.insertion_depth_m = 0.0025
@@ -416,7 +416,7 @@ def test_compute_place_targets_clamps_default_mg_origin_to_visible_slot_height()
 
 
 def test_move_to_named_pose_uses_configured_named_pose_duration():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.named_positions = {"home": [0.0, 0.1, 0.2]}
     controller.named_pose_duration_sec = 2.0
     controller.trajectory_time_scale = 0.8
@@ -439,7 +439,7 @@ def test_move_to_named_pose_uses_configured_named_pose_duration():
 
 
 def test_move_home_uses_configured_home_duration():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.named_positions = {"home": [0.0, 0.1, 0.2]}
     controller.move_home_duration_sec = 2.0
     controller.trajectory_time_scale = 0.8
@@ -477,7 +477,7 @@ def test_gazebo_timing_scale_applies_only_to_simulation_gazebo(monkeypatch):
 
 
 def test_fast_timing_profile_scales_waits_and_enforces_lower_bounds():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.gripper_move_time_sec = 0.4
     controller.gripper_settle_sec = 0.08
@@ -510,7 +510,7 @@ def test_fast_timing_profile_scales_waits_and_enforces_lower_bounds():
 
 
 def test_move_relative_does_not_start_no_collision_fallback_after_timeout():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.trajectory_time_scale = 0.45
     controller._last_failure_message = ""
     controller.wait_for_services = lambda: True
@@ -536,7 +536,7 @@ def test_move_relative_does_not_start_no_collision_fallback_after_timeout():
 
 
 def test_move_relative_keeps_vertical_no_collision_fallback_for_non_timeout_failure():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.trajectory_time_scale = 0.45
     controller._last_failure_message = ""
     controller.wait_for_services = lambda: True
@@ -795,7 +795,7 @@ def test_auto_link_attacher_xarm_uses_link6_without_right_gripper_links():
 
 
 def test_ur5e_derives_gripper_close_position_from_gazebo_model_geometry():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.gripper_open = 0.11
     controller.gripper_close = 0.02
 
@@ -808,7 +808,7 @@ def test_ur5e_derives_gripper_close_position_from_gazebo_model_geometry():
 
 
 def test_xarm6_does_not_apply_metric_width_gripper_close_position():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.gripper_open = 0.0
     controller.gripper_close = 0.85
 
@@ -845,7 +845,7 @@ def test_pick_grasp_passes_gripper_close_position_to_grasp_part():
 
 def test_snap_part_to_slot_attaches_part_to_assembly_board(monkeypatch):
     _install_fake_gazebo_msgs(monkeypatch)
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller._link_attacher_enabled = True
     controller._attached_model = "gear_medium"
     controller._attached_link = "ur5e_rg2_gripper_tcp"
@@ -911,7 +911,7 @@ def test_snap_part_to_slot_attaches_part_to_assembly_board(monkeypatch):
 
 def test_set_entity_pose_detaches_assembly_board_links_before_pose_reset(monkeypatch):
     _install_fake_gazebo_msgs(monkeypatch)
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller._link_attacher_enabled = True
     controller._SetEntityState = _FakeSetEntityState
     controller._detach_srv = _FakeAttachSrv
@@ -953,7 +953,7 @@ def test_set_entity_pose_detaches_assembly_board_links_before_pose_reset(monkeyp
 
 def test_snap_part_to_slot_fails_when_assembly_board_attach_fails(monkeypatch):
     _install_fake_gazebo_msgs(monkeypatch)
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller._link_attacher_enabled = True
     controller._attached_model = "gear_medium"
     controller._attached_link = "ur5e_rg2_gripper_tcp"
@@ -996,7 +996,7 @@ def test_snap_part_to_slot_fails_when_assembly_board_attach_fails(monkeypatch):
 
 def test_snap_part_to_slot_falls_back_to_board_link_when_anchor_link_is_missing(monkeypatch):
     _install_fake_gazebo_msgs(monkeypatch)
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller._link_attacher_enabled = True
     controller._attached_model = "gear_medium"
     controller._attached_link = "ur5e_rg2_gripper_tcp"
@@ -1048,7 +1048,7 @@ def test_snap_part_to_slot_falls_back_to_board_link_when_anchor_link_is_missing(
 
 
 def test_release_part_uses_open_command_fallback_when_detach_verification_unavailable():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0
     controller.release_postdetach_settle_sec = 0.0
@@ -1083,7 +1083,7 @@ def test_release_part_uses_open_command_fallback_when_detach_verification_unavai
 
 
 def test_simulation_release_part_continues_when_detach_verification_is_unavailable():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0
@@ -1143,7 +1143,7 @@ def test_simulation_release_part_continues_when_detach_verification_is_unavailab
 
 
 def test_simulation_release_part_tries_release_detach_link_candidates():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0
@@ -1183,7 +1183,7 @@ def test_simulation_release_part_tries_release_detach_link_candidates():
 
 
 def test_simulation_release_part_successful_detach_keeps_normal_release_mode():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0
@@ -1212,7 +1212,7 @@ def test_simulation_release_part_successful_detach_keeps_normal_release_mode():
 
 
 def test_simulation_release_part_verifies_release_with_rcutils_style_logger():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0
@@ -1257,7 +1257,7 @@ def test_simulation_release_part_verifies_release_with_rcutils_style_logger():
 
 
 def test_detach_verification_failure_logs_with_rcutils_style_logger():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
     controller.release_detach_verify_timeout_sec = 0.0
     controller.release_detach_verify_poll_sec = 0.05
@@ -1279,7 +1279,7 @@ def test_detach_verification_failure_logs_with_rcutils_style_logger():
 
 
 def test_physical_release_part_stays_strict_even_with_assume_released_if_open():
-    controller = Ros2PickPlaceController.__new__(Ros2PickPlaceController)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "physical"
     controller.release_preopen_settle_sec = 0.0
     controller.release_postopen_settle_sec = 0.0

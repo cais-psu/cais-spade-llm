@@ -1,0 +1,96 @@
+{
+  "robot": "ur5e",
+  "function_name": "ur5e_test1",
+  "name": "default",
+  "capture_source": "hardware",
+  "replay_targets": [
+    "hardware",
+    "digital_twin"
+  ],
+  "steps": [
+    {
+      "step_name": "step_1",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783051253.4100182,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          -0.9532669226275843,
+          -1.0924925369075318,
+          -1.7096760272979736,
+          -1.9105006657042445,
+          1.5672616958618164,
+          -2.52094537416567
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    },
+    {
+      "step_name": "step_2",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783051283.2936764,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          -0.5652850309955042,
+          -1.268236295585968,
+          -1.6108107566833496,
+          -1.8349892101683558,
+          1.567504644393921,
+          -2.1331165472613733
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    },
+    {
+      "step_name": "step_3",
+      "primitive": "move_cartesian",
+      "capture_source": "hardware",
+      "captured_at": 1783051306.8451102,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          -1.770111385975973,
+          -1.2254755955985566,
+          -1.6358503103256226,
+          -1.8484660587706507,
+          1.5680104494094849,
+          -3.3380213419543665
+        ],
+        "pose": null,
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    }
+  ]
+}

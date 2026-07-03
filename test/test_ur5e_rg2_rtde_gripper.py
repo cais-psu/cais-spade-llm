@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -7,10 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from cais_spade_llm.resources.robot.ur5e_rg2_gripper_controller import (
+from cais_spade_llm.resources.robot.hardware_pick_place_controller import (
+    HardwarePickPlaceController,
+    TAUGHT_FUNCTIONS_ROOT,
     UR5eRG2GripperController,
     UR5eRG2GripperControllerSettings,
 )
+from cais_spade_llm.resources.robot.robot_tasks import execute_robot_task
 from cais_spade_llm.ui.bridge import SystemBridge
 from ros2.cais_lab_gazebo.scripts import digital_twin_sync
 from ros2.cais_lab_gazebo.scripts.ur5e_rg2_rtde_gripper import (
@@ -46,6 +50,173 @@ class FakeRTDEFactory:
     def __call__(self, **kwargs: object) -> FakeRTDE:
         self.kwargs.append(dict(kwargs))
         return self.rtde
+
+
+def test_hardware_controller_replays_taught_function_step_from_taught_functions_root(
+    tmp_path,
+) -> None:
+    old_root = HardwarePickPlaceController.taught_functions_root
+    HardwarePickPlaceController.taught_functions_root = tmp_path
+    try:
+        path = tmp_path / "ur5e" / "place_insert" / "nist_assembly_board__hardware.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "robot": "ur5e",
+                    "function_name": "place_insert",
+                    "name": "nist_assembly_board",
+                    "capture_source": "hardware",
+                    "replay_targets": ["hardware", "digital_twin"],
+                    "steps": [
+                        {
+                            "step_name": "retreat_pose",
+                            "primitive": "move_relative",
+                            "waypoint": {
+                                "joint_names": ["j1", "j2"],
+                                "joint_positions": [0.1, 0.2],
+                                "pose": None,
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        controller = HardwarePickPlaceController.__new__(HardwarePickPlaceController)
+        controller.robot_name = "ur5e"
+        calls: list[tuple[list[float], float]] = []
+        controller.move_joints = lambda positions, duration_sec=2.0: calls.append(
+            ([float(value) for value in positions], float(duration_sec))
+        ) or True
+
+        result = controller.replay_taught_function_step(
+            "place_insert",
+            "nist_assembly_board",
+            "retreat_pose",
+        )
+
+        assert result["success"] is True
+        assert calls == [([0.1, 0.2], 2.0)]
+        assert Path(str(result["file"])) == path
+    finally:
+        HardwarePickPlaceController.taught_functions_root = old_root
+
+
+def test_hardware_controller_reports_missing_taught_function_file(tmp_path) -> None:
+    old_root = HardwarePickPlaceController.taught_functions_root
+    HardwarePickPlaceController.taught_functions_root = tmp_path
+    try:
+        controller = HardwarePickPlaceController.__new__(HardwarePickPlaceController)
+        controller.robot_name = "ur5e"
+
+        result = controller.replay_taught_function_step("move_home", "default", "home")
+
+        assert result["success"] is False
+        assert "taught function file not found" in result["message"]
+        assert "move_home/default__hardware.json" in result["message"]
+    finally:
+        HardwarePickPlaceController.taught_functions_root = old_root
+
+
+class FakeRobotTaskAgent:
+    execution_mode = "physical"
+
+    class Logger:
+        def debug(self, *_args, **_kwargs) -> None:
+            return None
+
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+        def warning(self, *_args, **_kwargs) -> None:
+            return None
+
+        def error(self, *_args, **_kwargs) -> None:
+            return None
+
+        def exception(self, *_args, **_kwargs) -> None:
+            return None
+
+    def __init__(self) -> None:
+        self.logger = self.Logger()
+        self._held_part = None
+        self._current_state = "idle"
+        self._position: dict[str, float] = {}
+        self._gripper_state = "open"
+        self._bridge_pose_ref = None
+        self._task_ctx: dict[str, object] = {}
+        self.primitive_calls: list[tuple[str, dict[str, object]]] = []
+        self.taught_calls: list[tuple[str, str, str]] = []
+
+    async def _maybe_inject_failure(self, **_kwargs):
+        return None
+
+    async def _execute_primitive(self, primitive: str, params: dict[str, object]):
+        self.primitive_calls.append((primitive, dict(params)))
+        if primitive == "detect_parts":
+            return {"success": True, "message": "detected"}
+        if primitive == "compute_pick_targets":
+            return {
+                "success": True,
+                "part_name": params.get("part_name"),
+                "model_name": "gear_large",
+                "tx": 0.1,
+                "ty": 0.2,
+                "tz": 0.3,
+                "pick_z": 0.4,
+                "travel_z": 0.8,
+                "part_height": 0.02,
+                "tcp_offset_z": 0.0,
+                "pick_tcp_z": 0.4,
+                "origin_pose": {"x": 0.1, "y": 0.2, "z": 0.3},
+                "approach_pose": {"x": 0.1, "y": 0.2, "z": 0.8},
+                "target_pose": {"x": 0.1, "y": 0.2, "z": 0.4},
+            }
+        if primitive == "open_gripper":
+            return {"success": True, "message": "opened"}
+        if primitive == "move_cartesian":
+            return {"success": False, "message": "move_cartesian should use taught function replay"}
+        return {"success": True, "message": primitive}
+
+    async def _execute_taught_function_step(
+        self,
+        *,
+        function_name: str,
+        taught_function_name: str,
+        step_name: str,
+    ):
+        self.taught_calls.append((function_name, taught_function_name, step_name))
+        return {"success": True, "message": f"taught {step_name}"}
+
+    def _task_failure(self, message: str, *, step: str, observations=None, failure_context=None):
+        return {
+            "status": "failed",
+            "content": message,
+            "step": step,
+            "observations": observations,
+            "failure_context": failure_context,
+        }
+
+
+def test_physical_robot_task_routes_motion_steps_to_taught_function_replay() -> None:
+    agent = FakeRobotTaskAgent()
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_approach",
+            origin_resource_location="nist_assembly_board",
+            part_name="LG",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert agent.taught_calls == [
+        ("pick_approach", "nist_assembly_board", "approach_pose"),
+        ("pick_approach", "nist_assembly_board", "pick_pose"),
+    ]
+    assert "move_cartesian" not in [primitive for primitive, _params in agent.primitive_calls]
 
 
 def test_rg2_rtde_maps_position_to_width_force_and_script_body() -> None:
@@ -289,6 +460,15 @@ def test_hardware_stack_status_includes_ur5e_gripper(monkeypatch) -> None:
         "_ur5e_external_control_status",
         lambda: {"state": "running", "message": "External Control: running"},
     )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "active",
+            "message": "scaled_joint_trajectory_controller active",
+            "error": "",
+        },
+    )
 
     status = bridge.hardware_stack_status("ur5e")
 
@@ -314,6 +494,15 @@ def test_digital_twin_status_includes_ur5e_gripper(monkeypatch) -> None:
         bridge,
         "_ur5e_external_control_status",
         lambda: {"state": "running", "message": "External Control: running"},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "active",
+            "message": "scaled_joint_trajectory_controller active",
+            "error": "",
+        },
     )
 
     status = bridge.digital_twin_statuses()["ur5e only"]["hardware"]["status"]
@@ -592,9 +781,14 @@ def _paired_dual_recording() -> dict[str, object]:
     }
 
 
-def _paired_replay_args(recording_file: Path, replay_target: str = "both") -> SimpleNamespace:
+def _paired_replay_args(
+    recording_file: Path,
+    replay_target: str = "both",
+    prepared_file: Path | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         recording_file=str(recording_file),
+        prepared_file=str(prepared_file or ""),
         robot="dual robots",
         replay_target=replay_target,
         gazebo_domain_id=41,
@@ -603,6 +797,108 @@ def _paired_replay_args(recording_file: Path, replay_target: str = "both") -> Si
         max_joint_delta_deg=175.0,
         max_joint_vel_deg_s=25.0,
     )
+
+
+def _single_ur5e_replay_args(recording_file: Path, replay_target: str = "hardware") -> SimpleNamespace:
+    return SimpleNamespace(
+        recording_file=str(recording_file),
+        robot="ur5e",
+        replay_target=replay_target,
+        gazebo_domain_id=41,
+        hardware_domain_id=42,
+        waypoint_duration_sec=2.0,
+        max_joint_delta_deg=175.0,
+        max_joint_vel_deg_s=25.0,
+    )
+
+
+def test_single_ur5e_replay_uses_moveit_plan_and_execute(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    recording = {
+        "target": "ur5e only",
+        "robot": "ur5e",
+        "recording_type": "single_robot",
+        "saved_steps": 2,
+        "joint_names": [
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ],
+        "waypoints": [
+            {"positions": [0.10, 0.10, 0.10, 0.10, 0.10, 0.10]},
+            {"positions": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15]},
+        ],
+    }
+    path = tmp_path / "ur5e_single.json"
+    path.write_text(json.dumps(recording), encoding="utf-8")
+
+    move_calls: list[dict[str, object]] = []
+    publish_calls: list[object] = []
+
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_read_snapshot",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "snapshot": {
+                "shoulder_pan_joint": 0.0,
+                "shoulder_lift_joint": 0.0,
+                "elbow_joint": 0.0,
+                "wrist_1_joint": 0.0,
+                "wrist_2_joint": 0.0,
+                "wrist_3_joint": 0.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_move_group_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_trajectory",
+        lambda *args, **_kwargs: publish_calls.append(args) or {"success": True, "message": "trajectory published."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_execute_move_group_joint_goal",
+        lambda domain_id, group_name, joint_names, start_positions, target_positions, **kwargs: move_calls.append(
+            {
+                "domain_id": domain_id,
+                "group_name": group_name,
+                "joint_names": list(joint_names),
+                "start_positions": list(start_positions),
+                "target_positions": list(target_positions),
+                "waypoint_index": kwargs.get("waypoint_index"),
+            }
+        )
+        or {
+            "success": True,
+            "message": "/move_action: plan_and_execute; action accepted; action succeeded; moveit_error_code=1.",
+            "mode": "plan_and_execute",
+        },
+    )
+
+    code = digital_twin_sync.run_replay(_single_ur5e_replay_args(path))
+    output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert code == 0
+    assert output["success"] is True
+    assert output["saved_steps"] == 2
+    assert output["waypoints"] == 2
+    assert "ur5e/hardware_arm used MoveIt plan_and_execute" in output["message"]
+    assert "group=ur_manipulator" in output["message"]
+    assert publish_calls == []
+    assert len(move_calls) == 2
+    assert move_calls[0]["start_positions"] == [0.0] * 6
+    assert move_calls[1]["start_positions"] == recording["waypoints"][0]["positions"]
 
 
 def test_digital_twin_sync_xarm6_hardware_replay_uses_namespaced_controller_action() -> None:
@@ -621,13 +917,16 @@ def test_digital_twin_sync_xarm6_hardware_replay_uses_namespaced_controller_acti
     ).read_text(encoding="utf-8")
     paired_body = body.split("def run_paired_replay", 1)[1].split("def run_replay", 1)[0]
 
-    assert "_wait_execute_trajectory_action" in paired_body
+    assert "_wait_execute_trajectory_action" not in paired_body
     assert "_wait_move_group_action" in paired_body
     assert "_wait_follow_joint_trajectory_action" in paired_body
+    assert "_publish_follow_joint_trajectory_action" in paired_body
+    assert "_publish_paired_follow_joint_trajectory_actions" not in paired_body
     assert "_execute_move_group_joint_goal" in paired_body
     assert "_publish_execute_trajectory_action" not in paired_body
     assert '"xarm6/hardware_arm"' in paired_body
     assert '"ur5e/hardware_arm"' in paired_body
+    assert "UR5E_HARDWARE_MOVE_GROUP" in paired_body
     assert '"hardware_moveit"' not in paired_body
     assert "list(xarm_plan[\"hardware_names\"]) + list(ur5e_plan[\"hardware_names\"])" not in paired_body
 
@@ -640,8 +939,157 @@ def test_digital_twin_snapshot_worker_accumulates_interleaved_joint_states() -> 
 
     assert "self.accumulated_snapshot: dict[str, float] = {}" in body
     assert "self.accumulated_snapshot.update(snapshot)" in body
-    assert "_resolve_hardware_positions(\n                    self.accumulated_snapshot" in body
+    assert "_resolve_hardware_positions(" in body
+    assert "self.accumulated_snapshot," in body
     assert "HARDWARE_SNAPSHOT_TIMEOUT_SEC" in body
+
+
+def test_ur5e_gazebo_mirror_uses_smoothing_helpers() -> None:
+    assert digital_twin_sync._mirror_point_time_sec("ur5e") == pytest.approx(
+        digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC
+    )
+    assert digital_twin_sync._mirror_point_time_sec("xarm6") == pytest.approx(
+        digital_twin_sync.MIRROR_POINT_TIME_SEC
+    )
+    assert digital_twin_sync._mirror_min_publish_period_sec("ur5e") > 0.0
+    assert digital_twin_sync._mirror_min_joint_delta_rad("ur5e") > 0.0
+
+    ok, reason = digital_twin_sync._should_publish_mirror_update(
+        "ur5e",
+        positions=[0.0] * 6,
+        last_positions=None,
+        last_publish_ts=0.0,
+        now=10.0,
+    )
+    assert ok is True
+    assert reason == ""
+
+    ok, reason = digital_twin_sync._should_publish_mirror_update(
+        "ur5e",
+        positions=[0.0001] * 6,
+        last_positions=[0.0] * 6,
+        last_publish_ts=9.0,
+        now=10.0,
+    )
+    assert ok is False
+    assert reason == "below_delta"
+
+    ok, reason = digital_twin_sync._should_publish_mirror_update(
+        "ur5e",
+        positions=[0.05] * 6,
+        last_positions=[0.0] * 6,
+        last_publish_ts=9.95,
+        now=10.0,
+    )
+    assert ok is False
+    assert reason == "rate_limited"
+
+    ok, reason = digital_twin_sync._should_publish_mirror_update(
+        "ur5e",
+        positions=[0.05] * 6,
+        last_positions=[0.0] * 6,
+        last_publish_ts=9.0,
+        now=10.0,
+    )
+    assert ok is True
+    assert reason == ""
+
+
+def test_dual_replay_timing_defaults_are_stable_slow() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    assert digital_twin_sync.REPLAY_SPEED_SCALE == pytest.approx(1.0)
+    assert digital_twin_sync.DEFAULT_REPLAY_WAYPOINT_DURATION_SEC == pytest.approx(2.0)
+    assert digital_twin_sync.MAX_REPLAY_JOINT_VEL_DEG_S == pytest.approx(25.0)
+    assert digital_twin_sync.UR5E_REPLAY_MAX_JOINT_VEL_DEG_S == pytest.approx(10.0)
+    assert digital_twin_sync.MOVE_GROUP_REPLAY_VELOCITY_SCALING == pytest.approx(0.25)
+    assert SystemBridge._DIGITAL_TWIN_REPLAY_SPEED_SCALE == pytest.approx(1.0)
+    assert SystemBridge._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC == pytest.approx(2.0)
+    assert SystemBridge._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S == pytest.approx(25.0)
+
+
+def test_follow_joint_trajectory_diagnostic_detail_includes_rejection_context() -> None:
+    detail = digital_twin_sync._follow_joint_trajectory_diagnostic_detail(
+        domain_id=42,
+        action_name="/scaled_joint_trajectory_controller/follow_joint_trajectory",
+        joint_names=[
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ],
+        points=[
+            {"positions": [0.0] * 6, "time": 0.25},
+            {"positions": [0.1] * 6, "time": 2.25},
+            {"positions": [0.2] * 6, "time": 4.25},
+            {"positions": [0.2] * 6, "time": 4.75},
+        ],
+        start_delay_sec=1.0,
+        goal_time_tolerance_sec=2.0,
+        header_stamp=True,
+        controller_state="active",
+    )
+
+    assert "ROS_DOMAIN_ID=42" in detail
+    assert "action=/scaled_joint_trajectory_controller/follow_joint_trajectory" in detail
+    assert "joints=shoulder_pan_joint,shoulder_lift_joint,elbow_joint,wrist_1_joint,wrist_2_joint,wrist_3_joint" in detail
+    assert "points=4" in detail
+    assert "first_point_time=0.250" in detail
+    assert "second_point_time=2.250" in detail
+    assert "final_point_time=4.750" in detail
+    assert "min_point_spacing=0.500" in detail
+    assert "header_stamp=True" in detail
+    assert "start_delay_sec=1.000" in detail
+    assert "goal_time_tolerance_sec=2.000" in detail
+    assert "controller_state=active" in detail
+
+
+def test_paired_dispatch_does_not_block_on_ur5e_controller_inactive() -> None:
+    body = (
+        Path(__file__).resolve().parents[1]
+        / "ros2"
+        / "cais_lab_gazebo"
+        / "scripts"
+        / "digital_twin_sync.py"
+    ).read_text(encoding="utf-8")
+    worker_body = body.split("def _send_paired_follow_joint_trajectory_worker", 1)[1].split(
+        "def _publish_paired_follow_joint_trajectory_actions",
+        1,
+    )[0]
+
+    assert "_paired_follow_joint_trajectory_inactive_controller_results" not in worker_body
+    assert "scaled_joint_trajectory_controller inactive before paired replay dispatch" not in body
+
+
+def test_snapshot_worker_init_failure_returns_detailed_message(monkeypatch) -> None:
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.payload = None
+
+        def put(self, payload) -> None:
+            self.payload = dict(payload)
+
+    result_queue = FakeQueue()
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_init_ros_domain",
+        lambda _domain_id: (_ for _ in ()).throw(RuntimeError("rclpy init failed")),
+    )
+
+    digital_twin_sync._joint_state_snapshot_worker(
+        42,
+        "ur5e",
+        "hardware",
+        0.1,
+        result_queue,
+    )
+
+    assert result_queue.payload["success"] is False
+    assert "hardware /joint_states snapshot failed for ur5e: rclpy init failed" in result_queue.payload["message"]
+    assert "ROS_DOMAIN_ID=42" in result_queue.payload["message"]
+    assert "topics=/joint_states" in result_queue.payload["message"]
 
 
 def test_read_snapshot_returns_queued_result_before_killing_slow_worker(monkeypatch) -> None:
@@ -685,6 +1133,78 @@ def test_read_snapshot_returns_queued_result_before_killing_slow_worker(monkeypa
 
     assert result == queued
     assert fake_process.terminated is True
+
+
+def test_read_snapshot_retries_once_after_empty_worker_result(monkeypatch) -> None:
+    queued = {
+        "success": True,
+        "snapshot": {
+            "shoulder_pan_joint": 0.0,
+            "shoulder_lift_joint": 0.0,
+            "elbow_joint": 0.0,
+            "wrist_1_joint": 0.0,
+            "wrist_2_joint": 0.0,
+            "wrist_3_joint": 0.0,
+        },
+    }
+
+    class EmptyQueue:
+        def get_nowait(self):
+            raise digital_twin_sync.queue.Empty()
+
+    class SuccessQueue:
+        def get_nowait(self):
+            return queued
+
+    class FakeProcess:
+        starts = 0
+
+        def start(self) -> None:
+            FakeProcess.starts += 1
+
+        def join(self, timeout=None) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+    queues = [EmptyQueue(), SuccessQueue()]
+    monkeypatch.setattr(digital_twin_sync.mp, "Queue", lambda maxsize=1: queues.pop(0))
+    monkeypatch.setattr(digital_twin_sync.mp, "Process", lambda *args, **kwargs: FakeProcess())
+
+    result = digital_twin_sync._read_snapshot(42, "ur5e", "hardware", 20.0)
+
+    assert result == queued
+    assert FakeProcess.starts == 2
+
+
+def test_read_snapshot_reports_context_after_repeated_empty_worker_result(monkeypatch) -> None:
+    class EmptyQueue:
+        def get_nowait(self):
+            raise digital_twin_sync.queue.Empty()
+
+    class FakeProcess:
+        starts = 0
+
+        def start(self) -> None:
+            FakeProcess.starts += 1
+
+        def join(self, timeout=None) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(digital_twin_sync.mp, "Queue", lambda maxsize=1: EmptyQueue())
+    monkeypatch.setattr(digital_twin_sync.mp, "Process", lambda *args, **kwargs: FakeProcess())
+
+    result = digital_twin_sync._read_snapshot(42, "ur5e", "hardware", 20.0)
+
+    assert result["success"] is False
+    assert FakeProcess.starts == 2
+    assert "hardware /joint_states returned no data for ur5e after 2 attempts" in result["message"]
+    assert "ROS_DOMAIN_ID=42" in result["message"]
+    assert "topics=/joint_states" in result["message"]
 
 
 def test_paired_dual_replay_preflights_both_robots_before_publish(
@@ -777,6 +1297,60 @@ def test_paired_dual_ur5e_replay_slows_large_initial_approach(monkeypatch, tmp_p
     )
 
 
+def test_paired_dual_ur5e_hardware_points_use_positive_current_hold(monkeypatch, tmp_path) -> None:
+    recording = _paired_dual_recording()
+
+    def fake_read_snapshot(_domain_id: int, robot: str, source: str, _timeout: float) -> dict[str, object]:
+        assert source == "hardware"
+        names = (
+            ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+            if robot == "xarm6"
+            else [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ]
+        )
+        return {"success": True, "snapshot": {name: 0.0 for name in names}}
+
+    monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_follow_joint_trajectory_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_move_group_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_xarm_gripper_endpoint",
+        lambda *_args, **_kwargs: {"success": True, "message": "service available.", "method": "service"},
+    )
+
+    prepared = digital_twin_sync._build_paired_replay_preparation(
+        _paired_replay_args(tmp_path / "unused.json"),
+        recording,
+    )
+
+    assert prepared["success"] is True
+    approach_time = float(prepared["approach_time"])
+    xarm_points = list(prepared["plans"]["xarm6"]["hardware_points"])
+    ur5e_points = list(prepared["plans"]["ur5e"]["hardware_points"])
+    assert float(xarm_points[0]["time"]) == digital_twin_sync.HARDWARE_TRAJECTORY_CURRENT_POINT_SEC
+    assert float(xarm_points[1]["time"]) == pytest.approx(approach_time)
+    assert float(ur5e_points[0]["time"]) == digital_twin_sync.UR5E_HARDWARE_TRAJECTORY_CURRENT_POINT_SEC
+    assert float(ur5e_points[0]["time"]) > 0.0
+    assert float(ur5e_points[1]["time"]) == pytest.approx(
+        digital_twin_sync.UR5E_HARDWARE_TRAJECTORY_CURRENT_POINT_SEC + approach_time
+    )
+
+
 def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     monkeypatch,
     tmp_path,
@@ -786,6 +1360,7 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
     publish_calls: list[dict[str, object]] = []
     action_calls: list[dict[str, object]] = []
+    plan_calls: list[dict[str, object]] = []
     move_calls: list[dict[str, object]] = []
     xarm_gripper_calls: list[dict[str, object]] = []
     events: list[tuple[str, object]] = []
@@ -843,6 +1418,35 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
         )
         return {"success": True, "message": "action accepted; action succeeded."}
 
+    def fake_paired_action(
+        domain_id: int,
+        arms: list[dict[str, object]],
+        **kwargs,
+    ) -> dict[str, dict[str, object]]:
+        out: dict[str, dict[str, object]] = {}
+        for arm in arms:
+            action_name = str(arm["action_name"])
+            joint_names = [str(name) for name in list(arm["joint_names"])]
+            points = [dict(point) for point in list(arm["points"])]
+            key = str(arm["key"])
+            events.append(("action", action_name))
+            action_calls.append(
+                {
+                    "domain_id": domain_id,
+                    "action_name": action_name,
+                    "joint_names": joint_names,
+                    "points": points,
+                    "start_delay_sec": kwargs.get("start_delay_sec", 0.0),
+                }
+            )
+            out[key] = {
+                "success": True,
+                "message": f"{action_name}: action accepted; action succeeded.",
+                "header_stamp": True,
+                "start_delay_sec": kwargs.get("start_delay_sec", 0.0),
+            }
+        return out
+
     monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
     monkeypatch.setattr(
         digital_twin_sync,
@@ -868,16 +1472,13 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     monkeypatch.setattr(digital_twin_sync, "_publish_follow_joint_trajectory_action", fake_action)
     monkeypatch.setattr(
         digital_twin_sync,
-        "_plan_move_group_joint_goal",
-        lambda *_args, **_kwargs: pytest.fail("Teach commit should not pre-plan UR5e hardware replay"),
+        "_publish_paired_follow_joint_trajectory_actions",
+        lambda *_args, **_kwargs: pytest.fail("paired dual replay must not use paired UR5e follow_joint_trajectory"),
     )
     monkeypatch.setattr(
         digital_twin_sync,
-        "_execute_move_group_joint_goal",
-        lambda domain_id, group_name, joint_names, start_positions, target_positions, **kwargs: events.append(
-            ("move", kwargs.get("waypoint_index"))
-        )
-        or move_calls.append(
+        "_plan_move_group_joint_goal",
+        lambda domain_id, group_name, joint_names, start_positions, target_positions, **kwargs: plan_calls.append(
             {
                 "domain_id": domain_id,
                 "group_name": group_name,
@@ -885,16 +1486,30 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
                 "start_positions": list(start_positions),
                 "target_positions": list(target_positions),
                 "waypoint_index": kwargs.get("waypoint_index"),
-                "timeout_sec": kwargs.get("timeout_sec"),
             }
         )
         or {
             "success": True,
-            "message": (
-                f"/move_action: plan_and_execute; action accepted; action succeeded; moveit_error_code=1; "
-                f"group={group_name}; waypoint={kwargs.get('waypoint_index')}; planning_time=0.010; points=2."
-            ),
-            "error_code": 1,
+            "message": "/move_action: planned; action accepted; action succeeded; moveit_error_code=1.",
+            "mode": "planned",
+        },
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_execute_move_group_joint_goal",
+        lambda domain_id, group_name, joint_names, start_positions, target_positions, **kwargs: move_calls.append(
+            {
+                "domain_id": domain_id,
+                "group_name": group_name,
+                "joint_names": list(joint_names),
+                "start_positions": list(start_positions),
+                "target_positions": list(target_positions),
+                "waypoint_index": kwargs.get("waypoint_index"),
+            }
+        )
+        or {
+            "success": True,
+            "message": "/move_action: plan_and_execute; action accepted; action succeeded; moveit_error_code=1.",
             "mode": "plan_and_execute",
         },
     )
@@ -918,10 +1533,26 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     assert code == 0
     assert output["success"] is True
     assert sorted(output["robots"]) == ["ur5e", "xarm6"]
-    assert "/move_action: ready for plan_and_execute group=ur_manipulator" in output["message"]
-    assert "/move_action: plan_and_execute completed 2 waypoint(s) for group=ur_manipulator" in output["message"]
+    assert "ur5e/hardware_arm" in output["message"]
+    assert "/move_action" in output["message"]
+    assert "plan_and_execute" in output["message"]
     assert len(publish_calls) == 4
-    assert len(action_calls) == 2
+    action_names = {str(call["action_name"]) for call in action_calls}
+    assert action_names <= {
+        "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+        "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+    }
+    assert "/xarm6/xarm6_traj_controller/follow_joint_trajectory" in action_names
+    assert "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory" in action_names
+    assert any(
+        call["action_name"] == "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
+        for call in action_calls
+    )
+    assert not any(
+        call["action_name"] == "/scaled_joint_trajectory_controller/follow_joint_trajectory"
+        for call in action_calls
+    )
+    assert len(plan_calls) == 2
     assert len(move_calls) == 2
     assert len(xarm_gripper_calls) == 1
     gazebo_arm_first_point_times = [
@@ -956,8 +1587,12 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
         "wrist_2_joint",
         "wrist_3_joint",
     ]
-    assert {call["group_name"] for call in move_calls} == {"ur_manipulator"}
-    assert {tuple(call["joint_names"]) for call in move_calls} == {tuple(expected_ur5e_names)}
+    assert plan_calls[0]["joint_names"] == expected_ur5e_names
+    assert plan_calls[0]["start_positions"] == pytest.approx([0.0] * 6)
+    assert plan_calls[0]["target_positions"] == pytest.approx([0.2] * 6)
+    assert plan_calls[1]["start_positions"] == pytest.approx([0.2] * 6)
+    assert plan_calls[1]["target_positions"] == pytest.approx([0.25] * 6)
+    assert move_calls[0]["joint_names"] == expected_ur5e_names
     assert move_calls[0]["start_positions"] == pytest.approx([0.0] * 6)
     assert move_calls[0]["target_positions"] == pytest.approx([0.2] * 6)
     assert move_calls[1]["start_positions"] == pytest.approx([0.2] * 6)
@@ -965,7 +1600,6 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     assert all(not str(name).startswith("ur5e_") for name in move_calls[0]["joint_names"])
     assert {call["domain_id"] for call in publish_calls} == {41}
     assert {call["domain_id"] for call in action_calls} == {42}
-    assert {call["domain_id"] for call in move_calls} == {42}
     assert {call["domain_id"] for call in xarm_gripper_calls} == {42}
     assert float(xarm_gripper_calls[0]["points"][0]["time"]) < min(gazebo_arm_first_point_times)
     assert any("/xarm6_xarm6_traj_controller/joint_trajectory" in call["topics"] for call in publish_calls)
@@ -978,7 +1612,7 @@ def test_paired_dual_replay_starts_both_robots_on_shared_timeline(
     )
 
 
-def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
+def test_paired_dual_replay_skips_ur5e_hardware_gripper_when_ur5e_arm_replay_fails(
     monkeypatch,
     tmp_path,
     capsys,
@@ -986,6 +1620,7 @@ def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
     path = tmp_path / "paired.json"
     path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
     action_calls: list[str] = []
+    move_calls: list[int | None] = []
     xarm_gripper_calls: list[list[dict[str, object]]] = []
 
     def fake_read_snapshot(_domain_id: int, robot: str, source: str, _timeout: float) -> dict[str, object]:
@@ -1011,7 +1646,34 @@ def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
         **_kwargs,
     ) -> dict[str, object]:
         action_calls.append(action_name)
+        if action_name == "/scaled_joint_trajectory_controller/follow_joint_trajectory":
+            return {
+                "success": False,
+                "message": f"{action_name}: action accepted; action aborted; error_code=-4.",
+            }
         return {"success": True, "message": f"{action_name}: action accepted; action succeeded."}
+
+    def fake_paired_action(
+        _domain_id: int,
+        arms: list[dict[str, object]],
+        **_kwargs,
+    ) -> dict[str, dict[str, object]]:
+        out: dict[str, dict[str, object]] = {}
+        for arm in arms:
+            action_name = str(arm["action_name"])
+            key = str(arm["key"])
+            action_calls.append(action_name)
+            if action_name == "/scaled_joint_trajectory_controller/follow_joint_trajectory":
+                out[key] = {
+                    "success": False,
+                    "message": f"{action_name}: action accepted; action aborted; error_code=-4.",
+                }
+            else:
+                out[key] = {
+                    "success": True,
+                    "message": f"{action_name}: action accepted; action succeeded.",
+                }
+        return out
 
     monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
     monkeypatch.setattr(
@@ -1042,8 +1704,13 @@ def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
     monkeypatch.setattr(digital_twin_sync, "_publish_follow_joint_trajectory_action", fake_action)
     monkeypatch.setattr(
         digital_twin_sync,
+        "_publish_paired_follow_joint_trajectory_actions",
+        lambda *_args, **_kwargs: pytest.fail("paired dual replay must not use paired UR5e follow_joint_trajectory"),
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
         "_plan_move_group_joint_goal",
-        lambda *_args, **_kwargs: pytest.fail("Teach commit should not pre-plan UR5e hardware replay"),
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: planned.", "mode": "planned"},
     )
     monkeypatch.setattr(
         digital_twin_sync,
@@ -1053,10 +1720,9 @@ def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
     monkeypatch.setattr(
         digital_twin_sync,
         "_execute_move_group_joint_goal",
-        lambda *_args, **_kwargs: {
+        lambda *_args, **kwargs: move_calls.append(kwargs.get("waypoint_index")) or {
             "success": False,
             "message": "/move_action: plan_and_execute; action accepted; action aborted; moveit_error_code=-4.",
-            "error_code": -4,
             "mode": "plan_and_execute",
         },
     )
@@ -1074,14 +1740,107 @@ def test_paired_dual_replay_runs_hardware_grippers_when_ur5e_arm_replay_fails(
     assert output["success"] is False
     assert "/xarm6/xarm6_traj_controller/follow_joint_trajectory" in action_calls
     assert "/scaled_joint_trajectory_controller/follow_joint_trajectory" not in action_calls
-    assert "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory" in action_calls
+    assert move_calls == [1]
+    assert "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory" not in action_calls
     assert len(xarm_gripper_calls) == 1
     assert "xarm6/hardware_gripper: xarm gripper replay sent." in output["message"]
-    assert "ur5e/hardware_gripper: /ur5e_rg2_gripper_traj_controller/follow_joint_trajectory: action accepted; action succeeded." in output["message"]
-    assert "ur5e/hardware_arm: /move_action: plan_and_execute; action accepted; action aborted; moveit_error_code=-4" in output["message"]
-    assert "fallback /scaled_joint_trajectory_controller/follow_joint_trajectory" not in output["message"]
-    assert "final_joint_error_deg=" in output["message"]
-    assert "hardware gripper skipped because hardware arm replay failed" not in output["message"]
+    assert "/move_action: plan_and_execute" in output["message"]
+    assert "ur5e/hardware_gripper: skipped because ur5e hardware arm failed." in output["message"]
+    assert "plan_and_execute" in output["message"]
+
+
+def test_paired_dual_replay_blocks_xarm6_when_ur5e_moveit_preflight_fails(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    path = tmp_path / "paired.json"
+    path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    publish_calls: list[str] = []
+    action_calls: list[str] = []
+    execute_calls: list[int | None] = []
+
+    def fake_read_snapshot(_domain_id: int, robot: str, source: str, _timeout: float) -> dict[str, object]:
+        assert source == "hardware"
+        names = (
+            ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+            if robot == "xarm6"
+            else [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ]
+        )
+        return {"success": True, "snapshot": {name: 0.0 for name in names}}
+
+    monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_follow_joint_trajectory_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_move_group_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_xarm_gripper_endpoint",
+        lambda *_args, **_kwargs: {"success": True, "message": "service available.", "method": "service"},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_trajectory",
+        lambda *_args, **_kwargs: publish_calls.append("gazebo") or {"success": True, "message": "trajectory published."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_follow_joint_trajectory_action",
+        lambda _domain_id, action_name, *_args, **_kwargs: action_calls.append(str(action_name)) or {"success": True},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_paired_follow_joint_trajectory_actions",
+        lambda *_args, **_kwargs: pytest.fail("paired dual replay must not use paired UR5e follow_joint_trajectory"),
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_xarm_gripper_sequence",
+        lambda *_args, **_kwargs: pytest.fail("xarm6 gripper must not move when ur5e MoveIt preflight fails"),
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_plan_move_group_joint_goal",
+        lambda *_args, **kwargs: {
+            "success": False,
+            "message": "/move_action: planned; action accepted; action aborted; moveit_error_code=-4.",
+            "mode": "planned",
+            "waypoint_index": kwargs.get("waypoint_index"),
+        },
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_execute_move_group_joint_goal",
+        lambda *_args, **kwargs: execute_calls.append(kwargs.get("waypoint_index")) or {"success": True},
+    )
+
+    code = digital_twin_sync.run_replay(_paired_replay_args(path))
+    output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert code == 8
+    assert output["success"] is False
+    assert publish_calls == []
+    assert action_calls == []
+    assert execute_calls == []
+    assert "ur5e MoveIt preflight failed waypoint 1/2" in output["message"]
+    assert "xarm6/hardware_arm: not sent because ur5e MoveIt preflight failed" in output["message"]
+    assert "ur5e/hardware_arm: not sent because ur5e MoveIt preflight failed" in output["message"]
+    assert "/move_action" in output["message"]
+    assert "/execute_trajectory" not in output["message"]
 
 
 def test_xarm_gripper_endpoint_falls_back_to_gripper_action(monkeypatch) -> None:
@@ -1134,7 +1893,7 @@ def test_xarm_gripper_replay_falls_back_to_gripper_action(monkeypatch) -> None:
     assert result["fallback_error"] == "xarm position service unavailable"
 
 
-def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing(
+def test_paired_dual_replay_does_not_require_execute_trajectory(
     monkeypatch,
     tmp_path,
     capsys,
@@ -1143,6 +1902,7 @@ def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing
     path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
     publish_calls: list[str] = []
     action_calls: list[str] = []
+    move_calls: list[int | None] = []
 
     def fake_read_snapshot(_domain_id: int, robot: str, source: str, _timeout: float) -> dict[str, object]:
         assert source == "hardware"
@@ -1163,6 +1923,20 @@ def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing
         action_calls.append(action_name)
         return {"success": True, "message": "action server available."}
 
+    def fake_paired_action(
+        _domain_id: int,
+        arms: list[dict[str, object]],
+        **_kwargs,
+    ) -> dict[str, dict[str, object]]:
+        publish_calls.append("hardware")
+        return {
+            str(arm["key"]): {
+                "success": True,
+                "message": f"{str(arm['action_name'])}: action accepted; action succeeded.",
+            }
+            for arm in arms
+        }
+
     monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
     monkeypatch.setattr(
         digital_twin_sync,
@@ -1172,7 +1946,10 @@ def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing
     monkeypatch.setattr(
         digital_twin_sync,
         "_wait_move_group_action",
-        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: action server available."},
+        lambda *_args, **_kwargs: action_calls.append("/move_action") or {
+            "success": True,
+            "message": "/move_action: action server available.",
+        },
     )
     monkeypatch.setattr(digital_twin_sync, "_wait_follow_joint_trajectory_action", fake_action_preflight)
     monkeypatch.setattr(
@@ -1192,6 +1969,11 @@ def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing
     )
     monkeypatch.setattr(
         digital_twin_sync,
+        "_publish_paired_follow_joint_trajectory_actions",
+        lambda *_args, **_kwargs: pytest.fail("paired dual replay must not use paired UR5e follow_joint_trajectory"),
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
         "_publish_execute_trajectory_action",
         lambda *_args, **_kwargs: publish_calls.append("execute") or {"success": True},
     )
@@ -1200,15 +1982,202 @@ def test_paired_dual_replay_blocks_before_gazebo_when_execute_trajectory_missing
         "_publish_xarm_gripper_sequence",
         lambda *_args, **_kwargs: publish_calls.append("xarm_gripper") or {"success": True},
     )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_execute_move_group_joint_goal",
+        lambda *_args, **kwargs: move_calls.append(kwargs.get("waypoint_index")) or {
+            "success": True,
+            "message": "/move_action: plan_and_execute; action accepted; action succeeded.",
+            "mode": "plan_and_execute",
+        },
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_plan_move_group_joint_goal",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: planned.", "mode": "planned"},
+    )
 
     code = digital_twin_sync.run_replay(_paired_replay_args(path))
     output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
-    assert code == 6
-    assert output["success"] is False
-    assert "/execute_trajectory unavailable" in output["message"]
-    assert action_calls == []
-    assert publish_calls == []
+    assert code == 0
+    assert output["success"] is True
+    assert "/execute_trajectory" not in action_calls
+    assert "/move_action" in action_calls
+    assert "/scaled_joint_trajectory_controller/follow_joint_trajectory" not in action_calls
+    assert move_calls == [1, 2]
+    assert "plan_and_execute" in output["message"]
+    assert "execute" not in publish_calls
+    assert "gazebo" in publish_calls
+    assert "hardware" in publish_calls
+
+
+def test_paired_dual_prepared_replay_reprepares_when_hardware_start_pose_changes(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    recording = _paired_dual_recording()
+    recording_path = tmp_path / "paired.json"
+    prepared_path = tmp_path / "paired_prepared.json"
+    recording_path.write_text(json.dumps(recording), encoding="utf-8")
+    current_positions = {
+        "xarm6": [0.0] * 6,
+        "ur5e": [0.0] * 6,
+    }
+    action_calls: list[dict[str, object]] = []
+    move_calls: list[dict[str, object]] = []
+
+    def fake_read_snapshot(_domain_id: int, robot: str, source: str, _timeout: float) -> dict[str, object]:
+        assert source == "hardware"
+        names = (
+            ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+            if robot == "xarm6"
+            else [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ]
+        )
+        return {
+            "success": True,
+            "snapshot": {
+                name: current_positions[str(robot)][index]
+                for index, name in enumerate(names)
+            },
+        }
+
+    def fake_action(
+        _domain_id: int,
+        action_name: str,
+        joint_names: list[str],
+        points: list[dict[str, object]],
+        **_kwargs,
+    ) -> dict[str, object]:
+        action_calls.append(
+            {
+                "action_name": action_name,
+                "joint_names": list(joint_names),
+                "points": [dict(point) for point in points],
+            }
+        )
+        return {"success": True, "message": f"{action_name}: action accepted; action succeeded."}
+
+    def fake_paired_action(
+        _domain_id: int,
+        arms: list[dict[str, object]],
+        **_kwargs,
+    ) -> dict[str, dict[str, object]]:
+        out: dict[str, dict[str, object]] = {}
+        for arm in arms:
+            action_name = str(arm["action_name"])
+            joint_names = [str(name) for name in list(arm["joint_names"])]
+            points = [dict(point) for point in list(arm["points"])]
+            key = str(arm["key"])
+            action_calls.append(
+                {
+                    "action_name": action_name,
+                    "joint_names": joint_names,
+                    "points": points,
+                }
+            )
+            out[key] = {
+                "success": True,
+                "message": f"{action_name}: action accepted; action succeeded.",
+            }
+        return out
+
+    monkeypatch.setattr(digital_twin_sync, "_read_snapshot", fake_read_snapshot)
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_follow_joint_trajectory_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_move_group_action",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: action server available."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_wait_xarm_gripper_endpoint",
+        lambda *_args, **_kwargs: {"success": True, "message": "service available.", "method": "service"},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_trajectory",
+        lambda *_args, **_kwargs: {"success": True, "message": "trajectory published."},
+    )
+    monkeypatch.setattr(digital_twin_sync, "_publish_follow_joint_trajectory_action", fake_action)
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_paired_follow_joint_trajectory_actions",
+        lambda *_args, **_kwargs: pytest.fail("paired dual replay must not use paired UR5e follow_joint_trajectory"),
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_publish_xarm_gripper_sequence",
+        lambda *_args, **_kwargs: {"success": True, "message": "xarm gripper replay sent."},
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_execute_move_group_joint_goal",
+        lambda domain_id, group_name, joint_names, start_positions, target_positions, **kwargs: move_calls.append(
+            {
+                "domain_id": domain_id,
+                "group_name": group_name,
+                "joint_names": list(joint_names),
+                "start_positions": list(start_positions),
+                "target_positions": list(target_positions),
+                "waypoint_index": kwargs.get("waypoint_index"),
+            }
+        )
+        or {
+            "success": True,
+            "message": "/move_action: plan_and_execute; action accepted; action succeeded.",
+            "mode": "plan_and_execute",
+        },
+    )
+    monkeypatch.setattr(
+        digital_twin_sync,
+        "_plan_move_group_joint_goal",
+        lambda *_args, **_kwargs: {"success": True, "message": "/move_action: planned.", "mode": "planned"},
+    )
+
+    prepare_args = _paired_replay_args(recording_path, prepared_file=prepared_path)
+    prepared = digital_twin_sync._build_paired_replay_preparation(prepare_args, recording)
+    assert prepared["success"] is True
+    digital_twin_sync._atomic_json_write(prepared_path, prepared)
+
+    current_positions["xarm6"] = [0.01] * 6
+    current_positions["ur5e"] = [0.01] * 6
+    first_code = digital_twin_sync.run_replay(
+        _paired_replay_args(recording_path, prepared_file=prepared_path)
+    )
+    first_output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    current_positions["xarm6"] = [0.15] * 6
+    current_positions["ur5e"] = [0.25] * 6
+    second_code = digital_twin_sync.run_replay(
+        _paired_replay_args(recording_path, prepared_file=prepared_path)
+    )
+    second_output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert first_code == 0
+    assert first_output["used_prepared_file"] is True
+    assert second_code == 0
+    assert second_output["used_prepared_file"] is False
+    assert not any(
+        call["action_name"] == "/scaled_joint_trajectory_controller/follow_joint_trajectory"
+        for call in action_calls
+    )
+    assert len(move_calls) == 4
+    assert move_calls[0]["start_positions"] == pytest.approx([0.01] * 6)
+    assert move_calls[0]["target_positions"] == pytest.approx([0.2] * 6)
+    assert move_calls[2]["start_positions"] == pytest.approx([0.25] * 6)
+    assert move_calls[2]["target_positions"] == pytest.approx([0.2] * 6)
 
 
 def test_paired_dual_preview_in_gazebo_does_not_use_hardware_actions(
@@ -1293,6 +2262,16 @@ def test_replay_in_twin_initializes_gazebo_from_hardware_before_replay(
     monkeypatch.setattr(bridge, "_digital_twin_hardware_status", lambda _cfg: {"overall": "running"})
     monkeypatch.setattr(
         bridge,
+        "_wait_for_digital_twin_dual_robots_hardware_ready",
+        lambda *_args, **_kwargs: pytest.fail("Replay in Twin must not use startup hardware readiness"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_replay_ready",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        bridge,
         "ros2_proc_status",
         lambda name: "running" if name == "digital_twin_dual_robots_gazebo" else "stopped",
     )
@@ -1308,6 +2287,11 @@ def test_replay_in_twin_initializes_gazebo_from_hardware_before_replay(
     )
     monkeypatch.setattr(
         bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+    monkeypatch.setattr(
+        bridge,
         "_start_digital_twin_sync_when_ready",
         lambda *_args, **kwargs: events.append(f"sync:{kwargs.get('direction')}") or None,
     )
@@ -1317,7 +2301,144 @@ def test_replay_in_twin_initializes_gazebo_from_hardware_before_replay(
     assert result["success"] is True
     assert result["sync_resumed"] is True
     assert "hardware -> Gazebo sync resumed" in result["message"]
-    assert events == ["initialize", "replay", "sync:hardware -> gazebo"]
+    assert events == ["initialize", "stop_mirror", "replay", "sync:hardware -> gazebo"]
+
+
+def test_replay_in_twin_does_not_repair_ur5e_controller_after_gazebo_initialization(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    recording_path = tmp_path / "paired.json"
+    recording_path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    events: list[str] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_digital_twin_sync_status_snapshot",
+        lambda *_args, **_kwargs: {
+            "process_status": "stopped",
+            "status_data": {},
+            "status_age_ms": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not inspect scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not use dashboard program_running"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda target: pytest.fail("dual replay readiness must not repair scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: events.append("initialize") or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_run_digital_twin_sync",
+        lambda *_args, **_kwargs: events.append("replay") or {"success": True, "message": "ok"},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda *_args, **kwargs: events.append(f"resume:{kwargs.get('direction')}") or None,
+    )
+
+    result = bridge._replay_recording_file("dual robots", cfg, recording_path, "twin")
+
+    assert result["success"] is True
+    assert events == [
+        "initialize",
+        "stop_mirror",
+        "replay",
+        "resume:hardware -> gazebo",
+    ]
+
+
+def test_replay_in_twin_does_not_block_when_final_ur5e_controller_is_inactive(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    recording_path = tmp_path / "paired.json"
+    recording_path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    events: list[str] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_digital_twin_sync_status_snapshot",
+        lambda *_args, **_kwargs: {
+            "process_status": "stopped",
+            "status_data": {},
+            "status_age_ms": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not inspect scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not use dashboard program_running"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda target: pytest.fail("dual replay readiness must not repair scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: events.append("initialize") or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_run_digital_twin_sync",
+        lambda *_args, **_kwargs: events.append("replay") or {"success": True, "message": "ok"},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda *_args, **kwargs: events.append(f"resume:{kwargs.get('direction')}") or None,
+    )
+
+    result = bridge._replay_recording_file("dual robots", cfg, recording_path, "twin")
+
+    assert result["success"] is True
+    assert result["gazebo_initialization"] == "ran"
+    assert events == [
+        "initialize",
+        "stop_mirror",
+        "replay",
+        "resume:hardware -> gazebo",
+    ]
 
 
 def test_replay_in_twin_reports_initialization_failure(monkeypatch, tmp_path) -> None:
@@ -1329,6 +2450,16 @@ def test_replay_in_twin_reports_initialization_failure(monkeypatch, tmp_path) ->
     statuses: list[dict[str, object]] = []
 
     monkeypatch.setattr(bridge, "_digital_twin_hardware_status", lambda _cfg: {"overall": "running"})
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_hardware_ready",
+        lambda *_args, **_kwargs: pytest.fail("Replay in Twin must not use startup hardware readiness"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_replay_ready",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         bridge,
         "ros2_proc_status",
@@ -1345,10 +2476,410 @@ def test_replay_in_twin_reports_initialization_failure(monkeypatch, tmp_path) ->
 
     assert result["success"] is False
     assert "could not initialize gazebo from hardware before replay" in result["message"]
-    assert statuses[0]["message"] == "Replay in Twin: initializing gazebo from hardware."
+    assert [status["message"] for status in statuses] == [
+        "checking replay readiness.",
+        "Replay in Twin: initializing gazebo from hardware.",
+    ]
 
 
-def test_preview_in_gazebo_initializes_from_hardware_before_gazebo_only_replay(
+def test_dual_replay_ready_does_not_call_strict_ros_graph_preflights(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    recording_path = tmp_path / "paired.json"
+    recording_path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "ros2_proc_status",
+        lambda _name: "running",
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_hardware_ready",
+        lambda *_args, **_kwargs: pytest.fail("dual replay must not use startup hardware readiness"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_ros_action",
+        lambda *_args, **_kwargs: pytest.fail("dual replay readiness must not use ros2 action list"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_ros_topic_publisher",
+        lambda *_args, **_kwargs: pytest.fail("dual replay readiness must not preflight /joint_states"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("active scaled_joint_trajectory_controller must not require dashboard preflight"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "active",
+            "message": "scaled_joint_trajectory_controller active",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_run_digital_twin_sync",
+        lambda *_args, **_kwargs: events.append("replay") or {"success": True, "message": "ok"},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda *_args, **kwargs: events.append(f"resume:{kwargs.get('direction')}") or None,
+    )
+
+    result = bridge._replay_recording_file("dual robots", cfg, recording_path, "twin")
+
+    assert result["success"] is True
+    assert result["sync_resumed"] is True
+    assert events == ["stop_mirror", "replay", "resume:hardware -> gazebo"]
+
+
+@pytest.mark.parametrize(
+    ("dashboard_result", "dashboard_detail"),
+    [
+        (False, "program_running=False"),
+        (None, "dashboard command timed out"),
+    ],
+)
+def test_dual_replay_ready_allows_active_ur5e_controller_when_dashboard_is_stale(
+    monkeypatch,
+    dashboard_result,
+    dashboard_detail,
+) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    program_checks: list[str] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "active",
+            "message": "scaled_joint_trajectory_controller active",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: program_checks.append(str(dashboard_detail)) or (dashboard_result, dashboard_detail),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda *_args, **_kwargs: pytest.fail("active controller must not be repaired"),
+    )
+
+    err = bridge._wait_for_digital_twin_dual_robots_replay_ready(
+        "dual robots",
+        cfg,
+        ros_domain_id=42,
+    )
+
+    assert err is None
+    assert program_checks == []
+
+
+def test_dual_replay_ready_does_not_repair_inactive_ur5e_controller(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_ros_action",
+        lambda *_args, **_kwargs: pytest.fail("dual replay readiness must not use ros2 action list"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_ros_topic_publisher",
+        lambda *_args, **_kwargs: pytest.fail("dual replay readiness must not preflight /joint_states"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not use dashboard program_running"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not inspect scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda *_args, **_kwargs: pytest.fail("dual replay readiness must not repair scaled_joint_trajectory_controller"),
+    )
+
+    err = bridge._wait_for_digital_twin_dual_robots_replay_ready(
+        "dual robots",
+        cfg,
+        ros_domain_id=42,
+    )
+
+    assert err is None
+
+
+def test_dual_replay_ready_does_not_check_external_control_when_scaled_controller_is_inactive(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    external_status: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not use dashboard program_running"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_write_ur5e_external_control_status",
+        lambda **kwargs: external_status.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not inspect scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda *_args, **_kwargs: pytest.fail("controller repair must not run when External Control is stopped"),
+    )
+
+    err = bridge._wait_for_digital_twin_dual_robots_replay_ready(
+        "dual robots",
+        cfg,
+        ros_domain_id=42,
+    )
+
+    assert err is None
+    assert external_status == []
+
+
+def test_dual_replay_ready_does_not_report_dashboard_unavailable_when_ur5e_controller_inactive(
+    monkeypatch,
+) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    external_status: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not inspect scaled_joint_trajectory_controller"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("dual replay readiness must not use dashboard program_running"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_write_ur5e_external_control_status",
+        lambda **kwargs: external_status.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "repair_ur5e_trajectory_controller",
+        lambda *_args, **_kwargs: pytest.fail("controller repair must not run without dashboard confirmation"),
+    )
+
+    err = bridge._wait_for_digital_twin_dual_robots_replay_ready(
+        "dual robots",
+        cfg,
+        ros_domain_id=42,
+    )
+
+    assert err is None
+    assert external_status == []
+
+
+def test_dual_replay_resumes_mirror_after_failed_replay(monkeypatch, tmp_path) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    recording_path = tmp_path / "paired.json"
+    recording_path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    events: list[str] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_replay_ready",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_run_digital_twin_sync",
+        lambda *_args, **_kwargs: events.append("replay")
+        or {"success": False, "message": "trajectory failed"},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda *_args, **kwargs: events.append(f"resume:{kwargs.get('direction')}") or None,
+    )
+
+    result = bridge._replay_recording_file("dual robots", cfg, recording_path, "twin")
+
+    assert result["success"] is False
+    assert result["sync_resumed"] is True
+    assert "trajectory failed" in result["message"]
+    assert "hardware -> Gazebo sync resumed after failed replay" in result["message"]
+    assert events == ["stop_mirror", "replay", "resume:hardware -> gazebo"]
+
+
+def test_replay_repeat_runs_setup_once_and_passes_replay_speed(monkeypatch, tmp_path) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    recording_path = tmp_path / "paired.json"
+    recording_path.write_text(json.dumps(_paired_dual_recording()), encoding="utf-8")
+    events: list[str] = []
+    sync_calls: list[list[str]] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_wait_for_digital_twin_dual_robots_replay_ready",
+        lambda *_args, **_kwargs: events.append("ready") or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_digital_twin_sync_status_snapshot",
+        lambda *_args, **_kwargs: {
+            "process_status": "stopped",
+            "status_data": {},
+            "status_age_ms": None,
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: events.append("initialize") or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_stop_digital_twin_mirror_workers_for_target",
+        lambda *_args, **_kwargs: events.append("stop_mirror"),
+    )
+
+    def fake_sync(args: list[str], **_kwargs) -> dict[str, object]:
+        events.append("replay")
+        sync_calls.append(list(args))
+        return {
+            "success": True,
+            "message": "ok",
+            "waypoints": 3,
+            "approach_time": 1.0,
+        }
+
+    monkeypatch.setattr(bridge, "_run_digital_twin_sync", fake_sync)
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda *_args, **kwargs: events.append(f"resume:{kwargs.get('direction')}") or None,
+    )
+
+    result = bridge._replay_recording_file(
+        "dual robots",
+        cfg,
+        recording_path,
+        "twin",
+        source="dual_function_xarm6_test_ur5e_test",
+        repeat_count=3,
+    )
+
+    assert result["success"] is True
+    assert result["repeat_count"] == 3
+    assert result["repeat_iteration"] == 3
+    assert "Replay Dual Function repeated 3 times" in result["message"]
+    assert events == [
+        "ready",
+        "initialize",
+        "ready",
+        "stop_mirror",
+        "replay",
+        "ready",
+        "replay",
+        "ready",
+        "replay",
+        "resume:hardware -> gazebo",
+    ]
+    assert len(sync_calls) == 3
+    for args in sync_calls:
+        assert (
+            args[args.index("--waypoint-duration-sec") + 1]
+            == f"{bridge._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC:.6f}"
+        )
+        assert (
+            args[args.index("--max-joint-vel-deg-s") + 1]
+            == f"{bridge._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S:.6f}"
+        )
+
+
+def test_dual_replay_stops_only_mirror_workers_for_target(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    stopped: list[tuple[str, str]] = []
+    pkill_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "ros2_stop",
+        lambda process, reason="": stopped.append((process, reason)) or None,
+    )
+    monkeypatch.setattr(
+        "cais_spade_llm.ui.bridge.subprocess.run",
+        lambda args, **_kwargs: pkill_calls.append(list(args)) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr("cais_spade_llm.ui.bridge.time.sleep", lambda *_args, **_kwargs: None)
+
+    bridge._stop_digital_twin_mirror_workers_for_target("dual robots", cfg)
+
+    assert stopped == [
+        ("digital_twin_dual_robots_sync_xarm6", "digital_twin_replay"),
+        ("digital_twin_dual_robots_sync_ur5e", "digital_twin_replay"),
+    ]
+    assert len(pkill_calls) == 4
+    patterns = [call[-1] for call in pkill_calls]
+    assert all("digital_twin_sync\\.py.*--mode mirror.*--status-file" in pattern for pattern in patterns)
+    assert any("cais_digital_twin_dual_robots_xarm6\\.json" in pattern for pattern in patterns)
+    assert any("cais_digital_twin_dual_robots_ur5e\\.json" in pattern for pattern in patterns)
+
+
+def test_preview_in_gazebo_skips_hardware_initialization_in_monitor_mode(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1368,7 +2899,7 @@ def test_preview_in_gazebo_initializes_from_hardware_before_gazebo_only_replay(
     monkeypatch.setattr(
         bridge,
         "_initialize_digital_twin_gazebo_from_hardware",
-        lambda *_args, **_kwargs: events.append("initialize") or None,
+        lambda *_args, **_kwargs: pytest.fail("Preview in Gazebo must stay Gazebo-only in monitor mode"),
     )
     def fake_sync(args: list[str], **_kwargs) -> dict[str, object]:
         events.append("replay")
@@ -1385,10 +2916,10 @@ def test_preview_in_gazebo_initializes_from_hardware_before_gazebo_only_replay(
     result = bridge._replay_recording_file("dual robots", cfg, recording_path, "gazebo")
 
     assert result["success"] is True
-    assert events == ["initialize", "replay"]
+    assert events == ["replay"]
 
 
-def test_preview_in_gazebo_reports_initialization_failure(monkeypatch, tmp_path) -> None:
+def test_preview_in_gazebo_reports_gazebo_only_replay_failure(monkeypatch, tmp_path) -> None:
     bridge = SystemBridge()
     cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
     bridge._digital_twin_sim_modes["dual robots"] = "teach"
@@ -1405,15 +2936,20 @@ def test_preview_in_gazebo_reports_initialization_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(
         bridge,
         "_initialize_digital_twin_gazebo_from_hardware",
-        lambda *_args, **_kwargs: "ur5e gazebo initial hardware pose failed",
+        lambda *_args, **_kwargs: pytest.fail("Preview in Gazebo must stay Gazebo-only in monitor mode"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_run_digital_twin_sync",
+        lambda *_args, **_kwargs: {"success": False, "message": "gazebo replay failed"},
     )
     monkeypatch.setattr(bridge, "_write_digital_twin_status", lambda _target, payload: statuses.append(dict(payload)))
 
     result = bridge._replay_recording_file("dual robots", cfg, recording_path, "gazebo")
 
     assert result["success"] is False
-    assert "could not initialize gazebo from hardware before preview" in result["message"]
-    assert statuses[0]["message"] == "Preview in Gazebo: initializing gazebo from hardware."
+    assert "gazebo replay failed" in result["message"]
+    assert statuses[0]["message"] == "Preview in Gazebo: publishing to Gazebo only."
     assert statuses[0]["direction"] == "hardware -> gazebo"
 
 
@@ -1430,8 +2966,8 @@ def test_dual_robots_hardware_rviz_uses_moveit_robot_display_only() -> None:
     assert "rviz_default_plugins/RobotModel" not in body
     assert "moveit_rviz_plugin/MotionPlanning" in body
     assert "Robot Alpha: 1" in body
-    assert "Velocity_Scaling_Factor: 0.40" in body
-    assert "Acceleration_Scaling_Factor: 0.40" in body
+    assert "Velocity_Scaling_Factor: 0.20" in body
+    assert "Acceleration_Scaling_Factor: 0.20" in body
 
 
 def test_dual_robots_hardware_moveit_launch_does_not_start_combined_robot_state_publisher() -> None:
@@ -1465,10 +3001,10 @@ def test_dual_robots_hardware_moveit_maps_xarm_gripper_to_namespaced_gripper_act
     assert '"joints": ["drive_joint"]' in body
     assert '"max_velocity": UR5E_MAX_VELOCITY' in body
     assert '"max_acceleration": UR5E_MAX_ACCELERATION' in body
-    assert "UR5E_MAX_VELOCITY = 0.80" in body
-    assert "UR5E_MAX_ACCELERATION = 1.60" in body
-    assert "DEFAULT_VELOCITY_SCALING = 0.40" in body
-    assert "DEFAULT_ACCELERATION_SCALING = 0.40" in body
+    assert "UR5E_MAX_VELOCITY = 0.50" in body
+    assert "UR5E_MAX_ACCELERATION = 0.80" in body
+    assert "DEFAULT_VELOCITY_SCALING = 0.20" in body
+    assert "DEFAULT_ACCELERATION_SCALING = 0.20" in body
     assert '"ur5e_rg2_gripper_traj_controller"' in body
     assert '"action_ns": "follow_joint_trajectory"' in body
     assert '"projection_evaluator": "joints(ur5e_rg2_finger_width)"' in body
@@ -1539,7 +3075,7 @@ def test_cleanup_kills_stale_xarm6_joint_state_relay() -> None:
     assert "XArm6JointStateRelay" in ui_main_body
 
 
-def test_digital_twin_dual_robots_is_supported_with_monitor_and_teach(monkeypatch) -> None:
+def test_digital_twin_dual_robots_is_supported_with_monitor(monkeypatch) -> None:
     bridge = SystemBridge()
     cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
     monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "stopped")
@@ -1550,7 +3086,7 @@ def test_digital_twin_dual_robots_is_supported_with_monitor_and_teach(monkeypatc
     assert row["supported"] is True
     assert row["blocked_reason"] == ""
     assert bridge._digital_twin_gazebo_launch("dual robots", cfg) == "gazebo_dual_passive"
-    assert row["sim_modes"] == ["monitor", "teach"]
+    assert row["sim_modes"] == ["monitor"]
     assert row["hardware"]["domains"] == {"xarm6": 42, "ur5e": 42}
     process_names = set(bridge._digital_twin_process_names(cfg))
     assert "digital_twin_dual_robots_hardware_moveit" in process_names
@@ -1574,6 +3110,82 @@ def test_dual_drag_markers_script_defines_two_interactive_drag_balls() -> None:
     assert 'marker.name = f"{robot}_drag_ball"' in body
     assert 'for robot in ("xarm6", "ur5e")' in body
     assert "ExecuteTrajectory.Goal" in body
+    assert "--status-file" in body
+    assert "def _write_status(" in body
+    assert "failed during {stage}" in body
+    assert "/execute_trajectory error_code=" in body
+
+
+def test_bridge_starts_dual_drag_markers_with_status_file(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    calls: list[tuple[str, str, int | None]] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "stopped")
+    monkeypatch.setattr(
+        bridge,
+        "_start_tracked_ros2_command",
+        lambda process_name, command, **kwargs: calls.append(
+            (process_name, command, kwargs.get("ros_domain_id"))
+        )
+        or None,
+    )
+
+    err = bridge._start_digital_twin_dual_drag_markers(
+        cfg,
+        ros_domain_id=42,
+        mode="monitor",
+    )
+
+    assert err is None
+    assert len(calls) == 1
+    process_name, command, ros_domain_id = calls[0]
+    assert process_name == "digital_twin_dual_robots_paired_markers"
+    assert ros_domain_id == 42
+    assert "--status-file" in command
+    assert str(bridge._digital_twin_dual_drag_markers_status_path("dual robots")) in command
+
+
+def test_digital_twin_statuses_include_dual_drag_markers_last_error(monkeypatch) -> None:
+    bridge = SystemBridge()
+    status_path = bridge._digital_twin_dual_drag_markers_status_path("dual robots")
+    old_body = status_path.read_text(encoding="utf-8") if status_path.exists() else None
+    status_path.write_text(
+        json.dumps(
+            {
+                "updated_at": 100.0,
+                "node": "dual_drag_markers",
+                "mode": "monitor",
+                "execution_policy": "paired",
+                "state": "failed",
+                "action": "Plan+Execute dual_robots",
+                "stage": "execute",
+                "message": "Plan+Execute dual_robots failed during execute: /execute_trajectory error_code=-4",
+                "last_error": "Plan+Execute dual_robots failed during execute: /execute_trajectory error_code=-4",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_digital_twin_hardware_status",
+        lambda _cfg: {"overall": "running", "moveit": "running", "status": {}},
+    )
+
+    try:
+        row = bridge.digital_twin_statuses()["dual robots"]
+    finally:
+        if old_body is None:
+            status_path.unlink(missing_ok=True)
+        else:
+            status_path.write_text(old_body, encoding="utf-8")
+
+    assert row["dual_drag_markers"]["state"] == "failed"
+    assert row["dual_drag_markers"]["action"] == "Plan+Execute dual_robots"
+    assert row["dual_drag_markers"]["stage"] == "execute"
+    assert "/execute_trajectory error_code=-4" in row["dual_drag_markers"]["last_error"]
 
 
 def test_dual_rviz_configs_show_dual_drag_markers() -> None:
@@ -1591,15 +3203,15 @@ def test_dual_rviz_configs_show_dual_drag_markers() -> None:
         assert "Update Topic: /dual_drag_markers/update" in body
 
 
-def test_digital_twin_sim_mode_uses_monitor_teach_with_legacy_compatibility() -> None:
+def test_digital_twin_sim_mode_uses_monitor_with_legacy_mirror_compatibility() -> None:
     bridge = SystemBridge()
     cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
 
-    assert bridge._digital_twin_allowed_sim_modes(cfg) == ("monitor", "teach")
+    assert bridge._digital_twin_allowed_sim_modes(cfg) == ("monitor",)
     assert bridge._digital_twin_sim_mode("dual robots") == "monitor"
-    assert bridge.digital_twin_set_sim_mode("dual robots", "author") is None
-    assert bridge._digital_twin_sim_mode("dual robots") == "teach"
-    assert bridge._digital_twin_gazebo_launch("dual robots", cfg) == "gazebo_dual_gazebo_only"
+    assert bridge.digital_twin_set_sim_mode("dual robots", "author") == "unknown digital twin sim mode: author"
+    assert bridge._digital_twin_sim_mode("dual robots") == "monitor"
+    assert bridge._digital_twin_gazebo_launch("dual robots", cfg) == "gazebo_dual_passive"
     assert bridge.digital_twin_set_sim_mode("dual robots", "mirror") is None
     assert bridge._digital_twin_sim_mode("dual robots") == "monitor"
     assert bridge._digital_twin_gazebo_launch("dual robots", cfg) == "gazebo_dual_passive"
@@ -1622,18 +3234,284 @@ def test_control_page_only_exposes_monitor_and_teach_mode_labels() -> None:
 
 
 def test_control_page_teach_copy_says_sim_rviz_controls_gazebo_only() -> None:
+    root = Path(__file__).resolve().parents[1]
     body = (
-        Path(__file__).resolve().parents[1]
-        / "cais_spade_llm"
-        / "ui"
-        / "pages"
-        / "control.py"
+        root / "cais_spade_llm" / "ui" / "pages" / "control.py"
+    ).read_text(encoding="utf-8")
+    bridge_body = (
+        root / "cais_spade_llm" / "ui" / "bridge.py"
     ).read_text(encoding="utf-8")
 
-    assert "Teach: sim RViz controls Gazebo only" in body
-    assert "Replay in Twin commits the saved" in body
-    assert "Replay in Twin: commit through hardware MoveIt?" in body
-    assert "Replay in Twin (commit through hardware MoveIt)" in body
+    assert "Function Record / Replay" in body
+    assert "Replay Function" in body
+    assert "Replay Function in Twin?" in body
+    assert "Replay Dual Function" in body
+    assert "saved steps:" in body
+    assert "def _suggest_next_step_name" in body
+    assert '"taught_functions"' in bridge_body
+    assert TAUGHT_FUNCTIONS_ROOT.name == "taught_functions"
+    assert "functions" not in TAUGHT_FUNCTIONS_ROOT.parts
+
+
+def test_ur5e_only_gazebo_launch_uses_single_table_center_and_home_pose() -> None:
+    body = (
+        Path(__file__).resolve().parents[1]
+        / "ros2"
+        / "cais_lab_gazebo"
+        / "launch"
+        / "ur5e_rg2_gazebo.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert "UR5E_BASE_XYZ = '0.0 0.0 1.021'" in body
+    assert "UR5E_BASE_RPY = '0 0 3.142'" in body
+    assert "'shoulder_pan_joint': 1.637161" in body
+    assert "'shoulder_lift_joint': -2.150816" in body
+    assert "'wrist_3_joint': 1.637331" in body
+    assert "_set_ros2_control_initial_positions(" in body
+    assert "{f'{onrobot_prefix}finger_width': 0.11}" in body
+    assert "_inject_mimic_plugins(onrobot_root, max_effort='3.0', sensitiveness='0.003')" in body
+    assert "_tune_rg2_contact_properties(onrobot_root, onrobot_prefix)" in body
+    assert "_strip_grasp_fix_plugins(onrobot_root)" in body
+
+
+def test_ur5e_only_digital_twin_start_keeps_stack_when_hardware_readiness_fails(monkeypatch) -> None:
+    bridge = SystemBridge()
+    statuses: list[dict] = []
+    err_text = "ur5e MoveIt is not ready: command timed out"
+
+    monkeypatch.setattr(bridge, "_digital_twin_blocked_reason", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(bridge, "_stop_teleop_server", lambda: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_direction", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_status", lambda _target, payload: statuses.append(dict(payload)))
+    monkeypatch.setattr(bridge, "_shutdown_gazebo_prewarm_controllers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_digital_twin_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_kill_stale_gazebo_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_gazebo_core", lambda **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_hardware_stack", lambda *_args, **_kwargs: err_text)
+    monkeypatch.setattr(
+        bridge,
+        "_initialize_digital_twin_gazebo_from_hardware",
+        lambda *_args, **_kwargs: pytest.fail("initialization should not run after hardware readiness failure"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "digital_twin_stop",
+        lambda *_args, **_kwargs: pytest.fail("ur5e only digital twin should not close RViz after hardware readiness failure"),
+    )
+
+    err = bridge.digital_twin_start("ur5e only")
+
+    assert err == err_text
+    assert statuses[-1]["state"] == "partial"
+    assert statuses[-1]["message"] == err_text
+
+
+def test_ur5e_only_digital_twin_start_keeps_stack_when_gazebo_launch_fails(monkeypatch) -> None:
+    bridge = SystemBridge()
+    statuses: list[dict] = []
+    err_text = "gazebo launch failed"
+
+    monkeypatch.setattr(bridge, "_digital_twin_blocked_reason", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(bridge, "_stop_teleop_server", lambda: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_direction", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_status", lambda _target, payload: statuses.append(dict(payload)))
+    monkeypatch.setattr(bridge, "_shutdown_gazebo_prewarm_controllers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_digital_twin_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_kill_stale_gazebo_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_gazebo_core", lambda **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_launch", lambda *_args, **_kwargs: err_text)
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_hardware_stack",
+        lambda *_args, **_kwargs: pytest.fail("hardware stack should not run after gazebo launch failure"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "digital_twin_stop",
+        lambda *_args, **_kwargs: pytest.fail("ur5e only digital twin should not close RViz/Gazebo after gazebo launch failure"),
+    )
+
+    err = bridge.digital_twin_start("ur5e only")
+
+    assert err == err_text
+    assert statuses[-1]["state"] == "partial"
+    assert statuses[-1]["message"] == err_text
+
+
+def test_ur5e_only_digital_twin_start_keeps_stack_when_sync_start_fails(monkeypatch) -> None:
+    bridge = SystemBridge()
+    sync_statuses: list[dict] = []
+    err_text = "sync command failed"
+
+    monkeypatch.setattr(bridge, "_digital_twin_blocked_reason", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(bridge, "_stop_teleop_server", lambda: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_direction", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_write_digital_twin_sync_status", lambda _target, _cfg, payload: sync_statuses.append(dict(payload)))
+    monkeypatch.setattr(bridge, "_shutdown_gazebo_prewarm_controllers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_digital_twin_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_kill_stale_gazebo_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_gazebo_core", lambda **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_hardware_stack", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_initialize_digital_twin_gazebo_from_hardware", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bridge, "_start_digital_twin_sync_when_ready", lambda *_args, **_kwargs: err_text)
+    monkeypatch.setattr(
+        bridge,
+        "digital_twin_stop",
+        lambda *_args, **_kwargs: pytest.fail("ur5e only digital twin should not close RViz after sync start failure"),
+    )
+
+    err = bridge.digital_twin_start("ur5e only")
+
+    assert err == err_text
+    assert sync_statuses[-1]["state"] == "waiting"
+    assert sync_statuses[-1]["last_error"] == err_text
+
+
+def test_save_function_appends_unsaved_steps_to_existing_saved_function_and_clears_buffer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bridge = SystemBridge()
+    function_root = tmp_path / "taught_functions"
+    saved_path = function_root / "ur5e" / "ur5e_test1" / "default__hardware.json"
+    saved_path.parent.mkdir(parents=True)
+    saved_path.write_text(
+        json.dumps(
+            {
+                "robot": "ur5e",
+                "function_name": "ur5e_test1",
+                "name": "default",
+                "capture_source": "hardware",
+                "replay_targets": ["hardware", "digital_twin"],
+                "steps": [
+                    {
+                        "step_name": "step_1",
+                        "primitive": "move_cartesian",
+                        "waypoint": {
+                            "joint_names": ["j1"],
+                            "joint_positions": [0.1],
+                            "pose": None,
+                        },
+                    },
+                    {
+                        "step_name": "step_2",
+                        "primitive": "move_cartesian",
+                        "waypoint": {
+                            "joint_names": ["j1"],
+                            "joint_positions": [0.2],
+                            "pose": None,
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("cais_spade_llm.ui.bridge._ROBOT_TAUGHT_FUNCTIONS_DIR", function_root)
+    monkeypatch.setattr(
+        bridge,
+        "_snapshot_robot_waypoint",
+        lambda *_args, **_kwargs: {
+            "joint_names": ["j1"],
+            "positions": [0.3],
+            "gripper_joint": "ur5e_rg2_finger_width",
+            "gripper": 0.08,
+        },
+    )
+
+    capture = bridge.digital_twin_capture_function_step(
+        "ur5e only",
+        "ur5e",
+        "ur5e_test1",
+        "default",
+        "step_3",
+        "move_cartesian",
+    )
+    assert capture["success"] is True
+    assert bridge.digital_twin_function_step_count("ur5e only", "ur5e", "ur5e_test1", "default") == 1
+
+    result = bridge.digital_twin_save_function("ur5e only", "ur5e", "ur5e_test1", "default")
+
+    assert result["success"] is True
+    assert result["saved_steps"] == 3
+    assert result["unsaved_steps"] == 0
+    assert bridge.digital_twin_function_step_count("ur5e only", "ur5e", "ur5e_test1", "default") == 0
+    payload = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert [step["step_name"] for step in payload["steps"]] == ["step_1", "step_2", "step_3"]
+    assert payload["steps"][2]["waypoint"]["joint_positions"] == [0.3]
+
+
+def test_ur5e_only_monitor_status_schedules_sync_restart_when_mirror_stopped(monkeypatch) -> None:
+    bridge = SystemBridge()
+    restarts: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "_digital_twin_hardware_status",
+        lambda _cfg: {
+            "overall": "running",
+            "driver": "running",
+            "moveit": "running",
+            "ur5e": {"overall": "running", "driver": "running", "moveit": "running"},
+        },
+    )
+    monkeypatch.setattr(bridge, "_ur5e_rg2_gripper_status", lambda: {})
+    monkeypatch.setattr(bridge, "_digital_twin_blocked_reason", lambda *_args, **_kwargs: "")
+
+    def fake_proc_status(name: str) -> str:
+        if name == "digital_twin_ur5e_only_gazebo":
+            return "running"
+        if name == "digital_twin_ur5e_only_sync":
+            return "stopped"
+        return "stopped"
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", fake_proc_status)
+    monkeypatch.setattr(
+        bridge,
+        "_schedule_digital_twin_monitor_sync_restart",
+        lambda target, _cfg, **kwargs: restarts.append((target, str(kwargs.get("reason") or ""))) or True,
+    )
+
+    row = bridge.digital_twin_statuses()["ur5e only"]
+
+    assert row["sync/status"]["process_status"] == "stopped"
+    assert restarts == [("ur5e only", "sync process is stopped")]
+
+
+def test_schedule_digital_twin_monitor_sync_restart_starts_background_sync(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["ur5e only"]
+    statuses: list[dict] = []
+    starts: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "_write_digital_twin_sync_status",
+        lambda _target, _cfg, payload: statuses.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_sync_when_ready",
+        lambda target, _cfg, **kwargs: starts.append((target, str(kwargs.get("direction") or ""))) or None,
+    )
+
+    scheduled = bridge._schedule_digital_twin_monitor_sync_restart(
+        "ur5e only",
+        cfg,
+        gazebo_process="digital_twin_ur5e_only_gazebo",
+        domains={"gazebo": 41, "hardware": 42},
+        reason="sync process is stopped",
+    )
+    thread = bridge._digital_twin_sync_restart_threads.get("ur5e only")
+    if thread is not None:
+        thread.join(timeout=2.0)
+
+    assert scheduled is True
+    assert statuses[0]["message"] == "restarting hardware -> gazebo mirror: sync process is stopped"
+    assert starts == [("ur5e only", "hardware -> gazebo")]
 
 
 def test_control_page_replay_notify_uses_captured_client_before_dialog_close() -> None:
@@ -1654,137 +3532,40 @@ def test_control_page_replay_notify_uses_captured_client_before_dialog_close() -
     )[0]
     assert "notify_client = _current_client()" in replay_confirmed
     assert "replay_confirm.close()" in replay_confirmed
-    assert 'await _replay("twin", client=notify_client)' in replay_confirmed
+    assert "await _replay_function(" in replay_confirmed
+    assert '"twin"' in replay_confirmed
+    assert "client=notify_client" in replay_confirmed
 
 
-def test_digital_twin_dual_teach_start_uses_sim_authoring_rviz_without_live_sync(monkeypatch) -> None:
+def test_digital_twin_dual_teach_mode_is_not_exposed_for_now(monkeypatch) -> None:
     bridge = SystemBridge()
-    events: list[tuple[str, str, str, int | None]] = []
+    events: list[str] = []
 
-    bridge.digital_twin_set_sim_mode("dual robots", "teach")
-    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "stopped")
-    monkeypatch.setattr(
-        bridge,
-        "hardware_connection_statuses",
-        lambda force=False: {
-            "xarm6": {"reachable": True, "ip": "192.168.1.240", "message": "OK"},
-            "ur5e": {"reachable": True, "ip": "192.168.1.172", "message": "OK"},
-        },
-    )
-    monkeypatch.setattr(bridge, "_shutdown_gazebo_prewarm_controllers", lambda: None)
-    monkeypatch.setattr(bridge, "_force_kill_digital_twin_helpers", lambda: None)
-    monkeypatch.setattr(bridge, "_kill_stale_gazebo_helpers", lambda: None)
-    monkeypatch.setattr(bridge, "_force_kill_gazebo_core", lambda reason="": None)
-    monkeypatch.setattr(
-        bridge,
-        "_ensure_digital_twin_launch",
-        lambda process, launch, **kwargs: events.append(
-            ("ensure", process, f"{launch} {kwargs.get('extra_args', '')}".strip(), kwargs.get("ros_domain_id"))
-        )
-        or None,
-    )
-    monkeypatch.setattr(bridge, "_ensure_ur5e_external_control_running", lambda **_kwargs: None)
+    err = bridge.digital_twin_set_sim_mode("dual robots", "teach")
+
+    assert err == "unknown digital twin sim mode: teach"
+    assert bridge._digital_twin_sim_mode("dual robots") == "monitor"
     monkeypatch.setattr(
         bridge,
         "_start_digital_twin_sync_process",
-        lambda *_args, **_kwargs: pytest.fail("Teach mode must not start live sync"),
+        lambda *_args, **_kwargs: events.append("sync"),
     )
     monkeypatch.setattr(
         bridge,
         "_initialize_digital_twin_gazebo_from_hardware",
-        lambda target, cfg, **kwargs: events.append(
-            ("init", target, "", kwargs.get("domains", {}).get("hardware"))
-        )
-        or None,
+        lambda *_args, **_kwargs: pytest.fail("monitor mode start must not initialize from teach mode"),
     )
-    monkeypatch.setattr(
-        bridge,
-        "_start_digital_twin_dual_drag_markers",
-        lambda _cfg, **kwargs: events.append(
-            ("markers", str(kwargs.get("mode")), "", kwargs.get("ros_domain_id"))
-        )
-        or None,
-    )
-
-    err = bridge.digital_twin_start("dual robots")
-
-    assert err is None
-    assert (
-        "ensure",
-        "digital_twin_dual_robots_hardware_moveit",
-        "hardware_dual_robots_moveit launch_rviz:=false",
-        42,
-    ) in events
-    assert (
-        "ensure",
-        "digital_twin_dual_robots_gazebo",
-        "gazebo_dual_gazebo_only",
-        41,
-    ) in events
-    assert (
-        "ensure",
-        "digital_twin_dual_robots_gazebo_moveit",
-        "gazebo_dual_moveit_only",
-        41,
-    ) in events
-    assert ("markers", "teach", "", 41) in events
-    assert ("init", "dual robots", "", 42) in events
-    assert events.index(("init", "dual robots", "", 42)) < events.index(
-        (
-            "ensure",
-            "digital_twin_dual_robots_gazebo_moveit",
-            "gazebo_dual_moveit_only",
-            41,
-        )
-    )
+    assert events == []
 
 
-def test_digital_twin_dual_teach_start_retries_initial_pose_when_stack_running(monkeypatch) -> None:
+def test_digital_twin_dual_stale_teach_mode_falls_back_to_monitor(monkeypatch) -> None:
     bridge = SystemBridge()
     cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
-    events: list[tuple[str, str]] = []
-    core = set(bridge._digital_twin_dual_robots_core_process_names(cfg))
 
-    bridge.digital_twin_set_sim_mode("dual robots", "teach")
-    monkeypatch.setattr(bridge, "ros2_proc_status", lambda name: "running" if name in core else "stopped")
-    monkeypatch.setattr(
-        bridge,
-        "_restart_ros2_daemon_for_discovery",
-        lambda **_kwargs: events.append(("restart", "ros2_daemon")) or None,
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_start_digital_twin_dual_robots_hardware_launches",
-        lambda *_args, **_kwargs: events.append(("hardware", "ensure")) or None,
-    )
-    monkeypatch.setattr(bridge, "_ensure_ur5e_external_control_running", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        bridge,
-        "_ensure_digital_twin_launch",
-        lambda *_args, **_kwargs: events.append(("gazebo", "ensure")) or None,
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_initialize_digital_twin_gazebo_from_hardware",
-        lambda *_args, **_kwargs: events.append(("init", "retry")) or None,
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_start_digital_twin_dual_drag_markers",
-        lambda _cfg, **kwargs: events.append(("markers", str(kwargs.get("mode")))) or None,
-    )
-    monkeypatch.setattr(
-        bridge,
-        "_start_digital_twin_sync_process",
-        lambda *_args, **_kwargs: pytest.fail("Teach retry must not start live sync"),
-    )
+    bridge._digital_twin_sim_modes["dual robots"] = "teach"
 
-    err = bridge.digital_twin_start("dual robots")
-
-    assert err is None
-    assert ("restart", "ros2_daemon") in events
-    assert ("init", "retry") in events
-    assert ("markers", "teach") in events
+    assert bridge._digital_twin_sim_mode("dual robots") == "monitor"
+    assert bridge._digital_twin_gazebo_launch("dual robots", cfg) == "gazebo_dual_passive"
 
 
 def test_digital_twin_dual_capture_waypoint_stores_xarm6_and_ur5e(monkeypatch) -> None:
@@ -2133,10 +3914,12 @@ def test_digital_twin_dual_hardware_stack_uses_xarm_ur5e_rg2_combined_moveit_ord
     external_control_index = events.index(
         ("external_control", "digital_twin_dual_robots_hardware_ur5e_driver", "", 42)
     )
+    wait_driver_event = ("wait_driver", "ur5e", "", 42)
+    wait_driver_index = events.index(wait_driver_event)
     rg2_start_index = events.index(
         ("start", "digital_twin_dual_robots_hardware_ur5e_rg2_gripper", "hardware_ur5e_rg2_gripper", 42)
     )
-    assert ur_driver_index < external_control_index < rg2_start_index
+    assert ur_driver_index < wait_driver_index < external_control_index < rg2_start_index
     assert (
         start_extra_args["digital_twin_dual_robots_hardware_ur5e_rg2_gripper"]
         == "--publish-arm-joint-states"
@@ -2145,6 +3928,8 @@ def test_digital_twin_dual_hardware_stack_uses_xarm_ur5e_rg2_combined_moveit_ord
         ("start", "digital_twin_dual_robots_hardware_moveit", "hardware_dual_robots_moveit", 42)
     )
     for index, event in enumerate(events):
+        if event == wait_driver_event:
+            continue
         if event[0] in {"wait_service", "wait_driver", "wait_topic", "wait_action", "controller"}:
             assert moveit_index < index
     assert (
@@ -2351,6 +4136,67 @@ def test_digital_twin_dual_start_does_not_gate_sync_on_passive_gazebo_actions(mo
         "/xarm6_xarm6_traj_controller/follow_joint_trajectory",
         "41",
     ) not in events
+
+
+def test_digital_twin_dual_start_writes_status_when_hardware_launch_fails(monkeypatch) -> None:
+    bridge = SystemBridge()
+    statuses: list[dict[str, object]] = []
+    sync_statuses: list[dict[str, object]] = []
+    events: list[tuple[str, str]] = []
+    expected = (
+        "UR5e External Control auto reconnect failed loading ros.urp: command timed out after 8s. "
+        "Set pendant to Remote Control or press Play on ros.urp manually."
+    )
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "stopped")
+    monkeypatch.setattr(
+        bridge,
+        "hardware_connection_statuses",
+        lambda force=False: {
+            "xarm6": {"reachable": True, "ip": "192.168.1.240", "message": "OK"},
+            "ur5e": {"reachable": True, "ip": "192.168.1.172", "message": "OK"},
+        },
+    )
+    monkeypatch.setattr(bridge, "_shutdown_gazebo_prewarm_controllers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_digital_twin_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_kill_stale_gazebo_helpers", lambda: None)
+    monkeypatch.setattr(bridge, "_force_kill_gazebo_core", lambda reason="": None)
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_dual_robots_hardware_launches",
+        lambda *_args, **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_start_digital_twin_dual_drag_markers",
+        lambda *_args, **_kwargs: events.append(("markers", "started")) or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ensure_digital_twin_launch",
+        lambda _process, launch, **_kwargs: events.append(("launch", launch)) or None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_write_digital_twin_status",
+        lambda _target, payload: statuses.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_write_digital_twin_sync_status",
+        lambda _target, _cfg, payload: sync_statuses.append(dict(payload)),
+    )
+
+    err = bridge.digital_twin_start("dual robots")
+
+    assert err == expected
+    assert statuses[-1]["state"] == "waiting"
+    assert statuses[-1]["message"] == expected
+    assert statuses[-1]["last_error"] == expected
+    assert sync_statuses[-1]["state"] == "waiting"
+    assert sync_statuses[-1]["message"] == expected
+    assert sync_statuses[-1]["last_error"] == expected
+    assert events == []
 
 
 def test_digital_twin_dual_start_retries_sync_without_cleanup_when_stack_running(monkeypatch) -> None:
@@ -2634,6 +4480,247 @@ def test_ros_service_success_parser_reads_response() -> None:
 
     assert SystemBridge._ros_service_success_from_output(ok_output) is True
     assert SystemBridge._ros_service_success_from_output(false_output) is False
+
+
+def test_repair_ur5e_controller_reactivates_when_external_control_running(monkeypatch) -> None:
+    bridge = SystemBridge()
+    events: list[tuple[str, str, int | None]] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_controller_context",
+        lambda _target=None: (
+            {
+                "target": "dual robots",
+                "process_name": "digital_twin_dual_robots_hardware_ur5e_driver",
+                "ros_domain_id": 42,
+                "controller_name": "scaled_joint_trajectory_controller",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "inactive",
+            "message": "scaled_joint_trajectory_controller inactive",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: (True, "program_running=True"),
+    )
+    monkeypatch.setattr(bridge, "_write_ur5e_external_control_status", lambda **_kwargs: None)
+
+    def fake_activate(controller_name: str, **kwargs):
+        events.append(("activate", controller_name, kwargs.get("ros_domain_id")))
+        return None
+
+    monkeypatch.setattr(bridge, "_activate_ros_controller", fake_activate)
+    monkeypatch.setattr(bridge, "_wait_for_ros_controller_active", lambda *_args, **_kwargs: None)
+
+    result = bridge.repair_ur5e_trajectory_controller("dual robots")
+
+    assert result["success"] is True
+    assert result["message"] == "reactivated scaled_joint_trajectory_controller"
+    assert result["state"] == "active"
+    assert events == [("activate", "scaled_joint_trajectory_controller", 42)]
+
+
+def test_repair_ur5e_controller_requires_manual_play_when_external_control_stopped(monkeypatch) -> None:
+    bridge = SystemBridge()
+    external_status: list[dict] = []
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_controller_context",
+        lambda _target=None: (
+            {
+                "target": "ur5e only",
+                "process_name": "digital_twin_ur5e_only_hardware_ur5e_driver",
+                "ros_domain_id": 42,
+                "controller_name": "scaled_joint_trajectory_controller",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "inactive",
+            "message": "scaled_joint_trajectory_controller inactive",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: (False, "program_running=False"),
+    )
+    monkeypatch.setattr(bridge, "_write_ur5e_external_control_status", lambda **kwargs: external_status.append(kwargs))
+    monkeypatch.setattr(
+        bridge,
+        "_activate_ros_controller",
+        lambda *_args, **_kwargs: pytest.fail("switch_controller should not be called"),
+    )
+
+    result = bridge.repair_ur5e_trajectory_controller("ur5e only")
+
+    assert result["success"] is False
+    assert result["message"] == "External Control is not running; press Play on ros.urp"
+    assert external_status[-1]["state"] == "manual Play required"
+
+
+def test_repair_ur5e_controller_skips_when_already_active(monkeypatch) -> None:
+    bridge = SystemBridge()
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_controller_context",
+        lambda _target=None: (
+            {
+                "target": "ur5e only",
+                "process_name": "digital_twin_ur5e_only_hardware_ur5e_driver",
+                "ros_domain_id": 42,
+                "controller_name": "scaled_joint_trajectory_controller",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "active",
+            "message": "scaled_joint_trajectory_controller active",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: pytest.fail("External Control should not be checked"),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_activate_ros_controller",
+        lambda *_args, **_kwargs: pytest.fail("switch_controller should not be called"),
+    )
+
+    result = bridge.repair_ur5e_trajectory_controller("ur5e only")
+
+    assert result["success"] is True
+    assert result["message"] == "scaled_joint_trajectory_controller already active"
+    assert result["state"] == "active"
+
+
+def test_repair_ur5e_controller_reports_switch_controller_false(monkeypatch) -> None:
+    bridge = SystemBridge()
+
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_controller_context",
+        lambda _target=None: (
+            {
+                "target": "dual robots",
+                "process_name": "digital_twin_dual_robots_hardware_ur5e_driver",
+                "ros_domain_id": 42,
+                "controller_name": "scaled_joint_trajectory_controller",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_trajectory_controller_status",
+        lambda **_kwargs: {
+            "state": "inactive",
+            "message": "scaled_joint_trajectory_controller inactive",
+            "error": "",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ur5e_program_running_once",
+        lambda **_kwargs: (True, "program_running=True"),
+    )
+    monkeypatch.setattr(bridge, "_write_ur5e_external_control_status", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        bridge,
+        "_activate_ros_controller",
+        lambda *_args, **_kwargs: "switch_controller returned ok=False for scaled_joint_trajectory_controller",
+    )
+
+    result = bridge.repair_ur5e_trajectory_controller("dual robots")
+
+    assert result["success"] is False
+    assert result["message"] == "switch_controller returned ok=False for scaled_joint_trajectory_controller"
+    assert result["state"] == "inactive"
+
+
+def test_digital_twin_hardware_status_refreshes_stale_ur5e_external_control_before_auto_repair(monkeypatch) -> None:
+    bridge = SystemBridge()
+    cfg = bridge._DIGITAL_TWIN_TARGETS["dual robots"]
+    refreshed = False
+    repairs: list[str] = []
+
+    monkeypatch.setattr(bridge, "ros2_proc_status", lambda _name: "running")
+
+    def fake_external_control_status() -> dict[str, object]:
+        return (
+            {
+                "state": "running",
+                "message": "External Control: running",
+                "error": "",
+            }
+            if refreshed
+            else {
+                "state": "manual Play required",
+                "message": "External Control is not running; press Play on ros.urp",
+                "error": "command timed out after 5s",
+            }
+        )
+
+    def fake_refresh(**kwargs) -> bool:
+        nonlocal refreshed
+        assert kwargs.get("ros_domain_id") == 42
+        refreshed = True
+        return True
+
+    monkeypatch.setattr(bridge, "_ur5e_external_control_status", fake_external_control_status)
+    monkeypatch.setattr(bridge, "_refresh_ur5e_external_control_running_status", fake_refresh)
+    monkeypatch.setattr(
+        bridge,
+        "_attach_ur5e_trajectory_controller_status",
+        lambda status, **_kwargs: status.update(
+            {
+                "trajectory_controller": "inactive",
+                "trajectory_controller_message": "scaled_joint_trajectory_controller inactive",
+                "trajectory_controller_error": "",
+            }
+        )
+        or status,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_schedule_ur5e_controller_auto_repair",
+        lambda target: repairs.append(target),
+    )
+
+    status = bridge._digital_twin_hardware_status(cfg)
+
+    assert refreshed is True
+    assert status["ur5e"]["external_control"] == "running"
+    assert status["ur5e"]["trajectory_controller"] == "inactive"
+    assert repairs == ["dual robots"]
 
 
 def test_ur5e_external_control_already_running_skips_load_play(monkeypatch) -> None:

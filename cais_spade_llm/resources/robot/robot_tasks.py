@@ -543,6 +543,45 @@ def _primitive_payload_from_result(
     return payload
 
 
+_TAUGHT_FUNCTION_STEP_MAP: dict[str, dict[str, str]] = {
+    "pick_approach": {
+        "move_above_part": "approach_pose",
+        "descend": "pick_pose",
+    },
+    "pick_grasp": {
+        "grasp_part": "grasp_part",
+        "lift": "lift_pose",
+    },
+    "place_approach": {
+        "move_above_destination": "approach_pose",
+        "descend": "place_pose",
+    },
+    "place_insert": {
+        "release_part": "release_part",
+        "lift": "retreat_pose",
+    },
+    "move_home": {
+        "move_home": "home",
+    },
+}
+
+
+def _uses_taught_function_replay(agent: Any) -> bool:
+    execution_mode = str(getattr(agent, "execution_mode", "") or "").strip().lower()
+    return execution_mode not in {"", "dry_run", "simulation"}
+
+
+def _taught_function_file_name(task_name: str, args: dict[str, Any]) -> str:
+    explicit = str(args.get("function_file_name") or "").strip()
+    if explicit:
+        return explicit
+    if task_name in {"pick_approach", "pick_grasp"}:
+        return str(args.get("origin_resource_location") or "").strip() or "default"
+    if task_name in {"place_approach", "place_insert"}:
+        return str(args.get("destination_location") or "").strip() or "default"
+    return "default"
+
+
 async def _execute_task_step(
     *,
     agent: Any,
@@ -590,10 +629,25 @@ async def _execute_task_step(
         )
         return {"success": True, "payload": payload, "raw": primitive_result}
 
-    result = await agent._execute_primitive(
-        step.op,
-        {key: value for key, value in params.items() if not str(key).startswith("_")},
-    )
+    taught_step_name = _TAUGHT_FUNCTION_STEP_MAP.get(task.name, {}).get(step.id)
+    if taught_step_name and _uses_taught_function_replay(agent):
+        executor = getattr(agent, "_execute_taught_function_step", None)
+        if not callable(executor):
+            result = {
+                "success": False,
+                "message": "resource agent missing taught function replay support",
+            }
+        else:
+            result = await executor(
+                function_name=task.name,
+                taught_function_name=_taught_function_file_name(task.name, args),
+                step_name=taught_step_name,
+            )
+    else:
+        result = await agent._execute_primitive(
+            step.op,
+            {key: value for key, value in params.items() if not str(key).startswith("_")},
+        )
     payload = None
     if result.get("success"):
         payload = _primitive_payload_from_result(

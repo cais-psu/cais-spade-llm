@@ -13,8 +13,7 @@ from pathlib import Path
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler
-from launch.event_handlers import OnProcessExit
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -189,14 +188,7 @@ def launch_setup(context, *args, **kwargs):
             f'{prefix}xarm_gripper_traj_controller',
         ])
 
-    launch_actions.append(
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=spawn,
-                on_exit=[controller_spawner],
-            )
-        )
-    )
+    launch_actions.append(TimerAction(period=2.0, actions=[controller_spawner]))
 
     return launch_actions
 
@@ -206,7 +198,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'passive',
             default_value='false',
-            description='Spawn Gazebo as a passive mirror without active trajectory controller spawners.',
+            description='Spawn Gazebo as a passive mirror with holding trajectory controllers.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

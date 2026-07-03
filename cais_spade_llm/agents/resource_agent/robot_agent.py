@@ -16,7 +16,12 @@ from cais_spade_llm.resources.robot.robot_tasks import (
     robot_task_registry,
 )
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
-from cais_spade_llm.resources.robot import UR5eController, XArm6Controller
+from cais_spade_llm.resources.robot import (
+    UR5eGazeboController,
+    UR5eHardwareController,
+    XArm6GazeboController,
+    XArm6HardwareController,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
     build_failure_event,
     failure_context_from_scenario_config,
@@ -690,21 +695,27 @@ class RobotAgent(ResourceAgent):
             return None
 
         robot_scope = self._robot_scope_name()
+        execution_mode = str(self.execution_mode or "").strip().lower()
+        use_gazebo_controller = execution_mode == "simulation"
         try:
             if robot_scope.startswith("ur5e"):
-                trajectory_topic = (
-                    _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC
-                    if str(self.execution_mode or "").strip().lower() == "simulation"
-                    else None
-                )
-                return UR5eController(
-                    trajectory_topic=trajectory_topic or "/scaled_joint_trajectory_controller/joint_trajectory",
+                if use_gazebo_controller:
+                    return UR5eGazeboController(
+                        trajectory_topic=_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC,
+                        controller_config=self.controller_config,
+                        named_positions=self.named_positions,
+                        execution_mode=self.execution_mode,
+                    )
+                return UR5eHardwareController(
                     controller_config=self.controller_config,
                     named_positions=self.named_positions,
                     execution_mode=self.execution_mode,
                 )
             if robot_scope.startswith("xarm6"):
-                return XArm6Controller(
+                controller_cls = (
+                    XArm6GazeboController if use_gazebo_controller else XArm6HardwareController
+                )
+                return controller_cls(
                     controller_config=self.controller_config,
                     named_positions=self.named_positions,
                     execution_mode=self.execution_mode,
@@ -833,6 +844,50 @@ class RobotAgent(ResourceAgent):
             return {
                 "success": False,
                 "message": f"{helper_name} exception: {type(exc).__name__}: {exc}",
+            }
+
+    async def _execute_taught_function_step(
+        self,
+        *,
+        function_name: str,
+        taught_function_name: str,
+        step_name: str,
+    ) -> Dict[str, Any]:
+        """Execute one user-taught function step through the hardware controller."""
+        if self.execution_mode == "dry_run":
+            return {"success": True, "message": f"Simulated taught function step: {step_name}"}
+
+        await self._ensure_controller_prewarmed()
+
+        if self._controller is None:
+            return {"success": False, "message": "controller is not initialized"}
+
+        method = getattr(self._controller, "replay_taught_function_step", None)
+        if not callable(method):
+            return {
+                "success": False,
+                "message": "controller missing taught function replay support",
+            }
+
+        try:
+            result = await asyncio.to_thread(
+                method,
+                function_name,
+                taught_function_name,
+                step_name,
+                storage_source="hardware",
+            )
+            if isinstance(result, dict):
+                return dict(result)
+            return {
+                "success": bool(result),
+                "message": f"taught function step {step_name} {'ok' if result else 'failed'}",
+            }
+        except Exception as exc:
+            self.logger.exception("[Robot] Taught function step '%s' execution failed", step_name)
+            return {
+                "success": False,
+                "message": f"taught function step exception: {type(exc).__name__}: {exc}",
             }
 
     def _log_step(self, step: str, message: str, **fields: Any) -> None:

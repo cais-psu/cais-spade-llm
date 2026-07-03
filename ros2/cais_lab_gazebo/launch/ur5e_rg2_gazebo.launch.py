@@ -21,6 +21,7 @@ from launch.actions import (
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
@@ -34,6 +35,16 @@ CONTROLLER_SERVICE_CALL_TIMEOUT_SEC = '20.0'
 CONTROLLER_SWITCH_TIMEOUT_SEC = '20.0'
 RG2_FINGER_WIDTH_EFFORT = '18'
 RG2_FINGER_WIDTH_VELOCITY = '0.40'
+UR5E_BASE_XYZ = '0.0 0.0 1.021'
+UR5E_BASE_RPY = '0 0 3.142'
+UR5E_HOME_RAD = {
+    'shoulder_pan_joint': 1.637161,
+    'shoulder_lift_joint': -2.150816,
+    'elbow_joint': 2.028921,
+    'wrist_1_joint': -1.452287,
+    'wrist_2_joint': -1.561075,
+    'wrist_3_joint': 1.637331,
+}
 
 
 def _strip_world_links_and_joints(root):
@@ -60,7 +71,44 @@ def _strip_gazebo_ros2_control_plugin(root):
             root.remove(gazebo_elem)
 
 
-def _inject_mimic_plugins(root):
+def _set_ros2_control_initial_positions(root, joint_positions):
+    for ros2_control in root.findall('ros2_control'):
+        for joint in ros2_control.findall('joint'):
+            joint_name = joint.get('name', '')
+            if joint_name not in joint_positions:
+                continue
+            position_state = None
+            for state_interface in joint.findall('state_interface'):
+                if state_interface.get('name') == 'position':
+                    position_state = state_interface
+                    break
+            if position_state is None:
+                position_state = ET.SubElement(joint, 'state_interface', {'name': 'position'})
+            initial_value = position_state.find("param[@name='initial_value']")
+            if initial_value is None:
+                initial_value = ET.SubElement(position_state, 'param', {'name': 'initial_value'})
+            initial_value.text = str(joint_positions[joint_name])
+
+
+def _set_or_update_text(parent, tag_name, value):
+    child = parent.find(tag_name)
+    if child is None:
+        child = ET.SubElement(parent, tag_name)
+    child.text = str(value)
+
+
+def _strip_grasp_fix_plugins(root):
+    for gazebo_elem in list(root.findall('gazebo')):
+        plugin = gazebo_elem.find('plugin')
+        if plugin is None:
+            continue
+        name = plugin.get('name', '')
+        filename = plugin.get('filename', '')
+        if 'grasp_fix' in name or 'libgazebo_grasp_fix' in filename:
+            root.remove(gazebo_elem)
+
+
+def _inject_mimic_plugins(root, max_effort='3.0', sensitiveness='0.003'):
     for joint in list(root.findall('joint')):
         mimic = joint.find('mimic')
         if mimic is None:
@@ -78,8 +126,8 @@ def _inject_mimic_plugins(root):
         ET.SubElement(plugin_elem, 'mimicJoint').text = joint.get('name')
         ET.SubElement(plugin_elem, 'multiplier').text = mimic.get('multiplier', '1.0')
         ET.SubElement(plugin_elem, 'offset').text = mimic.get('offset', '0.0')
-        ET.SubElement(plugin_elem, 'sensitiveness').text = '0.0'
-        ET.SubElement(plugin_elem, 'maxEffort').text = '100.0'
+        ET.SubElement(plugin_elem, 'sensitiveness').text = sensitiveness
+        ET.SubElement(plugin_elem, 'maxEffort').text = max_effort
 
 
 def _tune_rg2_joint_dynamics(root, prefix):
@@ -91,6 +139,24 @@ def _tune_rg2_joint_dynamics(root, prefix):
             continue
         limit.set('effort', RG2_FINGER_WIDTH_EFFORT)
         limit.set('velocity', RG2_FINGER_WIDTH_VELOCITY)
+
+
+def _tune_rg2_contact_properties(root, prefix):
+    finger_refs = {
+        f'{prefix}left_inner_finger',
+        f'{prefix}right_inner_finger',
+        f'{prefix}left_inner_knuckle',
+        f'{prefix}right_inner_knuckle',
+    }
+    for gazebo_elem in root.findall('gazebo'):
+        ref = gazebo_elem.get('reference', '')
+        if ref not in finger_refs:
+            continue
+        _set_or_update_text(gazebo_elem, 'kp', '12000.0')
+        _set_or_update_text(gazebo_elem, 'kd', '30.0')
+        _set_or_update_text(gazebo_elem, 'mu1', '200.0')
+        _set_or_update_text(gazebo_elem, 'mu2', '200.0')
+        _set_or_update_text(gazebo_elem, 'minDepth', '0.002')
 
 
 def _make_controller_spawner(controller_names):
@@ -123,6 +189,10 @@ def _build_ur5e_rg2_description(controllers_yaml):
         f'simulation_controllers:={controllers_yaml}',
     ]).decode('utf-8')
     ur5e_root = ET.fromstring(ur5e_raw)
+    _set_ros2_control_initial_positions(
+        ur5e_root,
+        {f'{ur5e_prefix}{joint}': value for joint, value in UR5E_HOME_RAD.items()},
+    )
     _strip_world_links_and_joints(ur5e_root)
     _strip_gazebo_ros2_control_plugin(ur5e_root)
 
@@ -136,6 +206,11 @@ def _build_ur5e_rg2_description(controllers_yaml):
         'sim_gazebo:=true',
     ]).decode('utf-8')
     onrobot_root = ET.fromstring(onrobot_raw)
+
+    _set_ros2_control_initial_positions(
+        onrobot_root,
+        {f'{onrobot_prefix}finger_width': 0.11},
+    )
 
     # Keep this mock link in Gazebo so the RG2 driving joint survives physics.
     for link in onrobot_root.findall('link'):
@@ -160,8 +235,10 @@ def _build_ur5e_rg2_description(controllers_yaml):
         )
 
     _strip_gazebo_ros2_control_plugin(onrobot_root)
-    _inject_mimic_plugins(onrobot_root)
+    _inject_mimic_plugins(onrobot_root, max_effort='3.0', sensitiveness='0.003')
     _tune_rg2_joint_dynamics(onrobot_root, onrobot_prefix)
+    _tune_rg2_contact_properties(onrobot_root, onrobot_prefix)
+    _strip_grasp_fix_plugins(onrobot_root)
     _strip_world_links_and_joints(onrobot_root)
 
     for elem in list(onrobot_root):
@@ -183,7 +260,7 @@ def _build_ur5e_rg2_description(controllers_yaml):
     )
     ET.SubElement(world_joint, 'parent', {'link': 'world'})
     ET.SubElement(world_joint, 'child', {'link': f'{ur5e_prefix}base_link'})
-    ET.SubElement(world_joint, 'origin', {'xyz': '0.0 0.0 1.021', 'rpy': '0 0 3.142'})
+    ET.SubElement(world_joint, 'origin', {'xyz': UR5E_BASE_XYZ, 'rpy': UR5E_BASE_RPY})
 
     for elem in list(ur5e_root):
         combined_root.append(elem)
@@ -303,14 +380,7 @@ def launch_setup(context, *args, **kwargs):
             'ur5e_joint_trajectory_controller',
             'ur5e_rg2_gripper_traj_controller',
         ])
-        launch_actions.append(
-            RegisterEventHandler(
-                event_handler=OnProcessExit(
-                    target_action=spawn,
-                    on_exit=[controller_spawner],
-                )
-            )
-        )
+        launch_actions.append(TimerAction(period=2.0, actions=[controller_spawner]))
     else:
         controller_spawner = _make_controller_spawner([
             'joint_state_broadcaster',
@@ -318,12 +388,7 @@ def launch_setup(context, *args, **kwargs):
             'ur5e_rg2_gripper_traj_controller',
         ])
         launch_actions.extend([
-            RegisterEventHandler(
-                event_handler=OnProcessExit(
-                    target_action=spawn,
-                    on_exit=[controller_spawner],
-                )
-            ),
+            TimerAction(period=2.0, actions=[controller_spawner]),
             RegisterEventHandler(
                 event_handler=OnProcessExit(
                     target_action=controller_spawner,
@@ -346,7 +411,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'passive',
             default_value='false',
-            description='Spawn Gazebo as a passive mirror without active trajectory controller spawners.',
+            description='Spawn Gazebo as a passive mirror with holding trajectory controllers.',
         ),
         OpaqueFunction(function=launch_setup),
     ])
