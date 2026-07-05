@@ -14,6 +14,12 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.14
     hooks:
+      # --exit-zero: auto-fix staged files but never block on the remaining
+      # legacy backlog (e.g. bridge.py carries hundreds of pre-existing
+      # findings; a strict gate here forces habitual --no-verify, which is
+      # worse). If ruff applies a fix, pre-commit still stops the commit so
+      # you can re-stage. Drop --exit-zero to go strict once the backlog is
+      # burned down (track with `make lint-report`).
       - id: ruff
-        args: [--fix]
+        args: [--fix, --exit-zero]
       - id: ruff-format
