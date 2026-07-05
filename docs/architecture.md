@@ -2,6 +2,8 @@
 
 This file is a human map of the current repository boundaries. It does not rename existing terms or introduce replacement terms for code symbols.
 
+For a plain-language tour of the runtime flow and every directory, see [codebase_map.md](codebase_map.md).
+
 ## Entry points
 
 - `cais_spade_llm/ui_main.py` is the unified entry point for the NiceGUI UI and the headless SPADE agent path. It owns startup cleanup, shutdown cleanup, and command-line flags.

@@ -11,6 +11,9 @@ This README is the deployment contract for a new engineer or an LLM. It is writt
 
 `What can I run immediately after cloning, and what still requires extra system setup?`
 
+> **Lost in the code?** Read [docs/codebase_map.md](docs/codebase_map.md) — a one-page tour of
+> what runs in what order, what every directory is for, and where to look when something breaks.
+
 ## Reality Check
 
 This repository is deployable on a new PC, but not all modes are equally turnkey.
