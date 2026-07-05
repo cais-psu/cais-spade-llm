@@ -68,6 +68,7 @@ ROBOT_PRIMITIVE_KIND_MAP = {
     "move_cartesian": "motion",
     "move_pose": "motion",
     "move_relative": "motion",
+    "delay": "motion",
     "open_gripper": "release",
     "close_gripper": "pick",
     "attach_part": "pick",
@@ -1471,6 +1472,7 @@ _ROBOT_PROMPT_HIDDEN_PRIMITIVES = frozenset(
         "detach_part",
         "snap_part_to_slot",
         "move_pose",
+        "delay",
         "get_current_pose",
     }
 )

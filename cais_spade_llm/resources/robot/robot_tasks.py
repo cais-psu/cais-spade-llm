@@ -1141,6 +1141,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         },
                     ),
                     RobotTaskStep(
+                        id="delay_after_grasp",
+                        op="delay",
+                        executor="primitive",
+                        exposed=False,
+                        params={"duration_sec": 0.25},
+                    ),
+                    RobotTaskStep(
                         id="lift",
                         op="move_relative",
                         executor="primitive",
@@ -1431,6 +1438,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                 ),
                 steps=(
                     RobotTaskStep(
+                        id="delay_before_release",
+                        op="delay",
+                        executor="primitive",
+                        exposed=False,
+                        params={"duration_sec": 0.25},
+                    ),
+                    RobotTaskStep(
                         id="release_part",
                         op="release_part",
                         executor="primitive",
@@ -1447,6 +1461,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "part_name": _state("_held_part"),
                             "destination_location": _arg("destination_location"),
                         },
+                    ),
+                    RobotTaskStep(
+                        id="delay_after_release",
+                        op="delay",
+                        executor="primitive",
+                        exposed=False,
+                        params={"duration_sec": 0.25},
                     ),
                     RobotTaskStep(
                         id="snap_part_to_slot",

@@ -22,6 +22,9 @@ RG2_MAX_VELOCITY = 0.40
 RG2_MAX_ACCELERATION = 1.50
 DEFAULT_VELOCITY_SCALING = 0.20
 DEFAULT_ACCELERATION_SCALING = 0.20
+RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
+RTDE_ALLOWED_GOAL_DURATION_MARGIN = 20.0
+UR5E_RTDE_TRAJECTORY_CONTROLLER = "cais_ur5e_rtde_trajectory_controller"
 
 
 def _strip_world_and_ground(root):
@@ -221,14 +224,15 @@ def _build_moveit_params(urdf, srdf):
         "longest_valid_segment_fraction": 0.005,
     }
 
+    ur5e_arm_controller = UR5E_RTDE_TRAJECTORY_CONTROLLER
     controllers = {
         "moveit_simple_controller_manager": {
             "controller_names": [
-                "scaled_joint_trajectory_controller",
+                ur5e_arm_controller,
                 "joint_trajectory_controller",
                 "ur5e_rg2_gripper_traj_controller",
             ],
-            "scaled_joint_trajectory_controller": {
+            ur5e_arm_controller: {
                 "action_ns": "follow_joint_trajectory",
                 "type": "FollowJointTrajectory",
                 "default": True,
@@ -266,8 +270,8 @@ def _build_moveit_params(urdf, srdf):
 
     trajectory_execution = {
         "moveit_manage_controllers": False,
-        "trajectory_execution.allowed_execution_duration_scaling": 1.2,
-        "trajectory_execution.allowed_goal_duration_margin": 0.5,
+        "trajectory_execution.allowed_execution_duration_scaling": RTDE_ALLOWED_EXECUTION_DURATION_SCALING,
+        "trajectory_execution.allowed_goal_duration_margin": RTDE_ALLOWED_GOAL_DURATION_MARGIN,
         "trajectory_execution.allowed_start_tolerance": 0.01,
         "trajectory_execution.execution_duration_monitoring": False,
     }

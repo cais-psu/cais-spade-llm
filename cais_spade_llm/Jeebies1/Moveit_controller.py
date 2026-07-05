@@ -11,17 +11,12 @@ from typing import Any
 
 import rclpy
 from control_msgs.action import FollowJointTrajectory
-from controller_manager_msgs.srv import ListControllers
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.msg import RobotTrajectory
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float64
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from ur_dashboard_msgs.msg import RobotMode, SafetyMode
-from ur_dashboard_msgs.srv import GetProgramState, GetRobotMode, GetSafetyMode, IsProgramRunning
 
 
 ARM_JOINTS = [
@@ -39,48 +34,13 @@ class UR5eMoveitCommander(Node):
         super().__init__("ur5e_moveit_commander")
         self.joint_state: JointState | None = None
         self.positions_by_name: dict[str, float] = {}
-        self.speed_scaling: float | None = None
-        self.driver_robot_program_running: bool | None = None
-        self.driver_robot_mode: int | None = None
-        self.driver_safety_mode: int | None = None
-        self.controllers: dict[str, str] = {}
 
         self.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
-        self.create_subscription(
-            Float64,
-            "/speed_scaling_state_broadcaster/speed_scaling",
-            self._on_speed_scaling,
-            10,
-        )
-        status_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.create_subscription(
-            Bool,
-            "/io_and_status_controller/robot_program_running",
-            self._on_driver_robot_program_running,
-            status_qos,
-        )
-        self.create_subscription(
-            RobotMode,
-            "/io_and_status_controller/robot_mode",
-            self._on_driver_robot_mode,
-            status_qos,
-        )
-        self.create_subscription(
-            SafetyMode,
-            "/io_and_status_controller/safety_mode",
-            self._on_driver_safety_mode,
-            status_qos,
-        )
         self.execute_client = ActionClient(self, ExecuteTrajectory, "/execute_trajectory")
         self.controller_client = ActionClient(
             self,
             FollowJointTrajectory,
-            "/scaled_joint_trajectory_controller/follow_joint_trajectory",
+            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
         )
 
     def _on_joint_state(self, msg: JointState) -> None:
@@ -88,27 +48,10 @@ class UR5eMoveitCommander(Node):
         for name, position in zip(msg.name, msg.position):
             self.positions_by_name[str(name)] = float(position)
 
-    def _on_speed_scaling(self, msg: Float64) -> None:
-        self.speed_scaling = float(msg.data)
-
-    def _on_driver_robot_program_running(self, msg: Bool) -> None:
-        self.driver_robot_program_running = bool(msg.data)
-
-    def _on_driver_robot_mode(self, msg: RobotMode) -> None:
-        self.driver_robot_mode = int(msg.mode)
-
-    def _on_driver_safety_mode(self, msg: SafetyMode) -> None:
-        self.driver_safety_mode = int(msg.mode)
-
     def wait_for_samples(self, timeout_sec: float = 3.0) -> None:
         deadline = time.monotonic() + float(timeout_sec)
         while rclpy.ok() and time.monotonic() < deadline:
-            if (
-                self.joint_state is not None
-                and self.speed_scaling is not None
-                and self.driver_robot_mode is not None
-                and self.driver_safety_mode is not None
-            ):
+            if self.joint_state is not None:
                 return
             rclpy.spin_once(self, timeout_sec=0.1)
 
@@ -138,72 +81,22 @@ class UR5eMoveitCommander(Node):
             return None
         return [float(self.positions_by_name[joint]) for joint in ARM_JOINTS]
 
-    def refresh_controllers(self) -> None:
-        response = self.call_service("/controller_manager/list_controllers", ListControllers)
-        self.controllers.clear()
-        if response is None:
-            return
-        print("controllers:")
-        for controller in response.controller:
-            self.controllers[str(controller.name)] = str(controller.state)
-            if controller.name in {
-                "joint_state_broadcaster",
-                "scaled_joint_trajectory_controller",
-                "joint_trajectory_controller",
-                "io_and_status_controller",
-                "speed_scaling_state_broadcaster",
-            }:
-                print(f"  {controller.name}: {controller.state} ({controller.type})")
-
     def diagnose(self) -> bool:
         self.wait_for_samples(timeout_sec=3.0)
-        self.refresh_controllers()
-        program_state = self.call_service("/dashboard_client/program_state", GetProgramState)
-        program_running = self.call_service("/dashboard_client/program_running", IsProgramRunning)
-        robot_mode = self.call_service("/dashboard_client/get_robot_mode", GetRobotMode)
-        safety_mode = self.call_service("/dashboard_client/get_safety_mode", GetSafetyMode)
 
         execute_available = self.execute_client.wait_for_server(timeout_sec=1.0)
         controller_available = self.controller_client.wait_for_server(timeout_sec=1.0)
         arm_positions = self.arm_positions()
 
-        print(f"program_state: {getattr(program_state, 'answer', None)!r}")
-        print(f"program_running: {getattr(program_running, 'program_running', None)!r}")
-        print(f"robot_mode: {getattr(robot_mode, 'robot_mode', None)!r}")
-        print(f"safety_mode: {getattr(safety_mode, 'safety_mode', None)!r}")
-        print(f"driver_robot_program_running: {self.driver_robot_program_running!r}")
-        print(f"driver_robot_mode: {self.driver_robot_mode!r}")
-        print(f"driver_safety_mode: {self.driver_safety_mode!r}")
-        print(f"speed_scaling: {self.speed_scaling!r}")
         print(f"arm_positions: {arm_positions!r}")
         print(f"execute_trajectory_available: {execute_available!r}")
-        print(f"scaled_joint_trajectory_action_available: {controller_available!r}")
-
-        dashboard_program_running = getattr(program_running, "program_running", None)
-        driver_state_ready = (
-            self.driver_robot_mode == RobotMode.RUNNING
-            and self.driver_safety_mode == SafetyMode.NORMAL
-            and self.speed_scaling is not None
-            and self.speed_scaling > 0.0
-        )
-        program_ready = (
-            dashboard_program_running is True
-            or self.driver_robot_program_running is True
-            or (dashboard_program_running is not True and driver_state_ready)
-        )
+        print(f"rtde_trajectory_action_available: {controller_available!r}")
 
         ready = (
-            self.controllers.get("joint_state_broadcaster") == "active"
-            and self.controllers.get("scaled_joint_trajectory_controller") == "active"
-            and program_ready
-            and self.speed_scaling is not None
-            and self.speed_scaling > 0.0
-            and arm_positions is not None
+            arm_positions is not None
             and execute_available
             and controller_available
         )
-        print(f"driver_state_ready: {driver_state_ready!r}")
-        print(f"program_ready: {program_ready!r}")
         print(f"moveit_execution_ready: {ready!r}")
         return bool(ready)
 

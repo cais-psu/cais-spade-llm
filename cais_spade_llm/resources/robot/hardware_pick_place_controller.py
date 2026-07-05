@@ -346,6 +346,9 @@ class HardwarePickPlaceController(GazeboPickPlaceController):
 
     def replay_step(self, step: dict[str, Any], *, duration_sec: float = 2.0) -> dict[str, Any]:
         primitive = str(step.get("primitive") or "").strip()
+        if primitive == "delay":
+            params = dict(step.get("params") or {})
+            return self.delay(duration_sec=params.get("duration_sec", 0.0))
         if primitive in {"move_cartesian", "move_relative", "move_to_named_pose"}:
             positions = self._step_positions(step)
             if not positions:

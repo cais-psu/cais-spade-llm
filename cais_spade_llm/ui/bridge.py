@@ -70,10 +70,11 @@ _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 _VENV_PYTHON = _PROJECT_ROOT / ".venv" / "bin" / "python"
 _UR5E_RG2_GRIPPER_SCRIPT = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rg2_rtde_gripper.py"
+_UR5E_RTDE_TRAJECTORY_SCRIPT = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rtde_trajectory_server.py"
+_UR5E_RTDE_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+_UR5E_RTDE_TRAJECTORY_STATUS = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
 _UR5E_RG2_GRIPPER_ACTION = "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
 _UR5E_RG2_GRIPPER_STATUS = Path("/tmp") / "cais_ur5e_rg2_gripper_status.json"
-_UR5E_EXTERNAL_CONTROL_PROGRAM = "ros.urp"
-_UR5E_EXTERNAL_CONTROL_STATUS = Path("/tmp") / "cais_ur5e_external_control_status.json"
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
@@ -110,7 +111,7 @@ class SystemBridge:
     _BASE_HARDWARE_PROCESS_NAMES = {
         "hardware_xarm6_driver",
         "hardware_xarm6_moveit",
-        "hardware_ur5e_driver",
+        "hardware_ur5e_rtde_trajectory_server",
         "hardware_ur5e_rg2_gripper",
         "hardware_ur5e_moveit",
     }
@@ -122,11 +123,11 @@ class SystemBridge:
     }
     _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES = {
         "digital_twin_xarm_only_hardware_xarm6_moveit",
-        "digital_twin_ur5e_only_hardware_ur5e_driver",
+        "digital_twin_ur5e_only_hardware_ur5e_rtde_trajectory_server",
         "digital_twin_ur5e_only_hardware_ur5e_rg2_gripper",
         "digital_twin_ur5e_only_hardware_ur5e_moveit",
         "digital_twin_dual_robots_hardware_xarm6_driver",
-        "digital_twin_dual_robots_hardware_ur5e_driver",
+        "digital_twin_dual_robots_hardware_ur5e_rtde_trajectory_server",
         "digital_twin_dual_robots_hardware_ur5e_rg2_gripper",
         "digital_twin_dual_robots_hardware_moveit",
     }
@@ -150,8 +151,12 @@ class SystemBridge:
     _HARDWARE_STACKS = {
         # xArm6 MoveIt realmove includes UFRobotSystemHardware (embedded driver path).
         "xarm6": ("hardware_xarm6_moveit",),
-        # UR5e uses explicit driver + RG2 bridge + MoveIt bring-up.
-        "ur5e": ("hardware_ur5e_driver", "hardware_ur5e_rg2_gripper", "hardware_ur5e_moveit"),
+        # UR5e arm execution is RTDE-only; RG2 remains a separate bridge.
+        "ur5e": (
+            "hardware_ur5e_rtde_trajectory_server",
+            "hardware_ur5e_rg2_gripper",
+            "hardware_ur5e_moveit",
+        ),
     }
     _DIGITAL_TWIN_TARGETS = {
         "xarm only": {
@@ -182,7 +187,7 @@ class SystemBridge:
             "gazebo_process": "digital_twin_ur5e_only_gazebo",
             "hardware": ("ur5e",),
             "hardware_processes": {
-                "driver": "digital_twin_ur5e_only_hardware_ur5e_driver",
+                "rtde": "digital_twin_ur5e_only_hardware_ur5e_rtde_trajectory_server",
                 "gripper": "digital_twin_ur5e_only_hardware_ur5e_rg2_gripper",
                 "moveit": "digital_twin_ur5e_only_hardware_ur5e_moveit",
             },
@@ -209,7 +214,7 @@ class SystemBridge:
                     "moveit": "digital_twin_dual_robots_hardware_moveit",
                 },
                 "ur5e": {
-                    "driver": "digital_twin_dual_robots_hardware_ur5e_driver",
+                    "rtde": "digital_twin_dual_robots_hardware_ur5e_rtde_trajectory_server",
                     "gripper": "digital_twin_dual_robots_hardware_ur5e_rg2_gripper",
                     "moveit": "digital_twin_dual_robots_hardware_moveit",
                 },
@@ -243,15 +248,14 @@ class SystemBridge:
     _DIGITAL_TWIN_REPLAY_SPEED_SCALE = 1.0
     _DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC = 2.0 / _DIGITAL_TWIN_REPLAY_SPEED_SCALE
     _DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S = 25.0 * _DIGITAL_TWIN_REPLAY_SPEED_SCALE
+    _DIGITAL_TWIN_PREPARED_REPLAY_VERSION = 6
     _DIGITAL_TWIN_INITIALIZE_TIMEOUT_S = 90.0
+    _DIGITAL_TWIN_MIRROR_STABILIZATION_SEC = 0.75
     # Per-robot home/initial joint pose (arm joints, radians) for the "Go Home" button.
     # xArm6 matches the dual-boot startup pose injected into the gazebo launch.
     _DIGITAL_TWIN_HOME: dict[str, list[float]] = {
         "xarm6": [-1.572631, -1.054702, -0.385494, 0.000322, 1.440603, -1.572544],
     }
-    _UR5E_TRAJECTORY_CONTROLLER = "scaled_joint_trajectory_controller"
-    _UR5E_CONTROLLER_STATUS_CACHE_TTL_S = 3.0
-    _UR5E_CONTROLLER_AUTO_REPAIR_COOLDOWN_S = 20.0
     _DIGITAL_TWIN_SYNC_RESTART_COOLDOWN_S = 8.0
     _ROBOT_FUNCTION_NAMES = (
         "pick_approach",
@@ -4645,21 +4649,22 @@ class SystemBridge:
             "ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py "
             "robot_ip:={xarm6_ip} add_gripper:=true"
         ),
-        "hardware_ur5e_driver": (
-            "ros2 launch ur_robot_driver ur_control.launch.py "
-            "ur_type:=ur5e robot_ip:={ur5e_ip} launch_rviz:=false "
-            "headless_mode:=false "
-            "runtime_config_package:=xarm_gazebo "
-            "controllers_file:=ur5e_hardware_controllers.yaml "
-            "initial_joint_controller:=scaled_joint_trajectory_controller "
-            "activate_joint_controller:=true"
+        "hardware_ur5e_rtde_trajectory_server": (
+            f"{_VENV_PYTHON} {_UR5E_RTDE_TRAJECTORY_SCRIPT} "
+            f"--robot-ip {{ur5e_ip}} --status-file {_UR5E_RTDE_TRAJECTORY_STATUS}"
         ),
         "hardware_ur5e_rg2_gripper": (
             f"{_VENV_PYTHON} {_UR5E_RG2_GRIPPER_SCRIPT} "
             "--robot-ip {ur5e_ip} --backend xmlrpc"
         ),
-        "hardware_ur5e_moveit": "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true",
-        "hardware_dual_robots_moveit": "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py launch_rviz:=true",
+        "hardware_ur5e_moveit": (
+            "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py "
+            "launch_rviz:=true"
+        ),
+        "hardware_dual_robots_moveit": (
+            "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py "
+            "launch_rviz:=true"
+        ),
         "perception": f"python3.10 {_PROJECT_ROOT / 'ros2' / 'cais_lab_gazebo' / 'sensor' / 'gazebo_camera_detector.py'}",
         "teleop_xarm6": f"python3.10 {_TELEOP_SCRIPT} --robot xarm6",
         "teleop_ur5e": f"python3.10 {_TELEOP_SCRIPT} --robot ur5e",
@@ -4701,7 +4706,7 @@ class SystemBridge:
             }
         if key == "ur5e":
             return {
-                "driver": "hardware_ur5e_driver",
+                "rtde": "hardware_ur5e_rtde_trajectory_server",
                 "gripper": "hardware_ur5e_rg2_gripper",
                 "moveit": "hardware_ur5e_moveit",
             }
@@ -5005,6 +5010,10 @@ class SystemBridge:
             ur5e_ip=self.hardware_ips.get("ur5e", self._HW_IP_DEFAULTS["ur5e"]),
         )
 
+    def _hardware_stack_for_robot(self, robot: str) -> tuple[str, ...] | None:
+        key = str(robot or "").strip().lower()
+        return self._HARDWARE_STACKS.get(key)
+
     @staticmethod
     def _env_int(name: str, default: int) -> int:
         raw = str(os.environ.get(name, "")).strip()
@@ -5187,6 +5196,16 @@ class SystemBridge:
                 f"UR5e RG2 bridge script is missing at {_UR5E_RG2_GRIPPER_SCRIPT}.",
             ),
         )
+        ur_rtde_trajectory_assets = (
+            (
+                _VENV_PYTHON,
+                f"Python venv is missing at {_VENV_PYTHON}. Create the project venv before starting the UR5e RTDE trajectory server.",
+            ),
+            (
+                _UR5E_RTDE_TRAJECTORY_SCRIPT,
+                f"UR5e RTDE trajectory server script is missing at {_UR5E_RTDE_TRAJECTORY_SCRIPT}.",
+            ),
+        )
 
         if launch_key == "gazebo_dual":
             return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *dual_assets]
@@ -5208,6 +5227,8 @@ class SystemBridge:
             return [*moveit_core, *ur_stack, *onrobot_ws, *ur_hardware_rg2_assets]
         if launch_key == "hardware_ur5e_rg2_gripper":
             return [*ur_rg2_bridge_assets]
+        if launch_key == "hardware_ur5e_rtde_trajectory_server":
+            return [*ur_rtde_trajectory_assets]
         return []
 
     def _ros2_launch_prereq_error(self, name: str) -> str | None:
@@ -5433,8 +5454,6 @@ class SystemBridge:
         key = str(robot).strip().lower()
         if key == "xarm6":
             return ("xarm" in name) and any(token in name for token in ("motion_enable", "set_mode", "set_state"))
-        if key == "ur5e":
-            return ("dashboard_client" in name) or ("ur_hardware_interface" in name)
         return False
 
     def _ros2_command_output(
@@ -5726,746 +5745,34 @@ class SystemBridge:
             return f"{target} has no publishers"
         return f"{target} publisher state not available within {timeout_sec:.0f}s"
 
-    @staticmethod
-    def _controller_state_from_list_controllers_output(
-        output: str,
-        controller_name: str,
-    ) -> str | None:
-        target = str(controller_name or "").strip()
-        if not target:
-            return None
-        pattern = (
-            r"ControllerState\(name=['\"]"
-            + re.escape(target)
-            + r"['\"], state=['\"]([^'\"]+)['\"]"
-        )
-        match = re.search(pattern, str(output or ""))
-        if match:
-            return str(match.group(1) or "").strip()
-        return None
+    def _ur5e_rtde_trajectory_status(self) -> dict[str, Any]:
+        return self._read_json_file(_UR5E_RTDE_TRAJECTORY_STATUS)
 
     @staticmethod
-    def _switch_controller_ok_from_output(output: str) -> bool | None:
-        text = str(output or "")
-        if re.search(r"\bok\s*=\s*True\b", text) or re.search(r"\bok\s*:\s*true\b", text, re.IGNORECASE):
-            return True
-        if re.search(r"\bok\s*=\s*False\b", text) or re.search(r"\bok\s*:\s*false\b", text, re.IGNORECASE):
-            return False
-        return None
-
-    @staticmethod
-    def _ur_program_running_from_output(output: str) -> bool | None:
-        text = str(output or "")
-        if re.search(r"\bprogram_running\s*=\s*True\b", text) or re.search(
-            r"\bprogram_running\s*:\s*true\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return True
-        if re.search(r"\bprogram_running\s*=\s*False\b", text) or re.search(
-            r"\bprogram_running\s*:\s*false\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return False
-        return None
-
-    @staticmethod
-    def _ros_service_success_from_output(output: str) -> bool | None:
-        text = str(output or "")
-        if re.search(r"\bsuccess\s*=\s*True\b", text) or re.search(
-            r"\bsuccess\s*:\s*true\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return True
-        if re.search(r"\bsuccess\s*=\s*False\b", text) or re.search(
-            r"\bsuccess\s*:\s*false\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return False
-        return None
-
-    def _write_ur5e_external_control_status(
-        self,
-        *,
-        state: str,
-        message: str = "",
-        success: bool | None = None,
-        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
-        ros_domain_id: int | None = None,
-        error: str = "",
-    ) -> None:
-        payload: dict[str, Any] = {
-            "state": str(state or "unknown"),
-            "message": str(message or ""),
-            "program": str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM),
-            "error": str(error or ""),
-            "updated_at": time.time(),
-        }
-        if success is not None:
-            payload["success"] = bool(success)
-        if ros_domain_id is not None:
-            payload["ros_domain_id"] = int(ros_domain_id)
-        atomic_json_write(_UR5E_EXTERNAL_CONTROL_STATUS, payload)
-
-    def _ur5e_external_control_status(self) -> dict[str, Any]:
-        return self._read_json_file(_UR5E_EXTERNAL_CONTROL_STATUS)
-
-    def _call_dashboard_service(
-        self,
-        service_name: str,
-        service_type: str,
-        request: str,
-        *,
-        ros_domain_id: int | None = None,
-        timeout_sec: float = 6.0,
-    ) -> tuple[bool, str]:
-        return self._ros2_command_output(
-            "ros2 service call "
-            + shlex.quote(service_name)
-            + " "
-            + shlex.quote(service_type)
-            + " "
-            + shlex.quote(request),
-            timeout_sec=timeout_sec,
-            ros_domain_id=ros_domain_id,
-            emit_slow_diag=False,
-            emit_failure_diag=False,
-            emit_timeout_diag=False,
-        )
-
-    def _ur5e_program_running_once(
-        self,
-        *,
-        ros_domain_id: int | None = None,
-    ) -> tuple[bool | None, str]:
-        ok, out = self._call_dashboard_service(
-            "/dashboard_client/program_running",
-            "ur_dashboard_msgs/srv/IsProgramRunning",
-            "{}",
-            ros_domain_id=ros_domain_id,
-            timeout_sec=5.0,
-        )
-        if not ok:
-            return None, self._tail_output(out) or str(out or "").strip()
-        return self._ur_program_running_from_output(out), out
-
-    def _refresh_ur5e_external_control_running_status(
-        self,
-        *,
-        ros_domain_id: int | None = None,
-        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
-    ) -> bool:
-        program_name = str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM).strip()
-        running, _detail = self._ur5e_program_running_once(ros_domain_id=ros_domain_id)
-        if running is not True:
-            return False
-        self._write_ur5e_external_control_status(
-            state="running",
-            message="External Control: running",
-            program=program_name,
-            ros_domain_id=ros_domain_id,
-            success=True,
-        )
-        return True
-
-    def _ensure_ur5e_external_control_running(
-        self,
-        *,
-        process_name: str,
-        ros_domain_id: int | None = None,
-        program: str = _UR5E_EXTERNAL_CONTROL_PROGRAM,
-        timeout_sec: float = 18.0,
-    ) -> str | None:
-        program_name = str(program or _UR5E_EXTERNAL_CONTROL_PROGRAM).strip()
-        if not program_name:
-            return "UR5e External Control program name is empty"
-
-        self._write_ur5e_external_control_status(
-            state="reconnecting",
-            message=f"External Control: reconnecting {program_name}",
-            program=program_name,
-            ros_domain_id=ros_domain_id,
-        )
-
-        services_err = self._wait_for_ros_services(
-            (
-                "/dashboard_client/program_running",
-                "/dashboard_client/load_program",
-                "/dashboard_client/play",
-            ),
-            timeout_sec=max(14.0, float(timeout_sec)),
-            process_name=process_name,
-            ros_domain_id=ros_domain_id,
-        )
-        if services_err:
-            message = (
-                "External Control: manual Play required. "
-                "Set pendant to Remote Control or press Play on ros.urp manually."
-            )
-            self._write_ur5e_external_control_status(
-                state="manual Play required",
-                message=message,
-                program=program_name,
-                ros_domain_id=ros_domain_id,
-                error=services_err,
-                success=False,
-            )
-            return f"UR5e External Control dashboard services are not ready: {services_err}"
-
-        running, detail = self._ur5e_program_running_once(ros_domain_id=ros_domain_id)
-        if running is True:
-            self._write_ur5e_external_control_status(
-                state="running",
-                message="External Control: running",
-                program=program_name,
-                ros_domain_id=ros_domain_id,
-                success=True,
-            )
-            return None
-
-        load_request = "{filename: " + program_name + "}"
-        ok, out = self._call_dashboard_service(
-            "/dashboard_client/load_program",
-            "ur_dashboard_msgs/srv/Load",
-            load_request,
-            ros_domain_id=ros_domain_id,
-            timeout_sec=8.0,
-        )
-        if not ok or self._ros_service_success_from_output(out) is False:
-            detail_text = self._tail_output(out) or str(out or detail or "").strip()
-            if self._refresh_ur5e_external_control_running_status(
-                ros_domain_id=ros_domain_id,
-                program=program_name,
-            ):
-                return None
-            message = (
-                "External Control: manual Play required. "
-                "Set pendant to Remote Control or press Play on ros.urp manually."
-            )
-            self._write_ur5e_external_control_status(
-                state="manual Play required",
-                message=message,
-                program=program_name,
-                ros_domain_id=ros_domain_id,
-                error=detail_text,
-                success=False,
-            )
-            return f"UR5e External Control auto reconnect failed loading {program_name}: {detail_text or 'load_program failed'}. Set pendant to Remote Control or press Play on ros.urp manually."
-
-        ok, out = self._call_dashboard_service(
-            "/dashboard_client/play",
-            "std_srvs/srv/Trigger",
-            "{}",
-            ros_domain_id=ros_domain_id,
-            timeout_sec=8.0,
-        )
-        if not ok or self._ros_service_success_from_output(out) is False:
-            detail_text = self._tail_output(out) or str(out or "").strip()
-            if self._refresh_ur5e_external_control_running_status(
-                ros_domain_id=ros_domain_id,
-                program=program_name,
-            ):
-                return None
-            message = (
-                "External Control: manual Play required. "
-                "Set pendant to Remote Control or press Play on ros.urp manually."
-            )
-            self._write_ur5e_external_control_status(
-                state="manual Play required",
-                message=message,
-                program=program_name,
-                ros_domain_id=ros_domain_id,
-                error=detail_text,
-                success=False,
-            )
-            return f"UR5e External Control auto reconnect failed playing {program_name}: {detail_text or 'play failed'}. Set pendant to Remote Control or press Play on ros.urp manually."
-
-        err = self._wait_for_ur_program_running(
-            timeout_sec=timeout_sec,
-            process_name=process_name,
-            ros_domain_id=ros_domain_id,
-        )
-        if err:
-            if self._refresh_ur5e_external_control_running_status(
-                ros_domain_id=ros_domain_id,
-                program=program_name,
-            ):
-                return None
-            message = (
-                "External Control: manual Play required. "
-                "Set pendant to Remote Control or press Play on ros.urp manually."
-            )
-            self._write_ur5e_external_control_status(
-                state="manual Play required",
-                message=message,
-                program=program_name,
-                ros_domain_id=ros_domain_id,
-                error=err,
-                success=False,
-            )
-            return f"UR5e External Control did not become running after play: {err}. Set pendant to Remote Control or press Play on ros.urp manually."
-
-        self._write_ur5e_external_control_status(
-            state="running",
-            message="External Control: running",
-            program=program_name,
-            ros_domain_id=ros_domain_id,
-            success=True,
-        )
-        return None
-
-    def _activate_ros_controller(
-        self,
-        controller_name: str,
-        timeout_sec: float = 5.0,
-        *,
-        ros_domain_id: int | None = None,
-    ) -> str | None:
-        target = str(controller_name or "").strip()
-        if not target:
-            return "controller name is empty"
-        if not re.fullmatch(r"[-A-Za-z0-9_./]+", target):
-            return f"invalid controller name: {target}"
-        switch_timeout_sec = max(1, int(math.ceil(float(timeout_sec))))
-        request = (
-            "{activate_controllers: ["
-            + target
-            + "], deactivate_controllers: [], strictness: 2, activate_asap: true, timeout: {sec: "
-            + str(switch_timeout_sec)
-            + ", nanosec: 0}}"
-        )
-        ok, out = self._ros2_command_output(
-            "ros2 service call /controller_manager/switch_controller "
-            "controller_manager_msgs/srv/SwitchController "
-            + shlex.quote(request),
-            timeout_sec=max(6.0, float(timeout_sec) + 4.0),
-            ros_domain_id=ros_domain_id,
-            emit_slow_diag=False,
-            emit_failure_diag=False,
-            emit_timeout_diag=False,
-        )
-        if not ok:
-            return self._tail_output(out) or f"failed to activate {target}"
-        switched = self._switch_controller_ok_from_output(out)
-        if switched is True:
-            return None
-        if switched is False:
-            return f"switch_controller returned ok=False for {target}"
-        return f"could not parse switch_controller response for {target}"
-
-    def _wait_for_ur_program_running(
-        self,
-        timeout_sec: float = 12.0,
-        *,
-        process_name: str | None = None,
-        cancel_event: threading.Event | None = None,
-        ros_domain_id: int | None = None,
-        poll_interval_sec: float = 0.6,
-    ) -> str | None:
-        deadline = time.monotonic() + max(1.0, float(timeout_sec))
-        last_state: bool | None = None
-        while time.monotonic() < deadline:
-            if cancel_event and cancel_event.is_set():
-                return "UR program-running wait cancelled"
-
-            if process_name and self.ros2_proc_status(process_name) != "running":
-                return f"{process_name} exited before UR program became running"
-
-            ok, out = self._ros2_command_output(
-                'ros2 service call /dashboard_client/program_running ur_dashboard_msgs/srv/IsProgramRunning "{}"',
-                timeout_sec=4.0,
-                ros_domain_id=ros_domain_id,
-                emit_slow_diag=False,
-                emit_failure_diag=False,
-                emit_timeout_diag=False,
-            )
-            if ok:
-                last_state = self._ur_program_running_from_output(out)
-                if last_state is True:
-                    return None
-            time.sleep(max(0.1, float(poll_interval_sec)))
-
-        if process_name and self.ros2_proc_status(process_name) != "running":
-            return f"{process_name} exited before UR program became running"
-        if last_state is False:
-            return "UR program is not running"
-        return f"UR program-running state not available within {timeout_sec:.0f}s"
-
-    def _wait_for_ros_controller_active(
-        self,
-        controller_name: str,
-        timeout_sec: float = 20.0,
-        process_name: str | None = None,
-        cancel_event: threading.Event | None = None,
-        ros_domain_id: int | None = None,
-        poll_interval_sec: float = 0.5,
-    ) -> str | None:
-        target = str(controller_name or "").strip()
-        if not target:
-            return "controller name is empty"
-
-        deadline = time.monotonic() + max(1.0, float(timeout_sec))
-        last_state: str | None = None
-        while time.monotonic() < deadline:
-            if cancel_event and cancel_event.is_set():
-                return f"{target} wait cancelled"
-
-            if process_name and self.ros2_proc_status(process_name) != "running":
-                return f"{process_name} exited before {target} became active"
-
-            ok, out = self._ros2_command_output(
-                'ros2 service call /controller_manager/list_controllers controller_manager_msgs/srv/ListControllers "{}"',
-                timeout_sec=5.0,
-                ros_domain_id=ros_domain_id,
-                emit_slow_diag=False,
-                emit_failure_diag=False,
-                emit_timeout_diag=False,
-            )
-            if ok:
-                last_state = self._controller_state_from_list_controllers_output(out, target)
-                if last_state == "active":
-                    return None
-            time.sleep(max(0.1, float(poll_interval_sec)))
-
-        if process_name and self.ros2_proc_status(process_name) != "running":
-            return f"{process_name} exited before {target} became active"
-        if last_state:
-            return f"{target} is {last_state}, not active"
-        return f"{target} not found active within {timeout_sec:.0f}s"
-
-    def _ensure_ros_controller_active(
-        self,
-        controller_name: str,
-        timeout_sec: float = 20.0,
-        *,
-        process_name: str | None = None,
-        cancel_event: threading.Event | None = None,
-        ros_domain_id: int | None = None,
-    ) -> str | None:
-        target = str(controller_name or "").strip()
-        if not target:
-            return "controller name is empty"
-
-        err = self._wait_for_ros_controller_active(
-            target,
-            timeout_sec=1.5,
-            process_name=process_name,
-            cancel_event=cancel_event,
-            ros_domain_id=ros_domain_id,
-            poll_interval_sec=0.25,
-        )
-        if err is None:
-            return None
-
-        err = self._activate_ros_controller(
-            target,
-            timeout_sec=min(8.0, max(3.0, float(timeout_sec) / 2.0)),
-            ros_domain_id=ros_domain_id,
-        )
-        if err:
-            return err
-
-        return self._wait_for_ros_controller_active(
-            target,
-            timeout_sec=timeout_sec,
-            process_name=process_name,
-            cancel_event=cancel_event,
-            ros_domain_id=ros_domain_id,
-            poll_interval_sec=0.35,
-        )
-
-    @staticmethod
-    def _ur5e_controller_cache_key(
-        process_name: str | None,
-        ros_domain_id: int | None,
-    ) -> str:
-        process_key = str(process_name or "hardware_ur5e_driver").strip() or "hardware_ur5e_driver"
-        domain_key = str(int(ros_domain_id)) if ros_domain_id is not None else "default"
-        return f"{process_key}|{domain_key}"
-
-    def _read_ros_controller_state(
-        self,
-        controller_name: str,
-        *,
-        ros_domain_id: int | None = None,
-        timeout_sec: float = 5.0,
-    ) -> tuple[str, str]:
-        target = str(controller_name or "").strip()
-        if not target:
-            return "unknown", "controller name is empty"
-        ok, out = self._ros2_command_output(
-            'ros2 service call /controller_manager/list_controllers controller_manager_msgs/srv/ListControllers "{}"',
-            timeout_sec=max(1.0, float(timeout_sec)),
-            ros_domain_id=ros_domain_id,
-            emit_slow_diag=False,
-            emit_failure_diag=False,
-            emit_timeout_diag=False,
-        )
-        if not ok:
-            return "unknown", self._tail_output(out) or str(out or "").strip()
-        state = self._controller_state_from_list_controllers_output(out, target)
-        if not state:
-            return "unknown", f"{target} not listed by controller_manager"
-        return state, str(out or "").strip()
-
-    def _cache_ur5e_trajectory_controller_status(
-        self,
-        payload: dict[str, Any],
-        *,
-        process_name: str | None = None,
-        ros_domain_id: int | None = None,
-    ) -> dict[str, Any]:
-        body = dict(payload)
-        body.setdefault("controller", self._UR5E_TRAJECTORY_CONTROLLER)
-        body.setdefault("updated_at", time.time())
-        if process_name:
-            body["process_name"] = str(process_name)
-        if ros_domain_id is not None:
-            body["ros_domain_id"] = int(ros_domain_id)
-        key = self._ur5e_controller_cache_key(process_name, ros_domain_id)
-        self._ur5e_controller_status_cache[key] = body
-        return body
-
-    def _ur5e_trajectory_controller_status(
-        self,
-        *,
-        process_name: str | None = None,
-        ros_domain_id: int | None = None,
-        force: bool = False,
-    ) -> dict[str, Any]:
-        process_key = str(process_name or "").strip()
-        if process_key:
-            process_state = self.ros2_proc_status(process_key)
-            if process_state != "running":
-                return self._cache_ur5e_trajectory_controller_status(
-                    {
-                        "state": "unavailable",
-                        "message": f"{process_key}: {process_state}",
-                        "error": "",
-                    },
-                    process_name=process_key,
-                    ros_domain_id=ros_domain_id,
-                )
-
-        cache_key = self._ur5e_controller_cache_key(process_key or None, ros_domain_id)
-        cached = self._ur5e_controller_status_cache.get(cache_key)
-        now = time.time()
-        if (
-            not force
-            and isinstance(cached, dict)
-            and (now - float(cached.get("updated_at") or 0.0)) <= self._UR5E_CONTROLLER_STATUS_CACHE_TTL_S
-        ):
-            return dict(cached)
-
-        state, detail = self._read_ros_controller_state(
-            self._UR5E_TRAJECTORY_CONTROLLER,
-            ros_domain_id=ros_domain_id,
-        )
-        error = "" if state in {"active", "inactive"} else detail
-        message = (
-            f"{self._UR5E_TRAJECTORY_CONTROLLER} {state}"
-            if state in {"active", "inactive"}
-            else (detail or f"{self._UR5E_TRAJECTORY_CONTROLLER} {state}")
-        )
-        return self._cache_ur5e_trajectory_controller_status(
-            {
-                "state": state or "unknown",
-                "message": message,
-                "error": error,
-            },
-            process_name=process_key or None,
-            ros_domain_id=ros_domain_id,
-        )
-
-    def _attach_ur5e_trajectory_controller_status(
-        self,
+    def _attach_ur5e_rtde_trajectory_status(
         status: dict[str, Any],
-        *,
-        process_name: str | None = None,
-        ros_domain_id: int | None = None,
-        force: bool = False,
+        rtde_status: dict[str, Any],
     ) -> dict[str, Any]:
-        controller_status = self._ur5e_trajectory_controller_status(
-            process_name=process_name,
-            ros_domain_id=ros_domain_id,
-            force=force,
-        )
-        state = str(controller_status.get("state") or "unknown")
-        status["trajectory_controller"] = state
-        status["trajectory_controller_message"] = str(controller_status.get("message") or "")
-        status["trajectory_controller_error"] = str(controller_status.get("error") or "")
-        if state == "inactive":
-            status["trajectory_controller_warning"] = (
-                "UR5e trajectory controller inactive; Plan & Execute will fail."
-            )
+        status["rtde_trajectory_server"] = str(rtde_status.get("state") or "unknown")
+        status["rtde_trajectory_message"] = str(rtde_status.get("message") or "")
+        for key in (
+            "robot_ip",
+            "action_name",
+            "point_count",
+            "start_delta_rad",
+            "start_delta_joint",
+            "first_point_time",
+            "min_point_spacing",
+            "max_segment_velocity_rad_s",
+            "max_segment_velocity_joint",
+            "time_scale_applied",
+            "blocked_reason",
+            "final_error_rad",
+            "final_error_joint",
+        ):
+            if key in rtde_status:
+                status[f"rtde_trajectory_{key}"] = rtde_status.get(key)
         return status
-
-    def _ur5e_controller_context(
-        self,
-        target: str | None = None,
-    ) -> tuple[dict[str, Any] | None, str]:
-        target_key = str(target or "").strip()
-        domains = self._digital_twin_domain_ids()
-
-        def _from_digital_twin(target_name: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
-            hardware_robots = tuple(str(r).strip().lower() for r in (cfg.get("hardware") or ()))
-            if "ur5e" not in hardware_robots:
-                return None
-            processes = self._digital_twin_hardware_processes_for_robot(cfg, "ur5e")
-            return {
-                "target": target_name,
-                "process_name": str(processes.get("driver") or "").strip(),
-                "ros_domain_id": self._digital_twin_hardware_domain_id(cfg, "ur5e", domains),
-                "controller_name": self._UR5E_TRAJECTORY_CONTROLLER,
-            }
-
-        if target_key:
-            cfg = self._digital_twin_target(target_key)
-            if not cfg:
-                return None, f"unknown digital twin target: {target_key}"
-            context = _from_digital_twin(target_key, cfg)
-            if context is None:
-                return None, f"{target_key} does not include ur5e"
-            return context, ""
-
-        active_target = self._active_digital_twin_target()
-        if active_target:
-            cfg = self._digital_twin_target(active_target) or {}
-            context = _from_digital_twin(active_target, cfg)
-            if context is not None:
-                return context, ""
-
-        stack = self._HARDWARE_STACKS.get("ur5e") or ()
-        process_name = str(stack[0]) if stack else "hardware_ur5e_driver"
-        return {
-            "target": "",
-            "process_name": process_name,
-            "ros_domain_id": None,
-            "controller_name": self._UR5E_TRAJECTORY_CONTROLLER,
-        }, ""
-
-    def repair_ur5e_trajectory_controller(
-        self,
-        target: str | None = None,
-        *,
-        auto: bool = False,
-    ) -> dict[str, Any]:
-        context, err = self._ur5e_controller_context(target)
-        if err:
-            return {"success": False, "message": err, "state": "unknown"}
-        if not context:
-            return {"success": False, "message": "UR5e controller context is unavailable", "state": "unknown"}
-
-        process_name = str(context.get("process_name") or "").strip()
-        ros_domain_id = context.get("ros_domain_id")
-        if ros_domain_id is not None:
-            ros_domain_id = int(ros_domain_id)
-        controller_name = str(context.get("controller_name") or self._UR5E_TRAJECTORY_CONTROLLER)
-
-        if process_name:
-            process_state = self.ros2_proc_status(process_name)
-            if process_state != "running":
-                message = f"{process_name}: {process_state}; start UR5e hardware/digital twin first."
-                self._cache_ur5e_trajectory_controller_status(
-                    {"state": "unavailable", "message": message, "error": ""},
-                    process_name=process_name,
-                    ros_domain_id=ros_domain_id,
-                )
-                return {"success": False, "message": message, "state": "unavailable"}
-
-        controller_status = self._ur5e_trajectory_controller_status(
-            process_name=process_name or None,
-            ros_domain_id=ros_domain_id,
-            force=True,
-        )
-        state = str(controller_status.get("state") or "unknown")
-        if state == "active":
-            message = "scaled_joint_trajectory_controller already active"
-            return {"success": True, "message": message, "state": state}
-
-        running, detail = self._ur5e_program_running_once(ros_domain_id=ros_domain_id)
-        if running is not True:
-            message = "External Control is not running; press Play on ros.urp"
-            self._write_ur5e_external_control_status(
-                state="manual Play required",
-                message=message,
-                ros_domain_id=ros_domain_id,
-                error=str(detail or ""),
-                success=False,
-            )
-            return {"success": False, "message": message, "state": state, "external_control": "stopped"}
-
-        self._write_ur5e_external_control_status(
-            state="running",
-            message="External Control: running",
-            ros_domain_id=ros_domain_id,
-            success=True,
-        )
-
-        switch_err = self._activate_ros_controller(
-            controller_name,
-            timeout_sec=5.0,
-            ros_domain_id=ros_domain_id,
-        )
-        if switch_err:
-            self._cache_ur5e_trajectory_controller_status(
-                {"state": state, "message": switch_err, "error": switch_err},
-                process_name=process_name or None,
-                ros_domain_id=ros_domain_id,
-            )
-            return {"success": False, "message": switch_err, "state": state}
-
-        wait_err = self._wait_for_ros_controller_active(
-            controller_name,
-            timeout_sec=8.0,
-            process_name=process_name or None,
-            ros_domain_id=ros_domain_id,
-            poll_interval_sec=0.35,
-        )
-        if wait_err:
-            self._cache_ur5e_trajectory_controller_status(
-                {"state": state, "message": wait_err, "error": wait_err},
-                process_name=process_name or None,
-                ros_domain_id=ros_domain_id,
-            )
-            return {"success": False, "message": wait_err, "state": state}
-
-        message = (
-            "Auto-repaired scaled_joint_trajectory_controller"
-            if auto
-            else "reactivated scaled_joint_trajectory_controller"
-        )
-        self._cache_ur5e_trajectory_controller_status(
-            {"state": "active", "message": message, "error": ""},
-            process_name=process_name or None,
-            ros_domain_id=ros_domain_id,
-        )
-        return {"success": True, "message": message, "state": "active"}
-
-    def _schedule_ur5e_controller_auto_repair(self, target: str) -> None:
-        target_key = str(target or "").strip()
-        if not target_key:
-            return
-        now = time.monotonic()
-        last_attempt = float(self._ur5e_controller_auto_repair_last_attempt.get(target_key) or 0.0)
-        if (now - last_attempt) < self._UR5E_CONTROLLER_AUTO_REPAIR_COOLDOWN_S:
-            return
-        self._ur5e_controller_auto_repair_last_attempt[target_key] = now
-
-        def _worker() -> None:
-            try:
-                self.repair_ur5e_trajectory_controller(target_key, auto=True)
-            except Exception:
-                log.exception("UR5e trajectory controller auto-repair failed")
-
-        threading.Thread(
-            target=_worker,
-            name=f"ur5e-controller-auto-repair-{target_key}",
-            daemon=True,
-        ).start()
 
     def _wait_for_driver_ready(
         self,
@@ -6476,7 +5783,7 @@ class SystemBridge:
         ros_domain_id: int | None = None,
     ) -> str | None:
         key = str(robot).strip().lower()
-        stack = self._HARDWARE_STACKS.get(key)
+        stack = self._hardware_stack_for_robot(key)
         if not stack:
             return f"unknown hardware robot: {robot}"
         if len(stack) < 2:
@@ -6519,7 +5826,7 @@ class SystemBridge:
 
     def hardware_stack_status(self, robot: str) -> dict[str, str]:
         key = str(robot).strip().lower()
-        stack = self._HARDWARE_STACKS.get(key)
+        stack = self._hardware_stack_for_robot(key)
         if not stack:
             return {"overall": "unknown", "driver": "unknown", "moveit": "unknown"}
         if len(stack) == 1:
@@ -6547,16 +5854,7 @@ class SystemBridge:
             result["gripper"] = gripper_state
             result["gripper_action"] = "ready" if gripper_state == "running" else gripper_state
         if key == "ur5e":
-            external_control = self._ur5e_external_control_status()
-            result["external_control"] = str(external_control.get("state") or "unknown")
-            result["external_control_message"] = str(external_control.get("message") or "")
-            result["external_control_error"] = str(external_control.get("error") or "")
-            if overall == "running" and result["external_control"] == "running":
-                self._attach_ur5e_trajectory_controller_status(
-                    result,
-                    process_name=driver_name,
-                    ros_domain_id=None,
-                )
+            self._attach_ur5e_rtde_trajectory_status(result, self._ur5e_rtde_trajectory_status())
         return result
 
     def _digital_twin_target(self, target: str) -> dict[str, Any] | None:
@@ -6803,7 +6101,7 @@ class SystemBridge:
         domains = self._digital_twin_domain_ids()
 
         def _status_for_processes(processes: dict[str, str]) -> dict[str, str]:
-            driver_name = str(processes.get("driver") or "").strip()
+            driver_name = str(processes.get("rtde") or processes.get("driver") or "").strip()
             gripper_name = str(processes.get("gripper") or "").strip()
             moveit_name = str(processes.get("moveit") or "").strip()
             driver_state = "embedded" if not driver_name else self.ros2_proc_status(driver_name)
@@ -6831,30 +6129,7 @@ class SystemBridge:
             robot = hardware_robots[0] if hardware_robots else ""
             status = _status_for_processes(self._digital_twin_hardware_processes_for_robot(cfg, robot))
             if robot == "ur5e":
-                external_control = self._ur5e_external_control_status()
-                if (
-                    str(status.get("overall") or "") == "running"
-                    and str(external_control.get("state") or "") != "running"
-                    and self._refresh_ur5e_external_control_running_status(
-                        ros_domain_id=self._digital_twin_hardware_domain_id(cfg, "ur5e", domains),
-                    )
-                ):
-                    external_control = self._ur5e_external_control_status()
-                status["external_control"] = str(external_control.get("state") or "unknown")
-                status["external_control_message"] = str(external_control.get("message") or "")
-                status["external_control_error"] = str(external_control.get("error") or "")
-                if str(status.get("overall") or "") == "running" and status["external_control"] == "running":
-                    processes = self._digital_twin_hardware_processes_for_robot(cfg, robot)
-                    self._attach_ur5e_trajectory_controller_status(
-                        status,
-                        process_name=str(processes.get("driver") or "").strip() or None,
-                        ros_domain_id=self._digital_twin_hardware_domain_id(cfg, "ur5e", domains),
-                    )
-                    if (
-                        self._digital_twin_sim_mode(target) == "monitor"
-                        and str(status.get("trajectory_controller") or "") == "inactive"
-                    ):
-                        self._schedule_ur5e_controller_auto_repair(target)
+                self._attach_ur5e_rtde_trajectory_status(status, self._ur5e_rtde_trajectory_status())
             return status
 
         result: dict[str, Any] = {}
@@ -6867,30 +6142,7 @@ class SystemBridge:
                 self._digital_twin_hardware_processes_for_robot(cfg, robot)
             )
             if robot == "ur5e":
-                external_control = self._ur5e_external_control_status()
-                if (
-                    str(robot_status.get("overall") or "") == "running"
-                    and str(external_control.get("state") or "") != "running"
-                    and self._refresh_ur5e_external_control_running_status(
-                        ros_domain_id=self._digital_twin_hardware_domain_id(cfg, "ur5e", domains),
-                    )
-                ):
-                    external_control = self._ur5e_external_control_status()
-                robot_status["external_control"] = str(external_control.get("state") or "unknown")
-                robot_status["external_control_message"] = str(external_control.get("message") or "")
-                robot_status["external_control_error"] = str(external_control.get("error") or "")
-                if str(robot_status.get("overall") or "") == "running" and robot_status["external_control"] == "running":
-                    processes = self._digital_twin_hardware_processes_for_robot(cfg, robot)
-                    self._attach_ur5e_trajectory_controller_status(
-                        robot_status,
-                        process_name=str(processes.get("driver") or "").strip() or None,
-                        ros_domain_id=self._digital_twin_hardware_domain_id(cfg, "ur5e", domains),
-                    )
-                    if (
-                        self._digital_twin_sim_mode(target) == "monitor"
-                        and str(robot_status.get("trajectory_controller") or "") == "inactive"
-                    ):
-                        self._schedule_ur5e_controller_auto_repair(target)
+                self._attach_ur5e_rtde_trajectory_status(robot_status, self._ur5e_rtde_trajectory_status())
             result[robot] = robot_status
             overall_states.append(str(robot_status.get("overall", "unknown")))
             moveit_states.append(str(robot_status.get("moveit", "unknown")))
@@ -7177,7 +6429,7 @@ class SystemBridge:
                         sync_message = (
                             "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
                             "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
-                            "/move_action."
+                            "/execute_trajectory."
                         )
                     else:
                         sync_message = (
@@ -7300,6 +6552,38 @@ class SystemBridge:
         except Exception as exc:
             return str(exc)
 
+    def _start_ur5e_rtde_trajectory_server(
+        self,
+        process_name: str,
+        *,
+        ros_domain_id: int | None = None,
+    ) -> str | None:
+        name = str(process_name or "").strip()
+        if not name:
+            return None
+        if self.ros2_proc_status(name) != "running":
+            prereq_err = self._ros2_launch_prereq_error("hardware_ur5e_rtde_trajectory_server")
+            if prereq_err:
+                return prereq_err
+            command = self._render_ros2_launch_cmd("hardware_ur5e_rtde_trajectory_server")
+            err = self._start_tracked_ros2_command(
+                name,
+                command,
+                ros_domain_id=ros_domain_id,
+            )
+            if err:
+                return err
+        return self._wait_with_ros2_daemon_retry(
+            "ur5e RTDE trajectory server",
+            lambda: self._wait_for_ros_action(
+                _UR5E_RTDE_TRAJECTORY_ACTION,
+                timeout_sec=18.0,
+                process_name=name,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+
     def _start_digital_twin_launch(
         self,
         process_name: str,
@@ -7408,7 +6692,7 @@ class SystemBridge:
         ur5e_processes = self._digital_twin_hardware_processes_for_robot(cfg, "ur5e")
 
         xarm_driver_process = str(xarm_processes.get("driver") or "").strip()
-        ur5e_driver_process = str(ur5e_processes.get("driver") or "").strip()
+        ur5e_driver_process = str(ur5e_processes.get("rtde") or "").strip()
         ur5e_gripper_process = str(ur5e_processes.get("gripper") or "").strip()
         moveit_process = str(
             xarm_processes.get("moveit") or ur5e_processes.get("moveit") or ""
@@ -7453,41 +6737,44 @@ class SystemBridge:
         )
         if err:
             return err
-        err = self._ensure_digital_twin_launch(
+        err = self._start_ur5e_rtde_trajectory_server(
             ur5e_driver_process,
-            "hardware_ur5e_driver",
             ros_domain_id=ros_domain_id,
         )
         if err:
             return err
         err = self._wait_with_ros2_daemon_retry(
-            "ur5e driver ready",
-            lambda: self._wait_for_driver_ready(
-                "ur5e",
-                timeout_sec=18.0,
+            "ur5e RTDE /joint_states publisher",
+            lambda: self._wait_for_ros_topic_publisher(
+                "/joint_states",
+                timeout_sec=20.0,
                 process_name=ur5e_driver_process,
                 ros_domain_id=ros_domain_id,
             ),
             ros_domain_id=ros_domain_id,
         )
         if err:
-            return err
-        err = self._ensure_ur5e_external_control_running(
-            process_name=ur5e_driver_process,
-            ros_domain_id=ros_domain_id,
-            timeout_sec=30.0,
-        )
-        if err:
-            return err
+            return f"ur5e RTDE trajectory server is not publishing /joint_states: {err}"
         if ur5e_gripper_process:
             err = self._ensure_digital_twin_launch(
                 ur5e_gripper_process,
                 "hardware_ur5e_rg2_gripper",
                 ros_domain_id=ros_domain_id,
-                extra_args="--publish-arm-joint-states",
             )
             if err:
                 return err
+            err = self._wait_with_ros2_daemon_retry(
+                "ur5e RG2 gripper bridge",
+                lambda: self._wait_for_ros_action(
+                    _UR5E_RG2_GRIPPER_ACTION,
+                    timeout_sec=12.0,
+                    process_name=ur5e_gripper_process,
+                    ros_domain_id=ros_domain_id,
+                ),
+                ros_domain_id=ros_domain_id,
+            )
+            if err:
+                return f"ur5e RG2 gripper bridge is not ready: {err}"
         err = self._ensure_digital_twin_launch(
             moveit_process,
             "hardware_dual_robots_moveit",
@@ -7496,6 +6783,18 @@ class SystemBridge:
         )
         if err:
             return err
+        err = self._wait_with_ros2_daemon_retry(
+            "dual robots MoveIt execute trajectory",
+            lambda: self._wait_for_ros_action(
+                "/execute_trajectory",
+                timeout_sec=26.0,
+                process_name=moveit_process,
+                ros_domain_id=ros_domain_id,
+            ),
+            ros_domain_id=ros_domain_id,
+        )
+        if err:
+            return f"dual robots MoveIt is not ready: {err}"
         return None
 
     def _wait_for_digital_twin_dual_robots_hardware_ready(
@@ -7504,7 +6803,6 @@ class SystemBridge:
         *,
         ros_domain_id: int,
         require_moveit: bool = True,
-        require_ur5e_trajectory_controller: bool = True,
     ) -> str | None:
         processes = self._digital_twin_dual_robots_processes(cfg)
         if isinstance(processes, str):
@@ -7548,9 +6846,9 @@ class SystemBridge:
             readiness_errors.append(f"xarm6 driver is not publishing relayed /joint_states: {err}")
 
         err = self._wait_with_ros2_daemon_retry(
-            "ur5e driver ready",
-            lambda: self._wait_for_driver_ready(
-                "ur5e",
+            "ur5e RTDE trajectory action",
+            lambda: self._wait_for_ros_action(
+                _UR5E_RTDE_TRAJECTORY_ACTION,
                 timeout_sec=18.0,
                 process_name=ur5e_driver_process,
                 ros_domain_id=ros_domain_id,
@@ -7558,49 +6856,19 @@ class SystemBridge:
             ros_domain_id=ros_domain_id,
         )
         if err:
-            readiness_errors.append(err)
+            readiness_errors.append(f"ur5e RTDE trajectory action is not ready: {err}")
         err = self._wait_with_ros2_daemon_retry(
-            "ur5e /joint_states publisher",
+            "ur5e RTDE /joint_states publisher",
             lambda: self._wait_for_ros_topic_publisher(
                 "/joint_states",
-                timeout_sec=40.0,
+                timeout_sec=20.0,
                 process_name=ur5e_driver_process,
                 ros_domain_id=ros_domain_id,
             ),
             ros_domain_id=ros_domain_id,
         )
         if err:
-            readiness_errors.append(f"ur5e driver is not publishing /joint_states: {err}")
-
-        if require_ur5e_trajectory_controller:
-            controller_err = self._wait_with_ros2_daemon_retry(
-                "ur5e scaled_joint_trajectory_controller",
-                lambda: self._ensure_ros_controller_active(
-                    "scaled_joint_trajectory_controller",
-                    timeout_sec=12.0,
-                    process_name=ur5e_driver_process,
-                    ros_domain_id=ros_domain_id,
-                ),
-                ros_domain_id=ros_domain_id,
-            )
-            if controller_err:
-                readiness_errors.append(
-                    f"ur5e scaled_joint_trajectory_controller is not active: {controller_err}"
-                )
-            err = self._wait_with_ros2_daemon_retry(
-                "ur5e scaled_joint_trajectory_controller action",
-                lambda: self._wait_for_ros_action(
-                    "/scaled_joint_trajectory_controller/follow_joint_trajectory",
-                    timeout_sec=18.0,
-                    process_name=ur5e_driver_process,
-                    ros_domain_id=ros_domain_id,
-                ),
-                ros_domain_id=ros_domain_id,
-            )
-            if err:
-                readiness_errors.append(
-                    f"ur5e scaled_joint_trajectory_controller action is not ready: {err}"
-                )
+            readiness_errors.append(f"ur5e RTDE trajectory server is not publishing /joint_states: {err}")
 
         if ur5e_gripper_process:
             err = self._wait_with_ros2_daemon_retry(
@@ -7757,46 +7025,48 @@ class SystemBridge:
                 continue
 
             if robot == "ur5e":
-                driver_process = str(robot_processes.get("driver") or "").strip()
+                rtde_process = str(robot_processes.get("rtde") or "").strip()
                 gripper_process = str(robot_processes.get("gripper") or "").strip()
                 moveit_process = str(robot_processes.get("moveit") or "").strip()
-                err = self._start_digital_twin_launch(
-                    driver_process,
-                    "hardware_ur5e_driver",
+                err = self._start_ur5e_rtde_trajectory_server(
+                    rtde_process,
                     ros_domain_id=robot_domain_id,
                 )
                 if err:
                     return err
+                extra_args = "launch_rviz:=false" if teach_mode else ""
+                err = self._start_digital_twin_launch(
+                    moveit_process,
+                    "hardware_ur5e_moveit",
+                    ros_domain_id=robot_domain_id,
+                    extra_args=extra_args,
+                )
+                if err:
+                    return err
                 err = self._wait_with_ros2_daemon_retry(
-                    f"{robot} driver ready",
-                    lambda: self._wait_for_driver_ready(
-                        robot,
-                        timeout_sec=18.0,
-                        process_name=driver_process,
+                    f"{robot} MoveIt execute trajectory",
+                    lambda: self._wait_for_ros_action(
+                        "/execute_trajectory",
+                        timeout_sec=22.0,
+                        process_name=moveit_process,
                         ros_domain_id=robot_domain_id,
                     ),
                     ros_domain_id=robot_domain_id,
                 )
                 if err:
-                    return err
-                err = self._ensure_ur5e_external_control_running(
-                    process_name=driver_process,
-                    ros_domain_id=robot_domain_id,
-                )
-                if err:
-                    return err
+                    return f"{robot} MoveIt is not ready: {err}"
                 err = self._wait_with_ros2_daemon_retry(
-                    f"{robot} /joint_states publisher",
+                    f"{robot} RTDE /joint_states publisher",
                     lambda: self._wait_for_ros_topic_publisher(
                         "/joint_states",
-                        timeout_sec=40.0,
-                        process_name=driver_process,
+                        timeout_sec=20.0,
+                        process_name=rtde_process,
                         ros_domain_id=robot_domain_id,
                     ),
                     ros_domain_id=robot_domain_id,
                 )
                 if err:
-                    return f"{robot} driver is not publishing /joint_states: {err}"
+                    return f"{robot} RTDE trajectory server is not publishing /joint_states: {err}"
                 if gripper_process:
                     err = self._start_digital_twin_launch(
                         gripper_process,
@@ -7817,38 +7087,6 @@ class SystemBridge:
                     )
                     if err:
                         return f"{robot} RG2 gripper bridge is not ready: {err}"
-                err = self._start_digital_twin_launch(
-                    moveit_process,
-                    "hardware_ur5e_moveit",
-                    ros_domain_id=robot_domain_id,
-                    extra_args="launch_rviz:=false" if teach_mode else "",
-                )
-                if err:
-                    return err
-                err = self._wait_with_ros2_daemon_retry(
-                    f"{robot} MoveIt execute trajectory",
-                    lambda: self._wait_for_ros_action(
-                        "/execute_trajectory",
-                        timeout_sec=22.0,
-                        process_name=moveit_process,
-                        ros_domain_id=robot_domain_id,
-                    ),
-                    ros_domain_id=robot_domain_id,
-                )
-                if err:
-                    return f"{robot} MoveIt is not ready: {err}"
-                controller_err = self._wait_with_ros2_daemon_retry(
-                    f"{robot} scaled_joint_trajectory_controller",
-                    lambda: self._ensure_ros_controller_active(
-                        "scaled_joint_trajectory_controller",
-                        timeout_sec=12.0,
-                        process_name=driver_process,
-                        ros_domain_id=robot_domain_id,
-                    ),
-                    ros_domain_id=robot_domain_id,
-                )
-                if controller_err:
-                    return f"{robot} scaled_joint_trajectory_controller is not active: {controller_err}"
                 continue
 
             return f"unknown hardware robot: {robot}"
@@ -7896,6 +7134,11 @@ class SystemBridge:
                 "--direction-file",
                 str(self._digital_twin_direction_path(target)),
             ]
+            if robot_key == "ur5e":
+                args.extend([
+                    "--ur5e-hardware-trajectory-action",
+                    _UR5E_RTDE_TRAJECTORY_ACTION,
+                ])
             command = " ".join(shlex.quote(part) for part in args)
             if self.ros2_proc_status(sync_process) == "running":
                 continue
@@ -7917,25 +7160,18 @@ class SystemBridge:
             if isinstance(processes, str):
                 return processes
             _xarm_driver_process, ur5e_driver_process, _ur5e_gripper_process, _moveit_process = processes
-
             err = self._wait_with_ros2_daemon_retry(
-                "ur5e External Control program",
-                lambda: self._wait_for_driver_ready(
-                    "ur5e",
-                    timeout_sec=45.0,
+                "ur5e RTDE feedback for initial gazebo pose",
+                lambda: self._wait_for_ros_topic_publisher(
+                    "/joint_states",
+                    timeout_sec=20.0,
                     process_name=ur5e_driver_process,
                     ros_domain_id=domains["hardware"],
                 ),
                 ros_domain_id=domains["hardware"],
             )
             if err:
-                return (
-                    "ur5e External Control is not connected for initial gazebo pose: "
-                    f"{err}. Press Play on ros.urp, then press Start Twin again."
-                )
-            self._refresh_ur5e_external_control_running_status(
-                ros_domain_id=domains["hardware"],
-            )
+                return f"ur5e RTDE feedback is not ready for initial gazebo pose: {err}"
 
         err = self._wait_for_ros_service(
             "/controller_manager/list_controllers",
@@ -8300,7 +7536,7 @@ class SystemBridge:
                         "message": (
                             "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
                             "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
-                            "/move_action."
+                            "/execute_trajectory."
                         ),
                     },
                 )
@@ -8527,6 +7763,15 @@ class SystemBridge:
 
     def _run_digital_twin_sync(self, extra_args: list[str], timeout_sec: float = 60.0) -> dict[str, Any]:
         """Run the digital twin sync helper in a one-shot mode and parse its JSON output."""
+        extra_args = list(extra_args)
+        if "--ur5e-hardware-trajectory-action" not in extra_args:
+            robot_arg = self._sync_arg_value(extra_args, "--robot")
+            target_arg = self._sync_arg_value(extra_args, "--target")
+            if str(robot_arg or "").strip().lower() == "ur5e" or str(target_arg or "").strip().lower() in {"ur5e only", "dual robots"}:
+                extra_args.extend([
+                    "--ur5e-hardware-trajectory-action",
+                    _UR5E_RTDE_TRAJECTORY_ACTION,
+                ])
         args = ["python3.10", str(self._DIGITAL_TWIN_SYNC_SCRIPT), *extra_args]
         command = " ".join(shlex.quote(part) for part in args)
         full_cmd = self._ROS2_ENV + command
@@ -9982,7 +9227,7 @@ class SystemBridge:
                     prepared_data = self._read_json_file(prepared_path)
                     metadata = dict(prepared_data.get("metadata") or {})
                     expected = {
-                        "version": 4,
+                        "version": self._DIGITAL_TWIN_PREPARED_REPLAY_VERSION,
                         "recording_hash": self._digital_twin_recording_hash(recording),
                         "replay_target": sync_target,
                         "gazebo_domain_id": int(domains["gazebo"]),
@@ -10053,14 +9298,14 @@ class SystemBridge:
                 "state": "replaying",
                 "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
                 "message": (
-                    "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /move_action."
+                    "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /execute_trajectory."
                     if (
                         prepared_args
                         and replay_target == "twin"
                         and self._digital_twin_is_dual_robots(cfg)
                     )
                     else (
-                        "Replay in Twin: committing saved sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /move_action."
+                        "Replay in Twin: committing saved sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /execute_trajectory."
                         if replay_target == "twin" and self._digital_twin_is_dual_robots(cfg)
                         else (
                             "Replay in Twin: committing prepared sim waypoint through hardware MoveIt."
@@ -10175,6 +9420,21 @@ class SystemBridge:
                     else f"hardware -> Gazebo sync resume failed: {sync_err}"
                 )
             elif result.get("success"):
+                settle_sec = max(0.0, float(self._DIGITAL_TWIN_MIRROR_STABILIZATION_SEC))
+                if settle_sec > 0.0:
+                    self._write_digital_twin_status(
+                        target,
+                        {
+                            "state": "resuming",
+                            "direction": "hardware -> gazebo",
+                            "message": (
+                                "waiting for hardware -> gazebo mirror to stabilize; "
+                                f"mirror_stabilization_sec={settle_sec:.2f}."
+                            ),
+                            "last_error": "",
+                        },
+                    )
+                    time.sleep(settle_sec)
                 result["message"] = (
                     f"{base_message}; hardware -> Gazebo sync resumed."
                     if base_message
@@ -10306,7 +9566,7 @@ class SystemBridge:
 
     def ros2_start_hardware_stack(self, robot: str) -> str | None:
         key = str(robot).strip().lower()
-        stack = self._HARDWARE_STACKS.get(key)
+        stack = self._hardware_stack_for_robot(key)
         if not stack:
             return f"unknown hardware robot: {robot}"
         if self._any_running(self._GAZEBO_PROCESS_NAMES):
@@ -10346,6 +9606,53 @@ class SystemBridge:
         driver_name = stack[0]
         gripper_names = tuple(name for name in stack[1:-1] if "rg2_gripper" in name)
         moveit_name = stack[-1]
+        if key == "ur5e":
+            err = self._start_ur5e_rtde_trajectory_server(driver_name)
+            if err:
+                return f"{key} RTDE trajectory server is not ready: {err}"
+            if self.ros2_proc_status(moveit_name) != "running":
+                err = self.ros2_start(moveit_name)
+                if err:
+                    return err
+            err = self._wait_with_ros2_daemon_retry(
+                f"{key} MoveIt execute trajectory",
+                lambda: self._wait_for_ros_action(
+                    "/execute_trajectory",
+                    timeout_sec=22.0,
+                    process_name=moveit_name,
+                ),
+            )
+            if err:
+                return (
+                    f"{key} MoveIt is not ready: {err}. "
+                    "MoveIt may have failed to launch correctly."
+                )
+            err = self._wait_with_ros2_daemon_retry(
+                f"{key} RTDE /joint_states publisher",
+                lambda: self._wait_for_ros_topic_publisher(
+                    "/joint_states",
+                    timeout_sec=20.0,
+                    process_name=driver_name,
+                ),
+            )
+            if err:
+                return f"{key} RTDE trajectory server is not publishing /joint_states: {err}"
+            for gripper_name in gripper_names:
+                if self.ros2_proc_status(gripper_name) != "running":
+                    err = self.ros2_start(gripper_name)
+                    if err:
+                        return err
+                err = self._wait_with_ros2_daemon_retry(
+                    f"{key} RG2 gripper bridge",
+                    lambda: self._wait_for_ros_action(
+                        _UR5E_RG2_GRIPPER_ACTION,
+                        timeout_sec=12.0,
+                        process_name=gripper_name,
+                    ),
+                )
+                if err:
+                    return f"{key} RG2 gripper bridge is not ready: {err}"
+            return None
         if self.ros2_proc_status(driver_name) != "running":
             err = self.ros2_start(driver_name)
             if err:
@@ -10357,12 +9664,6 @@ class SystemBridge:
         )
         if err:
             return err
-        if key == "ur5e":
-            err = self._ensure_ur5e_external_control_running(
-                process_name=driver_name,
-            )
-            if err:
-                return err
         err = self._wait_with_ros2_daemon_retry(
             f"{key} /joint_states publisher",
             lambda: self._wait_for_ros_topic_publisher(
@@ -10407,21 +9708,11 @@ class SystemBridge:
                 f"{key} MoveIt is not ready: {err}. "
                 "MoveIt may have failed to launch correctly."
             )
-        controller_err = self._wait_with_ros2_daemon_retry(
-            f"{key} scaled_joint_trajectory_controller",
-            lambda: self._ensure_ros_controller_active(
-                "scaled_joint_trajectory_controller",
-                timeout_sec=12.0,
-                process_name=driver_name,
-            ),
-        )
-        if controller_err:
-            return f"{key} scaled_joint_trajectory_controller is not active: {controller_err}"
         return None
 
     def ros2_stop_hardware_stack(self, robot: str) -> str | None:
         key = str(robot).strip().lower()
-        stack = self._HARDWARE_STACKS.get(key)
+        stack = self._hardware_stack_for_robot(key)
         if not stack:
             return f"unknown hardware robot: {robot}"
         if len(stack) == 1:
@@ -10755,6 +10046,7 @@ class SystemBridge:
             "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",
             "pkill -9 -f xarm6_moveit_realmove.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
+            "pkill -9 -f ur5e_rtde_trajectory_server.py 2>/dev/null",
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)
 
@@ -10834,6 +10126,15 @@ class SystemBridge:
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
             self._force_kill_gazebo_core(reason="prelaunch_restart")
+
+        if name == "hardware_ur5e_moveit":
+            err = self._start_ur5e_rtde_trajectory_server("hardware_ur5e_rtde_trajectory_server")
+            if err:
+                return f"UR5e RTDE trajectory server is not ready: {err}"
+        elif name == "hardware_dual_robots_moveit":
+            err = self._start_ur5e_rtde_trajectory_server("hardware_ur5e_rtde_trajectory_server")
+            if err:
+                return f"UR5e RTDE trajectory server is not ready: {err}"
 
         cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(
             name,
@@ -10936,7 +10237,6 @@ class SystemBridge:
             "pkill -9 -f ur_moveit.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
-            "pkill -9 -f ur_robot_driver 2>/dev/null",
             "pkill -9 -f gazebo 2>/dev/null",
         ]:
             subprocess.run(["bash", "-c", cmd], capture_output=True)

@@ -140,7 +140,6 @@ ROBOTS = {
         'arm_controller_topic': '/ur5e_joint_trajectory_controller/joint_trajectory',
         'arm_controller_topics': [
             '/ur5e_joint_trajectory_controller/joint_trajectory',
-            '/scaled_joint_trajectory_controller/joint_trajectory',
             '/joint_trajectory_controller/joint_trajectory',
         ],
         'gripper_joint': 'ur5e_rg2_finger_width',

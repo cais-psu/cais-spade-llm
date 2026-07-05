@@ -1496,6 +1496,38 @@ class GazeboPickPlaceController:
         target = float(position) if position is not None else self.gripper_close
         return self._gripper_command(target, "CLOSE")
 
+    def delay(self, duration_sec: float) -> dict[str, Any]:
+        """
+        ---
+        description: Wait intentionally between robot task steps.
+        params:
+          duration_sec: {type: number, description: "Intentional wait duration in seconds."}
+        preconditions: {}
+        effects: {}
+        synthesis_hidden: true
+        ---
+        """
+        try:
+            duration = float(duration_sec)
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "message": f"delay duration_sec must be numeric: {duration_sec!r}",
+            }
+        if not math.isfinite(duration) or duration < 0.0:
+            return {
+                "success": False,
+                "message": "delay duration_sec must be finite and non-negative",
+            }
+        wait_sec = self._scaled_wall_wait_sec(duration)
+        time.sleep(wait_sec)
+        return {
+            "success": True,
+            "message": f"delay {duration:.3f}s",
+            "duration_sec": duration,
+            "wait_sec": wait_sec,
+        }
+
     def _derive_gripper_close_position(
         self,
         *,
@@ -3340,7 +3372,7 @@ UR5E_JOINT_NAMES = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
-UR5E_TRAJECTORY_TOPIC = "/scaled_joint_trajectory_controller/joint_trajectory"
+UR5E_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 UR5E_JOINT_STATES_TOPIC = "/joint_states"
 
 XARM6_JOINT_NAMES = [

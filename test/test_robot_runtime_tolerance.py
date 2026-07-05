@@ -742,9 +742,13 @@ def test_physical_place_insert_still_fails_when_lift_fails():
     assert result["content"] == "lift failed"
     assert result["step"] == "place_insert.lift"
     assert [name for name, _params in agent.calls] == [
+        "delay",
         "release_part",
+        "delay",
         "move_relative",
     ]
+    assert agent.calls[0] == ("delay", {"duration_sec": 0.25})
+    assert agent.calls[2] == ("delay", {"duration_sec": 0.25})
     assert agent._held_part == "MG"
 
 
@@ -841,6 +845,62 @@ def test_pick_grasp_passes_gripper_close_position_to_grasp_part():
             "position": pytest.approx(0.048),
         },
     )
+
+
+def test_pick_grasp_runs_delay_between_grasp_and_lift():
+    agent = _FakePickRobotAgent()
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_grasp",
+            part_name="MG",
+            origin_resource_location="prusa-mk4-1",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert [primitive for primitive, _params in agent.calls] == [
+        "grasp_part",
+        "delay",
+        "move_relative",
+    ]
+    assert agent.calls[1] == ("delay", {"duration_sec": 0.25})
+
+
+def test_delay_uses_scaled_wall_time(monkeypatch):
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._gazebo_wait_scale = 2.0
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "cais_spade_llm.resources.robot.gazebo_pick_place_controller.time.sleep",
+        lambda seconds: sleep_calls.append(float(seconds)),
+    )
+
+    result = controller.delay(duration_sec=0.5)
+
+    assert result["success"] is True
+    assert result["duration_sec"] == pytest.approx(0.5)
+    assert result["wait_sec"] == pytest.approx(1.0)
+    assert sleep_calls == [pytest.approx(1.0)]
+
+
+def test_delay_rejects_invalid_duration(monkeypatch):
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "cais_spade_llm.resources.robot.gazebo_pick_place_controller.time.sleep",
+        lambda seconds: sleep_calls.append(float(seconds)),
+    )
+
+    negative = controller.delay(duration_sec=-0.1)
+    non_numeric = controller.delay(duration_sec="later")
+
+    assert negative["success"] is False
+    assert "finite and non-negative" in negative["message"]
+    assert non_numeric["success"] is False
+    assert "must be numeric" in non_numeric["message"]
+    assert sleep_calls == []
 
 
 def test_snap_part_to_slot_attaches_part_to_assembly_board(monkeypatch):

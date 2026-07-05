@@ -905,6 +905,7 @@ class RobotAgent(ResourceAgent):
         "move_pose",
         "move_relative",
         "move_to_named_pose",
+        "delay",
         "grasp_part",
         "release_part",
         "open_gripper",

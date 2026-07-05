@@ -31,6 +31,9 @@ UR5E_MAX_VELOCITY = 0.50
 UR5E_MAX_ACCELERATION = 0.80
 DEFAULT_VELOCITY_SCALING = 0.20
 DEFAULT_ACCELERATION_SCALING = 0.20
+RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
+RTDE_ALLOWED_GOAL_DURATION_MARGIN = 20.0
+UR5E_RTDE_TRAJECTORY_CONTROLLER = "cais_ur5e_rtde_trajectory_controller"
 
 
 def _strip_world_and_ground(root: ET.Element) -> None:
@@ -198,7 +201,10 @@ def _build_srdf() -> str:
     return ET.tostring(merged, encoding="unicode")
 
 
-def _build_moveit_params(urdf: str, srdf: str) -> dict:
+def _build_moveit_params(
+    urdf: str,
+    srdf: str,
+) -> dict:
     from ur_moveit_config.launch_common import load_yaml
 
     kinematics = {
@@ -294,12 +300,13 @@ def _build_moveit_params(urdf: str, srdf: str) -> dict:
         "longest_valid_segment_fraction": 0.005,
     }
 
+    ur5e_arm_controller = UR5E_RTDE_TRAJECTORY_CONTROLLER
     controllers = {
         "moveit_simple_controller_manager": {
             "controller_names": [
                 "xarm6/xarm6_traj_controller",
                 "xarm6/xarm_gripper",
-                "scaled_joint_trajectory_controller",
+                ur5e_arm_controller,
                 "ur5e_rg2_gripper_traj_controller",
             ],
             "xarm6/xarm6_traj_controller": {
@@ -314,7 +321,7 @@ def _build_moveit_params(urdf: str, srdf: str) -> dict:
                 "default": True,
                 "joints": ["drive_joint"],
             },
-            "scaled_joint_trajectory_controller": {
+            ur5e_arm_controller: {
                 "action_ns": "follow_joint_trajectory",
                 "type": "FollowJointTrajectory",
                 "default": True,
@@ -339,8 +346,8 @@ def _build_moveit_params(urdf: str, srdf: str) -> dict:
 
     trajectory_execution = {
         "moveit_manage_controllers": False,
-        "trajectory_execution.allowed_execution_duration_scaling": 1.6,
-        "trajectory_execution.allowed_goal_duration_margin": 1.0,
+        "trajectory_execution.allowed_execution_duration_scaling": RTDE_ALLOWED_EXECUTION_DURATION_SCALING,
+        "trajectory_execution.allowed_goal_duration_margin": RTDE_ALLOWED_GOAL_DURATION_MARGIN,
         "trajectory_execution.allowed_start_tolerance": 0.01,
         "trajectory_execution.execution_duration_monitoring": False,
     }

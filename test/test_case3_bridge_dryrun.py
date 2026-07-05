@@ -1200,6 +1200,7 @@ class FakeBridgeRobot:
             "move_pose",
             "move_relative",
             "move_to_named_pose",
+            "delay",
             "grasp_part",
             "release_part",
             "open_gripper",
@@ -1369,6 +1370,19 @@ class FakeBridgeRobot:
         self._current_state = "idle"
         self._bridge_pose_ref = str(pose_name or "").strip() or None
         return {"success": True, "message": "fake move_to_named_pose ok"}
+
+    def delay(self, duration_sec: float) -> dict[str, Any]:
+        """
+        ---
+        description: Wait intentionally between robot task steps.
+        params:
+          duration_sec: {type: number, description: "Intentional wait duration in seconds."}
+        preconditions: {}
+        effects: {}
+        synthesis_hidden: true
+        ---
+        """
+        return {"success": True, "message": f"fake delay ok {float(duration_sec):.3f}"}
 
     def open_gripper(self) -> bool:
         """

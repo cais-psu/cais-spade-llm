@@ -24,12 +24,12 @@ _GAZEBO_VARIANTS = {
 
 _HARDWARE_STACKS = {
     "xarm6": ("xArm6 Hardware Stack", "Start xArm6 MoveIt realmove stack (includes embedded driver)"),
-    "ur5e": ("UR5e Hardware Stack", "Auto sequence: start driver, wait for ready, then start RG2 gripper bridge and MoveIt"),
+    "ur5e": ("UR5e Hardware Stack", "Auto sequence: start RTDE trajectory server, RG2 gripper bridge, and MoveIt"),
 }
 _HARDWARE_PROC_NAMES = (
     "hardware_xarm6_driver",
     "hardware_xarm6_moveit",
-    "hardware_ur5e_driver",
+    "hardware_ur5e_rtde_trajectory_server",
     "hardware_ur5e_rg2_gripper",
     "hardware_ur5e_moveit",
 )
@@ -72,29 +72,39 @@ def _ur5e_status_sources(status: dict) -> list[tuple[str, dict]]:
     return [("", status)]
 
 
-def _render_ur5e_external_control_and_rg2_status(status: dict) -> None:
+def _render_ur5e_rtde_and_rg2_status(status: dict) -> None:
     for prefix, source in _ur5e_status_sources(status):
-        external_control = str(source.get("external_control") or "").strip()
-        if external_control:
-            ui.label(f"{prefix}External Control: {external_control}").classes("text-xs text-slate-500")
-            external_error = str(source.get("external_control_error") or "").strip()
-            if external_error:
-                ui.label(f"{prefix}External Control error: {external_error}").classes("text-xs text-red-700")
-
-        trajectory_controller = str(source.get("trajectory_controller") or "").strip()
-        if trajectory_controller:
-            controller_classes = (
+        rtde_state = str(source.get("rtde_trajectory_server") or "").strip()
+        if rtde_state:
+            rtde_classes = (
                 "text-xs text-red-700"
-                if trajectory_controller == "inactive"
+                if rtde_state in {"blocked", "failed"}
                 else "text-xs text-slate-500"
             )
-            ui.label(f"{prefix}UR5e trajectory controller: {trajectory_controller}").classes(controller_classes)
-            controller_warning = str(source.get("trajectory_controller_warning") or "").strip()
-            if controller_warning:
-                ui.label(f"{prefix}{controller_warning}").classes("text-xs text-red-700")
-            controller_error = str(source.get("trajectory_controller_error") or "").strip()
-            if controller_error:
-                ui.label(f"{prefix}UR5e trajectory controller error: {controller_error}").classes("text-xs text-red-700")
+            ui.label(f"{prefix}RTDE trajectory server: {rtde_state}").classes(rtde_classes)
+        rtde_message = str(source.get("rtde_trajectory_message") or "").strip()
+        if rtde_message:
+            ui.label(f"{prefix}RTDE trajectory: {rtde_message}").classes("text-xs text-slate-500")
+        rtde_blocked = str(source.get("rtde_trajectory_blocked_reason") or "").strip()
+        if rtde_blocked:
+            ui.label(f"{prefix}RTDE trajectory blocked: {rtde_blocked}").classes("text-xs text-red-700")
+        joint_states_fresh = source.get("joint_states_fresh")
+        if joint_states_fresh is not None:
+            ui.label(f"{prefix}UR5e /joint_states fresh: {bool(joint_states_fresh)}").classes("text-xs text-slate-500")
+        max_velocity = source.get("rtde_trajectory_max_segment_velocity_rad_s")
+        if max_velocity is not None:
+            try:
+                value = float(max_velocity)
+                ui.label(f"{prefix}RTDE max segment velocity: {value:.3f} rad/s").classes("text-xs text-slate-500")
+            except (TypeError, ValueError):
+                ui.label(f"{prefix}RTDE max segment velocity: {max_velocity}").classes("text-xs text-slate-500")
+        time_scale = source.get("rtde_trajectory_time_scale_applied")
+        if time_scale is not None:
+            try:
+                value = float(time_scale)
+                ui.label(f"{prefix}RTDE time scale: {value:.3f}").classes("text-xs text-slate-500")
+            except (TypeError, ValueError):
+                ui.label(f"{prefix}RTDE time scale: {time_scale}").classes("text-xs text-slate-500")
 
         gripper_state = source.get("gripper")
         if gripper_state is not None:
@@ -406,7 +416,7 @@ def _hardware_stack_row(
             ui.label(desc).classes("text-xs text-slate-400")
             ui.label(_hardware_status_text(status)).classes("text-xs text-slate-500")
             if robot == "ur5e":
-                _render_ur5e_external_control_and_rg2_status(status)
+                _render_ur5e_rtde_and_rg2_status(status)
 
         start_blocked = bool(blocked_reason) or overall == "running"
         stop_disabled = overall == "stopped"
@@ -425,14 +435,6 @@ def _hardware_stack_row(
                 return
             ui.notify(f"Stopped {label}", type="info")
 
-        async def _repair_ur5e_async() -> None:
-            result = await asyncio.to_thread(bridge.repair_ur5e_trajectory_controller)
-            ui.notify(
-                str(result.get("message") or "UR5e controller repair finished."),
-                type=("positive" if result.get("success") else "warning"),
-                timeout=5000,
-            )
-
         def _start() -> None:
             if blocked_reason:
                 ui.notify(blocked_reason, type="warning", timeout=3500)
@@ -442,19 +444,12 @@ def _hardware_stack_row(
         def _stop() -> None:
             asyncio.create_task(_stop_async())
 
-        def _repair_ur5e() -> None:
-            asyncio.create_task(_repair_ur5e_async())
-
         ui.button("Start", on_click=_start, icon="play_arrow").props(
             "flat dense" + (" disable" if start_blocked else "")
         ).classes("text-green-600")
         ui.button("Stop", on_click=_stop, icon="stop").props(
             "flat dense" + (" disable" if stop_disabled else "")
         ).classes("text-red-600")
-        if robot == "ur5e":
-            ui.button("Repair UR5e Controller", on_click=_repair_ur5e, icon="build").props(
-                "flat dense" + (" disable" if overall == "stopped" else "")
-            ).classes("text-amber-700")
 
 
 # =====================================================================
@@ -696,28 +691,7 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                 ui.label("hardware").classes("text-xs text-slate-500")
             if supported:
                 ui.label(_hardware_status_text(hardware_status)).classes("text-xs text-slate-500")
-                _render_ur5e_external_control_and_rg2_status(hardware_status)
-                if "ur5e" in hardware_robots:
-                    async def _repair_ur5e_async() -> None:
-                        try:
-                            result = await asyncio.to_thread(
-                                bridge.repair_ur5e_trajectory_controller,
-                                target,
-                            )
-                            ui.notify(
-                                str(result.get("message") or "UR5e controller repair finished."),
-                                type=("positive" if result.get("success") else "warning"),
-                                timeout=5000,
-                            )
-                        finally:
-                            refresh_callback(force=True)
-
-                    def _repair_ur5e() -> None:
-                        asyncio.create_task(_repair_ur5e_async())
-
-                    ui.button("Repair UR5e Controller", on_click=_repair_ur5e, icon="build").props(
-                        "flat dense" + (" disable" if (not is_running or hardware_overall == "stopped") else "")
-                    ).classes("text-amber-700")
+                _render_ur5e_rtde_and_rg2_status(hardware_status)
                 hardware_domains = dict(hardware.get("domains") or {})
                 if hardware_domains:
                     domain_text = " | ".join(

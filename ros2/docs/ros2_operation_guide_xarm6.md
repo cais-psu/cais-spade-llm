@@ -216,10 +216,10 @@ ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.100
 |---|---|---|
 | Simulator | Gazebo Ignition (`gz`) | Gazebo Classic (`gazebo`) |
 | Launch package | `ur_simulation_gz` | `xarm_gazebo` |
-| Controller topic | `/scaled_joint_trajectory_controller/joint_trajectory` | `/xarm6_traj_controller/joint_trajectory` |
+| Arm command path | `/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory` | `/xarm6_traj_controller/follow_joint_trajectory` |
 | TCP frame | `tool0` | `link_eef` |
 | Base frame | `base_link` | `link_base` |
-| SDK | `ur_robot_driver` (ROS2 only) | `xarm-python-sdk` (direct IP) |
+| Hardware backend | CAIS RTDE trajectory server | `xarm-python-sdk` (direct IP) |
 | SDK units | radians | degrees |
 
 ---

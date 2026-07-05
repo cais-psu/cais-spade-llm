@@ -107,12 +107,8 @@ ROBOTS: dict[str, dict[str, Any]] = {
         "hardware_joint_state_topics": [
             "/joint_states",
         ],
-        "trajectory_topics": [
-            "/scaled_joint_trajectory_controller/joint_trajectory",
-            "/joint_trajectory_controller/joint_trajectory",
-            "/ur5e_joint_trajectory_controller/joint_trajectory",
-        ],
-        "hardware_trajectory_action": "/scaled_joint_trajectory_controller/follow_joint_trajectory",
+        "trajectory_topics": [],
+        "hardware_trajectory_action": "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
         # Controller spawned by the passive/mirror gazebo launch.
         "gazebo_trajectory_topics": [
             "/ur5e_joint_trajectory_controller/joint_trajectory",
@@ -132,9 +128,9 @@ ROBOTS: dict[str, dict[str, Any]] = {
 MIRROR_POINT_TIME_SEC = 0.1
 MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.0
 MIRROR_MIN_JOINT_DELTA_RAD = 0.0
-UR5E_MIRROR_POINT_TIME_SEC = 0.25
-UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.20
-UR5E_MIRROR_MIN_JOINT_DELTA_RAD = 0.0015
+UR5E_MIRROR_POINT_TIME_SEC = 0.12
+UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.05
+UR5E_MIRROR_MIN_JOINT_DELTA_RAD = 0.0010
 NO_MATCHING_JOINT_STATE_REPORT_SEC = 5.0
 HARDWARE_SNAPSHOT_TIMEOUT_SEC = 20.0
 
@@ -165,13 +161,16 @@ UR5E_HARDWARE_MOVE_GROUP = "ur_manipulator"
 MOVE_GROUP_JOINT_TOLERANCE_RAD = 0.001
 MOVE_GROUP_ALLOWED_PLANNING_TIME_SEC = 5.0
 MOVE_GROUP_PLAN_TIMEOUT_SEC = 15.0
+MOVE_GROUP_GOAL_ACCEPTANCE_TIMEOUT_SEC = 20.0
+MOVE_GROUP_GOAL_ACCEPTANCE_RETRY_COUNT = 1
+MOVE_GROUP_GOAL_ACCEPTANCE_RETRY_DELAY_SEC = 0.5
 UR5E_TEACH_REPLAY_TIME_SCALE = 1.5
 UR5E_TEACH_REPLAY_FINAL_HOLD_SEC = 0.5
 UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC = 0.02
 UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC = 20.0
 UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC = 2.0
 UR5E_FINAL_ERROR_SNAPSHOT_TIMEOUT_SEC = 2.0
-PREPARED_REPLAY_VERSION = 5
+PREPARED_REPLAY_VERSION = 6
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -229,6 +228,10 @@ def _prepared_replay_validation_error(
         return "prepared replay stale: plans missing."
     if set(dict(prepared.get("plans") or {}).keys()) != {"xarm6", "ur5e"}:
         return "prepared replay stale: paired plans missing."
+    if str(args.replay_target or "hardware") in ("hardware", "both"):
+        ur5e_plan = dict(dict(prepared.get("plans") or {}).get("ur5e") or {})
+        if not ur5e_plan.get("execute_trajectory_points"):
+            return "prepared replay stale: ur5e execute trajectory missing."
     return ""
 
 
@@ -300,6 +303,12 @@ def _refresh_prepared_hardware_start_from_snapshot(
             first_point["positions"] = [float(value) for value in observed_positions]
             hardware_points[0] = first_point
             plan["hardware_points"] = hardware_points
+        execute_points = [dict(point) for point in list(plan.get("execute_trajectory_points") or [])]
+        if robot_key == "ur5e" and execute_points:
+            first_point = dict(execute_points[0])
+            first_point["positions"] = [float(value) for value in observed_positions]
+            execute_points[0] = first_point
+            plan["execute_trajectory_points"] = execute_points
         plan["hardware_positions"] = [float(value) for value in observed_positions]
         plans[robot_key] = plan
     prepared["plans"] = plans
@@ -993,6 +1002,8 @@ def _gazebo_mirror_worker(
         return [pub for pub in node._mirror_publishers if pub.get_subscription_count() > 0]
 
     mirror_point_time_sec = _mirror_point_time_sec(robot)
+    mirror_min_publish_period_sec = _mirror_min_publish_period_sec(robot)
+    mirror_min_joint_delta_rad = _mirror_min_joint_delta_rad(robot)
 
     def _make_point_traj(joint_names: list[str], positions: list[float]) -> Any:
         traj = JointTrajectory()
@@ -1027,6 +1038,8 @@ def _gazebo_mirror_worker(
         last_published_positions: list[float] | None = None
         last_publish_ts = 0.0
         last_status_ts = 0.0
+        last_skip_reason = "none"
+        last_mirror_max_joint_delta_rad = math.inf
         while rclpy.ok():
             direction = _direction(direction_file)
             if direction != "hardware -> gazebo":
@@ -1108,6 +1121,10 @@ def _gazebo_mirror_worker(
             connected = _connected_publishers() or node._mirror_publishers
             latest_positions = [float(value) for value in list(latest["positions"])]
             now = time.time()
+            mirror_max_joint_delta_rad = _max_position_delta_rad(
+                last_published_positions,
+                latest_positions,
+            )
             should_publish, skip_reason = _should_publish_mirror_update(
                 robot,
                 positions=latest_positions,
@@ -1116,6 +1133,27 @@ def _gazebo_mirror_worker(
                 now=now,
             )
             if not should_publish:
+                last_skip_reason = skip_reason or "skipped"
+                status_now = time.time()
+                if status_now - last_status_ts > 0.5:
+                    latency_ms = (status_now - float(latest.get("source_stamp") or status_now)) * 1000.0
+                    _write_status(
+                        status_file,
+                        target=target,
+                        state="mirroring",
+                        direction=direction,
+                        latency_ms=latency_ms,
+                        message=(
+                            "hardware -> gazebo active; "
+                            f"mirror_point_time_sec={mirror_point_time_sec:.3f}; "
+                            f"mirror_min_publish_period_sec={mirror_min_publish_period_sec:.3f}; "
+                            f"mirror_min_joint_delta_rad={mirror_min_joint_delta_rad:.4f}; "
+                            f"mirror_max_joint_delta_rad={mirror_max_joint_delta_rad:.4f}; "
+                            f"last_skip_reason={last_skip_reason}."
+                        ),
+                        last_error="",
+                    )
+                    last_status_ts = status_now
                 if skip_reason == "below_delta":
                     latest = None
                 rclpy.spin_once(node, timeout_sec=0.0)
@@ -1126,6 +1164,8 @@ def _gazebo_mirror_worker(
                 publisher.publish(arm_traj)
             last_published_positions = list(latest_positions)
             last_publish_ts = now
+            last_mirror_max_joint_delta_rad = mirror_max_joint_delta_rad
+            last_skip_reason = "none"
 
             gripper_joint = latest.get("gripper_joint")
             gripper_position = latest.get("gripper_position")
@@ -1148,7 +1188,10 @@ def _gazebo_mirror_worker(
                     message=(
                         "hardware -> gazebo active; "
                         f"mirror_point_time_sec={mirror_point_time_sec:.3f}; "
-                        f"mirror_min_publish_period_sec={_mirror_min_publish_period_sec(robot):.3f}."
+                        f"mirror_min_publish_period_sec={mirror_min_publish_period_sec:.3f}; "
+                        f"mirror_min_joint_delta_rad={mirror_min_joint_delta_rad:.4f}; "
+                        f"mirror_max_joint_delta_rad={last_mirror_max_joint_delta_rad:.4f}; "
+                        f"last_skip_reason={last_skip_reason}."
                     ),
                     last_error="",
                 )
@@ -2202,7 +2245,21 @@ def _publish_execute_trajectory_action(
         proc.join(timeout=1.0)
         return {"success": False, "message": "/execute_trajectory: action worker timed out."}
     try:
-        return result_queue.get_nowait()
+        result = dict(result_queue.get_nowait())
+        result.update(
+            {
+                "header_stamp": bool(use_header_stamp),
+                "start_delay_sec": float(start_delay_sec),
+                **_follow_joint_trajectory_metadata(
+                    "/execute_trajectory",
+                    joint_names,
+                    points,
+                    header_stamp=bool(use_header_stamp),
+                    start_delay_sec=float(start_delay_sec),
+                ),
+            }
+        )
+        return result
     except queue.Empty:
         return {"success": False, "message": "/execute_trajectory: action worker returned no data."}
 
@@ -2229,6 +2286,187 @@ def _serialize_joint_trajectory(trajectory: Any) -> dict[str, Any]:
     return {
         "joint_names": [str(name) for name in list(getattr(joint_trajectory, "joint_names", []) or [])],
         "points": points,
+    }
+
+
+def _positions_match(
+    left: list[float],
+    right: list[float],
+    tolerance_rad: float = MOVE_GROUP_JOINT_TOLERANCE_RAD,
+) -> bool:
+    if len(left) != len(right):
+        return False
+    return all(_angular_delta(a, b) <= tolerance_rad for a, b in zip(left, right))
+
+
+def _remap_trajectory_point_values(
+    point: dict[str, Any],
+    key: str,
+    source_joint_names: list[str],
+    target_joint_names: list[str],
+) -> list[float]:
+    values = [float(value) for value in list(point.get(key) or [])]
+    if not values:
+        return []
+    if len(values) != len(source_joint_names):
+        raise ValueError(f"{key} length does not match planned trajectory joints")
+    index_by_name = {name: index for index, name in enumerate(source_joint_names)}
+    return [values[index_by_name[name]] for name in target_joint_names]
+
+
+def _stitch_ur5e_move_group_plan_results(
+    joint_names: list[str],
+    plan_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    target_joint_names = [str(name) for name in list(joint_names or [])]
+    if not target_joint_names:
+        return {
+            "success": False,
+            "message": "UR5e MoveIt planned trajectory has no hardware joint names.",
+        }
+    if not plan_results:
+        return {
+            "success": False,
+            "message": "UR5e MoveIt planned trajectory has no planned segments.",
+        }
+
+    stitched_points: list[dict[str, Any]] = []
+    last_positions: list[float] | None = None
+    last_time = -UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC
+    has_velocities = False
+    has_accelerations = False
+    segment_count = 0
+
+    for segment_index, result in enumerate(plan_results, start=1):
+        if not bool(result.get("success")):
+            return {
+                "success": False,
+                "message": (
+                    f"UR5e MoveIt planned trajectory segment {segment_index} failed: "
+                    f"{str(result.get('message') or 'planning failed')}"
+                ),
+            }
+        trajectory = dict(result.get("trajectory") or {})
+        source_joint_names = [str(name) for name in list(trajectory.get("joint_names") or [])]
+        raw_points = [dict(point) for point in list(trajectory.get("points") or [])]
+        if not source_joint_names or not raw_points:
+            return {
+                "success": False,
+                "message": f"UR5e MoveIt planned trajectory segment {segment_index} has no joint names or points.",
+            }
+        if set(source_joint_names) != set(target_joint_names):
+            return {
+                "success": False,
+                "message": (
+                    f"UR5e MoveIt planned trajectory segment {segment_index} joint names "
+                    "do not match hardware joint names."
+                ),
+                "planned_joint_names": source_joint_names,
+                "expected_joint_names": target_joint_names,
+            }
+
+        segment_count += 1
+        base_time = max(0.0, float(raw_points[0].get("time") or 0.0))
+        segment_start_time = max(0.0, last_time)
+        for point_index, point in enumerate(raw_points):
+            try:
+                positions = _remap_trajectory_point_values(
+                    point,
+                    "positions",
+                    source_joint_names,
+                    target_joint_names,
+                )
+                velocities = _remap_trajectory_point_values(
+                    point,
+                    "velocities",
+                    source_joint_names,
+                    target_joint_names,
+                )
+                accelerations = _remap_trajectory_point_values(
+                    point,
+                    "accelerations",
+                    source_joint_names,
+                    target_joint_names,
+                )
+            except ValueError as exc:
+                return {
+                    "success": False,
+                    "message": f"UR5e MoveIt planned trajectory segment {segment_index}: {exc}.",
+                }
+            if len(positions) != len(target_joint_names):
+                return {
+                    "success": False,
+                    "message": (
+                        f"UR5e MoveIt planned trajectory segment {segment_index} point "
+                        "length does not match hardware joint names."
+                    ),
+                }
+            if (
+                stitched_points
+                and point_index == 0
+                and last_positions is not None
+                and _positions_match(positions, last_positions)
+            ):
+                continue
+
+            raw_time = max(0.0, float(point.get("time") or 0.0))
+            relative_time = max(0.0, raw_time - base_time)
+            scaled_time = segment_start_time + relative_time * UR5E_TEACH_REPLAY_TIME_SCALE
+            if stitched_points and scaled_time <= last_time:
+                scaled_time = last_time + UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC
+
+            item: dict[str, Any] = {
+                "positions": positions,
+                "time": scaled_time,
+            }
+            if velocities:
+                has_velocities = True
+                item["velocities"] = [
+                    float(value) / UR5E_TEACH_REPLAY_TIME_SCALE
+                    for value in velocities
+                ]
+            if accelerations:
+                has_accelerations = True
+                scale_sq = UR5E_TEACH_REPLAY_TIME_SCALE * UR5E_TEACH_REPLAY_TIME_SCALE
+                item["accelerations"] = [float(value) / scale_sq for value in accelerations]
+            stitched_points.append(item)
+            last_positions = positions
+            last_time = scaled_time
+
+    if not stitched_points:
+        return {
+            "success": False,
+            "message": "UR5e MoveIt planned trajectory stitching produced no points.",
+        }
+
+    final_point = dict(stitched_points[-1])
+    final_positions = [float(value) for value in list(final_point.get("positions") or [])]
+    if has_velocities:
+        final_point["velocities"] = [0.0] * len(target_joint_names)
+    if has_accelerations:
+        final_point["accelerations"] = [0.0] * len(target_joint_names)
+    stitched_points[-1] = final_point
+
+    hold_point: dict[str, Any] = {
+        "positions": list(final_positions),
+        "time": float(stitched_points[-1]["time"]) + UR5E_TEACH_REPLAY_FINAL_HOLD_SEC,
+    }
+    if has_velocities:
+        hold_point["velocities"] = [0.0] * len(target_joint_names)
+    if has_accelerations:
+        hold_point["accelerations"] = [0.0] * len(target_joint_names)
+    stitched_points.append(hold_point)
+
+    return {
+        "success": True,
+        "joint_names": target_joint_names,
+        "points": stitched_points,
+        "segments": segment_count,
+        "final_hold_sec": UR5E_TEACH_REPLAY_FINAL_HOLD_SEC,
+        "time_scale": UR5E_TEACH_REPLAY_TIME_SCALE,
+        "has_velocities": has_velocities,
+        "has_accelerations": has_accelerations,
+        "final_time": float(stitched_points[-1]["time"]),
     }
 
 
@@ -2352,6 +2590,7 @@ def _plan_move_group_joint_goal_worker(
     waypoint_index: int,
     timeout_sec: float,
     plan_only: bool,
+    acceptance_timeout_sec: float,
     result_queue: mp.Queue,
 ) -> None:
     rclpy = _init_ros_domain(domain_id)
@@ -2414,15 +2653,20 @@ def _plan_move_group_joint_goal_worker(
         goal.planning_options.replan = False
 
         send_future = client.send_goal_async(goal)
-        if not _wait_future(node, send_future, 8.0):
+        acceptance_timeout = max(8.0, float(acceptance_timeout_sec))
+        if not _wait_future(node, send_future, acceptance_timeout):
             result_queue.put(
                 {
                     "success": False,
-                    "message": f"{action_name}: action goal acceptance timed out.",
+                    "message": (
+                        f"{action_name}: action goal acceptance timed out; "
+                        f"acceptance_timeout_sec={acceptance_timeout:.3f}."
+                    ),
                     "action_name": action_name,
                     "group_name": group_name,
                     "waypoint_index": int(waypoint_index),
                     "joint_names": list(joint_names),
+                    "acceptance_timeout_sec": acceptance_timeout,
                 }
             )
             return
@@ -2523,6 +2767,7 @@ def _plan_move_group_joint_goal(
     *,
     waypoint_index: int,
     timeout_sec: float = MOVE_GROUP_PLAN_TIMEOUT_SEC,
+    acceptance_timeout_sec: float = MOVE_GROUP_GOAL_ACCEPTANCE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     result_queue: mp.Queue = mp.Queue(maxsize=1)
     proc = mp.Process(
@@ -2536,12 +2781,17 @@ def _plan_move_group_joint_goal(
             int(waypoint_index),
             float(timeout_sec),
             True,
+            float(acceptance_timeout_sec),
             result_queue,
         ),
         daemon=True,
     )
     proc.start()
-    proc.join(max(1.0, float(timeout_sec)) + 10.0)
+    proc.join(
+        max(1.0, float(timeout_sec))
+        + max(8.0, float(acceptance_timeout_sec))
+        + 10.0
+    )
     if proc.is_alive():
         proc.terminate()
         proc.join(timeout=1.0)
@@ -2575,6 +2825,7 @@ def _execute_move_group_joint_goal(
     *,
     waypoint_index: int,
     timeout_sec: float,
+    acceptance_timeout_sec: float = MOVE_GROUP_GOAL_ACCEPTANCE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     result_queue: mp.Queue = mp.Queue(maxsize=1)
     proc = mp.Process(
@@ -2588,12 +2839,17 @@ def _execute_move_group_joint_goal(
             int(waypoint_index),
             float(timeout_sec),
             False,
+            float(acceptance_timeout_sec),
             result_queue,
         ),
         daemon=True,
     )
     proc.start()
-    proc.join(max(1.0, float(timeout_sec)) + 10.0)
+    proc.join(
+        max(1.0, float(timeout_sec))
+        + max(8.0, float(acceptance_timeout_sec))
+        + 10.0
+    )
     if proc.is_alive():
         proc.terminate()
         proc.join(timeout=1.0)
@@ -3230,6 +3486,16 @@ def _publish_hardware_trajectory(
     joint_names: list[str],
     positions: list[float],
 ) -> dict[str, Any]:
+    if str(robot or "").strip().lower() == "ur5e":
+        action_name = str(ROBOTS[robot].get("hardware_trajectory_action") or "").strip()
+        return _publish_follow_joint_trajectory_action(
+            domain_id,
+            action_name,
+            joint_names,
+            [{"positions": positions, "time": 2.0}],
+            join_timeout_sec=8.0,
+            goal_time_tolerance_sec=2.0,
+        )
     return _publish_trajectory(
         domain_id,
         ROBOTS[robot]["trajectory_topics"],
@@ -3759,15 +4025,6 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
                 "success": False,
                 "message": f"xarm6: {str(xarm6_action_result.get('message') or f'{xarm6_action_name} unavailable')}",
             }
-        ur5e_action_result = _wait_move_group_action(
-            int(args.hardware_domain_id),
-            timeout_sec=8.0,
-        )
-        if not ur5e_action_result.get("success"):
-            return {
-                "success": False,
-                "message": f"ur5e: {str(ur5e_action_result.get('message') or f'{MOVE_GROUP_ACTION_NAME} unavailable')}",
-            }
         for robot in robots:
             plan = plans[robot]
             gripper_points = [
@@ -3862,22 +4119,30 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
         )
 
     if need_hardware:
+        ur5e_preflight = _preflight_ur5e_move_group_replay(
+            args,
+            dict(plans["ur5e"]),
+            timeout_sec=max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC),
+        )
+        if not bool(ur5e_preflight.get("success")):
+            return {
+                "success": False,
+                "message": str(ur5e_preflight.get("message") or "ur5e MoveIt preflight failed"),
+                "preflight": dict(ur5e_preflight),
+            }
         ur5e_plan = plans["ur5e"]
-        ur5e_joint_names = list(ur5e_plan["hardware_names"])
-        ur5e_plan["hardware_plan_result"] = {
-            "success": True,
-            "message": (
-                f"{MOVE_GROUP_ACTION_NAME}: ready for ur5e MoveIt plan_and_execute; "
-                f"joints={','.join(str(name) for name in ur5e_joint_names)}; "
-                f"waypoints={len(list(ur5e_plan.get('waypoints') or []))}; "
-                f"group={UR5E_HARDWARE_MOVE_GROUP}."
-            ),
-            "action_name": MOVE_GROUP_ACTION_NAME,
-            "group_name": UR5E_HARDWARE_MOVE_GROUP,
-            "joint_names": list(ur5e_joint_names),
-            "mode": "plan_and_execute",
-            "waypoints": len(list(ur5e_plan.get("waypoints") or [])),
-        }
+        ur5e_plan["hardware_plan_result"] = dict(ur5e_preflight)
+        ur5e_plan["execute_trajectory_joint_names"] = [
+            str(name)
+            for name in list(ur5e_preflight.get("execute_trajectory_joint_names") or [])
+        ]
+        ur5e_plan["execute_trajectory_points"] = [
+            dict(point)
+            for point in list(ur5e_preflight.get("execute_trajectory_points") or [])
+        ]
+        ur5e_plan["execute_trajectory_final_time"] = float(
+            ur5e_preflight.get("execute_trajectory_final_time") or 0.0
+        )
 
     return {
         "success": True,
@@ -3901,6 +4166,13 @@ def _preflight_ur5e_move_group_replay(
     *,
     timeout_sec: float,
 ) -> dict[str, Any]:
+    def _move_group_acceptance_timed_out(result: dict[str, Any]) -> bool:
+        message = str(result.get("message") or "").lower()
+        return (
+            str(result.get("action_name") or MOVE_GROUP_ACTION_NAME) == MOVE_GROUP_ACTION_NAME
+            and "action goal acceptance timed out" in message
+        )
+
     action_result = _wait_move_group_action(int(args.hardware_domain_id), timeout_sec=8.0)
     if not action_result.get("success"):
         return {
@@ -3913,6 +4185,23 @@ def _preflight_ur5e_move_group_replay(
             "group_name": UR5E_HARDWARE_MOVE_GROUP,
             "mode": "plan_only",
             "move_group_results": [dict(action_result)],
+        }
+    execute_action_result = _wait_execute_trajectory_action(
+        int(args.hardware_domain_id),
+        timeout_sec=8.0,
+    )
+    if not execute_action_result.get("success"):
+        return {
+            "success": False,
+            "message": (
+                "/execute_trajectory: ur5e MoveIt preflight failed: "
+                f"{str(execute_action_result.get('message') or 'action server unavailable')}"
+            ),
+            "action_name": "/execute_trajectory",
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
+            "mode": "execute_trajectory",
+            "move_group_results": [dict(action_result)],
+            "execute_trajectory_result": dict(execute_action_result),
         }
 
     joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
@@ -3940,7 +4229,13 @@ def _preflight_ur5e_move_group_replay(
         }
 
     plan_results: list[dict[str, Any]] = []
+    plan_attempt_results: list[dict[str, Any]] = []
     moveit_timeout = max(float(timeout_sec), MOVE_GROUP_PLAN_TIMEOUT_SEC)
+    acceptance_timeout = max(
+        MOVE_GROUP_GOAL_ACCEPTANCE_TIMEOUT_SEC,
+        min(max(moveit_timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC), 30.0),
+    )
+    max_attempts = 1 + max(0, int(MOVE_GROUP_GOAL_ACCEPTANCE_RETRY_COUNT))
     for index, waypoint in enumerate(waypoints, start=1):
         target_positions = [float(value) for value in list(waypoint.get("positions") or [])]
         if len(target_positions) != len(joint_names):
@@ -3958,16 +4253,30 @@ def _preflight_ur5e_move_group_replay(
                 "joint_names": list(joint_names),
             }
         else:
-            result = _plan_move_group_joint_goal(
-                int(args.hardware_domain_id),
-                UR5E_HARDWARE_MOVE_GROUP,
-                joint_names,
-                start_positions,
-                target_positions,
-                waypoint_index=index,
-                timeout_sec=moveit_timeout,
-            )
-        plan_results.append(dict(result))
+            result = {}
+            for attempt in range(1, max_attempts + 1):
+                result = _plan_move_group_joint_goal(
+                    int(args.hardware_domain_id),
+                    UR5E_HARDWARE_MOVE_GROUP,
+                    joint_names,
+                    start_positions,
+                    target_positions,
+                    waypoint_index=index,
+                    timeout_sec=moveit_timeout,
+                    acceptance_timeout_sec=acceptance_timeout,
+                )
+                result = dict(result)
+                result["attempt"] = int(attempt)
+                result["attempts"] = int(max_attempts)
+                result.setdefault("acceptance_timeout_sec", float(acceptance_timeout))
+                plan_attempt_results.append(dict(result))
+                if bool(result.get("success")):
+                    break
+                if attempt >= max_attempts or not _move_group_acceptance_timed_out(result):
+                    break
+                time.sleep(max(0.0, MOVE_GROUP_GOAL_ACCEPTANCE_RETRY_DELAY_SEC))
+        if bool(result.get("success")):
+            plan_results.append(dict(result))
         if not bool(result.get("success")):
             return {
                 "success": False,
@@ -3981,21 +4290,51 @@ def _preflight_ur5e_move_group_replay(
                 "failed_waypoint_index": int(index),
                 "joint_names": list(joint_names),
                 "move_group_results": plan_results,
+                "move_group_attempt_results": plan_attempt_results,
+                "acceptance_timeout_sec": float(acceptance_timeout),
             }
         start_positions = list(target_positions)
+
+    stitched = _stitch_ur5e_move_group_plan_results(joint_names, plan_results)
+    if not bool(stitched.get("success")):
+        return {
+            "success": False,
+            "message": (
+                f"/execute_trajectory: ur5e MoveIt preflight failed while stitching: "
+                f"{str(stitched.get('message') or 'trajectory stitching failed')}"
+            ),
+            "action_name": "/execute_trajectory",
+            "group_name": UR5E_HARDWARE_MOVE_GROUP,
+            "mode": "execute_trajectory",
+            "joint_names": list(joint_names),
+            "move_group_results": plan_results,
+            "move_group_attempt_results": plan_attempt_results,
+            "stitch_result": dict(stitched),
+        }
 
     return {
         "success": True,
         "message": (
             f"{MOVE_GROUP_ACTION_NAME}: ur5e MoveIt preflight planned; "
-            f"group={UR5E_HARDWARE_MOVE_GROUP}; waypoints={len(waypoints)}."
+            f"/execute_trajectory ready; group={UR5E_HARDWARE_MOVE_GROUP}; "
+            f"waypoints={len(waypoints)}; points={len(list(stitched.get('points') or []))}."
         ),
         "action_name": MOVE_GROUP_ACTION_NAME,
+        "execute_action_name": "/execute_trajectory",
         "group_name": UR5E_HARDWARE_MOVE_GROUP,
         "mode": "plan_only",
         "joint_names": list(joint_names),
         "waypoints": len(waypoints),
         "move_group_results": plan_results,
+        "move_group_attempt_results": plan_attempt_results,
+        "acceptance_timeout_sec": float(acceptance_timeout),
+        "execute_trajectory_joint_names": list(stitched.get("joint_names") or []),
+        "execute_trajectory_points": [dict(point) for point in list(stitched.get("points") or [])],
+        "execute_trajectory_final_time": float(stitched.get("final_time") or 0.0),
+        "execute_trajectory_segments": int(stitched.get("segments") or 0),
+        "final_hold_sec": float(stitched.get("final_hold_sec") or 0.0),
+        "time_scale": float(stitched.get("time_scale") or 1.0),
+        "execute_trajectory_result": dict(execute_action_result),
     }
 
 
@@ -4085,12 +4424,12 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
             _write_replay_status(args, state="blocked", message=message, last_error=message)
             print(json.dumps({"success": False, "message": message}))
             return 6
-        ur5e_action_result = _wait_move_group_action(
+        ur5e_action_result = _wait_execute_trajectory_action(
             int(args.hardware_domain_id),
             timeout_sec=3.0,
         )
         if not ur5e_action_result.get("success"):
-            message = f"ur5e: {str(ur5e_action_result.get('message') or f'{MOVE_GROUP_ACTION_NAME} unavailable')}"
+            message = f"ur5e: {str(ur5e_action_result.get('message') or '/execute_trajectory unavailable')}"
             _write_replay_status(args, state="blocked", message=message, last_error=message)
             print(json.dumps({"success": False, "message": message}))
             return 6
@@ -4244,79 +4583,58 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
 
     def _publish_ur5e_hardware_arm() -> None:
         plan = plans["ur5e"]
-        joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
-        points = list(plan.get("points") or [])
-        waypoints_for_moveit = [dict(waypoint) for waypoint in list(plan.get("waypoints") or [])]
-        start_positions = [float(value) for value in list(plan.get("hardware_positions") or [])]
-        move_results: list[dict[str, Any]] = []
-        failed_result: dict[str, Any] | None = None
-        failed_index: int | None = None
-        moveit_timeout = max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC)
+        joint_names = [
+            str(name)
+            for name in list(plan.get("execute_trajectory_joint_names") or plan.get("hardware_names") or [])
+        ]
+        points = [dict(point) for point in list(plan.get("execute_trajectory_points") or [])]
         _set_result("ur5e/hardware_plan", dict(plan.get("hardware_plan_result") or {}))
-        for index, waypoint in enumerate(waypoints_for_moveit, start=1):
-            target_positions = [float(value) for value in list(waypoint.get("positions") or [])]
-            result = _execute_move_group_joint_goal(
-                int(args.hardware_domain_id),
-                UR5E_HARDWARE_MOVE_GROUP,
-                joint_names,
-                start_positions,
-                target_positions,
-                waypoint_index=index,
-                timeout_sec=moveit_timeout,
-            )
-            move_results.append(dict(result))
-            if not bool(result.get("success")):
-                failed_result = dict(result)
-                failed_index = index
-                break
-            start_positions = list(target_positions)
-        if failed_result is None:
-            result = {
-                "success": True,
-                "message": (
-                    "ur5e/hardware_arm used MoveIt plan_and_execute; "
-                    f"waypoints={len(waypoints_for_moveit)}; group={UR5E_HARDWARE_MOVE_GROUP}."
-                ),
-                "mode": "plan_and_execute",
-                "action_name": MOVE_GROUP_ACTION_NAME,
-                "group_name": UR5E_HARDWARE_MOVE_GROUP,
-                "move_group_results": move_results,
-            }
-        else:
+        target_positions = [float(value) for value in list(points[-1].get("positions") or [])] if points else []
+        final_time = max((float(point.get("time") or 0.0) for point in points), default=0.0)
+        if not joint_names or not points:
             result = {
                 "success": False,
-                "message": (
-                    "ur5e/hardware_arm used MoveIt plan_and_execute; "
-                    f"failed waypoint {failed_index}/{len(waypoints_for_moveit)}: "
-                    f"{str(failed_result.get('message') or 'MoveIt execution failed')}"
-                ),
-                "mode": "plan_and_execute",
-                "action_name": MOVE_GROUP_ACTION_NAME,
+                "message": "/execute_trajectory: no stitched UR5e trajectory points.",
+                "mode": "execute_trajectory",
+                "action_name": "/execute_trajectory",
                 "group_name": UR5E_HARDWARE_MOVE_GROUP,
-                "failed_waypoint_index": failed_index,
-                "move_group_results": move_results,
             }
+        else:
+            result = _publish_execute_trajectory_action(
+                int(args.hardware_domain_id),
+                joint_names,
+                points,
+                join_timeout_sec=max(
+                    timeout,
+                    final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
+                ),
+            )
+            result = _apply_observed_completion_fallback(
+                result,
+                domain_id=int(args.hardware_domain_id),
+                robot="ur5e",
+                joint_names=joint_names,
+                target_positions=target_positions,
+            )
+            result["message"] = (
+                f"{str(result.get('message') or '').rstrip('. ')}; "
+                f"ur5e/hardware_arm used MoveIt /execute_trajectory; "
+                f"group={UR5E_HARDWARE_MOVE_GROUP}"
+            ).rstrip("; ") + "."
+            result["mode"] = "execute_trajectory"
+            result["action_name"] = "/execute_trajectory"
+            result["group_name"] = UR5E_HARDWARE_MOVE_GROUP
+            result["final_hold_sec"] = float(plan.get("hardware_final_hold_sec") or UR5E_TEACH_REPLAY_FINAL_HOLD_SEC)
         _set_result(
             "ur5e/hardware_arm",
             _decorate_hardware_arm_result(
                 result,
                 robot="ur5e",
-                action_name=MOVE_GROUP_ACTION_NAME,
+                action_name="/execute_trajectory",
                 joint_names=joint_names,
                 points=points,
             ),
         )
-        if plan.get("gripper_points"):
-            if bool(result.get("success")):
-                _publish_gripper_for("ur5e", "hardware")
-            else:
-                _set_result(
-                    "ur5e/hardware_gripper",
-                    {
-                        "success": True,
-                        "message": "skipped because ur5e hardware arm failed.",
-                    },
-                )
 
     def _publish_paired_hardware_arms() -> None:
         arm_threads = [
@@ -4384,16 +4702,15 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
 
     thread_launch_blocked = False
     if need_hardware:
-        ur5e_preflight = _preflight_ur5e_move_group_replay(
-            args,
-            dict(plans["ur5e"]),
-            timeout_sec=max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC),
-        )
+        ur5e_preflight = dict(plans["ur5e"].get("hardware_plan_result") or {})
         plans["ur5e"]["hardware_plan_result"] = dict(ur5e_preflight)
         _set_result("ur5e/hardware_plan", dict(ur5e_preflight))
-        if not bool(ur5e_preflight.get("success")):
+        if not bool(ur5e_preflight.get("success")) or not list(plans["ur5e"].get("execute_trajectory_points") or []):
             thread_launch_blocked = True
-            preflight_message = str(ur5e_preflight.get("message") or "ur5e MoveIt preflight failed")
+            preflight_message = str(
+                ur5e_preflight.get("message")
+                or "ur5e MoveIt preflight failed: missing stitched /execute_trajectory points"
+            )
             _set_result(
                 "xarm6/hardware_arm",
                 {
@@ -4407,9 +4724,9 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                 {
                     "success": False,
                     "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
-                    "action_name": MOVE_GROUP_ACTION_NAME,
+                    "action_name": "/execute_trajectory",
                     "group_name": UR5E_HARDWARE_MOVE_GROUP,
-                    "mode": "plan_and_execute",
+                    "mode": "execute_trajectory",
                     "skip_observed_completion": True,
                 },
             )
@@ -4458,7 +4775,11 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                 thread_join_timeout,
                 xarm_final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
             )
-            ur5e_points = list(dict(plans.get("ur5e") or {}).get("points") or [])
+            ur5e_points = list(
+                dict(plans.get("ur5e") or {}).get("execute_trajectory_points")
+                or dict(plans.get("ur5e") or {}).get("points")
+                or []
+            )
             ur5e_final_time = max((float(point.get("time") or 0.0) for point in ur5e_points), default=0.0)
             thread_join_timeout = max(
                 thread_join_timeout,
@@ -4797,11 +5118,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replay-target", choices=["hardware", "gazebo", "both"], default="hardware")
     parser.add_argument("--waypoint-duration-sec", type=float, default=DEFAULT_REPLAY_WAYPOINT_DURATION_SEC)
     parser.add_argument("--max-joint-vel-deg-s", type=float, default=MAX_REPLAY_JOINT_VEL_DEG_S)
+    parser.add_argument("--ur5e-hardware-trajectory-action", default="")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    ur5e_hardware_trajectory_action = str(args.ur5e_hardware_trajectory_action or "").strip()
+    if ur5e_hardware_trajectory_action:
+        ROBOTS["ur5e"]["hardware_trajectory_action"] = ur5e_hardware_trajectory_action
     if args.mode == "mirror":
         return run_mirror(args)
     if args.mode == "apply-gazebo-to-hardware":

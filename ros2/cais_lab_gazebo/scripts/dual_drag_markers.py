@@ -11,12 +11,14 @@ import time
 from pathlib import Path
 
 import rclpy
+from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
 from interactive_markers.menu_handler import MenuHandler
 from interactive_markers.interactive_marker_server import InteractiveMarkerServer
 from moveit_msgs.msg import DisplayTrajectory, RobotState, RobotTrajectory
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath, GetStateValidity
+from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 from visualization_msgs.msg import InteractiveMarker, InteractiveMarkerControl, InteractiveMarkerFeedback, Marker
@@ -28,6 +30,10 @@ except Exception:
 
     sys.path.append(str(Path(__file__).resolve().parent))
     from keyboard_teleop import KeyboardTeleop, ROBOTS, wait_for_joint_positions
+
+
+UR5E_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+UR5E_JOINT_STATES_STALE_SEC = 3.0
 
 
 class DualDragMarkers(KeyboardTeleop):
@@ -42,6 +48,7 @@ class DualDragMarkers(KeyboardTeleop):
         execution_policy: str,
         status_file: str = "",
     ) -> None:
+        self._ur5e_last_joint_state_monotonic: float | None = None
         super().__init__(
             cartesian_max_step_mm=cartesian_max_step_mm,
             joint_duration_sec=0.35,
@@ -64,6 +71,12 @@ class DualDragMarkers(KeyboardTeleop):
         self._paired_targets: dict[str, Pose] = {}
         self._paired_plan: RobotTrajectory | None = None
         self._paired_busy = False
+        self.ur5e_trajectory_action_client = ActionClient(
+            self,
+            FollowJointTrajectory,
+            UR5E_TRAJECTORY_ACTION,
+            callback_group=self.cb_group,
+        )
         self.state_validity_client = self.create_client(
             GetStateValidity, "/check_state_validity", callback_group=self.cb_group
         )
@@ -80,6 +93,35 @@ class DualDragMarkers(KeyboardTeleop):
             ),
         )
         self.create_timer(0.5, self._refresh_markers)
+
+    def _joint_state_cb(self, msg: JointState) -> None:
+        super()._joint_state_cb(msg)
+        names = {str(name) for name in msg.name}
+        for joint_names in self._joint_name_candidates("ur5e"):
+            if all(str(joint) in names for joint in joint_names):
+                self._ur5e_last_joint_state_monotonic = time.monotonic()
+                break
+
+    def _ur5e_joint_states_fresh(self) -> bool:
+        if self._ur5e_last_joint_state_monotonic is None:
+            return False
+        return (time.monotonic() - self._ur5e_last_joint_state_monotonic) <= UR5E_JOINT_STATES_STALE_SEC
+
+    def _ur5e_execution_health(self) -> tuple[bool, str]:
+        trajectory_action_available = self.ur5e_trajectory_action_client.wait_for_server(timeout_sec=1.0)
+        joint_states_fresh = self._ur5e_joint_states_fresh()
+        ready = (
+            bool(trajectory_action_available)
+            and joint_states_fresh
+        )
+        detail = (
+            f"trajectory_action_available={bool(trajectory_action_available)}; "
+            f"rtde_action={UR5E_TRAJECTORY_ACTION}; "
+            f"joint_states_fresh={joint_states_fresh}"
+        )
+        if ready:
+            return True, f"UR5e execution health ready; {detail}"
+        return False, f"UR5e execution health not ready; {detail}"
 
     def _write_status(
         self,
@@ -566,6 +608,9 @@ class DualDragMarkers(KeyboardTeleop):
     def execute_dual_robots(self) -> tuple[bool, str]:
         if self._paired_plan is None:
             return False, "no dual_robots plan; use Plan dual_robots first"
+        ok, message = self._ur5e_execution_health()
+        if not ok:
+            return False, message
         if not self.execute_client.wait_for_server(timeout_sec=self.service_timeout_sec):
             return False, "/execute_trajectory not available"
 

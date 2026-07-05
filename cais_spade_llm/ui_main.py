@@ -109,7 +109,6 @@ _KILL_CMDS: list[str] = [
     "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
     "pkill -9 -f controller_manager 2>/dev/null",
     "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
-    "pkill -9 -f ur_robot_driver 2>/dev/null",
     "pkill -9 -f robot_state_publisher 2>/dev/null",
 ]
 
