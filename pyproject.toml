@@ -27,7 +27,6 @@ target-version = "py310"
 line-length = 100
 exclude = [
     ".venv",
-    "cais_spade_llm/Jeebies1/xarmlib",
     "ros2/third_party",
 ]
 
