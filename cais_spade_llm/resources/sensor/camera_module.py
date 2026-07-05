@@ -96,12 +96,8 @@ class CameraModule:
             self._ros2_node = rclpy.create_node("camera_module_client")
 
             # Keep legacy clients for compatibility with older perception nodes.
-            self._legacy_detect_part_client = self._ros2_node.create_client(
-                Trigger, "/detect_part"
-            )
-            self._legacy_detect_all_client = self._ros2_node.create_client(
-                Trigger, "/detect_all"
-            )
+            self._legacy_detect_part_client = self._ros2_node.create_client(Trigger, "/detect_part")
+            self._legacy_detect_all_client = self._ros2_node.create_client(Trigger, "/detect_all")
 
             logger.info(
                 "CameraModule ROS2 clients ready backend=%s node=%s",
@@ -121,7 +117,9 @@ class CameraModule:
             return False
         if self._ros2_node is None:
             self._init_ros2()
-        return bool(self._ros2_node and self._legacy_detect_part_client and self._legacy_detect_all_client)
+        return bool(
+            self._ros2_node and self._legacy_detect_part_client and self._legacy_detect_all_client
+        )
 
     def observe(self, part_name: str) -> dict[str, Any] | None:
         if self._backend == "mock":

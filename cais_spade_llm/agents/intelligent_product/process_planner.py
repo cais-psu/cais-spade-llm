@@ -80,8 +80,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         selected_parts = list(validated.selected_parts)
         destination_location = str(order_payload.get("product") or "").strip()
         product_jid = str(
-            order_payload.get("product_jid")
-            or getattr(self.product_agent, "jid", "")
+            order_payload.get("product_jid") or getattr(self.product_agent, "jid", "")
         ).strip()
         ordering_constraints = derive_ordering_constraints_from_safety(
             safety_text,
@@ -160,7 +159,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             }
         )
         unmet: list[str] = []
-        for constraint in (runtime.get("ordering_constraints") or []):
+        for constraint in runtime.get("ordering_constraints") or []:
             if not isinstance(constraint, dict) or constraint.get("type") != "place_before":
                 continue
             if str(constraint.get("after") or "").strip() != part_name:
@@ -275,7 +274,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 "predecessors": predecessors,
                 "successors": [],
                 "product_order_part": part_name,
-                "product_order_file": str(getattr(self.product_agent, "product_order_file", "") or ""),
+                "product_order_file": str(
+                    getattr(self.product_agent, "product_order_file", "") or ""
+                ),
                 "product_order_commit_status": str(status or "pending_validation"),
             }
             if predecessors:
@@ -289,7 +290,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 continue
             if str(constraint.get("after") or "").strip() != part_name:
                 continue
-            before_tid = task_by_part_fn.get((str(constraint.get("before") or "").strip(), "place_insert"))
+            before_tid = task_by_part_fn.get(
+                (str(constraint.get("before") or "").strip(), "place_insert")
+            )
             after_tid = task_by_part_fn.get((part_name, "place_insert"))
             if not before_tid or not after_tid or before_tid == after_tid:
                 continue
@@ -456,9 +459,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         if not runtime.get("enabled"):
             return []
         targets = {
-            str(part or "").strip()
-            for part in (part_names or [])
-            if str(part or "").strip()
+            str(part or "").strip() for part in (part_names or []) if str(part or "").strip()
         }
         validated_parts: list[str] = []
         for node in self.nodes:
@@ -483,9 +484,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         if not runtime.get("enabled"):
             return []
         targets = {
-            str(part or "").strip()
-            for part in (part_names or [])
-            if str(part or "").strip()
+            str(part or "").strip() for part in (part_names or []) if str(part or "").strip()
         }
         if not targets:
             return []
@@ -664,8 +663,12 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             "derived_nodes": deepcopy(self.nodes),
             "active_window_nodes": self.active_product_order_fsa_nodes(),
             "pending_product_order_parts": list(runtime.get("pending_product_order_parts") or []),
-            "committed_product_order_parts": list(runtime.get("committed_product_order_parts") or []),
-            "completed_product_order_parts": list(runtime.get("completed_product_order_parts") or []),
+            "committed_product_order_parts": list(
+                runtime.get("committed_product_order_parts") or []
+            ),
+            "completed_product_order_parts": list(
+                runtime.get("completed_product_order_parts") or []
+            ),
             "bid_evidence_by_part": deepcopy(runtime.get("bid_evidence_by_part") or {}),
             "rolling_runtime_product_bidding": True,
         }
@@ -686,7 +689,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         order_payload = dict(validated.payload)
         selected_parts = list(validated.selected_parts)
         destination_location = str(order_payload.get("product") or "").strip()
-        product_jid = str(order_payload.get("product_jid") or getattr(self.product_agent, "jid", "")).strip()
+        product_jid = str(
+            order_payload.get("product_jid") or getattr(self.product_agent, "jid", "")
+        ).strip()
 
         resource_options = self._product_order_resource_options(destination_location)
         if not resource_options:
@@ -757,7 +762,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     "predecessors": predecessors,
                     "successors": [],
                     "product_order_part": part_name,
-                    "product_order_file": str(getattr(self.product_agent, "product_order_file", "") or ""),
+                    "product_order_file": str(
+                        getattr(self.product_agent, "product_order_file", "") or ""
+                    ),
                 }
                 if predecessors:
                     prev = nodes[-1]
@@ -842,9 +849,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             if part_in_state:
                 intermediate_states.add(part_in_state)
             completed_state = str(
-                (tool.get("part_transition") or {})
-                .get("completed", {})
-                .get("state", "")
+                (tool.get("part_transition") or {}).get("completed", {}).get("state", "")
             ).strip()
             if completed_state:
                 completed_states.append(completed_state)
@@ -885,7 +890,13 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             slot_y = self._product_order_float(slot_xy[1])
             slot_floor_z = self._product_order_float(geometry.get("slot_floor_z_m"))
             part_height = self._product_order_float(geometry.get("part_height_m")) or 0.0
-            if center_x is not None and center_y is not None and slot_x is not None and slot_y is not None and slot_floor_z is not None:
+            if (
+                center_x is not None
+                and center_y is not None
+                and slot_x is not None
+                and slot_y is not None
+                and slot_floor_z is not None
+            ):
                 return {
                     "x": center_x + slot_x,
                     "y": center_y + slot_y,
@@ -1040,16 +1051,11 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             only_reach_rejections = bool(candidates) and all(
                 str(candidate.get("status") or "").strip() == "incomplete"
                 and (
-                    "source pose outside gripper_reach"
-                    in str(candidate.get("reason") or "")
-                    or "source pose not nearest staging_area"
-                    in str(candidate.get("reason") or "")
-                    or "gripper_reach metadata unavailable"
-                    in str(candidate.get("reason") or "")
-                    or "gripper_reach."
-                    in str(candidate.get("reason") or "")
-                    or "source pose unavailable"
-                    in str(candidate.get("reason") or "")
+                    "source pose outside gripper_reach" in str(candidate.get("reason") or "")
+                    or "source pose not nearest staging_area" in str(candidate.get("reason") or "")
+                    or "gripper_reach metadata unavailable" in str(candidate.get("reason") or "")
+                    or "gripper_reach." in str(candidate.get("reason") or "")
+                    or "source pose unavailable" in str(candidate.get("reason") or "")
                 )
                 for candidate in candidates
             )
@@ -1072,9 +1078,10 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             ),
         )
         for candidate in candidates:
-            same_candidate = (
-                str(candidate.get("resource_jid") or "") == str(selected.get("resource_jid") or "")
-                and str(candidate.get("source_location") or "") == str(selected.get("source_location") or "")
+            same_candidate = str(candidate.get("resource_jid") or "") == str(
+                selected.get("resource_jid") or ""
+            ) and str(candidate.get("source_location") or "") == str(
+                selected.get("source_location") or ""
             )
             if same_candidate:
                 candidate["status"] = "selected"
@@ -1304,18 +1311,16 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             if not isinstance(caps, dict):
                 continue
             reachability = [
-                str(item)
-                for item in (caps.get("reachability") or [])
-                if str(item or "").strip()
+                str(item) for item in (caps.get("reachability") or []) if str(item or "").strip()
             ]
             if destination and destination not in reachability:
                 continue
             staging = caps.get("staging_areas") or {}
-            staging_locations = [
-                str(name)
-                for name in staging.keys()
-                if str(name or "").strip()
-            ] if isinstance(staging, dict) else []
+            staging_locations = (
+                [str(name) for name in staging.keys() if str(name or "").strip()]
+                if isinstance(staging, dict)
+                else []
+            )
             staging_set = set(staging_locations)
             source_locations = [
                 item
@@ -1326,11 +1331,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 if location not in source_locations:
                     source_locations.append(location)
             if not source_locations:
-                source_locations = [
-                    item
-                    for item in reachability
-                    if item and item != destination
-                ]
+                source_locations = [item for item in reachability if item and item != destination]
             if not source_locations:
                 continue
             options.append(
@@ -1381,10 +1382,12 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
             # Use values exactly as returned by _llm_parse_requirements
             raw_text = req.get("raw_text", "")
-            phase = req.get("phase")              # e.g. "ASSEMBLY", "printing", or None
+            phase = req.get("phase")  # e.g. "ASSEMBLY", "printing", or None
             process_type = req.get("process_type")  # e.g. "PICK_PLACE", "FDM_PRINT", or None
-            product = req.get("product")          # e.g. "SG", "MCP", or None
-            context = req.get("context") or {}    # e.g. {"origin": "prusa-mk4-2", "destination": "assembly board"}
+            product = req.get("product")  # e.g. "SG", "MCP", or None
+            context = (
+                req.get("context") or {}
+            )  # e.g. {"origin": "prusa-mk4-2", "destination": "assembly board"}
 
             node = {
                 "id": node_id,
@@ -1401,7 +1404,6 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         msg = f"[Planner] Parsed {len(structured)} requirement(s) via LLM."
         self.logger.info(msg)
         return msg
-
 
     async def _llm_parse_requirements(
         self,
@@ -1433,9 +1435,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            self.logger.error(
-                "[Planner] LLM did not return valid JSON: %s\nRaw: %s", exc, raw
-            )
+            self.logger.error("[Planner] LLM did not return valid JSON: %s\nRaw: %s", exc, raw)
             raise
 
         reqs = parsed.get("requirements", [])
@@ -1586,44 +1586,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             len(self.nodes),
         )
 
-
     # ------------------------------------------------------------------ #
     # 3. REPLAN WHEN SAFETY VIOLATION OR ONLINE FAILURE OCCURS
     # ------------------------------------------------------------------ #
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # ------------------------------------------------------------------ #
     # Prompt helpers
@@ -1688,9 +1653,10 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                             conflict_task_ids.add(str(rt["id"]))
 
         return conflict_task_ids
+
     def _ensure_graph_consistency(self, nodes: list[dict[str, Any]] | None = None) -> None:
         """
-        Helper to ensure that if A lists B as a predecessor, 
+        Helper to ensure that if A lists B as a predecessor,
         B lists A as a successor (and vice versa).
         This fixes 'one-sided' edits from the LLM.
         """
@@ -1707,7 +1673,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     p_node = node_map[pid]
                     if nid not in p_node.get("successors", []):
                         p_node.setdefault("successors", []).append(nid)
-            
+
             # 2. Sync Successors -> Predecessors
             # If 'node' thinks 'sid' is a successor, make sure 'sid' knows 'node' is a predecessor.
             succs = list(dict.fromkeys(node.get("successors", []) or []))
@@ -1812,9 +1778,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self._ensure_graph_consistency(working_nodes)
 
         node_map = {
-            str(node.get("id", "")): node
-            for node in task_nodes
-            if str(node.get("id", "")).strip()
+            str(node.get("id", "")): node for node in task_nodes if str(node.get("id", "")).strip()
         }
 
         if not node_map:
@@ -1857,12 +1821,14 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 preserved_predecessors = [
                     pid
                     for pid in task.get("predecessors", []) or []
-                    if pid not in local_task_ids or node_map.get(pid, {}).get("resource_jid") != resource_jid
+                    if pid not in local_task_ids
+                    or node_map.get(pid, {}).get("resource_jid") != resource_jid
                 ]
                 preserved_successors = [
                     sid
                     for sid in task.get("successors", []) or []
-                    if sid not in local_task_ids or node_map.get(sid, {}).get("resource_jid") != resource_jid
+                    if sid not in local_task_ids
+                    or node_map.get(sid, {}).get("resource_jid") != resource_jid
                 ]
                 task["predecessors"] = list(dict.fromkeys(preserved_predecessors))
                 task["successors"] = list(dict.fromkeys(preserved_successors))
@@ -1975,6 +1941,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def graph_ready_task_nodes(self) -> list[dict[str, Any]]:
         """Return pending task nodes whose DAG predecessors are completed."""
+
         def _pred_satisfied(status: Any) -> bool:
             s = str(status) if status else ""
             return s == "completed"
@@ -2096,8 +2063,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         resources = sorted(res_to_tasks.keys())
 
         pos: dict[str, dict[str, int]] = {
-            res: {tid: i for i, tid in enumerate(res_to_tasks[res])}
-            for res in resources
+            res: {tid: i for i, tid in enumerate(res_to_tasks[res])} for res in resources
         }
 
         # ---- labeling helpers (NEW) ----
@@ -2169,7 +2135,6 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
             return True
 
-
         # ---- initial / marked ----
         x0 = tuple((0, None) for _ in resources)
         x_marked = tuple((len(res_to_tasks[r]), None) for r in resources)
@@ -2215,18 +2180,20 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                             name_map[x_next] = state_name(x_next)
                             q.append(x_next)
 
-                        transitions.append({
-                            "from": sx,
-                            "event": e,  # canonical
-                            "readable_event": readable_event(tid, "start"),
-                            "to": name_map[x_next],
-                            "resource_jid": res,
-                            "task_id": tid,
-                            "function_name": by_id[tid].get("function_name"),
-                            "params": dict(by_id[tid].get("params") or {}),
-                            "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
-                            "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
-                        })
+                        transitions.append(
+                            {
+                                "from": sx,
+                                "event": e,  # canonical
+                                "readable_event": readable_event(tid, "start"),
+                                "to": name_map[x_next],
+                                "resource_jid": res,
+                                "task_id": tid,
+                                "function_name": by_id[tid].get("function_name"),
+                                "params": dict(by_id[tid].get("params") or {}),
+                                "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
+                                "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
+                            }
+                        )
 
                 # RUNNING → done
                 else:
@@ -2239,18 +2206,20 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                         name_map[x_done] = state_name(x_done)
                         q.append(x_done)
 
-                    transitions.append({
-                        "from": sx,
-                        "event": e,  # canonical
-                        "readable_event": readable_event(tid, "done"),
-                        "to": name_map[x_done],
-                        "resource_jid": res,
-                        "task_id": tid,
-                        "function_name": by_id[tid].get("function_name"),
-                        "params": dict(by_id[tid].get("params") or {}),
-                        "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
-                        "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
-                    })
+                    transitions.append(
+                        {
+                            "from": sx,
+                            "event": e,  # canonical
+                            "readable_event": readable_event(tid, "done"),
+                            "to": name_map[x_done],
+                            "resource_jid": res,
+                            "task_id": tid,
+                            "function_name": by_id[tid].get("function_name"),
+                            "params": dict(by_id[tid].get("params") or {}),
+                            "in_state": _tool_meta_for_task(by_id[tid]).get("in_state"),
+                            "out_state": _tool_meta_for_task(by_id[tid]).get("out_state"),
+                        }
+                    )
 
         if x_marked not in name_map:
             raise ValueError(
@@ -2274,7 +2243,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             },
         }
 
-        self.global_fsa = fsa        # ← STORE IT
+        self.global_fsa = fsa  # ← STORE IT
         return fsa
 
     def save_global_fsa(self, path: Path | str) -> None:

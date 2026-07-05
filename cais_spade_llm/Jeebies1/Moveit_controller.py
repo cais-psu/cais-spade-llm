@@ -54,7 +54,9 @@ class UR5eMoveitCommander(Node):
                 return
             rclpy.spin_once(self, timeout_sec=0.1)
 
-    def call_service(self, service_name: str, service_type: type, timeout_sec: float = 3.0) -> Any | None:
+    def call_service(
+        self, service_name: str, service_type: type, timeout_sec: float = 3.0
+    ) -> Any | None:
         client = self.create_client(service_type, service_name)
         if not client.wait_for_service(timeout_sec=timeout_sec):
             print(f"{service_name}: unavailable")
@@ -91,11 +93,7 @@ class UR5eMoveitCommander(Node):
         print(f"execute_trajectory_available: {execute_available!r}")
         print(f"rtde_trajectory_action_available: {controller_available!r}")
 
-        ready = (
-            arm_positions is not None
-            and execute_available
-            and controller_available
-        )
+        ready = arm_positions is not None and execute_available and controller_available
         print(f"moveit_execution_ready: {ready!r}")
         return bool(ready)
 
@@ -139,7 +137,9 @@ class UR5eMoveitCommander(Node):
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = robot_trajectory
 
-        print(f"Sending MoveIt trajectory: {joint} += {delta_rad:.6f} rad ({math.degrees(delta_rad):.3f} deg)")
+        print(
+            f"Sending MoveIt trajectory: {joint} += {delta_rad:.6f} rad ({math.degrees(delta_rad):.3f} deg)"
+        )
         print(f"Start joints:  {current}")
         print(f"Target joints: {target}")
 
@@ -175,7 +175,9 @@ class UR5eMoveitCommander(Node):
         actual_delta = None if end is None else end[joint_index] - current[joint_index]
         print(f"End joints:    {end}")
         if actual_delta is not None:
-            print(f"Actual {joint} delta: {actual_delta:.6f} rad ({math.degrees(actual_delta):.3f} deg)")
+            print(
+                f"Actual {joint} delta: {actual_delta:.6f} rad ({math.degrees(actual_delta):.3f} deg)"
+            )
         observed = actual_delta is not None and abs(actual_delta) > abs(float(delta_rad)) * 0.5
         print(f"moveit_motion_observed: {observed!r}")
         return code == 1 and observed

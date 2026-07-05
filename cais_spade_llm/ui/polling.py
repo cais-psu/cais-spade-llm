@@ -18,7 +18,9 @@ class LogTailer:
             print(line)
     """
 
-    def __init__(self, path: str | Path, initial_lines: int = 200, poll_interval: float = 0.5) -> None:
+    def __init__(
+        self, path: str | Path, initial_lines: int = 200, poll_interval: float = 0.5
+    ) -> None:
         self.path = Path(path)
         self.initial_lines = initial_lines
         self.poll_interval = poll_interval
@@ -37,7 +39,7 @@ class LogTailer:
         except Exception:
             return []
         lines = text.splitlines()
-        tail = lines[-self.initial_lines:]
+        tail = lines[-self.initial_lines :]
         self._offset = len(text.encode("utf-8"))
         return tail
 

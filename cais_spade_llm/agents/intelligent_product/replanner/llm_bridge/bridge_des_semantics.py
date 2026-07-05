@@ -78,9 +78,7 @@ class BridgeValidationFinding:
         payload = asdict(self)
         traits = _finding_traits(stage=self.stage, code=self.code)
         payload["owner"] = self.owner or traits["owner"]
-        payload["durable"] = (
-            traits["durable"] if self.durable is None else bool(self.durable)
-        )
+        payload["durable"] = traits["durable"] if self.durable is None else bool(self.durable)
         payload["retriable"] = (
             traits["retriable"] if self.retriable is None else bool(self.retriable)
         )
@@ -220,7 +218,12 @@ def build_bridge_validation_context(
             entity_kind="part",
             attributes=row,
         )
-        for field_name in ("current_location", "goal_location", "origin_location", "target_location"):
+        for field_name in (
+            "current_location",
+            "goal_location",
+            "origin_location",
+            "target_location",
+        ):
             value = str(row.get(field_name) or "").strip()
             if value:
                 known_locations.add(value)
@@ -270,23 +273,19 @@ def build_bridge_validation_context(
                 value = source.get(key)
                 if isinstance(value, dict):
                     known_locations.update(
-                        str(item).strip()
-                        for item in value.keys()
-                        if str(item).strip()
+                        str(item).strip() for item in value.keys() if str(item).strip()
                     )
                 elif isinstance(value, (list, tuple, set)):
-                    known_locations.update(
-                        str(item).strip()
-                        for item in value
-                        if str(item).strip()
-                    )
+                    known_locations.update(str(item).strip() for item in value if str(item).strip())
                 else:
                     token_value = str(value or "").strip()
                     if token_value:
                         known_locations.add(token_value)
 
     marked_conditions: list[dict[str, Any]] = []
-    grounding_parts = dict(dict(prepared_bridge_request.get("grounding_context") or {}).get("parts") or {})
+    grounding_parts = dict(
+        dict(prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+    )
     for part_name, part_entry in grounding_parts.items():
         token = str(part_name or "").strip()
         target_location = str(dict(part_entry.get("target") or {}).get("location") or "").strip()
@@ -334,9 +333,7 @@ def parse_bridge_event_instance(
         },
         parameters=deepcopy(dict(raw.get("parameters") or {})),
         predecessors=[
-            str(item).strip()
-            for item in (raw.get("predecessors") or [])
-            if str(item).strip()
+            str(item).strip() for item in (raw.get("predecessors") or []) if str(item).strip()
         ],
         rationale=str(raw.get("rationale") or "").strip(),
     )
@@ -556,7 +553,11 @@ def _validate_schema_roles(
                     task_id=instance.outline_id,
                     resource_jid=resource_jid,
                     part_name=part_name,
-                    evidence={"role": role, "token": token, "known_locations": sorted(context.known_locations)},
+                    evidence={
+                        "role": role,
+                        "token": token,
+                        "known_locations": sorted(context.known_locations),
+                    },
                 )
             )
             return findings
@@ -783,7 +784,8 @@ def _project_release_like_part(
         action_target=action_target,
         part_name=part_name,
         target_ref=target_location,
-        description=instance.rationale or f"{verb} {part_name} with {resource_jid} to {target_location}.",
+        description=instance.rationale
+        or f"{verb} {part_name} with {resource_jid} to {target_location}.",
     ), unsatisfied
 
 
@@ -806,7 +808,8 @@ def _project_resume_nominal_task(
         action_target={},
         part_name="",
         target_ref="",
-        description=instance.rationale or f"Resume nominal task {nominal_task_id or 'unknown'} on {resource_jid}.",
+        description=instance.rationale
+        or f"Resume nominal task {nominal_task_id or 'unknown'} on {resource_jid}.",
     ), unsatisfied
 
 
@@ -826,9 +829,7 @@ def build_outline_task_row(
         "event_name": event_name,
         "description": projection.description,
         "predecessors": [
-            str(item).strip()
-            for item in (instance.predecessors or [])
-            if str(item).strip()
+            str(item).strip() for item in (instance.predecessors or []) if str(item).strip()
         ],
         "expected_start_state": deepcopy(projection.start_state),
         "expected_end_state": deepcopy(projection.end_state),
@@ -865,10 +866,14 @@ def _project_symbolic_state(
     resource_row["current_state"] = deepcopy(projection.end_state.get("resource_state"))
     if "held_part" in projection.end_state:
         resource_row["held_part"] = deepcopy(projection.end_state.get("held_part"))
-        resource_row["gripper_state"] = "closed" if projection.end_state.get("held_part") not in (None, "") else "open"
+        resource_row["gripper_state"] = (
+            "closed" if projection.end_state.get("held_part") not in (None, "") else "open"
+        )
 
     if projection.part_name:
-        part_row = projected_parts.setdefault(projection.part_name, {"part_name": projection.part_name})
+        part_row = projected_parts.setdefault(
+            projection.part_name, {"part_name": projection.part_name}
+        )
         part_row["current_state"] = deepcopy(projection.end_state.get("part_state"))
         part_row["current_location"] = deepcopy(projection.end_state.get("part_location"))
         part_row["current_holder_resource_jid"] = deepcopy(
@@ -922,14 +927,18 @@ def _progress_pick_part(
             {
                 "resolved_marked_conditions": 0,
                 "blocker_part_acquired": 1,
-                "remaining_marked_conditions": max(0, len(context.marked_conditions) - projected_satisfied),
+                "remaining_marked_conditions": max(
+                    0, len(context.marked_conditions) - projected_satisfied
+                ),
             },
         )
     return (
         0,
         {
             "resolved_marked_conditions": 0,
-            "remaining_marked_conditions": max(0, len(context.marked_conditions) - projected_satisfied),
+            "remaining_marked_conditions": max(
+                0, len(context.marked_conditions) - projected_satisfied
+            ),
         },
     )
 
@@ -950,14 +959,18 @@ def _progress_recover_resource_idle(
             {
                 "resolved_marked_conditions": 0,
                 "recovered_resource_idle": 1,
-                "remaining_marked_conditions": max(0, len(context.marked_conditions) - projected_satisfied),
+                "remaining_marked_conditions": max(
+                    0, len(context.marked_conditions) - projected_satisfied
+                ),
             },
         )
     return (
         0,
         {
             "resolved_marked_conditions": 0,
-            "remaining_marked_conditions": max(0, len(context.marked_conditions) - projected_satisfied),
+            "remaining_marked_conditions": max(
+                0, len(context.marked_conditions) - projected_satisfied
+            ),
         },
     )
 
@@ -971,8 +984,12 @@ def _goal_location_for_part(context: BridgeValidationContext, *, part_name: str)
         ).strip()
         if target_location:
             return target_location
-    grounding_parts = dict(dict(context.prepared_bridge_request.get("grounding_context") or {}).get("parts") or {})
-    return str(dict(dict(grounding_parts.get(part_name) or {}).get("target") or {}).get("location") or "").strip()
+    grounding_parts = dict(
+        dict(context.prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}
+    )
+    return str(
+        dict(dict(grounding_parts.get(part_name) or {}).get("target") or {}).get("location") or ""
+    ).strip()
 
 
 def _resource_state(resource_row: dict[str, Any]) -> str:
@@ -1003,9 +1020,7 @@ def _part_location(part_row: dict[str, Any]) -> str:
 
 def _part_holder(part_row: dict[str, Any]) -> str:
     return str(
-        part_row.get("current_holder_resource_jid")
-        or part_row.get("holder_resource_jid")
-        or ""
+        part_row.get("current_holder_resource_jid") or part_row.get("holder_resource_jid") or ""
     ).strip()
 
 

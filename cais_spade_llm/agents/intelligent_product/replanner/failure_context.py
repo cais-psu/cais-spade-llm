@@ -123,11 +123,7 @@ def build_failure_event(
     )
     observed_failure_mode = str(
         failure_context.get("failure_mode")
-        or (
-            observations.get("raw_failure_mode")
-            if isinstance(observations, dict)
-            else ""
-        )
+        or (observations.get("raw_failure_mode") if isinstance(observations, dict) else "")
         or (final_status.split(":", 1)[1] if ":" in str(final_status or "") else "")
     ).strip()
 

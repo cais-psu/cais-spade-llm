@@ -86,7 +86,9 @@ class ProductAgent(LlmAgent):
     - Keeps the PA simple: RA is the single broker that asks the LLM with tools.
     """
 
-    agent_role = "product"  # Registered role so the shared LLM base class can fetch the right prompts.
+    agent_role = (
+        "product"  # Registered role so the shared LLM base class can fetch the right prompts.
+    )
 
     def __init__(
         self,
@@ -142,7 +144,9 @@ class ProductAgent(LlmAgent):
         self.safety_text: str = ""
         self.safety_text_has_requirements: bool = False
 
-        self.precomputed_bundle: dict[str, Any] = dict(self.product_profile.precomputed_bundle or {})
+        self.precomputed_bundle: dict[str, Any] = dict(
+            self.product_profile.precomputed_bundle or {}
+        )
 
         # Planner scaffolding
         base_plan_dir = Path("cais_spade_llm/monitor/plan")
@@ -162,8 +166,8 @@ class ProductAgent(LlmAgent):
         self.process_planner = ProcessPlanner(self, planner_resources)
         self.recovery_controller = ProductRecoveryController(self)
         self.recovery_controller.bind_methods()
-        
-        #keep resolved resource agents on the ProductAgent for caps overview
+
+        # keep resolved resource agents on the ProductAgent for caps overview
         self.resource_agents = planner_resources
 
         # Simple in-memory map of task_id -> latest status string so UI/debug tooling can query progress.
@@ -176,7 +180,9 @@ class ProductAgent(LlmAgent):
         self.camera = camera if camera is not None else CameraModule()
 
         # Runtime tracking for replanning context (PRODUCT STATE ONLY)
-        self.part_tracker: dict[str, dict[str, Any]] = {}  # part_name -> {location, state, last_task}
+        self.part_tracker: dict[
+            str, dict[str, Any]
+        ] = {}  # part_name -> {location, state, last_task}
         self.execution_timeline: list[dict[str, Any]] = []  # [{timestamp, task_id, status, ...}]
         # NOTE: Robot states are queried directly from ResourceAgents, not cached here
         self._plan_result_inbox_registered = False
@@ -230,15 +236,18 @@ class ProductAgent(LlmAgent):
                 )
             except Exception:
                 self._runtime_repair_max_attempts = 3
-            self._bridge_generation_mode = str(
-                precomputed_policy.get("bridge_generation_mode", "auto") or "auto"
-            ).strip().lower()
+            self._bridge_generation_mode = (
+                str(precomputed_policy.get("bridge_generation_mode", "auto") or "auto")
+                .strip()
+                .lower()
+            )
             if self._bridge_generation_mode not in {"auto", "manual"}:
                 self._bridge_generation_mode = "auto"
-            self._bridge_reasoning_mode = str(
-                precomputed_policy.get("bridge_reasoning_mode", "multi_turn")
-                or "multi_turn"
-            ).strip().lower()
+            self._bridge_reasoning_mode = (
+                str(precomputed_policy.get("bridge_reasoning_mode", "multi_turn") or "multi_turn")
+                .strip()
+                .lower()
+            )
             if self._bridge_reasoning_mode in {
                 "hybrid",
                 "procedural",
@@ -259,7 +268,7 @@ class ProductAgent(LlmAgent):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _fsa_task_ids(fsa: dict[str, Any] | None) -> set[str]:
-        transitions = (((fsa or {}).get("A") or {}).get("Tr") or [])
+        transitions = ((fsa or {}).get("A") or {}).get("Tr") or []
         return {
             str(transition.get("task_id") or "").strip()
             for transition in transitions
@@ -305,10 +314,7 @@ class ProductAgent(LlmAgent):
         runtime_supervisor_mode = str(runtime_supervisor_mode or "reactive").strip()
         if runtime_supervisor_mode:
             runtime_context["runtime_supervisor_mode"] = runtime_supervisor_mode
-        if (
-            validation_scope == "active_window"
-            and composition_backend == "explicit_fsa_dfa"
-        ):
+        if validation_scope == "active_window" and composition_backend == "explicit_fsa_dfa":
             self._filter_runtime_context_completed_task_ids_for_fsa(
                 runtime_context,
                 fsa or {},
@@ -318,7 +324,7 @@ class ProductAgent(LlmAgent):
             raise RuntimeError("Global FSA is None. Did you call save_global_fsa()?")
 
         payload = {
-            "fsa": fsa or {},                # <-- upload FSA here
+            "fsa": fsa or {},  # <-- upload FSA here
             "product_jid": str(self.jid),
             "plan": {"nodes": nodes},
             "runtime_context": runtime_context,
@@ -399,9 +405,7 @@ class ProductAgent(LlmAgent):
 
         safety_event_history_builder = getattr(self, "_build_safety_event_history", None)
         safety_event_history = (
-            safety_event_history_builder()
-            if callable(safety_event_history_builder)
-            else []
+            safety_event_history_builder() if callable(safety_event_history_builder) else []
         )
         return {
             "completed_task_ids": completed_task_ids,
@@ -450,14 +454,10 @@ class ProductAgent(LlmAgent):
             params = dict(task_node.get("params") or {})
             params.setdefault("task_id", task_id)
             resource_jid = str(
-                task_node.get("resource_jid")
-                or source_event.get("resource_jid")
-                or ""
+                task_node.get("resource_jid") or source_event.get("resource_jid") or ""
             ).strip()
             function_name = str(
-                task_node.get("function_name")
-                or source_event.get("function_name")
-                or ""
+                task_node.get("function_name") or source_event.get("function_name") or ""
             ).strip()
             if resource_jid:
                 params.setdefault("resource_jid", resource_jid)
@@ -489,9 +489,7 @@ class ProductAgent(LlmAgent):
             params = dict(task_node.get("params") or {})
             params.setdefault("task_id", task_id)
             resource_jid = str(
-                task_node.get("resource_jid")
-                or source_event.get("resource_jid")
-                or ""
+                task_node.get("resource_jid") or source_event.get("resource_jid") or ""
             ).strip()
             function_name = str(task_node.get("function_name") or "").strip()
             part_name = str(self._tracked_part_name_for_task(task_node) or "").strip()
@@ -527,7 +525,6 @@ class ProductAgent(LlmAgent):
         history_cache["history"] = deepcopy(history)
         return history
 
-
     def _dispatch_agent_message_sync(
         self,
         msg: Message,
@@ -541,7 +538,6 @@ class ProductAgent(LlmAgent):
             trace_category=trace_category,
             transport_label=trace_category,
         )
-
 
     def _run_callable_on_agent_loop_sync(
         self,
@@ -602,75 +598,6 @@ class ProductAgent(LlmAgent):
         canonical = json.dumps(task_nodes, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     # --------------------------------------------------------------------- #
     # SPADE lifecycle
     # --------------------------------------------------------------------- #
@@ -726,8 +653,6 @@ class ProductAgent(LlmAgent):
             if line:
                 return True
         return False
-    
-
 
     def _geometry_for_part(self, part_name: str) -> dict[str, Any]:
         """Compatibility wrapper for ProductProfile per-part geometry lookup."""
@@ -787,9 +712,7 @@ class ProductAgent(LlmAgent):
 
         # Ensure every requirement_id referenced by tasks is represented.
         req_ids_from_tasks = {
-            str(n.get("requirement_id"))
-            for n in task_nodes
-            if n.get("requirement_id")
+            str(n.get("requirement_id")) for n in task_nodes if n.get("requirement_id")
         }
         for req_id in req_ids_from_tasks:
             requirements_status.setdefault(
@@ -806,10 +729,14 @@ class ProductAgent(LlmAgent):
                 isinstance(n.get("status"), str) and n.get("status", "").startswith("failed")
                 for n in req_tasks
             )
-            all_completed = bool(req_tasks) and all(n.get("status") == "completed" for n in req_tasks)
+            all_completed = bool(req_tasks) and all(
+                n.get("status") == "completed" for n in req_tasks
+            )
 
             if total_tasks > 0:
-                requirements_status[req_id]["completion"] = int((completed_tasks / total_tasks) * 100)
+                requirements_status[req_id]["completion"] = int(
+                    (completed_tasks / total_tasks) * 100
+                )
 
             if has_failed:
                 requirements_status[req_id]["status"] = "failed"
@@ -821,7 +748,8 @@ class ProductAgent(LlmAgent):
                 requirements_status[req_id]["status"] = "pending"
 
         final_timeline = [
-            e for e in self.execution_timeline
+            e
+            for e in self.execution_timeline
             if e.get("status", "") in {"completed", "blocked"}
             or str(e.get("status", "")).startswith("failed:")
         ]
@@ -860,91 +788,7 @@ class ProductAgent(LlmAgent):
         self.add_behaviour(self._PlanSafetyResultInbox(), t_plan_result)
         self._plan_result_inbox_registered = True
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     @staticmethod
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     async def _build_plan(self, requirement_text: str, safety_text: str = ""):
         """Build requirements, expand to tasks, and compile the global FSA."""
         # 1) NL → structured requirements
@@ -1306,9 +1150,6 @@ class ProductAgent(LlmAgent):
         )
         return True
 
-
-
-
     # --------------------------------------------------------------------- #
     # Behaviours
     # --------------------------------------------------------------------- #
@@ -1324,7 +1165,9 @@ class ProductAgent(LlmAgent):
                 instruction = None if product_order else agent._extract_requirement_text()
                 safety_text = agent._read_safety_text()
                 agent.safety_text = safety_text
-                agent.safety_text_has_requirements = agent._safety_text_has_requirements(safety_text)
+                agent.safety_text_has_requirements = agent._safety_text_has_requirements(
+                    safety_text
+                )
                 agent.runtime_repair_state = "idle"
                 agent._runtime_repair_fail_streak = 0
                 agent._clear_plan_safety_alert()
@@ -1336,7 +1179,9 @@ class ProductAgent(LlmAgent):
                     if product_order:
                         await agent._build_plan_from_product_order(product_order, safety_text)
                     elif not instruction:
-                        raise RuntimeError("no product requirement text available for startup planning")
+                        raise RuntimeError(
+                            "no product requirement text available for startup planning"
+                        )
                     else:
                         await agent._build_plan(instruction, safety_text)
 
@@ -1510,7 +1355,9 @@ class ProductAgent(LlmAgent):
                             return
                         agent.process_planner.compile_global_fsa()
                         await asyncio.to_thread(agent._persist_plan_snapshot)
-                        await asyncio.to_thread(agent.process_planner.save_global_fsa, agent.global_fsa_path)
+                        await asyncio.to_thread(
+                            agent.process_planner.save_global_fsa, agent.global_fsa_path
+                        )
                     except Exception as exc:
                         message = (
                             f"{agent.agent_name}: startup auto-replan attempt {retries_used}/{max_retries} "
@@ -1617,12 +1464,15 @@ class ProductAgent(LlmAgent):
 
             # 3) Track execution timeline
             from datetime import datetime, timezone
-            agent.execution_timeline.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "task_id": task_id,
-                "status": status,
-                "resource_jid": str(msg.sender),
-            })
+
+            agent.execution_timeline.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "task_id": task_id,
+                    "status": status,
+                    "resource_jid": str(msg.sender),
+                }
+            )
 
             # 4) Update part location tracking
             if task_node:
@@ -1656,23 +1506,26 @@ class ProductAgent(LlmAgent):
 
             if task_node and str(status).strip().lower() in {"completed", "finished"}:
                 product_order_part = str(task_node.get("product_order_part") or "").strip()
-                if product_order_part and agent._mark_product_order_part_completed_if_ready(product_order_part):
+                if product_order_part and agent._mark_product_order_part_completed_if_ready(
+                    product_order_part
+                ):
                     updated_node = True
 
-            if updated_node and not handled_bridge_ack and _should_persist_ack_state(task_node, str(status)):
+            if (
+                updated_node
+                and not handled_bridge_ack
+                and _should_persist_ack_state(task_node, str(status))
+            ):
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
                 await asyncio.to_thread(agent._persist_resource_state)
 
-            agent.logger.info(
-                f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}"
-            )
+            agent.logger.info(f"[Product] ACK ({task_id}) status='{status}' from={msg.sender}")
 
             if (
                 task_node
                 and str(status).strip().lower() == "blocked"
-                and str(task_id).strip()
-                in getattr(agent, "_pending_task_retry_ready_ids", set())
+                and str(task_id).strip() in getattr(agent, "_pending_task_retry_ready_ids", set())
             ):
                 reactivated = agent._handle_task_retry_ready([str(task_id).strip()])
                 if reactivated:
@@ -1861,9 +1714,7 @@ class ProductAgent(LlmAgent):
                 await asyncio.to_thread(agent._persist_product_state)
                 await asyncio.to_thread(agent._persist_resource_state)
             except Exception:
-                agent.logger.exception(
-                    "[Product] Corrective runtime replan attempt failed."
-                )
+                agent.logger.exception("[Product] Corrective runtime replan attempt failed.")
                 message = (
                     f"{agent.agent_name}: runtime auto-replan attempt "
                     f"{agent._runtime_repair_fail_streak}/{agent._runtime_repair_max_attempts} failed; "
@@ -2005,11 +1856,14 @@ class ProductAgent(LlmAgent):
                 to = str(to or "").strip()
                 active_statuses = {"dispatched", "accepted", "running"}
                 active_same_resource_task_ids: list[str] = []
-                planner_nodes = getattr(
-                    getattr(agent, "process_planner", None),
-                    "nodes",
-                    [],
-                ) or []
+                planner_nodes = (
+                    getattr(
+                        getattr(agent, "process_planner", None),
+                        "nodes",
+                        [],
+                    )
+                    or []
+                )
                 for other_node in planner_nodes:
                     if not isinstance(other_node, dict):
                         continue
@@ -2019,13 +1873,10 @@ class ProductAgent(LlmAgent):
                     if str(other_node.get("resource_jid") or "").strip() != to:
                         continue
                     other_status = str(other_node.get("status") or "").strip().lower()
-                    other_tracked_status = str(
-                        agent.task_states.get(other_task_id) or ""
-                    ).strip().lower()
-                    if (
-                        other_status in active_statuses
-                        or other_tracked_status in active_statuses
-                    ):
+                    other_tracked_status = (
+                        str(agent.task_states.get(other_task_id) or "").strip().lower()
+                    )
+                    if other_status in active_statuses or other_tracked_status in active_statuses:
                         active_same_resource_task_ids.append(other_task_id or "<unknown>")
                 if active_same_resource_task_ids:
                     agent.logger.info(
@@ -2094,7 +1945,9 @@ class ProductAgent(LlmAgent):
                         )
                         if isinstance(next_sequence, dict):
                             agent._set_runtime_recovery(
-                                message=str(agent.runtime_recovery.get("message", "") or "").strip(),
+                                message=str(
+                                    agent.runtime_recovery.get("message", "") or ""
+                                ).strip(),
                                 active_bridge_sequence=next_sequence,
                             )
 
@@ -2148,17 +2001,13 @@ class ProductAgent(LlmAgent):
             await asyncio.sleep(0.01)
 
     @staticmethod
-    def _match_resource_objects(
-        resources: Iterable[Any], target_jids: Iterable[str]
-    ) -> list[Any]:
+    def _match_resource_objects(resources: Iterable[Any], target_jids: Iterable[str]) -> list[Any]:
         """Return the subset of *resources* whose JIDs appear in *target_jids* (case-insensitive)."""
         resources = list(resources or [])
         if not resources:
             return []
 
-        target_jids_lower = {
-            str(jid).lower() for jid in target_jids if jid is not None
-        }
+        target_jids_lower = {str(jid).lower() for jid in target_jids if jid is not None}
         if not target_jids_lower:
             return resources
 

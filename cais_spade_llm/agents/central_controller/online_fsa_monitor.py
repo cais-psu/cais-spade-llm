@@ -25,9 +25,7 @@ class OnlineFsaMonitor:
         self.current_state: str | None = A.get("x0")
         self.transitions: list[dict[str, Any]] = A.get("Tr") or []
         self._all_states: set[str] = {
-            str(state)
-            for state in (A.get("X") or [])
-            if str(state).strip()
+            str(state) for state in (A.get("X") or []) if str(state).strip()
         }
 
         # Build (from_state, event) -> transition map
@@ -84,10 +82,16 @@ class OnlineFsaMonitor:
         self.current_state = prior_monitor.current_state
         self.completed_task_ids = set(prior_monitor.completed_task_ids)
         self.failed_task_ids = set(prior_monitor.failed_task_ids)
-        self.last_event = dict(prior_monitor.last_event) if isinstance(prior_monitor.last_event, dict) else prior_monitor.last_event
+        self.last_event = (
+            dict(prior_monitor.last_event)
+            if isinstance(prior_monitor.last_event, dict)
+            else prior_monitor.last_event
+        )
         return True
 
-    def _apply_event_label(self, event_label: str, *, task_id: str, outcome: str | None = None) -> bool:
+    def _apply_event_label(
+        self, event_label: str, *, task_id: str, outcome: str | None = None
+    ) -> bool:
         if not self.current_state:
             return False
 
@@ -116,9 +120,15 @@ class OnlineFsaMonitor:
         self.completed_task_ids = set()
         self.failed_task_ids = set()
 
-        completed = [str(task_id).strip() for task_id in (completed_task_ids or []) if str(task_id).strip()]
-        running = [str(task_id).strip() for task_id in (running_task_ids or []) if str(task_id).strip()]
-        failed = [str(task_id).strip() for task_id in (failed_task_ids or []) if str(task_id).strip()]
+        completed = [
+            str(task_id).strip() for task_id in (completed_task_ids or []) if str(task_id).strip()
+        ]
+        running = [
+            str(task_id).strip() for task_id in (running_task_ids or []) if str(task_id).strip()
+        ]
+        failed = [
+            str(task_id).strip() for task_id in (failed_task_ids or []) if str(task_id).strip()
+        ]
 
         for task_id in completed:
             started = self._apply_event_label(f"{task_id}.start", task_id=task_id)
@@ -256,9 +266,7 @@ class OnlineFsaMonitor:
         if not state:
             return result
 
-        pattern = re.compile(
-            r"([^\s=,]+)=\(k=(\d+),(?:run=([^:]+):([^)]+)|idle)\)"
-        )
+        pattern = re.compile(r"([^\s=,]+)=\(k=(\d+),(?:run=([^:]+):([^)]+)|idle)\)")
         for match in pattern.finditer(state):
             res = match.group(1)
             k = int(match.group(2))
@@ -319,11 +327,13 @@ class OnlineFsaMonitor:
         """
         Tasks whose START transitions are enabled from the given state.
         """
-        return sorted({
-            str(tr.get("task_id"))
-            for tr in self._from_map.get(state or "", [])
-            if tr.get("task_id") and str(tr.get("event", "")).endswith(".start")
-        })
+        return sorted(
+            {
+                str(tr.get("task_id"))
+                for tr in self._from_map.get(state or "", [])
+                if tr.get("task_id") and str(tr.get("event", "")).endswith(".start")
+            }
+        )
 
     def running_task_ids_from_state(self, state: str | None = None) -> list[str]:
         """
@@ -376,10 +386,7 @@ class OnlineFsaMonitor:
         failed_task_descendant_ids: list[str] = []
         failed_task_id = None
         if failure_event:
-            failed_task_id = (
-                failure_event.get("failed_task_id")
-                or failure_event.get("task_id")
-            )
+            failed_task_id = failure_event.get("failed_task_id") or failure_event.get("task_id")
 
         # Build the blocked-by-failure set: failed tasks + all FSA-descendants.
         failed_task_ids = set(self.failed_task_ids)

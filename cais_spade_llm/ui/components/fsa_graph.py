@@ -146,11 +146,19 @@ def fsa_to_mermaid(
 
     lines = ["graph TB"]
     lines.append("    classDef normal fill:#f8fafc,color:#0f172a,stroke:#94a3b8,stroke-width:1.5px")
-    lines.append("    classDef initial fill:#bfdbfe,color:#1e3a8a,stroke:#3b82f6,stroke-width:2.5px")
+    lines.append(
+        "    classDef initial fill:#bfdbfe,color:#1e3a8a,stroke:#3b82f6,stroke-width:2.5px"
+    )
     lines.append("    classDef marked fill:#bbf7d0,color:#14532d,stroke:#22c55e,stroke-width:2.5px")
-    lines.append("    classDef current fill:#fed7aa,color:#7c2d12,stroke:#f97316,stroke-width:3.5px")
-    lines.append("    classDef current_marked fill:#fde68a,color:#78350f,stroke:#f59e0b,stroke-width:3.5px")
-    lines.append("    classDef note fill:#e2e8f0,color:#334155,stroke:#94a3b8,stroke-dasharray: 3 3")
+    lines.append(
+        "    classDef current fill:#fed7aa,color:#7c2d12,stroke:#f97316,stroke-width:3.5px"
+    )
+    lines.append(
+        "    classDef current_marked fill:#fde68a,color:#78350f,stroke:#f59e0b,stroke-width:3.5px"
+    )
+    lines.append(
+        "    classDef note fill:#e2e8f0,color:#334155,stroke:#94a3b8,stroke-dasharray: 3 3"
+    )
     lines.append("    linkStyle default stroke:#64748b,stroke-width:2.2px")
 
     for state in states_ordered:

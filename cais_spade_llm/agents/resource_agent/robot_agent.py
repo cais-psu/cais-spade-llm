@@ -108,10 +108,7 @@ class RobotAgent(ResourceAgent):
         self._primitive_catalog_cache: list | None = None
 
         self.logger.info(
-            (
-                "RobotAgent '%s' initialized. mode=%s tools=%s "
-                "failure_scenarios=%s"
-            ),
+            ("RobotAgent '%s' initialized. mode=%s tools=%s failure_scenarios=%s"),
             name,
             self.execution_mode,
             list(self.executables.keys()),
@@ -142,9 +139,7 @@ class RobotAgent(ResourceAgent):
             requested_list = None
         else:
             requested_list = [
-                str(name).strip()
-                for name in requested_names
-                if str(name or "").strip()
+                str(name).strip() for name in requested_names if str(name or "").strip()
             ]
         return list(
             resolve_robot_task_names(
@@ -180,8 +175,7 @@ class RobotAgent(ResourceAgent):
         # Run prewarm in background so startup/ready signal is not blocked.
         if (
             self.enable_controller_prewarm
-            and
-            self.execution_mode != "dry_run"
+            and self.execution_mode != "dry_run"
             and self._controller is not None
             and not self._controller_prewarm_done
         ):
@@ -439,8 +433,7 @@ class RobotAgent(ResourceAgent):
             if set(value.keys()) == {"ref"}:
                 return self._resolve_effect_ref(str(value.get("ref") or ""), effect_context)
             return {
-                key: self._resolve_effect_value(item, effect_context)
-                for key, item in value.items()
+                key: self._resolve_effect_value(item, effect_context) for key, item in value.items()
             }
         if isinstance(value, list):
             return [self._resolve_effect_value(item, effect_context) for item in value]
@@ -900,30 +893,34 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
 
     # Controller primitives available for bridge macro steps.
-    _BRIDGE_PRIMITIVES = frozenset({
-        "move_cartesian",
-        "move_pose",
-        "move_relative",
-        "move_to_named_pose",
-        "delay",
-        "grasp_part",
-        "release_part",
-        "open_gripper",
-        "close_gripper",
-        "detect_parts",
-        "compute_pick_targets",
-        "compute_place_targets",
-        "attach_part",
-        "detach_part",
-        "snap_part_to_slot",
-        "get_current_pose",
-    })
-    _BRIDGE_OBSERVATION_PRIMITIVES = frozenset({
-        "detect_parts",
-        "compute_pick_targets",
-        "compute_place_targets",
-        "get_current_pose",
-    })
+    _BRIDGE_PRIMITIVES = frozenset(
+        {
+            "move_cartesian",
+            "move_pose",
+            "move_relative",
+            "move_to_named_pose",
+            "delay",
+            "grasp_part",
+            "release_part",
+            "open_gripper",
+            "close_gripper",
+            "detect_parts",
+            "compute_pick_targets",
+            "compute_place_targets",
+            "attach_part",
+            "detach_part",
+            "snap_part_to_slot",
+            "get_current_pose",
+        }
+    )
+    _BRIDGE_OBSERVATION_PRIMITIVES = frozenset(
+        {
+            "detect_parts",
+            "compute_pick_targets",
+            "compute_place_targets",
+            "get_current_pose",
+        }
+    )
 
     async def execute_bridge_observation(
         self,
@@ -1125,9 +1122,7 @@ class RobotAgent(ResourceAgent):
             except (TypeError, ValueError):
                 return None
 
-        part_name = str(
-            step_result.get("part_name") or params.get("part_name") or ""
-        ).strip()
+        part_name = str(step_result.get("part_name") or params.get("part_name") or "").strip()
         if not part_name:
             return
 
@@ -1185,10 +1180,7 @@ class RobotAgent(ResourceAgent):
             return
 
         part_name = str(
-            params.get("part_name")
-            or params.get("model_name")
-            or self._held_part
-            or ""
+            params.get("part_name") or params.get("model_name") or self._held_part or ""
         ).strip()
         if not part_name:
             return
@@ -1306,11 +1298,12 @@ class RobotAgent(ResourceAgent):
 
         runtime_snapshot = get_resource_bridge_snapshot(self)
         if expected_snapshot:
-            matches, mismatch_message = snapshot_matches_expected(runtime_snapshot, expected_snapshot)
+            matches, mismatch_message = snapshot_matches_expected(
+                runtime_snapshot, expected_snapshot
+            )
             if not matches:
                 msg = (
-                    f"Recovery macro '{macro_name}' expected snapshot mismatch: "
-                    f"{mismatch_message}"
+                    f"Recovery macro '{macro_name}' expected snapshot mismatch: {mismatch_message}"
                 )
                 self.logger.error("[Robot] %s", msg)
                 return {
@@ -1334,9 +1327,7 @@ class RobotAgent(ResourceAgent):
         try:
             primitive_steps = expand_composite_steps(primitive_steps, primitive_catalog)
         except Exception as exc:
-            msg = (
-                f"Recovery macro '{macro_name}' could not expand composite primitives: {exc}"
-            )
+            msg = f"Recovery macro '{macro_name}' could not expand composite primitives: {exc}"
             self.logger.error("[Robot] %s", msg)
             return {
                 "status": "failed",
@@ -1378,20 +1369,22 @@ class RobotAgent(ResourceAgent):
         # Execute each primitive step sequentially.
         results: list[dict[str, Any]] = []
         event_facts: dict[str, Any] = {}
-        resource_type = str(
-            dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
-            or runtime_snapshot.get("resource_type")
+        resource_type = (
+            str(
+                dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
+                or runtime_snapshot.get("resource_type")
+                or "resource"
+            )
+            .strip()
+            .lower()
             or "resource"
-        ).strip().lower() or "resource"
+        )
         for step_idx, step in enumerate(primitive_steps):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
             raw_params = step.get("params", {}) if isinstance(step, dict) else {}
 
             if primitive not in self._BRIDGE_PRIMITIVES:
-                msg = (
-                    f"Unknown primitive '{primitive}' at step {step_idx} "
-                    f"in macro '{macro_name}'"
-                )
+                msg = f"Unknown primitive '{primitive}' at step {step_idx} in macro '{macro_name}'"
                 self.logger.error("[Robot] %s", msg)
                 return {
                     "status": "failed",
@@ -1444,14 +1437,19 @@ class RobotAgent(ResourceAgent):
             results.append({"primitive": primitive, "result": step_result})
 
             if not step_result.get("success", False):
-                enhanced_msg = step_result.get('message', '')
-                
+                enhanced_msg = step_result.get("message", "")
+
                 # Phase 2: Granular Semantic Error Translation
                 # Inject real-time spatial context into the error so the LLM understands WHY it failed.
                 if primitive in (
-                    "move_cartesian", "move_pose", "move_relative", 
-                    "move_to_named_pose", "attach_part", "close_gripper",
-                    "grasp_part", "release_part",
+                    "move_cartesian",
+                    "move_pose",
+                    "move_relative",
+                    "move_to_named_pose",
+                    "attach_part",
+                    "close_gripper",
+                    "grasp_part",
+                    "release_part",
                 ):
                     try:
                         pose_res = await self._execute_primitive("get_current_pose", {})
@@ -1462,7 +1460,10 @@ class RobotAgent(ResourceAgent):
                                 f"[x={pose.get('x', 0):.3f}, y={pose.get('y', 0):.3f}, z={pose.get('z', 0):.3f}]."
                             )
                     except Exception as e:
-                        self.logger.warning("[Robot] Failed to capture spatial context during error translation: %s", e)
+                        self.logger.warning(
+                            "[Robot] Failed to capture spatial context during error translation: %s",
+                            e,
+                        )
 
                 return {
                     "status": "failed",
@@ -1601,9 +1602,7 @@ class RobotAgent(ResourceAgent):
         """Return the cached primitive catalog, building it on first access."""
         return self.bridge_execution_primitive_catalog()
 
-    async def _execute_primitive(
-        self, primitive: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
         if self.execution_mode == "dry_run":
             self.logger.debug("[Robot] dry_run primitive: %s", primitive)
@@ -1710,13 +1709,9 @@ class RobotAgent(ResourceAgent):
             lo = bounds.get(f"{axis}_min_m")
             hi = bounds.get(f"{axis}_max_m")
             if lo is not None and val < float(lo):
-                violations.append(
-                    f"{axis}={val:.4f} < {axis}_min_m={float(lo):.4f}"
-                )
+                violations.append(f"{axis}={val:.4f} < {axis}_min_m={float(lo):.4f}")
             if hi is not None and val > float(hi):
-                violations.append(
-                    f"{axis}={val:.4f} > {axis}_max_m={float(hi):.4f}"
-                )
+                violations.append(f"{axis}={val:.4f} > {axis}_max_m={float(hi):.4f}")
 
         if violations:
             return False, f"pose outside workspace: {', '.join(violations)}"
@@ -1774,8 +1769,7 @@ class RobotAgent(ResourceAgent):
             end_state = dict(getattr(projection, "end_state", {}) or {})
             source_ref: dict[str, Any] = {
                 "location": str(
-                    getattr(event_instance, "object_bindings", {}).get("source_location")
-                    or ""
+                    getattr(event_instance, "object_bindings", {}).get("source_location") or ""
                 ).strip()
                 or None,
             }
@@ -1826,9 +1820,7 @@ class RobotAgent(ResourceAgent):
                 "operation_kind": str(action_type or operation_kind or "").strip(),
                 "task_kind": str(action_type or operation_kind or "").strip(),
                 "target": deepcopy(
-                    getattr(projection, "action_target", {})
-                    or part_context.get("target")
-                    or {}
+                    getattr(projection, "action_target", {}) or part_context.get("target") or {}
                 ),
                 "expected_effect": {
                     "resource": expected_resource,
@@ -1848,12 +1840,12 @@ class RobotAgent(ResourceAgent):
         part_preconditions = dict(preconditions.get("part") or {})
         source_ref = dict(preconditions.get("source_ref") or {})
         effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
-        task_kind = str(
-            grounded_action.get("task_kind") or action_type or operation_kind or ""
-        ).strip().lower()
-        part_name = (
-            str(part_name or grounded_action.get("part_name") or "").strip() or None
+        task_kind = (
+            str(grounded_action.get("task_kind") or action_type or operation_kind or "")
+            .strip()
+            .lower()
         )
+        part_name = str(part_name or grounded_action.get("part_name") or "").strip() or None
         expected_resource = dict(expected_effect.get("resource") or {})
         expected_part = dict(expected_effect.get("part") or {})
         part_affecting = bool(
@@ -1906,15 +1898,17 @@ class RobotAgent(ResourceAgent):
             }
 
         held_part = str(
-            bridge_snapshot.get("held_part")
-            or part_context.get("resource_held_part")
-            or ""
+            bridge_snapshot.get("held_part") or part_context.get("resource_held_part") or ""
         ).strip()
-        gripper_state = str(
-            bridge_snapshot.get("gripper_state")
-            or part_context.get("resource_gripper_state")
-            or ""
-        ).strip().lower()
+        gripper_state = (
+            str(
+                bridge_snapshot.get("gripper_state")
+                or part_context.get("resource_gripper_state")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         current_holder = str(part_context.get("current_holder_resource_jid") or "").strip()
         resource_jid = str(getattr(self, "jid", "") or "")
         desired_resource_state = str(expected_resource.get("current_state") or "").strip()
@@ -1929,16 +1923,12 @@ class RobotAgent(ResourceAgent):
             if str(token).strip()
         }
         allows_abstract_idle_recovery = (
-            effect_scope == "resource_only"
-            and desired_resource_state.lower() == "idle"
+            effect_scope == "resource_only" and desired_resource_state.lower() == "idle"
         )
         requires_part_acquisition = bool(
             part_name
             and part_affecting
-            and (
-                bool(part_preconditions.get("requires_acquisition"))
-                or schema_id == "pick_part"
-            )
+            and (bool(part_preconditions.get("requires_acquisition")) or schema_id == "pick_part")
         )
         if (
             effect_scope == "resource_only"
@@ -2080,11 +2070,7 @@ class RobotAgent(ResourceAgent):
                     },
                 }
         if target_pose is None:
-            target_pose = (
-                target_info.get("slot_pose")
-                or target_info.get("pose")
-                or None
-            )
+            target_pose = target_info.get("slot_pose") or target_info.get("pose") or None
 
         if target_pose is None:
             return {
@@ -2144,7 +2130,7 @@ class RobotAgent(ResourceAgent):
 
         self.logger.info("[%s] %s (estimated %.1f sec)", robot, description, duration)
 
-        interval = 2.0   # progress tick interval
+        interval = 2.0  # progress tick interval
         elapsed = 0.0
 
         while elapsed < duration:
@@ -2155,6 +2141,7 @@ class RobotAgent(ResourceAgent):
             )
 
         self.logger.info("[%s] Finished: %s", robot, description)
+
 
 for _robot_task_name in robot_task_names():
     setattr(RobotAgent, _robot_task_name, robot_task_registry()[_robot_task_name].handler)

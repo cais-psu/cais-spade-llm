@@ -14,6 +14,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
     Maintains the LIVE state of the factory.
     Inherits parsing/transition logic from BaseSafetyChecker.
     """
+
     def __init__(
         self,
         dfa_dots: dict[str, str],
@@ -47,11 +48,11 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             self.logger.error("Malformed resource_event body.")
             return None
 
-        task_id       = data.get("task_id")
-        resource_jid  = data.get("resource_jid")
+        task_id = data.get("task_id")
+        resource_jid = data.get("resource_jid")
         function_name = data.get("function_name")
-        params        = data.get("params") or {}
-        status        = data.get("status") or "running"
+        params = data.get("params") or {}
+        status = data.get("status") or "running"
         current_state = data.get("current_state")
 
         if not (resource_jid and function_name):
@@ -127,10 +128,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
 
         # Combine Running + Candidate to see the "Next World State"
         sigma = frozenset(
-            set(self.running_aps)
-            | self._all_state_aps()
-            | set(candidate_aps)
-            | set(predicted)
+            set(self.running_aps) | self._all_state_aps() | set(candidate_aps) | set(predicted)
         )
 
         next_states: dict[str, str] = {}
@@ -222,9 +220,9 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         current_state = str(event.get("current_state", "") or "").strip()
         projected_surface = self._state_surface_from_prediction(event_params)
         if current_state or projected_surface:
-            current_state = current_state or str(
-                projected_surface.get("resource_state") or ""
-            ).strip()
+            current_state = (
+                current_state or str(projected_surface.get("resource_state") or "").strip()
+            )
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,
@@ -232,11 +230,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             )
 
         # Advance DFA with the original APs to mark this action as completed.
-        sigma = frozenset(
-            set(self.running_aps)
-            | self._all_state_aps()
-            | set(finished_aps)
-        )
+        sigma = frozenset(set(self.running_aps) | self._all_state_aps() | set(finished_aps))
         next_states: dict[str, str] = {}
         for rule_id in self.dfas:
             prev = self.current_states.get(rule_id, "1")
@@ -263,9 +257,9 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         current_state = str(event.get("current_state", "") or "").strip()
         projected_surface = self._state_surface_from_prediction(event_params)
         if current_state or projected_surface:
-            current_state = current_state or str(
-                projected_surface.get("resource_state") or ""
-            ).strip()
+            current_state = (
+                current_state or str(projected_surface.get("resource_state") or "").strip()
+            )
             self._update_resource_state(
                 event["resource_jid"],
                 current_state,

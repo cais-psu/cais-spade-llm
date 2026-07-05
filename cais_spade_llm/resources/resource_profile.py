@@ -96,11 +96,7 @@ def resource_event_fact_contract(
         if str(param).strip()
     ]
     any_of_param_sets = [
-        [
-            str(param).strip()
-            for param in (param_set or [])
-            if str(param).strip()
-        ]
+        [str(param).strip() for param in (param_set or []) if str(param).strip()]
         for param_set in (contract.get("any_of_param_sets") or [])
         if isinstance(param_set, (list, tuple))
     ]
@@ -110,9 +106,7 @@ def resource_event_fact_contract(
     if any_of_param_sets:
         normalized["any_of_param_sets"] = any_of_param_sets
     path_templates = [
-        str(path).strip()
-        for path in (contract.get("path_templates") or [])
-        if str(path).strip()
+        str(path).strip() for path in (contract.get("path_templates") or []) if str(path).strip()
     ]
     if path_templates:
         normalized["path_templates"] = path_templates
@@ -173,26 +167,18 @@ def resource_primitive_event_target_contract(
     raw_param_fields = raw_contract.get("param_fields")
     if isinstance(raw_param_fields, str):
         raw_param_fields = [raw_param_fields]
-    param_fields = [
-        str(field).strip()
-        for field in (raw_param_fields or [])
-        if str(field).strip()
-    ]
+    param_fields = [str(field).strip() for field in (raw_param_fields or []) if str(field).strip()]
     raw_event_families = raw_contract.get("event_families")
     if isinstance(raw_event_families, str):
         raw_event_families = [raw_event_families]
     event_families = [
-        str(family).strip().lower()
-        for family in (raw_event_families or [])
-        if str(family).strip()
+        str(family).strip().lower() for family in (raw_event_families or []) if str(family).strip()
     ]
     raw_conditions = raw_contract.get("conditions") or raw_contract.get("when")
     if isinstance(raw_conditions, str):
         raw_conditions = [raw_conditions]
     conditions = [
-        str(token).strip().lower()
-        for token in (raw_conditions or [])
-        if str(token).strip()
+        str(token).strip().lower() for token in (raw_conditions or []) if str(token).strip()
     ]
     normalized: dict[str, Any] = {}
     if param_fields:
@@ -223,9 +209,7 @@ def resource_expected_end_state_projection_map(
                 compare_when_present = False
             elif isinstance(raw_spec, dict):
                 snapshot_field = str(
-                    raw_spec.get("snapshot_field")
-                    or raw_spec.get("field")
-                    or ""
+                    raw_spec.get("snapshot_field") or raw_spec.get("field") or ""
                 ).strip()
                 compare_when_present = bool(raw_spec.get("compare_when_present"))
             else:
@@ -366,7 +350,9 @@ def resource_snapshot_set_field(
                 top_level_value = dict(raw_snapshot.get(root_field) or {})
                 if not isinstance(top_level_value, dict):
                     top_level_value = {}
-                raw_snapshot[root_field] = _nested_set(top_level_value, field_name.split(".", 1)[1], value)
+                raw_snapshot[root_field] = _nested_set(
+                    top_level_value, field_name.split(".", 1)[1], value
+                )
             return raw_snapshot
 
         resource_facets = dict(raw_snapshot.get("resource_facets") or {})
@@ -412,7 +398,9 @@ def resource_snapshot_has_field(
     if field in dict(raw_snapshot.get("resource_core") or {}):
         return True
     facet_key = str(active_profile.facet_key or "").strip()
-    if facet_key and field in dict((raw_snapshot.get("resource_facets") or {}).get(facet_key) or {}):
+    if facet_key and field in dict(
+        (raw_snapshot.get("resource_facets") or {}).get(facet_key) or {}
+    ):
         return True
     return False
 
@@ -449,7 +437,11 @@ def resource_snapshot_availability(
         )
     )
     if active_profile.availability_resolver is not None:
-        resolved = str(active_profile.availability_resolver(raw_snapshot, current_state) or "").strip().lower()
+        resolved = (
+            str(active_profile.availability_resolver(raw_snapshot, current_state) or "")
+            .strip()
+            .lower()
+        )
         if resolved:
             return resolved
     return "available"
@@ -561,20 +553,12 @@ def all_registered_operation_kinds() -> set[str]:
     kinds: set[str] = set()
     for profile in _PROFILE_REGISTRY.values():
         kinds.update(
-            str(kind).strip()
-            for kind in profile.primitive_kind_map.values()
-            if str(kind).strip()
+            str(kind).strip() for kind in profile.primitive_kind_map.values() if str(kind).strip()
         )
         kinds.update(
-            str(kind).strip()
-            for kind in profile.family_to_primitive.keys()
-            if str(kind).strip()
+            str(kind).strip() for kind in profile.family_to_primitive.keys() if str(kind).strip()
         )
-        kinds.update(
-            str(kind).strip()
-            for kind in profile.compiler_map.keys()
-            if str(kind).strip()
-        )
+        kinds.update(str(kind).strip() for kind in profile.compiler_map.keys() if str(kind).strip())
     kinds.update({"bridge", "clear", "home"})
     return {kind for kind in kinds if kind}
 

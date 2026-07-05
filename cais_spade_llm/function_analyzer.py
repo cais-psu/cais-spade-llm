@@ -3,6 +3,7 @@
 Analysis of Python functions and entire classes using introspection
 for creating descriptions usable with the OpenAI API
 """
+
 from __future__ import annotations
 
 import inspect
@@ -29,9 +30,9 @@ class VariableDescription:
 class FunctionAnalyzer:
     openai_types = {
         float: "number",
-        int  : "number",
-        str  : "string",
-        bool : "boolean",
+        int: "number",
+        str: "string",
+        bool: "boolean",
     }
 
     # ------------------------------------------------------------------ #
@@ -71,12 +72,10 @@ class FunctionAnalyzer:
             return getattr(underlying, "__tool_spec__", None)
         return None
 
-
-
     def analyze_function(self, fn) -> dict:
         """
         Analyzes a python function and returns a description compatible with the OpenAI API.
-        
+
         Assumptions:
         * Docstring includes a function description and (optionally) parameter descriptions separated by 2 linebreaks.
         * Parameter descriptions are indicated by `:param x:`.
@@ -93,7 +92,8 @@ class FunctionAnalyzer:
         hints.pop("return", None)
 
         required = [
-            p for p, t in hints.items()
+            p
+            for p, t in hints.items()
             if not (typing.get_origin(t) is Union and type(None) in typing.get_args(t))
         ]
 
@@ -109,9 +109,7 @@ class FunctionAnalyzer:
             key, _, text = line.partition(": ")
             param_descriptions[key.strip()] = text.strip()
 
-        param_meta = (
-            frontmatter.get("params") if isinstance(frontmatter, dict) else None
-        )
+        param_meta = frontmatter.get("params") if isinstance(frontmatter, dict) else None
         if not isinstance(param_meta, dict):
             param_meta = {}
 
@@ -145,7 +143,7 @@ class FunctionAnalyzer:
                 "required": required,
             },
         }
-    
+
     def analyze_class(self, class_: object) -> list:
         """
         Analyzes a python class and returns a description of all its non-private functions
@@ -208,15 +206,20 @@ class FunctionAnalyzer:
         allowed: dict[str, set[str]] | None = None,
         outfile: Path | str = Path("tools.json"),
     ) -> None:
-
         analyzer = FunctionAnalyzer()
         rows = []
         for agent in agents:
             # prefer agent.agent_name; fallback to .name; else class name
             owner = getattr(agent, "agent_name", getattr(agent, "name", agent.__class__.__name__))
-            fn_whitelist = allowed.get(owner, set()) if isinstance(allowed, dict) else {
-                n for n in dir(agent) if not n.startswith("_") and callable(getattr(agent, n, None))
-            }
+            fn_whitelist = (
+                allowed.get(owner, set())
+                if isinstance(allowed, dict)
+                else {
+                    n
+                    for n in dir(agent)
+                    if not n.startswith("_") and callable(getattr(agent, n, None))
+                }
+            )
 
             # Iterate in stable order so tools.json hash is reproducible across runs.
             for fn_name in sorted(fn_whitelist):
@@ -236,9 +239,7 @@ class FunctionAnalyzer:
                 if analyzed.get("description"):
                     row.setdefault("description", analyzed["description"])
 
-                params_schema = (
-                    analyzed.get("parameters", {}).get("properties", {}) or {}
-                )
+                params_schema = analyzed.get("parameters", {}).get("properties", {}) or {}
                 if params_schema:
                     params_payload = {}
                     for param_name, schema in params_schema.items():
@@ -261,7 +262,7 @@ class FunctionAnalyzer:
             )
         )
 
-        out_path = Path(outfile)                     # ← coerce to Path
+        out_path = Path(outfile)  # ← coerce to Path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
         print(f"wrote {len(rows)} capability rows to {out_path}")

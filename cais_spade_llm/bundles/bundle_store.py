@@ -53,8 +53,7 @@ class BundleStore:
         manifest_data = manifest if isinstance(manifest, dict) else None
         if manifest_data is None:
             out["display_name"] = (
-                str(out.get("display_name", "")).strip()
-                or f"{bid} | INVALID (manifest missing)"
+                str(out.get("display_name", "")).strip() or f"{bid} | INVALID (manifest missing)"
             )
             out["created_at_utc"] = str(out.get("created_at_utc", "")).strip()
             out["status"] = "invalid"
@@ -62,21 +61,13 @@ class BundleStore:
             return out
 
         out["display_name"] = str(
-            manifest_data.get("display_name")
-            or out.get("display_name")
-            or bid
+            manifest_data.get("display_name") or out.get("display_name") or bid
         ).strip()
         out["created_at_utc"] = str(
-            manifest_data.get("created_at_utc")
-            or out.get("created_at_utc")
-            or ""
+            manifest_data.get("created_at_utc") or out.get("created_at_utc") or ""
         ).strip()
 
-        status = str(
-            manifest_data.get("status")
-            or out.get("status")
-            or "invalid"
-        ).strip().lower()
+        status = str(manifest_data.get("status") or out.get("status") or "invalid").strip().lower()
         out["status"] = status or "invalid"
         out["verified"] = bool(
             manifest_data.get("verified")
@@ -132,11 +123,15 @@ class BundleStore:
             active_bundle_id = None
         elif active_bundle_id:
             manifest = self.load_manifest(active_bundle_id)
-            status = str(
-                (manifest or {}).get("status")
-                or indexed_by_id.get(active_bundle_id, {}).get("status")
-                or ""
-            ).strip().lower()
+            status = (
+                str(
+                    (manifest or {}).get("status")
+                    or indexed_by_id.get(active_bundle_id, {}).get("status")
+                    or ""
+                )
+                .strip()
+                .lower()
+            )
             if not manifest or status != "verified":
                 active_bundle_id = None
 

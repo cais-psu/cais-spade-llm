@@ -39,10 +39,7 @@ def _artifact_token(value: Any, *, fallback: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
         return fallback
-    token = "".join(
-        ch if ch.isalnum() else "_"
-        for ch in raw
-    ).strip("_")
+    token = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
     while "__" in token:
         token = token.replace("__", "_")
     return token or fallback
@@ -52,10 +49,7 @@ def _artifact_case_preserving_token(value: Any, *, fallback: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return fallback
-    token = "".join(
-        ch if ch.isalnum() else "_"
-        for ch in raw
-    ).strip("_")
+    token = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
     while "__" in token:
         token = token.replace("__", "_")
     return token or fallback
@@ -106,11 +100,7 @@ def _multi_turn_artifact_context(payload: dict[str, Any]) -> dict[str, Any]:
     bridge_debug = _bridge_debug_payload(payload)
     multi_turn_session = dict(bridge_debug.get("multi_turn_session") or {})
     latest_turn = _latest_multi_turn_turn(payload)
-    turn_index = int(
-        latest_turn.get("turn_index")
-        or multi_turn_session.get("turn_index")
-        or 0
-    )
+    turn_index = int(latest_turn.get("turn_index") or multi_turn_session.get("turn_index") or 0)
     phase = _artifact_token(
         latest_turn.get("phase") or multi_turn_session.get("current_phase"),
         fallback="grounding",
@@ -318,9 +308,7 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        if "constraint_code" in row and not (
-            row.get("validation_findings") or row.get("findings")
-        ):
+        if "constraint_code" in row and not (row.get("validation_findings") or row.get("findings")):
             compact_finding = _compact_artifact_finding(row)
             if compact_finding:
                 compact_rows.append(compact_finding)
@@ -341,11 +329,13 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
         ]
         if findings:
             compact_row["findings"] = findings
-            compact_row["constraint_codes"] = sorted({
-                str(item.get("constraint_code") or "")
-                for item in findings
-                if str(item.get("constraint_code") or "").strip()
-            })
+            compact_row["constraint_codes"] = sorted(
+                {
+                    str(item.get("constraint_code") or "")
+                    for item in findings
+                    if str(item.get("constraint_code") or "").strip()
+                }
+            )
         compact_rows.append(compact_row)
     return compact_rows
 
@@ -371,18 +361,19 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
         findings = [
             compact_finding
             for compact_finding in (
-                _compact_artifact_finding(item)
-                for item in (row.get("validation_findings") or [])
+                _compact_artifact_finding(item) for item in (row.get("validation_findings") or [])
             )
             if compact_finding
         ]
         if findings:
             summary["findings"] = findings
-            summary["constraint_codes"] = sorted({
-                str(item.get("constraint_code") or "")
-                for item in findings
-                if str(item.get("constraint_code") or "").strip()
-            })
+            summary["constraint_codes"] = sorted(
+                {
+                    str(item.get("constraint_code") or "")
+                    for item in findings
+                    if str(item.get("constraint_code") or "").strip()
+                }
+            )
         progress_detail = row.get("progress_detail")
         if isinstance(progress_detail, dict) and progress_detail:
             summary["progress_detail"] = deepcopy(progress_detail)
@@ -431,8 +422,8 @@ def _compact_multi_turn_response_artifact(response: Any) -> Any:
         compact.pop("accepted_transition_prefix", None)
     evaluations = compact.pop("candidate_evaluations", None)
     if isinstance(evaluations, list):
-        compact["candidate_evaluation_summary"] = (
-            _compact_artifact_candidate_evaluations(evaluations)
+        compact["candidate_evaluation_summary"] = _compact_artifact_candidate_evaluations(
+            evaluations
         )
     rejection_feedback = compact.get("candidate_rejection_feedback")
     if isinstance(rejection_feedback, list):
@@ -466,35 +457,31 @@ def _compact_multi_turn_session_transcript(session: dict[str, Any]) -> dict[str,
             compact_turn.pop("accepted_transition_prefix", None)
         evaluations = compact_turn.pop("candidate_evaluations", None)
         if isinstance(evaluations, list):
-            compact_turn["candidate_evaluation_summary"] = (
-                _compact_artifact_candidate_evaluations(evaluations)
+            compact_turn["candidate_evaluation_summary"] = _compact_artifact_candidate_evaluations(
+                evaluations
             )
         rejection_feedback = compact_turn.get("candidate_rejection_feedback")
         if isinstance(rejection_feedback, list):
-            compact_turn["candidate_rejection_feedback"] = (
-                _compact_artifact_feedback_rows(rejection_feedback)
+            compact_turn["candidate_rejection_feedback"] = _compact_artifact_feedback_rows(
+                rejection_feedback
             )
         transition_validation = compact_turn.get("transition_validation")
         if isinstance(transition_validation, dict):
-            compact_turn["transition_validation"] = (
-                _compact_multi_turn_response_artifact({
+            compact_turn["transition_validation"] = _compact_multi_turn_response_artifact(
+                {
                     "transition_validation": transition_validation,
-                }).get("transition_validation", {})
-            )
+                }
+            ).get("transition_validation", {})
         raw_response = compact_turn.get("raw_response")
         if isinstance(raw_response, dict):
-            compact_turn["raw_response"] = _compact_multi_turn_response_artifact(
-                raw_response
-            )
+            compact_turn["raw_response"] = _compact_multi_turn_response_artifact(raw_response)
         primitive_substream_turns = compact_turn.get("primitive_substream_turns")
         if isinstance(primitive_substream_turns, list):
             compact_turn["primitive_substream_turns"] = [
                 {
                     "outline_id": str(row.get("outline_id") or "").strip(),
                     "resource_jid": str(row.get("resource_jid") or "").strip(),
-                    "primitive_local_turn_index": int(
-                        row.get("primitive_local_turn_index") or 0
-                    ),
+                    "primitive_local_turn_index": int(row.get("primitive_local_turn_index") or 0),
                     "decision": str(row.get("decision") or "").strip(),
                 }
                 for row in primitive_substream_turns
@@ -560,9 +547,7 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
                 {
                     "outline_id": str(row.get("outline_id") or "").strip(),
                     "resource_jid": str(row.get("resource_jid") or "").strip(),
-                    "primitive_local_turn_index": int(
-                        row.get("primitive_local_turn_index") or 0
-                    ),
+                    "primitive_local_turn_index": int(row.get("primitive_local_turn_index") or 0),
                     "decision": str(row.get("decision") or "").strip(),
                 }
                 for row in primitive_substream_turns
@@ -571,9 +556,7 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
 
     raw_response = turn.get("raw_response")
     if isinstance(raw_response, dict) and phase != "final_output":
-        compact_turn["raw_response"] = _compact_multi_turn_response_artifact(
-            raw_response
-        )
+        compact_turn["raw_response"] = _compact_multi_turn_response_artifact(raw_response)
     return compact_turn
 
 
@@ -667,17 +650,18 @@ def _primitive_substream_prompt_text(turn: dict[str, Any]) -> str:
     lines = [
         f"Outline ID: {str(turn.get('outline_id') or '').strip() or '-'}",
         f"Resource JID: {str(turn.get('resource_jid') or '').strip() or '-'}",
-        (
-            "Primitive Local Turn: "
-            f"{int(turn.get('primitive_local_turn_index') or 0)}"
-        ),
+        (f"Primitive Local Turn: {int(turn.get('primitive_local_turn_index') or 0)}"),
         "",
         "System Instructions",
         system_instructions or "_None_",
         "",
         "Response Schema",
         "```json",
-        json.dumps(response_schema if isinstance(response_schema, dict) else {}, indent=2, ensure_ascii=True),
+        json.dumps(
+            response_schema if isinstance(response_schema, dict) else {},
+            indent=2,
+            ensure_ascii=True,
+        ),
         "```",
         "",
         "Prompt",
@@ -713,11 +697,7 @@ def _extract_primitive_substream_turns(payload: dict[str, Any]) -> list[dict[str
     raw_turns = latest_turn.get("primitive_substream_turns")
     if not isinstance(raw_turns, list):
         return []
-    return [
-        deepcopy(turn)
-        for turn in raw_turns
-        if isinstance(turn, dict)
-    ]
+    return [deepcopy(turn) for turn in raw_turns if isinstance(turn, dict)]
 
 
 def _write_multi_turn_primitive_substream_artifacts(
@@ -739,13 +719,15 @@ def _write_multi_turn_primitive_substream_artifacts(
             prompt_path = Path(existing_prompt_path)
             response_path = Path(existing_response_path)
             if prompt_path.exists() and response_path.exists():
-                artifact_rows.append({
-                    "outline_id": str(turn.get("outline_id") or "").strip(),
-                    "resource_jid": str(turn.get("resource_jid") or "").strip(),
-                    "primitive_local_turn_index": str(local_turn_index),
-                    "prompt_artifact_path": str(prompt_path),
-                    "response_artifact_path": str(response_path),
-                })
+                artifact_rows.append(
+                    {
+                        "outline_id": str(turn.get("outline_id") or "").strip(),
+                        "resource_jid": str(turn.get("resource_jid") or "").strip(),
+                        "primitive_local_turn_index": str(local_turn_index),
+                        "prompt_artifact_path": str(prompt_path),
+                        "response_artifact_path": str(response_path),
+                    }
+                )
                 continue
         prompt_path = target_dir / (
             f"multi_turn_{outline_id}_primitive_generation_"
@@ -763,13 +745,15 @@ def _write_multi_turn_primitive_substream_artifacts(
             _primitive_substream_response_text(turn),
             encoding="utf-8",
         )
-        artifact_rows.append({
-            "outline_id": str(turn.get("outline_id") or "").strip(),
-            "resource_jid": str(turn.get("resource_jid") or "").strip(),
-            "primitive_local_turn_index": str(local_turn_index),
-            "prompt_artifact_path": str(prompt_path),
-            "response_artifact_path": str(response_path),
-        })
+        artifact_rows.append(
+            {
+                "outline_id": str(turn.get("outline_id") or "").strip(),
+                "resource_jid": str(turn.get("resource_jid") or "").strip(),
+                "primitive_local_turn_index": str(local_turn_index),
+                "prompt_artifact_path": str(prompt_path),
+                "response_artifact_path": str(response_path),
+            }
+        )
     return artifact_rows
 
 
@@ -779,17 +763,11 @@ def _json_safe_resume_value(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {
-            str(key): _json_safe_resume_value(item)
-            for key, item in value.items()
-        }
+        return {str(key): _json_safe_resume_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe_resume_value(item) for item in value]
     if isinstance(value, set):
-        return [
-            _json_safe_resume_value(item)
-            for item in sorted(value, key=lambda row: str(row))
-        ]
+        return [_json_safe_resume_value(item) for item in sorted(value, key=lambda row: str(row))]
     return str(value)
 
 
@@ -931,9 +909,7 @@ def write_bridge_artifacts(
             f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
             f"{multi_turn_ctx['phase']}_resume_checkpoint_{timestamp}.json"
         )
-        latest_resume_checkpoint_artifact_name = (
-            "multi_turn_resume_checkpoint_latest.json"
-        )
+        latest_resume_checkpoint_artifact_name = "multi_turn_resume_checkpoint_latest.json"
     else:
         target_dir = base_target_dir
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -949,9 +925,7 @@ def write_bridge_artifacts(
 
     prompt_text = _extract_prompt_text(normalized_payload)
     report_text = _extract_report_text(normalized_payload)
-    is_report_artifact = not str(prompt_text or "").strip() and bool(
-        str(report_text or "").strip()
-    )
+    is_report_artifact = not str(prompt_text or "").strip() and bool(str(report_text or "").strip())
     primary_text = report_text if is_report_artifact else prompt_text
     primary_artifact_name = (
         prompt_artifact_name.replace("_prompt_", "_report_")
@@ -973,9 +947,7 @@ def write_bridge_artifacts(
             latest_artifact_name=latest_resume_checkpoint_artifact_name,
         )
         artifact_paths.update(checkpoint_paths)
-        primitive_batch_checkpoint = _primitive_batch_resume_checkpoint_payload(
-            normalized_payload
-        )
+        primitive_batch_checkpoint = _primitive_batch_resume_checkpoint_payload(normalized_payload)
         if primitive_batch_checkpoint is not None:
             assigned_outline_events = list(
                 primitive_batch_checkpoint.get("assigned_outline_events") or []
@@ -1008,8 +980,7 @@ def write_bridge_artifacts(
                     f"turn{local_turn_index:02d}_resume_checkpoint_{timestamp}.json"
                 ),
                 latest_artifact_name=(
-                    f"multi_turn_{outline_id}_primitive_generation_"
-                    "resume_checkpoint_latest.json"
+                    f"multi_turn_{outline_id}_primitive_generation_resume_checkpoint_latest.json"
                 ),
             )
             if primitive_checkpoint_paths:
@@ -1019,7 +990,11 @@ def write_bridge_artifacts(
                 artifact_paths["latest_primitive_resume_checkpoint_artifact_path"] = (
                     primitive_checkpoint_paths["latest_resume_checkpoint_artifact_path"]
                 )
-    if write_phase_prompt_response and suppress_phase_prompt_response and reasoning_mode == "multi_turn":
+    if (
+        write_phase_prompt_response
+        and suppress_phase_prompt_response
+        and reasoning_mode == "multi_turn"
+    ):
         primitive_substream_artifacts = _write_multi_turn_primitive_substream_artifacts(
             normalized_payload,
             target_dir=target_dir,
@@ -1030,7 +1005,11 @@ def write_bridge_artifacts(
                 primitive_substream_artifacts,
                 ensure_ascii=True,
             )
-    if write_phase_prompt_response and not suppress_phase_prompt_response and str(primary_text or "").strip():
+    if (
+        write_phase_prompt_response
+        and not suppress_phase_prompt_response
+        and str(primary_text or "").strip()
+    ):
         primary_artifact_path = target_dir / primary_artifact_name
         primary_artifact_path.write_text(
             primary_text,
@@ -1071,24 +1050,22 @@ def write_bridge_artifacts(
             session_transcript,
             encoding="utf-8",
         )
-        artifact_paths["session_transcript_artifact_path"] = str(
-            session_transcript_artifact_path
-        )
+        artifact_paths["session_transcript_artifact_path"] = str(session_transcript_artifact_path)
     if write_latest:
-        if write_phase_prompt_response and not suppress_phase_prompt_response and str(primary_text or "").strip():
+        if (
+            write_phase_prompt_response
+            and not suppress_phase_prompt_response
+            and str(primary_text or "").strip()
+        ):
             latest_primary_artifact_path = target_dir / latest_primary_artifact_name
             latest_primary_artifact_path.write_text(
                 primary_text,
                 encoding="utf-8",
             )
             if is_report_artifact:
-                artifact_paths["latest_report_artifact_path"] = str(
-                    latest_primary_artifact_path
-                )
+                artifact_paths["latest_report_artifact_path"] = str(latest_primary_artifact_path)
             else:
-                artifact_paths["latest_prompt_artifact_path"] = str(
-                    latest_primary_artifact_path
-                )
+                artifact_paths["latest_prompt_artifact_path"] = str(latest_primary_artifact_path)
         if write_phase_prompt_response and not suppress_phase_prompt_response and secondary_text:
             latest_secondary_artifact_path = target_dir / latest_secondary_artifact_name
             latest_secondary_artifact_path.write_text(
@@ -1096,9 +1073,7 @@ def write_bridge_artifacts(
                 encoding="utf-8",
             )
             if is_report_artifact:
-                artifact_paths["latest_result_artifact_path"] = str(
-                    latest_secondary_artifact_path
-                )
+                artifact_paths["latest_result_artifact_path"] = str(latest_secondary_artifact_path)
             else:
                 artifact_paths["latest_response_artifact_path"] = str(
                     latest_secondary_artifact_path

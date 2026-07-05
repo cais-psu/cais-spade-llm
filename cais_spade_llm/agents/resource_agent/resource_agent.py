@@ -44,7 +44,7 @@ class ResourceAgent(LlmAgent):
         allowed_senders: Iterable[str] | None = None,
         llm_timeout_s: int = 30,
         tool_timeout_s: int = 300,
-        cca_jid: str | None = None,   # <-- NEW
+        cca_jid: str | None = None,  # <-- NEW
         **kw: Any,
     ) -> None:
         """
@@ -130,9 +130,7 @@ class ResourceAgent(LlmAgent):
                 build_execution_primitive_catalog,
             )
 
-            self._bridge_execution_primitive_catalog_cache = (
-                build_execution_primitive_catalog(self)
-            )
+            self._bridge_execution_primitive_catalog_cache = build_execution_primitive_catalog(self)
         return deepcopy(self._bridge_execution_primitive_catalog_cache)
 
     def bridge_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
@@ -142,10 +140,8 @@ class ResourceAgent(LlmAgent):
                 build_synthesis_primitive_catalog,
             )
 
-            self._bridge_synthesis_primitive_catalog_cache = (
-                build_synthesis_primitive_catalog(
-                    primitive_catalog=self.bridge_execution_primitive_catalog()
-                )
+            self._bridge_synthesis_primitive_catalog_cache = build_synthesis_primitive_catalog(
+                primitive_catalog=self.bridge_execution_primitive_catalog()
             )
         return deepcopy(self._bridge_synthesis_primitive_catalog_cache)
 
@@ -188,7 +184,10 @@ class ResourceAgent(LlmAgent):
         )
 
         normalized_resource_jid = str(resource_jid or getattr(self, "jid", "") or "").strip()
-        if normalized_resource_jid and normalized_resource_jid != str(getattr(self, "jid", "") or "").strip():
+        if (
+            normalized_resource_jid
+            and normalized_resource_jid != str(getattr(self, "jid", "") or "").strip()
+        ):
             raise ValueError(
                 f"resource-owned primitive batch was assigned to {normalized_resource_jid!r} "
                 f"but invoked on {str(getattr(self, 'jid', '') or '').strip()!r}"
@@ -197,9 +196,7 @@ class ResourceAgent(LlmAgent):
             llm_agent=self,
             prepared_bridge_request=dict(prepared_bridge_request or {}),
             assigned_outline_events=[
-                dict(row)
-                for row in (assigned_outline_events or [])
-                if isinstance(row, dict)
+                dict(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
             ],
             bridge_session_id=str(bridge_session_id or "").strip(),
             carried_session_state=dict(carried_session_state or {}),
@@ -245,7 +242,9 @@ class ResourceAgent(LlmAgent):
 
         steps = list(primitive_steps or [])
         runtime_snapshot = get_resource_bridge_snapshot(self)
-        actual_state = str(runtime_snapshot.get("current_state") or getattr(self, "_current_state", "") or "").strip()
+        actual_state = str(
+            runtime_snapshot.get("current_state") or getattr(self, "_current_state", "") or ""
+        ).strip()
 
         if expected_start_state and actual_state != expected_start_state:
             msg = (
@@ -264,11 +263,12 @@ class ResourceAgent(LlmAgent):
             }
 
         if expected_snapshot:
-            matches, mismatch_message = snapshot_matches_expected(runtime_snapshot, expected_snapshot)
+            matches, mismatch_message = snapshot_matches_expected(
+                runtime_snapshot, expected_snapshot
+            )
             if not matches:
                 msg = (
-                    f"Recovery macro '{macro_name}' expected snapshot mismatch: "
-                    f"{mismatch_message}"
+                    f"Recovery macro '{macro_name}' expected snapshot mismatch: {mismatch_message}"
                 )
                 return {
                     "status": "failed",
@@ -337,11 +337,16 @@ class ResourceAgent(LlmAgent):
 
         results: list[dict[str, Any]] = []
         event_facts: dict[str, Any] = {}
-        resource_type = str(
-            dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
-            or runtime_snapshot.get("resource_type")
+        resource_type = (
+            str(
+                dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
+                or runtime_snapshot.get("resource_type")
+                or "resource"
+            )
+            .strip()
+            .lower()
             or "resource"
-        ).strip().lower() or "resource"
+        )
         for step_idx, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
@@ -350,10 +355,7 @@ class ResourceAgent(LlmAgent):
 
             fn = getattr(owner, primitive, None) or getattr(self, primitive, None)
             if not callable(fn):
-                msg = (
-                    f"Unknown primitive '{primitive}' at step {step_idx} "
-                    f"in macro '{macro_name}'"
-                )
+                msg = f"Unknown primitive '{primitive}' at step {step_idx} in macro '{macro_name}'"
                 return {
                     "status": "failed",
                     "content": msg,
@@ -390,7 +392,9 @@ class ResourceAgent(LlmAgent):
 
             try:
                 maybe_result = fn(**params)
-                step_result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+                step_result = (
+                    await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+                )
             except Exception as exc:
                 return {
                     "status": "failed",
@@ -579,11 +583,13 @@ class ResourceAgent(LlmAgent):
             if decision is not None:
                 return decision
             await asyncio.sleep(0.1)
+
     # ------------------------------------------------------------------ #
     # Behaviours
     # ------------------------------------------------------------------ ##
     class _TaskInbox(CyclicBehaviour):
         """Long-running behaviour that processes incoming tasks sequentially."""
+
         async def run(self) -> None:
             agent: ResourceAgent = self.agent  # type: ignore
 
@@ -595,9 +601,7 @@ class ResourceAgent(LlmAgent):
             # ----- trust boundary ----- #
             # Give operators a simple safety net: reject unexpected senders early.
             if agent.allowed_senders and str(msg.sender) not in agent.allowed_senders:
-                agent.logger.warning(
-                    f"[Resource] Rejecting task from {msg.sender} (not allowed)"
-                )
+                agent.logger.warning(f"[Resource] Rejecting task from {msg.sender} (not allowed)")
                 await self._ack(msg, task_id="?", status="rejected:unauthorized")
                 return
 
@@ -622,9 +626,7 @@ class ResourceAgent(LlmAgent):
                 await self._ack(msg, task_id="?", status="failed:missing_task_id")
                 return
 
-            agent.logger.info(
-                f"[Resource] ← Task ({task_id}) from={msg.sender} proto={protocol}"
-            )
+            agent.logger.info(f"[Resource] ← Task ({task_id}) from={msg.sender} proto={protocol}")
 
             # ----- Tool selection ----- #
             # If the instruction already specifies a tool, honor it and skip the LLM.
@@ -662,15 +664,11 @@ class ResourceAgent(LlmAgent):
 
                 fn_name, fn_args = _parse_function_call(llm_resp)
             if not fn_name:
-                agent.logger.info(
-                    f"[Resource] ({task_id}) no_tool_match; responding."
-                )
+                agent.logger.info(f"[Resource] ({task_id}) no_tool_match; responding.")
                 await self._ack(msg, task_id=task_id, status="no_tool_match")
                 return
 
-            start_safety_mode = str(
-                fn_args.get("start_safety_mode") or ""
-            ).strip().lower()
+            start_safety_mode = str(fn_args.get("start_safety_mode") or "").strip().lower()
             # Recovery bridge macros keep the legacy default fast path unless
             # they explicitly request cca_check. Any task can now opt into the
             # same bypass with start_safety_mode=fast_path.
@@ -712,13 +710,15 @@ class ResourceAgent(LlmAgent):
                 try:
                     running_msg = Message(to=agent.cca_jid)
                     running_msg.set_metadata("type", "resource_event")
-                    running_msg.body = json.dumps({
-                        "task_id": task_id,
-                        "resource_jid": str(agent.jid),
-                        "function_name": fn_name,
-                        "params": fn_args,
-                        "status": "running",
-                    })
+                    running_msg.body = json.dumps(
+                        {
+                            "task_id": task_id,
+                            "resource_jid": str(agent.jid),
+                            "function_name": fn_name,
+                            "params": fn_args,
+                            "status": "running",
+                        }
+                    )
                     await send_agent_message(
                         self,
                         running_msg,
@@ -738,20 +738,24 @@ class ResourceAgent(LlmAgent):
                     # 1) Send request permission, not running
                     resource_msg = Message(to=agent.cca_jid)
                     resource_msg.set_metadata("type", "resource_event")
-                    resource_msg.body = json.dumps({
-                        "task_id": task_id,
-                        "resource_jid": str(agent.jid),
-                        "function_name": fn_name,
-                        "params": fn_args,
-                        "status": "safety_check",   # <-- REQUEST permission
-                    })
+                    resource_msg.body = json.dumps(
+                        {
+                            "task_id": task_id,
+                            "resource_jid": str(agent.jid),
+                            "function_name": fn_name,
+                            "params": fn_args,
+                            "status": "safety_check",  # <-- REQUEST permission
+                        }
+                    )
                     await send_agent_message(
                         self,
                         resource_msg,
                         transport_label="resource_safety",
                     )
                 except Exception:
-                    agent.logger.exception("[Resource] Failed to send resource_event to CCA (ignored).")
+                    agent.logger.exception(
+                        "[Resource] Failed to send resource_event to CCA (ignored)."
+                    )
 
             # 2) Wait for CCA decision (instant for recovery macros, blocks for normal tasks)
             decision = await agent._wait_for_safety_decision(task_id)
@@ -768,13 +772,15 @@ class ResourceAgent(LlmAgent):
 
                 running_msg = Message(to=agent.cca_jid)
                 running_msg.set_metadata("type", "resource_event")
-                running_msg.body = json.dumps({
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "function_name": fn_name,
-                    "params": fn_args,
-                    "status": "running",
-                })
+                running_msg.body = json.dumps(
+                    {
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": fn_name,
+                        "params": fn_args,
+                        "status": "running",
+                    }
+                )
                 await send_agent_message(
                     self,
                     running_msg,
@@ -793,8 +799,7 @@ class ResourceAgent(LlmAgent):
                 # others get only the params in their signature.
                 sig = inspect.signature(func)
                 accepts_var_kw = any(
-                    p.kind == inspect.Parameter.VAR_KEYWORD
-                    for p in sig.parameters.values()
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
                 )
                 if accepts_var_kw:
                     filtered_args = fn_args
@@ -823,15 +828,17 @@ class ResourceAgent(LlmAgent):
 
                         done_msg = Message(to=agent.cca_jid)
                         done_msg.set_metadata("type", "resource_event")
-                        done_msg.body = json.dumps({
-                            "task_id": task_id,
-                            "resource_jid": str(agent.jid),
-                            "function_name": fn_name,
-                            "params": fn_args,
-                            "status": final_status,  # e.g. "completed", "blocked", etc.
-                            "failure_context": failure_context,
-                            "current_state": state_after.get("current_state", "idle"),
-                        })
+                        done_msg.body = json.dumps(
+                            {
+                                "task_id": task_id,
+                                "resource_jid": str(agent.jid),
+                                "function_name": fn_name,
+                                "params": fn_args,
+                                "status": final_status,  # e.g. "completed", "blocked", etc.
+                                "failure_context": failure_context,
+                                "current_state": state_after.get("current_state", "idle"),
+                            }
+                        )
                         # fire-and-forget so we don't block on CCA
                         asyncio.create_task(
                             send_agent_message(
@@ -866,24 +873,24 @@ class ResourceAgent(LlmAgent):
                     )
                     fail_msg = Message(to=agent.cca_jid)
                     fail_msg.set_metadata("type", "resource_event")
-                    fail_msg.body = json.dumps({
-                        "task_id": task_id,
-                        "resource_jid": str(agent.jid),
-                        "function_name": fn_name,
-                        "params": fn_args,
-                        "status": final_status,
-                        "failure_context": failure_context,
-                        "current_state": state_after.get("current_state", "idle"),
-                    })
+                    fail_msg.body = json.dumps(
+                        {
+                            "task_id": task_id,
+                            "resource_jid": str(agent.jid),
+                            "function_name": fn_name,
+                            "params": fn_args,
+                            "status": final_status,
+                            "failure_context": failure_context,
+                            "current_state": state_after.get("current_state", "idle"),
+                        }
+                    )
                     await send_agent_message(
                         self,
                         fail_msg,
                         transport_label="resource_fail",
                     )
                 except Exception:
-                    agent.logger.exception(
-                        "[Resource] Failed to send fail resource_event to CCA."
-                    )
+                    agent.logger.exception("[Resource] Failed to send fail resource_event to CCA.")
 
             # ---------------------------
             #  SEND FINAL ACK TO PA
@@ -929,6 +936,7 @@ class ResourceAgent(LlmAgent):
 
     class _SafetyDecisionInbox(CyclicBehaviour):
         """Receives safety_decision messages from CCA and stores them on the agent."""
+
         async def run(self) -> None:
             agent: ResourceAgent = self.agent  # type: ignore
 
@@ -946,9 +954,7 @@ class ResourceAgent(LlmAgent):
             decision = data.get("decision")
 
             if not task_id or decision not in ("allow", "block"):
-                agent.logger.warning(
-                    "[Resource] Invalid safety_decision message: %s", data
-                )
+                agent.logger.warning("[Resource] Invalid safety_decision message: %s", data)
                 return
 
             agent._safety_decisions[task_id] = decision
@@ -957,6 +963,7 @@ class ResourceAgent(LlmAgent):
                 decision,
                 task_id,
             )
+
 
 # --------------------------------------------------------------------------- #
 # Utilities

@@ -43,163 +43,164 @@ def _env_flag_enabled(*names: str, default: bool = False) -> bool:
         return token in {"1", "true", "yes", "on"}
     return bool(default)
 
+
 class ProductRecoveryController:
     EXPORTED_METHODS = (
-        '_build_plan_safety_alert',
-        '_set_plan_safety_alert',
-        '_clear_plan_safety_alert',
-        'get_plan_safety_alert',
-        '_normalize_runtime_bridge_mode',
-        '_normalize_runtime_bridge_validation_policy',
-        'set_runtime_bridge_session_settings',
-        '_runtime_bridge_session_mode',
-        '_runtime_bridge_session_validation_policy',
-        '_runtime_bridge_session_archive_path',
-        '_runtime_bridge_session_archive_label',
-        '_runtime_bridge_session_artifact_directory',
-        '_bridge_debug_with_runtime_handoff',
-        '_runtime_bridge_turn_token',
-        '_runtime_bridge_progress_message',
-        'report_runtime_bridge_turn_progress',
-        '_runtime_action_feedback_payload',
-        '_recovery_result_with_action_feedback',
-        '_bridge_sequence_state',
-        '_bridge_sequence_is_live',
-        '_bridge_sequence_task_ids',
-        '_bridge_proposal_fingerprint',
-        '_bridge_sequence_summary',
-        '_should_ignore_stale_recovery_macro_ack',
-        '_bridge_sequence_with_dispatched_task',
-        '_bridge_sequence_with_completed_task',
-        '_derive_runtime_bridge_stage',
-        '_empty_runtime_recovery',
-        '_sync_runtime_repair_state',
-        '_set_runtime_recovery',
-        '_clear_runtime_recovery',
-        '_normalized_xyz_pose',
-        '_observed_pose_for_part',
-        '_tracked_pose_for_part_at_location',
-        '_support_surface_place_pose_from_observations',
-        '_part_geometry_for_pick_context',
-        '_enrich_observed_pose_recovery_params',
-        '_runtime_safety_fast_path_monitor',
-        '_runtime_safety_ap_sets_for_task',
-        '_runtime_safety_task_ap_empty',
-        '_dispatch_params_for_task_node',
-        '_runtime_recovery_blocks_execution',
-        'get_runtime_recovery',
-        '_runtime_bridge_data_root',
-        '_resolve_runtime_bridge_archive_path',
-        '_bridge_feedback_history_with',
-        '_append_bridge_feedback',
-        '_bridge_session_state',
-        '_reset_session_for_outline_retry',
-        '_reset_session_for_primitive_retry',
-        '_prepare_runtime_bridge_session_state',
-        '_bridge_proposal_from_debug',
-        '_load_runtime_bridge_archive_bundle',
-        '_run_multi_turn_bridge_until',
-        '_set_kickoff_result',
-        'wait_for_kickoff_result',
-        '_persist_plan_snapshot',
-        '_persist_product_state',
-        '_bridge_debug_directory',
-        '_ensure_live_bridge_per_turn_debug_dir',
-        '_build_runtime_bridge_artifact_payload',
-        '_record_runtime_bridge_artifacts',
-        '_runtime_recovery_safety_live_root',
-        '_allocate_runtime_recovery_safety_worked_dir',
-        '_recovery_safety_generation_dirs',
-        '_build_recovery_safety_generation_payload',
-        '_dispatch_recovery_safety_generation_request',
-        '_handle_recovery_safety_generated_result',
-        '_persist_resource_state',
-        '_get_part_transition',
-        '_tracked_part_name_for_task',
-        '_apply_part_tracker_update',
-        '_reactivate_blocked_tasks',
-        '_handle_task_retry_ready',
-        '_reactivate_restored_repair_target_from_context',
-        '_candidate_task_ids_from_violations',
-        '_active_bridge_sequence',
-        '_bridge_used_llm',
-        '_bridge_execution_policy',
-        '_bridge_requires_complete_full_tail',
-        '_bridge_is_verification_only',
-        '_reconstruct_active_bridge_sequence_for_validation',
-        '_active_bridge_blocks_nominal_dispatch',
-        '_next_dispatchable_task_node',
-        '_active_bridge_next_ready_task',
-        '_bridge_task_predecessors_ready',
-        '_select_runtime_event',
-        '_graph_ready_task_nodes',
-        '_tool_row_for_task_node',
-        '_event_contract_for_task_node',
-        '_build_runtime_plant_state',
-        '_plant_resource_field',
-        '_plant_part_field',
-        '_unknown_runtime_value',
-        '_event_guard_violations',
-        '_record_runtime_des_trace',
-        '_resource_can_reach_location',
-        '_model_name_from_mapping',
-        '_part_model_name_for_repair',
-        '_part_geometry_for_repair',
-        '_repair_execution_mode_for_resource',
-        '_resolve_acquire_entity_pick_source',
-        '_repair_primitive_catalog_for_resource',
-        '_validate_repair_primitive_program',
-        '_record_repair_compile_error',
-        '_strip_continuation_requirement_actuals',
-        '_runtime_des_disabled_event_message',
-        '_failed_release_primitive_observation',
-        '_try_compile_release_retry_event',
-        '_try_compile_controllable_repair',
-        '_append_acquire_entity_repair_event',
-        '_mark_runtime_des_human_required',
-        '_bridge_continuation_disabled_frontier',
-        '_runtime_is_gazebo_simulation',
-        '_should_enable_generated_bridge_verification',
-        '_build_generated_code_verification',
-        '_runtime_bridge_fixture_final_output_path',
-        '_runtime_bridge_fixture_final_output_source_path',
-        '_runtime_bridge_fixture_replay_enabled',
-        '_compact_fixture_replay_status',
-        '_load_runtime_bridge_fixture_replay',
-        '_bridge_task_debug_rows',
-        '_bridge_sequence_tail_task_ids',
-        '_refresh_bridge_snapshot',
-        '_system_coordination_state_with_bridge_snapshot',
-        '_bridge_snapshot_mismatch',
-        '_bridge_part_entry_mismatch',
-        '_dispatch_runtime_plan_validation_check',
-        '_send_runtime_plan_validation_check',
-        '_send_runtime_plan_validation_check_sync',
-        '_fail_closed_bridge_sequence',
-        '_handle_bridge_macro_ack',
-        '_run_des_runtime_recovery_attempt',
-        '_handle_runtime_des_replan_request',
-        '_handle_runtime_plan_validation_result',
-        'submit_runtime_recovery_guidance',
-        '_execute_runtime_bridge_generation',
-        'generate_runtime_bridge_proposal',
-        'load_runtime_bridge_archive_proposal',
-        'approve_runtime_bridge_outline',
-        'refine_runtime_bridge_outline',
-        'reject_runtime_bridge_outline',
-        'approve_runtime_bridge_primitives',
-        'refine_runtime_bridge_primitives',
-        'reject_runtime_bridge_primitives',
-        '_build_preprogrammed_runtime_bridge_bundle',
-        '_derive_preprogrammed_part_observations',
-        '_cache_preprogrammed_runtime_bridge_scenario',
-        '_resolve_preprogrammed_runtime_bridge_bundle',
-        'load_preprogrammed_runtime_bridge_scenario_sync',
-        'load_preprogrammed_runtime_bridge_scenario',
-        'approve_runtime_bridge_proposal_sync',
-        'approve_runtime_bridge_proposal',
-        'reject_runtime_bridge_proposal',
-        'retry_runtime_recovery_des',
+        "_build_plan_safety_alert",
+        "_set_plan_safety_alert",
+        "_clear_plan_safety_alert",
+        "get_plan_safety_alert",
+        "_normalize_runtime_bridge_mode",
+        "_normalize_runtime_bridge_validation_policy",
+        "set_runtime_bridge_session_settings",
+        "_runtime_bridge_session_mode",
+        "_runtime_bridge_session_validation_policy",
+        "_runtime_bridge_session_archive_path",
+        "_runtime_bridge_session_archive_label",
+        "_runtime_bridge_session_artifact_directory",
+        "_bridge_debug_with_runtime_handoff",
+        "_runtime_bridge_turn_token",
+        "_runtime_bridge_progress_message",
+        "report_runtime_bridge_turn_progress",
+        "_runtime_action_feedback_payload",
+        "_recovery_result_with_action_feedback",
+        "_bridge_sequence_state",
+        "_bridge_sequence_is_live",
+        "_bridge_sequence_task_ids",
+        "_bridge_proposal_fingerprint",
+        "_bridge_sequence_summary",
+        "_should_ignore_stale_recovery_macro_ack",
+        "_bridge_sequence_with_dispatched_task",
+        "_bridge_sequence_with_completed_task",
+        "_derive_runtime_bridge_stage",
+        "_empty_runtime_recovery",
+        "_sync_runtime_repair_state",
+        "_set_runtime_recovery",
+        "_clear_runtime_recovery",
+        "_normalized_xyz_pose",
+        "_observed_pose_for_part",
+        "_tracked_pose_for_part_at_location",
+        "_support_surface_place_pose_from_observations",
+        "_part_geometry_for_pick_context",
+        "_enrich_observed_pose_recovery_params",
+        "_runtime_safety_fast_path_monitor",
+        "_runtime_safety_ap_sets_for_task",
+        "_runtime_safety_task_ap_empty",
+        "_dispatch_params_for_task_node",
+        "_runtime_recovery_blocks_execution",
+        "get_runtime_recovery",
+        "_runtime_bridge_data_root",
+        "_resolve_runtime_bridge_archive_path",
+        "_bridge_feedback_history_with",
+        "_append_bridge_feedback",
+        "_bridge_session_state",
+        "_reset_session_for_outline_retry",
+        "_reset_session_for_primitive_retry",
+        "_prepare_runtime_bridge_session_state",
+        "_bridge_proposal_from_debug",
+        "_load_runtime_bridge_archive_bundle",
+        "_run_multi_turn_bridge_until",
+        "_set_kickoff_result",
+        "wait_for_kickoff_result",
+        "_persist_plan_snapshot",
+        "_persist_product_state",
+        "_bridge_debug_directory",
+        "_ensure_live_bridge_per_turn_debug_dir",
+        "_build_runtime_bridge_artifact_payload",
+        "_record_runtime_bridge_artifacts",
+        "_runtime_recovery_safety_live_root",
+        "_allocate_runtime_recovery_safety_worked_dir",
+        "_recovery_safety_generation_dirs",
+        "_build_recovery_safety_generation_payload",
+        "_dispatch_recovery_safety_generation_request",
+        "_handle_recovery_safety_generated_result",
+        "_persist_resource_state",
+        "_get_part_transition",
+        "_tracked_part_name_for_task",
+        "_apply_part_tracker_update",
+        "_reactivate_blocked_tasks",
+        "_handle_task_retry_ready",
+        "_reactivate_restored_repair_target_from_context",
+        "_candidate_task_ids_from_violations",
+        "_active_bridge_sequence",
+        "_bridge_used_llm",
+        "_bridge_execution_policy",
+        "_bridge_requires_complete_full_tail",
+        "_bridge_is_verification_only",
+        "_reconstruct_active_bridge_sequence_for_validation",
+        "_active_bridge_blocks_nominal_dispatch",
+        "_next_dispatchable_task_node",
+        "_active_bridge_next_ready_task",
+        "_bridge_task_predecessors_ready",
+        "_select_runtime_event",
+        "_graph_ready_task_nodes",
+        "_tool_row_for_task_node",
+        "_event_contract_for_task_node",
+        "_build_runtime_plant_state",
+        "_plant_resource_field",
+        "_plant_part_field",
+        "_unknown_runtime_value",
+        "_event_guard_violations",
+        "_record_runtime_des_trace",
+        "_resource_can_reach_location",
+        "_model_name_from_mapping",
+        "_part_model_name_for_repair",
+        "_part_geometry_for_repair",
+        "_repair_execution_mode_for_resource",
+        "_resolve_acquire_entity_pick_source",
+        "_repair_primitive_catalog_for_resource",
+        "_validate_repair_primitive_program",
+        "_record_repair_compile_error",
+        "_strip_continuation_requirement_actuals",
+        "_runtime_des_disabled_event_message",
+        "_failed_release_primitive_observation",
+        "_try_compile_release_retry_event",
+        "_try_compile_controllable_repair",
+        "_append_acquire_entity_repair_event",
+        "_mark_runtime_des_human_required",
+        "_bridge_continuation_disabled_frontier",
+        "_runtime_is_gazebo_simulation",
+        "_should_enable_generated_bridge_verification",
+        "_build_generated_code_verification",
+        "_runtime_bridge_fixture_final_output_path",
+        "_runtime_bridge_fixture_final_output_source_path",
+        "_runtime_bridge_fixture_replay_enabled",
+        "_compact_fixture_replay_status",
+        "_load_runtime_bridge_fixture_replay",
+        "_bridge_task_debug_rows",
+        "_bridge_sequence_tail_task_ids",
+        "_refresh_bridge_snapshot",
+        "_system_coordination_state_with_bridge_snapshot",
+        "_bridge_snapshot_mismatch",
+        "_bridge_part_entry_mismatch",
+        "_dispatch_runtime_plan_validation_check",
+        "_send_runtime_plan_validation_check",
+        "_send_runtime_plan_validation_check_sync",
+        "_fail_closed_bridge_sequence",
+        "_handle_bridge_macro_ack",
+        "_run_des_runtime_recovery_attempt",
+        "_handle_runtime_des_replan_request",
+        "_handle_runtime_plan_validation_result",
+        "submit_runtime_recovery_guidance",
+        "_execute_runtime_bridge_generation",
+        "generate_runtime_bridge_proposal",
+        "load_runtime_bridge_archive_proposal",
+        "approve_runtime_bridge_outline",
+        "refine_runtime_bridge_outline",
+        "reject_runtime_bridge_outline",
+        "approve_runtime_bridge_primitives",
+        "refine_runtime_bridge_primitives",
+        "reject_runtime_bridge_primitives",
+        "_build_preprogrammed_runtime_bridge_bundle",
+        "_derive_preprogrammed_part_observations",
+        "_cache_preprogrammed_runtime_bridge_scenario",
+        "_resolve_preprogrammed_runtime_bridge_bundle",
+        "load_preprogrammed_runtime_bridge_scenario_sync",
+        "load_preprogrammed_runtime_bridge_scenario",
+        "approve_runtime_bridge_proposal_sync",
+        "approve_runtime_bridge_proposal",
+        "reject_runtime_bridge_proposal",
+        "retry_runtime_recovery_des",
     )
 
     def __init__(self, agent: Any) -> None:
@@ -328,9 +329,7 @@ class ProductRecoveryController:
             if prepared_bridge_request:
                 bridge_debug = self._bridge_debug_with_runtime_handoff(
                     dict(prepared_bridge_request.get("bridge_debug") or {}),
-                    bridge_mode=self._normalize_runtime_bridge_mode(
-                        self._runtime_bridge_mode
-                    ),
+                    bridge_mode=self._normalize_runtime_bridge_mode(self._runtime_bridge_mode),
                     validation_policy=self._normalize_runtime_bridge_validation_policy(
                         self._runtime_bridge_validation_policy
                     ),
@@ -365,9 +364,7 @@ class ProductRecoveryController:
     def _runtime_bridge_session_archive_path(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
-            candidate = str(
-                runtime_context.get("selected_archive_path") or ""
-            ).strip()
+            candidate = str(runtime_context.get("selected_archive_path") or "").strip()
             if candidate:
                 return candidate
         return str(self._runtime_bridge_archive_path or "").strip()
@@ -375,9 +372,7 @@ class ProductRecoveryController:
     def _runtime_bridge_session_archive_label(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
-            candidate = str(
-                runtime_context.get("selected_archive_label") or ""
-            ).strip()
+            candidate = str(runtime_context.get("selected_archive_label") or "").strip()
             if candidate:
                 return candidate
         return str(self._runtime_bridge_archive_label or "").strip()
@@ -434,7 +429,9 @@ class ProductRecoveryController:
             int(session.get("turn_index") or 0),
             int(session.get("max_turns") or 0),
         )
-        phase_label = str(current_phase or session.get("current_phase") or "grounding").strip() or "grounding"
+        phase_label = (
+            str(current_phase or session.get("current_phase") or "grounding").strip() or "grounding"
+        )
         status_key = str(status_label or "running").strip().lower()
         decision_label = str(decision or "").strip()
         next_phase_label = str(next_phase or "").strip()
@@ -442,9 +439,7 @@ class ProductRecoveryController:
             return f"Live bridge turn {turn_token}: {phase_label} (waiting for LLM)."
         if status_key == "still_waiting_for_llm":
             elapsed_text = (
-                f"{max(0.0, float(elapsed_s)):.1f}s elapsed"
-                if elapsed_s is not None
-                else "waiting"
+                f"{max(0.0, float(elapsed_s)):.1f}s elapsed" if elapsed_s is not None else "waiting"
             )
             return f"Live bridge turn {turn_token}: {phase_label} (still waiting for LLM, {elapsed_text})."
         if status_key == "response_received":
@@ -486,7 +481,9 @@ class ProductRecoveryController:
             or self.runtime_recovery.get("bridge_debug")
             or {}
         )
-        bridge_debug["status"] = str(session_snapshot.get("status") or "running").strip() or "running"
+        bridge_debug["status"] = (
+            str(session_snapshot.get("status") or "running").strip() or "running"
+        )
         bridge_debug["multi_turn_session"] = deepcopy(session_snapshot)
         prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
         prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_snapshot)
@@ -533,11 +530,7 @@ class ProductRecoveryController:
         kind: str,
         text: str,
     ) -> dict[str, Any]:
-        result = (
-            deepcopy(recovery)
-            if isinstance(recovery, dict)
-            else self.get_runtime_recovery()
-        )
+        result = deepcopy(recovery) if isinstance(recovery, dict) else self.get_runtime_recovery()
         payload = self._runtime_action_feedback_payload(kind, text)
         if payload is not None:
             result["action_feedback"] = payload
@@ -545,9 +538,7 @@ class ProductRecoveryController:
 
     @staticmethod
     def _bridge_sequence_state(active_bridge_sequence: dict[str, Any] | None) -> str:
-        return str(
-            (active_bridge_sequence or {}).get("state") or ""
-        ).strip().lower()
+        return str((active_bridge_sequence or {}).get("state") or "").strip().lower()
 
     @classmethod
     def _bridge_sequence_is_live(cls, active_bridge_sequence: dict[str, Any] | None) -> bool:
@@ -630,9 +621,7 @@ class ProductRecoveryController:
                 active_bridge_sequence.get("last_completed_macro_name") or ""
             ).strip(),
             "source_mode": str(active_bridge_sequence.get("source_mode") or "").strip(),
-            "validation_policy": str(
-                active_bridge_sequence.get("validation_policy") or ""
-            ).strip(),
+            "validation_policy": str(active_bridge_sequence.get("validation_policy") or "").strip(),
             "source_archive_path": str(
                 active_bridge_sequence.get("source_archive_path") or ""
             ).strip(),
@@ -641,18 +630,12 @@ class ProductRecoveryController:
             ).strip(),
             "source": str(active_bridge_sequence.get("source") or "").strip(),
             "used_llm_bridge": bool(active_bridge_sequence.get("used_llm_bridge", False)),
-            "repair_task_id": str(
-                active_bridge_sequence.get("repair_task_id") or ""
-            ).strip(),
+            "repair_task_id": str(active_bridge_sequence.get("repair_task_id") or "").strip(),
             "repair_target_task_id": str(
                 active_bridge_sequence.get("repair_target_task_id") or ""
             ).strip(),
-            "repair_operator": str(
-                active_bridge_sequence.get("repair_operator") or ""
-            ).strip(),
-            "repair_intent": str(
-                active_bridge_sequence.get("repair_intent") or ""
-            ).strip(),
+            "repair_operator": str(active_bridge_sequence.get("repair_operator") or "").strip(),
+            "repair_intent": str(active_bridge_sequence.get("repair_intent") or "").strip(),
         }
 
     def _should_ignore_stale_recovery_macro_ack(
@@ -684,13 +667,16 @@ class ProductRecoveryController:
         active_bridge_sequence = self._active_bridge_sequence()
         if isinstance(active_bridge_sequence, dict):
             active_state = self._bridge_sequence_state(active_bridge_sequence)
-            active_sequence_id = str(
-                active_bridge_sequence.get("bridge_sequence_id") or ""
-            ).strip()
-            if active_sequence_id and active_sequence_id == sequence_id and active_state in {
-                "failed",
-                "human_required",
-            }:
+            active_sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
+            if (
+                active_sequence_id
+                and active_sequence_id == sequence_id
+                and active_state
+                in {
+                    "failed",
+                    "human_required",
+                }
+            ):
                 return True
             completed_ids = set(
                 self._bridge_sequence_task_ids(
@@ -699,9 +685,7 @@ class ProductRecoveryController:
             )
             if task_id in completed_ids:
                 return True
-            active_sequence_id = str(
-                active_bridge_sequence.get("bridge_sequence_id") or ""
-            ).strip()
+            active_sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
             if active_sequence_id and active_sequence_id != sequence_id:
                 return True
 
@@ -714,9 +698,7 @@ class ProductRecoveryController:
             )
             if task_id in completed_ids:
                 return True
-            last_sequence_id = str(
-                last_completed_sequence.get("bridge_sequence_id") or ""
-            ).strip()
+            last_sequence_id = str(last_completed_sequence.get("bridge_sequence_id") or "").strip()
             if last_sequence_id and last_sequence_id == sequence_id:
                 return True
 
@@ -776,12 +758,16 @@ class ProductRecoveryController:
 
     @staticmethod
     def _derive_runtime_bridge_stage(recovery: dict[str, Any]) -> str:
-        approval_state = str(recovery.get("bridge_approval_state", "none") or "none").strip().lower()
+        approval_state = (
+            str(recovery.get("bridge_approval_state", "none") or "none").strip().lower()
+        )
         if approval_state == "outline_pending":
             return "outline"
         if approval_state == "primitive_pending":
             return "primitive"
-        if approval_state in {"pending", "approved"} or isinstance(recovery.get("bridge_proposal"), dict):
+        if approval_state in {"pending", "approved"} or isinstance(
+            recovery.get("bridge_proposal"), dict
+        ):
             return "final"
         return "none"
 
@@ -830,10 +816,16 @@ class ProductRecoveryController:
 
     def _sync_runtime_repair_state(self) -> None:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
-        if status == "llm_bridge" and approval_state in {"pending", "outline_pending", "primitive_pending"}:
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
+        if status == "llm_bridge" and approval_state in {
+            "pending",
+            "outline_pending",
+            "primitive_pending",
+        }:
             self.runtime_repair_state = "paused_after_failure"
         elif status in {"des_search", "llm_bridge", "validating"}:
             self.runtime_repair_state = "repairing"
@@ -903,17 +895,21 @@ class ProductRecoveryController:
         if operator_guidance is not None:
             current["operator_guidance"] = str(operator_guidance).strip()
         if bridge_proposal is not _UNSET:
-            current["bridge_proposal"] = deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None
+            current["bridge_proposal"] = (
+                deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None
+            )
         if bridge_debug is not _UNSET:
-            current["bridge_debug"] = deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None
+            current["bridge_debug"] = (
+                deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None
+            )
         if bridge_artifacts is not _UNSET:
             current["bridge_artifacts"] = (
-                deepcopy(bridge_artifacts)
-                if isinstance(bridge_artifacts, dict)
-                else {}
+                deepcopy(bridge_artifacts) if isinstance(bridge_artifacts, dict) else {}
             )
         if bridge_approval_state is not None:
-            current["bridge_approval_state"] = str(bridge_approval_state or "none").strip() or "none"
+            current["bridge_approval_state"] = (
+                str(bridge_approval_state or "none").strip() or "none"
+            )
         if bridge_stage is not None:
             current["bridge_stage"] = str(bridge_stage or "none").strip() or "none"
         if artifact_directory is not _UNSET:
@@ -933,7 +929,9 @@ class ProductRecoveryController:
         if recovery_safety_scope_id is not _UNSET:
             current["recovery_safety_scope_id"] = str(recovery_safety_scope_id or "").strip()
         if recovery_safety_status is not _UNSET:
-            current["recovery_safety_status"] = str(recovery_safety_status or "none").strip() or "none"
+            current["recovery_safety_status"] = (
+                str(recovery_safety_status or "none").strip() or "none"
+            )
         if recovery_safety_logic_json is not _UNSET:
             current["recovery_safety_logic_json"] = str(recovery_safety_logic_json or "").strip()
         if recovery_safety_dir is not _UNSET:
@@ -954,15 +952,11 @@ class ProductRecoveryController:
             ]
         if bridge_feedback_history is not _UNSET:
             current["bridge_feedback_history"] = [
-                str(item).strip()
-                for item in (bridge_feedback_history or [])
-                if str(item).strip()
+                str(item).strip() for item in (bridge_feedback_history or []) if str(item).strip()
             ]
         if fixture_replay is not _UNSET:
             current["fixture_replay"] = (
-                deepcopy(fixture_replay)
-                if isinstance(fixture_replay, dict)
-                else None
+                deepcopy(fixture_replay) if isinstance(fixture_replay, dict) else None
             )
         if generated_code_verification is not _UNSET:
             current["generated_code_verification"] = (
@@ -982,12 +976,16 @@ class ProductRecoveryController:
         if artifact_directory is _UNSET:
             current["artifact_directory"] = (
                 self._runtime_bridge_session_artifact_directory()
-                or str(dict(current.get("bridge_debug") or {}).get("artifact_directory") or "").strip()
+                or str(
+                    dict(current.get("bridge_debug") or {}).get("artifact_directory") or ""
+                ).strip()
             )
         if bridge_stage is None:
             current["bridge_stage"] = self._derive_runtime_bridge_stage(current)
 
-        event_message = str(history_message if history_message is not None else message or "").strip()
+        event_message = str(
+            history_message if history_message is not None else message or ""
+        ).strip()
         if append_history and event_message:
             history = list(current.get("history") or [])
             history.append(
@@ -1105,7 +1103,9 @@ class ProductRecoveryController:
         target_origin_pose = dict(place_target.get("target_origin_pose") or {})
         normalized_target_origin_pose = self._normalized_xyz_pose(target_origin_pose)
         if normalized_target_origin_pose is not None:
-            pose_source = str(target_origin_pose.get("source") or "").strip() or "target_origin_pose"
+            pose_source = (
+                str(target_origin_pose.get("source") or "").strip() or "target_origin_pose"
+            )
             return normalized_target_origin_pose, pose_source
 
         try:
@@ -1153,14 +1153,10 @@ class ProductRecoveryController:
         )
         precomputed_bundle = getattr(self, "precomputed_bundle", {})
         artifacts = (
-            precomputed_bundle.get("artifacts", {})
-            if isinstance(precomputed_bundle, dict)
-            else {}
+            precomputed_bundle.get("artifacts", {}) if isinstance(precomputed_bundle, dict) else {}
         )
         precomputed_logic = (
-            artifacts.get("safety_logic_json")
-            if isinstance(artifacts, dict)
-            else None
+            artifacts.get("safety_logic_json") if isinstance(artifacts, dict) else None
         )
         if precomputed_logic:
             logic_path_value = precomputed_logic
@@ -1234,14 +1230,10 @@ class ProductRecoveryController:
             return None
 
         resource_jid = str(
-            task_node.get("resource_jid")
-            or params.get("resource_jid")
-            or ""
+            task_node.get("resource_jid") or params.get("resource_jid") or ""
         ).strip()
         function_name = str(
-            task_node.get("function_name")
-            or params.get("function_name")
-            or ""
+            task_node.get("function_name") or params.get("function_name") or ""
         ).strip()
         if not resource_jid or not function_name:
             return None
@@ -1280,11 +1272,7 @@ class ProductRecoveryController:
             llm_outline_id = str(task_node.get("llm_outline_id") or "").strip()
             if llm_outline_id:
                 params.setdefault("llm_outline_id", llm_outline_id)
-            event_name = str(
-                params.get("event_name")
-                or task_node.get("event_name")
-                or ""
-            ).strip()
+            event_name = str(params.get("event_name") or task_node.get("event_name") or "").strip()
             if event_name:
                 params["event_name"] = event_name
             projected_outline_state = dict(
@@ -1294,7 +1282,10 @@ class ProductRecoveryController:
             )
             if projected_outline_state:
                 params["projected_outline_state"] = deepcopy(projected_outline_state)
-            if isinstance(task_node.get("part_name"), str) and str(task_node.get("part_name") or "").strip():
+            if (
+                isinstance(task_node.get("part_name"), str)
+                and str(task_node.get("part_name") or "").strip()
+            ):
                 params.setdefault("part_name", str(task_node.get("part_name") or "").strip())
         elif part_name and function_name != "execute_recovery_macro":
             geo = self._geometry_for_part(part_name)
@@ -1308,13 +1299,17 @@ class ProductRecoveryController:
             and isinstance(active_bridge_sequence.get("execution_policy"), dict)
             else {}
         )
-        active_validation_policy = str(
-            active_execution_policy.get("validation_policy")
-            or (active_bridge_sequence or {}).get("validation_policy")
-            or self.runtime_recovery.get("validation_policy")
-            or self._runtime_bridge_session_validation_policy()
-            or ""
-        ).strip().lower()
+        active_validation_policy = (
+            str(
+                active_execution_policy.get("validation_policy")
+                or (active_bridge_sequence or {}).get("validation_policy")
+                or self.runtime_recovery.get("validation_policy")
+                or self._runtime_bridge_session_validation_policy()
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         recovery_safety_scope_id = str(
             (active_bridge_sequence or {}).get("recovery_safety_scope_id")
             or self.runtime_recovery.get("recovery_safety_scope_id")
@@ -1393,7 +1388,10 @@ class ProductRecoveryController:
         elif not recovery_safety_task:
             if active_validation_policy == "no_validation" and bridge_dispatch_session:
                 return params
-            if not bool(getattr(self, "safety_text_has_requirements", False)) or self._runtime_safety_task_ap_empty(task_node, params) is True:
+            if (
+                not bool(getattr(self, "safety_text_has_requirements", False))
+                or self._runtime_safety_task_ap_empty(task_node, params) is True
+            ):
                 params.setdefault("start_safety_mode", "fast_path")
         return params
 
@@ -1402,7 +1400,11 @@ class ProductRecoveryController:
         return status not in {"", "idle", "resolved"}
 
     def get_runtime_recovery(self) -> dict[str, Any]:
-        return deepcopy(self.runtime_recovery) if isinstance(self.runtime_recovery, dict) else self._empty_runtime_recovery()
+        return (
+            deepcopy(self.runtime_recovery)
+            if isinstance(self.runtime_recovery, dict)
+            else self._empty_runtime_recovery()
+        )
 
     def _runtime_bridge_data_root(self) -> Path:
         return Path(DEFAULT_BRIDGE_DEBUG_DIR)
@@ -1519,9 +1521,7 @@ class ProductRecoveryController:
         result.setdefault("recovery_safety_dir", str(recovery_safety_dir))
         result.setdefault("recovery_plan_dir", str(recovery_safety_dir))
         result.setdefault("recovery_safery_dir", str(recovery_safety_dir))
-        recovery_safety_logic_json = str(
-            result.get("recovery_safety_logic_json") or ""
-        ).strip()
+        recovery_safety_logic_json = str(result.get("recovery_safety_logic_json") or "").strip()
         if not recovery_safety_logic_json:
             logic_path = recovery_safety_dir / "cca_safety_logic.json"
             if logic_path.is_file():
@@ -1568,11 +1568,7 @@ class ProductRecoveryController:
             or prepared_bridge_request.get("multi_turn_session_state")
             or {}
         )
-        turns = [
-            dict(row)
-            for row in (session_state.get("turns") or [])
-            if isinstance(row, dict)
-        ]
+        turns = [dict(row) for row in (session_state.get("turns") or []) if isinstance(row, dict)]
         for turn in reversed(turns):
             if str(turn.get("phase") or "").strip().lower() != "final_output":
                 continue
@@ -1593,11 +1589,7 @@ class ProductRecoveryController:
             or prepared_bridge_request.get("multi_turn_session_state")
             or {}
         )
-        turns = [
-            dict(row)
-            for row in (session_state.get("turns") or [])
-            if isinstance(row, dict)
-        ]
+        turns = [dict(row) for row in (session_state.get("turns") or []) if isinstance(row, dict)]
         for turn in reversed(turns):
             if str(turn.get("phase") or "").strip().lower() != "final_output":
                 continue
@@ -1714,9 +1706,9 @@ class ProductRecoveryController:
         *,
         prepared_bridge_request: dict[str, Any],
     ) -> dict[str, str]:
-        recovery_safety_status = str(
-            self.runtime_recovery.get("recovery_safety_status") or "none"
-        ).strip().lower()
+        recovery_safety_status = (
+            str(self.runtime_recovery.get("recovery_safety_status") or "none").strip().lower()
+        )
         if recovery_safety_status != "ready":
             return {}
         return self._write_recovery_final_bundle(
@@ -1745,9 +1737,7 @@ class ProductRecoveryController:
             requirement_task_index = dict(
                 prepared_bridge_request.get("requirement_task_index") or {}
             )
-            task_requirement_map = dict(
-                prepared_bridge_request.get("task_requirement_map") or {}
-            )
+            task_requirement_map = dict(prepared_bridge_request.get("task_requirement_map") or {})
             bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
             pending_task_rows_by_id: dict[str, dict[str, Any]] = {}
             active_requirement_ids: set[str] = set()
@@ -1755,7 +1745,7 @@ class ProductRecoveryController:
             for resource_entry in bridge_resources.values():
                 if not isinstance(resource_entry, dict):
                     continue
-                for task in (resource_entry.get("pending_tasks") or []):
+                for task in resource_entry.get("pending_tasks") or []:
                     if not isinstance(task, dict):
                         continue
                     task_id = str(task.get("id") or "").strip()
@@ -1763,9 +1753,7 @@ class ProductRecoveryController:
                         continue
                     pending_task_rows_by_id[task_id] = deepcopy(task)
                     requirement_id = str(
-                        task.get("requirement_id")
-                        or task_requirement_map.get(task_id)
-                        or ""
+                        task.get("requirement_id") or task_requirement_map.get(task_id) or ""
                     ).strip()
                     if requirement_id:
                         active_requirement_ids.add(requirement_id)
@@ -1778,7 +1766,7 @@ class ProductRecoveryController:
             candidate_rows: list[dict[str, Any]] = []
             seen_task_ids: set[str] = set()
             for requirement_id in sorted(active_requirement_ids):
-                for raw_task in (requirement_task_index.get(requirement_id) or []):
+                for raw_task in requirement_task_index.get(requirement_id) or []:
                     if not isinstance(raw_task, dict):
                         continue
                     task_id = str(raw_task.get("task_id") or raw_task.get("id") or "").strip()
@@ -1787,15 +1775,9 @@ class ProductRecoveryController:
                     seen_task_ids.add(task_id)
                     enriched = dict(pending_task_rows_by_id.get(task_id) or {})
                     pending_row = dict(pending_by_id.get(task_id) or {})
-                    params = dict(
-                        enriched.get("params")
-                        or raw_task.get("params")
-                        or {}
-                    )
+                    params = dict(enriched.get("params") or raw_task.get("params") or {})
                     product_jid = str(params.get("product_jid") or "").strip()
-                    destination_location = str(
-                        params.get("destination_location") or ""
-                    ).strip()
+                    destination_location = str(params.get("destination_location") or "").strip()
                     candidate_rows.append(
                         {
                             "id": task_id,
@@ -1878,9 +1860,7 @@ class ProductRecoveryController:
                 dict(candidate.get("final_output") or {}).get("transition_trace"),
             ):
                 accepted_outline_prefix = [
-                    deepcopy(row)
-                    for row in (rows or [])
-                    if isinstance(row, dict)
+                    deepcopy(row) for row in (rows or []) if isinstance(row, dict)
                 ]
                 if accepted_outline_prefix:
                     break
@@ -1893,9 +1873,7 @@ class ProductRecoveryController:
             for candidate in session_candidates:
                 if not candidate:
                     continue
-                projected_outline_state = deepcopy(
-                    candidate.get("projected_outline_state") or {}
-                )
+                projected_outline_state = deepcopy(candidate.get("projected_outline_state") or {})
                 if projected_outline_state:
                     break
         if not projected_outline_state and accepted_outline_prefix:
@@ -2014,7 +1992,11 @@ class ProductRecoveryController:
             expected_request_id = str(
                 self._runtime_recovery_context.get("active_recovery_safety_request_id") or ""
             ).strip()
-        if incoming_request_id and expected_request_id and incoming_request_id != expected_request_id:
+        if (
+            incoming_request_id
+            and expected_request_id
+            and incoming_request_id != expected_request_id
+        ):
             self.logger.info(
                 "[Product] Ignoring stale recovery_safety_generated request_id=%s; active request_id=%s.",
                 incoming_request_id,
@@ -2036,10 +2018,7 @@ class ProductRecoveryController:
         recovery_plan_dir = str(payload.get("recovery_plan_dir") or "").strip()
         recovery_safery_dir = str(payload.get("recovery_safery_dir") or "").strip()
         recovery_safety_dir = str(
-            payload.get("recovery_safety_dir")
-            or recovery_safery_dir
-            or recovery_plan_dir
-            or ""
+            payload.get("recovery_safety_dir") or recovery_safery_dir or recovery_plan_dir or ""
         ).strip()
         recovery_safety_logic_json = str(payload.get("recovery_safety_logic_json") or "").strip()
         rule_ids = [
@@ -2072,14 +2051,10 @@ class ProductRecoveryController:
             self.logger.info("[Product] %s", message)
             if (
                 self._runtime_bridge_session_mode() == "pre_ran"
-                and str(self.runtime_recovery.get("status") or "").strip().lower()
-                == "llm_bridge"
-                and str(
-                    self.runtime_recovery.get("bridge_approval_state") or ""
-                ).strip().lower()
+                and str(self.runtime_recovery.get("status") or "").strip().lower() == "llm_bridge"
+                and str(self.runtime_recovery.get("bridge_approval_state") or "").strip().lower()
                 == "pending"
-                and str(self.runtime_recovery.get("bridge_stage") or "").strip().lower()
-                == "final"
+                and str(self.runtime_recovery.get("bridge_stage") or "").strip().lower() == "final"
                 and isinstance(self.runtime_recovery.get("bridge_proposal"), dict)
             ):
                 self.logger.info(
@@ -2132,9 +2107,7 @@ class ProductRecoveryController:
         try:
             resolved.relative_to(root_resolved)
         except Exception as exc:
-            raise ValueError(
-                f"archived bridge run must be inside {root_resolved}"
-            ) from exc
+            raise ValueError(f"archived bridge run must be inside {root_resolved}") from exc
         if not resolved.exists() or not resolved.is_file():
             raise FileNotFoundError(f"archived bridge run does not exist: {resolved}")
         return resolved
@@ -2258,7 +2231,9 @@ class ProductRecoveryController:
         bridge_debug["multi_turn_session"] = deepcopy(session_state)
         bridge_debug["status"] = "pending"
         prepared_bridge_request["bridge_debug"] = bridge_debug
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(prepared_bridge_request)
+        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
+            prepared_bridge_request
+        )
         return prepared_bridge_request
 
     @staticmethod
@@ -2305,15 +2280,16 @@ class ProductRecoveryController:
         try:
             final_output_payload = json.loads(resolved_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise RuntimeError(
-                f"failed to parse archived bridge run: {exc}"
-            ) from exc
+            raise RuntimeError(f"failed to parse archived bridge run: {exc}") from exc
         if not isinstance(final_output_payload, dict):
             raise RuntimeError("archived bridge run did not contain a JSON object")
         engine = str(final_output_payload.get("engine") or "").strip().lower()
         if engine and not engine.startswith("multi_turn"):
             raise RuntimeError("archived bridge run engine must be multi_turn-compatible")
-        if str(final_output_payload.get("final_output_stage") or "").strip() != "primitive_program_ready":
+        if (
+            str(final_output_payload.get("final_output_stage") or "").strip()
+            != "primitive_program_ready"
+        ):
             raise RuntimeError("archived bridge run is not a primitive_program_ready artifact")
         if not bool(final_output_payload.get("primitive_program_complete")):
             raise RuntimeError("archived bridge run does not contain a complete primitive program")
@@ -2329,7 +2305,9 @@ class ProductRecoveryController:
         proposal = adapter_result.get("bridge_proposal")
         if not isinstance(proposal, dict):
             raise RuntimeError(
-                str(adapter_result.get("reason") or "archived bridge run proposal build failed").strip()
+                str(
+                    adapter_result.get("reason") or "archived bridge run proposal build failed"
+                ).strip()
                 or "archived bridge run proposal build failed"
             )
         return deepcopy(final_output_payload), deepcopy(adapter_result), resolved_path
@@ -2346,7 +2324,9 @@ class ProductRecoveryController:
 
         target = str(stop_after or "final").strip().lower()
         self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        prepared_bridge_request["_stop_after_multi_turn_phase"] = target if target in {"outline", "primitive"} else ""
+        prepared_bridge_request["_stop_after_multi_turn_phase"] = (
+            target if target in {"outline", "primitive"} else ""
+        )
         session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
         if session_state:
             proposal = await _resume_multi_turn_bridge(
@@ -2364,7 +2344,9 @@ class ProductRecoveryController:
             10,
             int(
                 bridge_session.get("max_turns")
-                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get(
+                    "max_turns"
+                )
                 or 0
             ),
         )
@@ -2490,7 +2472,10 @@ class ProductRecoveryController:
                 "runtime_recovery": self.runtime_recovery,
                 "plan_safety_alert": self.plan_safety_alert,
                 "product_order_runtime": deepcopy(
-                    getattr(getattr(self, "process_planner", None), "last_product_order_artifact", {}) or {}
+                    getattr(
+                        getattr(self, "process_planner", None), "last_product_order_artifact", {}
+                    )
+                    or {}
                 ),
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
@@ -2498,7 +2483,9 @@ class ProductRecoveryController:
             with self.product_state_path.open("w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
 
-            self.logger.debug(f"[Product] Saved product state to {self.product_state_path.resolve()}")
+            self.logger.debug(
+                f"[Product] Saved product state to {self.product_state_path.resolve()}"
+            )
         except Exception:
             self.logger.exception("[Product] Failed to persist product state.")
 
@@ -2581,9 +2568,7 @@ class ProductRecoveryController:
         runtime_bridge_artifacts = deepcopy(self.runtime_recovery.get("bridge_artifacts") or {})
         if not isinstance(runtime_bridge_artifacts, dict):
             runtime_bridge_artifacts = {}
-        runtime_bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(
-            artifact_paths
-        )
+        runtime_bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
         self._set_runtime_recovery(
             bridge_debug=bridge_debug,
             bridge_artifacts=runtime_bridge_artifacts,
@@ -2611,7 +2596,9 @@ class ProductRecoveryController:
             with self.resource_state_path.open("w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
 
-            self.logger.debug(f"[Product] Saved resource state to {self.resource_state_path.resolve()}")
+            self.logger.debug(
+                f"[Product] Saved resource state to {self.resource_state_path.resolve()}"
+            )
         except Exception:
             self.logger.exception("[Product] Failed to persist resource state.")
 
@@ -2705,7 +2692,8 @@ class ProductRecoveryController:
         if transition.get("camera_locate"):
             last_known = (
                 params.get(transition["last_known_param"])
-                if "last_known_param" in transition else None
+                if "last_known_param" in transition
+                else None
             )
             entry["location"] = None
             if last_known:
@@ -2737,7 +2725,9 @@ class ProductRecoveryController:
             if "last_known_param" in transition:
                 entry["last_known_location"] = params.get(transition["last_known_param"])
             elif "last_known_template" in transition:
-                entry["last_known_location"] = transition["last_known_template"].format(resource_jid=resource_jid)
+                entry["last_known_location"] = transition["last_known_template"].format(
+                    resource_jid=resource_jid
+                )
 
         if status == "completed":
             entry["last_successful_task"] = task_id
@@ -2814,9 +2804,7 @@ class ProductRecoveryController:
         has cleared and the task may be retried with a fresh safety_check.
         """
         candidate_task_ids = {
-            str(task_id).strip()
-            for task_id in (task_ids or [])
-            if str(task_id).strip()
+            str(task_id).strip() for task_id in (task_ids or []) if str(task_id).strip()
         }
         if not candidate_task_ids:
             return 0
@@ -2857,12 +2845,14 @@ class ProductRecoveryController:
         now_iso = datetime.now(timezone.utc).isoformat()
         for task_id in reactivated_task_ids:
             self.task_states[task_id] = "pending"
-            self.execution_timeline.append({
-                "timestamp": now_iso,
-                "task_id": task_id,
-                "status": "requeued",
-                "resource_jid": str(self.cca_jid),
-            })
+            self.execution_timeline.append(
+                {
+                    "timestamp": now_iso,
+                    "task_id": task_id,
+                    "status": "requeued",
+                    "resource_jid": str(self.cca_jid),
+                }
+            )
 
         return len(reactivated_task_ids)
 
@@ -2870,9 +2860,7 @@ class ProductRecoveryController:
         repair_target_task_id = str(
             self._runtime_recovery_context.get("repair_target_task_id") or ""
         ).strip()
-        repair_task_id = str(
-            self._runtime_recovery_context.get("repair_task_id") or ""
-        ).strip()
+        repair_task_id = str(self._runtime_recovery_context.get("repair_task_id") or "").strip()
         if not repair_target_task_id:
             return ""
         node = self.process_planner._find_node(repair_target_task_id)
@@ -2946,9 +2934,11 @@ class ProductRecoveryController:
 
     def _reconstruct_active_bridge_sequence_for_validation(self) -> dict[str, Any] | None:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "validating" or approval_state != "approved":
             return None
         if isinstance(self.runtime_recovery.get("last_completed_bridge_sequence"), dict):
@@ -3056,9 +3046,7 @@ class ProductRecoveryController:
                     modeled_gap.get("continuation_requirements") or []
                 )
             ),
-            "pending_nominal_task_ids": deepcopy(
-                modeled_gap.get("pending_nominal_task_ids") or []
-            ),
+            "pending_nominal_task_ids": deepcopy(modeled_gap.get("pending_nominal_task_ids") or []),
             "continuation_repair_attempts": 0,
             "source_mode": str(
                 bridge_debug.get("bridge_mode")
@@ -3362,9 +3350,7 @@ class ProductRecoveryController:
             system_state = {}
         system_state.setdefault("resource_states", {})
         for resource_jid in {
-            str(item or "").strip()
-            for item in (resource_jids or [])
-            if str(item or "").strip()
+            str(item or "").strip() for item in (resource_jids or []) if str(item or "").strip()
         }:
             snapshot = self._refresh_bridge_snapshot(resource_jid)
             if isinstance(snapshot, dict):
@@ -3374,9 +3360,7 @@ class ProductRecoveryController:
                     bridge_snapshot=snapshot,
                 )
         return {
-            "resources": dict(
-                self.process_planner._extract_resource_states(system_state)
-            ),
+            "resources": dict(self.process_planner._extract_resource_states(system_state)),
             "parts": deepcopy(dict(getattr(self, "part_tracker", {}) or {})),
             "system_coordination_state": system_state,
         }
@@ -3440,11 +3424,7 @@ class ProductRecoveryController:
             actual: Any,
             kind: str,
         ) -> None:
-            if (
-                field != "held_part"
-                and self._unknown_runtime_value(actual)
-                and not enforce_unknown
-            ):
+            if field != "held_part" and self._unknown_runtime_value(actual) and not enforce_unknown:
                 return
             if actual == expected:
                 return
@@ -3496,9 +3476,7 @@ class ProductRecoveryController:
         location_param = str(ctx_map.get("location_param") or "").strip()
         location_type = str(ctx_map.get("location_type") or "").strip()
         location_value = (
-            dict(task_node.get("params") or {}).get(location_param)
-            if location_param
-            else None
+            dict(task_node.get("params") or {}).get(location_param) if location_param else None
         )
         if part_name and location_type == "part_location" and location_value not in (None, ""):
             add_violation(
@@ -3568,7 +3546,9 @@ class ProductRecoveryController:
         if reachable:
             return True
 
-        bridge_proposal = dict((getattr(self, "runtime_recovery", {}) or {}).get("bridge_proposal") or {})
+        bridge_proposal = dict(
+            (getattr(self, "runtime_recovery", {}) or {}).get("bridge_proposal") or {}
+        )
         bridge_macro_tasks = []
         if bridge_proposal and hasattr(self.process_planner, "_primitive_bridge_macro_tasks"):
             try:
@@ -3617,9 +3597,7 @@ class ProductRecoveryController:
             "target",
             "part_target",
         ):
-            token = ProductRecoveryController._model_name_from_mapping(
-                value.get(key), part_name
-            )
+            token = ProductRecoveryController._model_name_from_mapping(value.get(key), part_name)
             if token:
                 return token
 
@@ -3741,9 +3719,7 @@ class ProductRecoveryController:
             origin_pose = self._normalized_xyz_pose(tracker_entry.get("origin_pose"))
             if origin_pose is not None:
                 pick_params["target_pose"] = deepcopy(origin_pose)
-                pick_params["target_pose_source"] = (
-                    f"tracked_origin_pose:{normalized_source}"
-                )
+                pick_params["target_pose_source"] = f"tracked_origin_pose:{normalized_source}"
                 return "tracked_origin", pick_params, ""
 
         execution_mode = self._repair_execution_mode_for_resource(resource_jid)
@@ -3830,8 +3806,7 @@ class ProductRecoveryController:
                 unexpected_params = sorted(
                     str(param_name).strip()
                     for param_name in params
-                    if str(param_name).strip()
-                    and str(param_name).strip() not in allowed_params
+                    if str(param_name).strip() and str(param_name).strip() not in allowed_params
                 )
                 if unexpected_params:
                     allowed_description = (
@@ -3849,10 +3824,7 @@ class ProductRecoveryController:
                     continue
                 value = params.get(param_name)
                 if value in (None, ""):
-                    return (
-                        f"missing required param '{param_name}' at step {index} "
-                        f"({primitive})"
-                    )
+                    return f"missing required param '{param_name}' at step {index} ({primitive})"
         return ""
 
     def _record_repair_compile_error(
@@ -3896,9 +3868,7 @@ class ProductRecoveryController:
         event = dict(disabled_event or {})
         task_id = str(event.get("task_id") or "").strip()
         violations = [
-            dict(item)
-            for item in (event.get("guard_violations") or [])
-            if isinstance(item, dict)
+            dict(item) for item in (event.get("guard_violations") or []) if isinstance(item, dict)
         ]
         held_part_violation = next(
             (
@@ -3938,7 +3908,9 @@ class ProductRecoveryController:
         return ""
 
     @staticmethod
-    def _failed_release_primitive_observation(observations: dict[str, Any] | None) -> dict[str, Any]:
+    def _failed_release_primitive_observation(
+        observations: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not isinstance(observations, dict):
             return {}
         primitive = str(observations.get("primitive") or "").strip()
@@ -3964,7 +3936,9 @@ class ProductRecoveryController:
             return None
 
         params = dict(task_node.get("params") or {})
-        part_name = str(params.get("part_name") or self._tracked_part_name_for_task(task_node) or "").strip()
+        part_name = str(
+            params.get("part_name") or self._tracked_part_name_for_task(task_node) or ""
+        ).strip()
         if not part_name:
             return None
         model_name = str(params.get("model_name") or "").strip()
@@ -4047,9 +4021,7 @@ class ProductRecoveryController:
                     "resource_type": "robot",
                     "current_state": "idle",
                 },
-                "resource_facets": {
-                    "manipulator": {"held_part": None, "gripper_state": "open"}
-                },
+                "resource_facets": {"manipulator": {"held_part": None, "gripper_state": "open"}},
             }
         projected_part_entry = deepcopy(task_node.get("projected_part_entry") or {})
         if not projected_part_entry:
@@ -4136,9 +4108,7 @@ class ProductRecoveryController:
                 or self.runtime_recovery.get("failed_task_id")
                 or ""
             ),
-            message=(
-                "Runtime DES supervisor inserted retry_event for failed bridge release."
-            ),
+            message=("Runtime DES supervisor inserted retry_event for failed bridge release."),
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
             used_llm_bridge=bool(used_llm_bridge),
@@ -4187,9 +4157,7 @@ class ProductRecoveryController:
                 continue
 
             resource_jid = str(
-                carried_violation.get("entity")
-                or disabled_event.get("resource_jid")
-                or ""
+                carried_violation.get("entity") or disabled_event.get("resource_jid") or ""
             ).strip()
             part_name = str(carried_violation.get("expected") or "").strip()
             if not resource_jid or not part_name:
@@ -4243,9 +4211,7 @@ class ProductRecoveryController:
             if projected_snapshot:
                 resource_entry.update(deepcopy(projected_snapshot))
             part_name = str(
-                bridge_task.get("part_name")
-                or self._tracked_part_name_for_task(bridge_task)
-                or ""
+                bridge_task.get("part_name") or self._tracked_part_name_for_task(bridge_task) or ""
             ).strip()
             projected_part_entry = dict(bridge_task.get("projected_part_entry") or {})
             if part_name and projected_part_entry:
@@ -4272,7 +4238,9 @@ class ProductRecoveryController:
         requirement_id: str = "",
         change_reason: str = "",
     ) -> dict[str, Any] | None:
-        sequence_token = str(sequence_id or "").strip() or f"DESREPAIR_{uuid.uuid4().hex[:8].upper()}"
+        sequence_token = (
+            str(sequence_id or "").strip() or f"DESREPAIR_{uuid.uuid4().hex[:8].upper()}"
+        )
         task_id = f"REPAIR_EVENT_{uuid.uuid4().hex[:6].upper()}"
         event_fact_part = str(part_name)
         model_name = self._part_model_name_for_repair(
@@ -4390,19 +4358,13 @@ class ProductRecoveryController:
                 "primitive": "move_cartesian",
                 "params": {
                     "x": {
-                        "context_ref": (
-                            f"event_facts.pick_targets.{event_fact_part}.target_pose.x"
-                        )
+                        "context_ref": (f"event_facts.pick_targets.{event_fact_part}.target_pose.x")
                     },
                     "y": {
-                        "context_ref": (
-                            f"event_facts.pick_targets.{event_fact_part}.target_pose.y"
-                        )
+                        "context_ref": (f"event_facts.pick_targets.{event_fact_part}.target_pose.y")
                     },
                     "z": {
-                        "context_ref": (
-                            f"event_facts.pick_targets.{event_fact_part}.target_pose.z"
-                        )
+                        "context_ref": (f"event_facts.pick_targets.{event_fact_part}.target_pose.z")
                     },
                 },
             },
@@ -4622,9 +4584,7 @@ class ProductRecoveryController:
                 patch_rows.extend(repair_patch_rows)
                 repair_node["bridge_sequence_length"] = next_bridge_length
                 tasks.append(deepcopy(repair_node))
-                task_groups_by_resource.setdefault(resource_jid, []).append(
-                    deepcopy(repair_node)
-                )
+                task_groups_by_resource.setdefault(resource_jid, []).append(deepcopy(repair_node))
                 for bridge_task in tasks:
                     bridge_task["bridge_sequence_length"] = next_bridge_length
                 continue
@@ -4635,9 +4595,9 @@ class ProductRecoveryController:
             )
             if isinstance(inserted_repair_node, dict):
                 inserted_repair_node["bridge_sequence_length"] = next_bridge_length
-                self.task_states[str(inserted_repair_node.get("id") or "").strip()] = str(
-                    inserted_repair_node.get("status") or "pending"
-                ).strip() or "pending"
+                self.task_states[str(inserted_repair_node.get("id") or "").strip()] = (
+                    str(inserted_repair_node.get("status") or "pending").strip() or "pending"
+                )
                 tasks.append(deepcopy(inserted_repair_node))
                 task_groups_by_resource.setdefault(resource_jid, []).append(
                     deepcopy(inserted_repair_node)
@@ -4749,9 +4709,7 @@ class ProductRecoveryController:
                 remaining_task_ids,
                 key=lambda task_id: (
                     self.process_planner._task_sequence_index_key(
-                        dict(self.process_planner._find_node(task_id) or {}).get(
-                            "sequence_index"
-                        )
+                        dict(self.process_planner._find_node(task_id) or {}).get("sequence_index")
                     ),
                     task_id,
                 ),
@@ -4807,9 +4765,9 @@ class ProductRecoveryController:
         inserted_node = self.process_planner._find_node(task_id)
         planner_owned_node = inserted_node if isinstance(inserted_node, dict) else None
         if planner_owned_node is not None:
-            self.task_states[task_id] = str(
-                planner_owned_node.get("status") or "pending"
-            ).strip() or "pending"
+            self.task_states[task_id] = (
+                str(planner_owned_node.get("status") or "pending").strip() or "pending"
+            )
 
         next_sequence = deepcopy(active_bridge_sequence or {})
         next_sequence.update(
@@ -4859,13 +4817,12 @@ class ProductRecoveryController:
                 "producer_semantics": ["pick_approach", "pick_grasp"],
             }
         )
-        current_trigger = str(trigger or "").strip() or str(
-            self.runtime_recovery.get("trigger", "") or ""
-        ).strip()
+        current_trigger = (
+            str(trigger or "").strip()
+            or str(self.runtime_recovery.get("trigger", "") or "").strip()
+        )
         current_failed_task_id = str(
-            next_sequence.get("failed_task_id")
-            or self.runtime_recovery.get("failed_task_id")
-            or ""
+            next_sequence.get("failed_task_id") or self.runtime_recovery.get("failed_task_id") or ""
         ).strip()
         current_violations = deepcopy(
             self._runtime_recovery_context.get("violations")
@@ -4877,9 +4834,7 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("system_coordination_state")
             or {}
         )
-        current_feedback_history = list(
-            self.runtime_recovery.get("bridge_feedback_history") or []
-        )
+        current_feedback_history = list(self.runtime_recovery.get("bridge_feedback_history") or [])
         validation_message = (
             f"Runtime DES repair {task_id} inserted before {disabled_task_id or '-'}; "
             "validating repaired continuation before dispatch."
@@ -5016,8 +4971,12 @@ class ProductRecoveryController:
                 {
                     "task_id": source_task_id,
                     "function_name": str(requirement.get("source_function_name") or "").strip(),
-                    "resource_jid": str(node.get("resource_jid") or entity if isinstance(node, dict) else entity),
-                    "part_name": self._tracked_part_name_for_task(node) if isinstance(node, dict) else "",
+                    "resource_jid": str(
+                        node.get("resource_jid") or entity if isinstance(node, dict) else entity
+                    ),
+                    "part_name": self._tracked_part_name_for_task(node)
+                    if isinstance(node, dict)
+                    else "",
                     "guard_violations": [],
                 },
             )
@@ -5089,7 +5048,9 @@ class ProductRecoveryController:
             "source_final_output_stage": str(final_output.get("final_output_stage") or "").strip(),
             "source_artifact_path": (
                 str(fixture_replay.get("source_path") or "").strip()
-                or str(dict(artifacts.get("prepare") or {}).get("response_artifact_path") or "").strip()
+                or str(
+                    dict(artifacts.get("prepare") or {}).get("response_artifact_path") or ""
+                ).strip()
             ),
             "source_turn_index": int(session.get("turn_index") or 0),
             "bridge_proposal_available": isinstance(bridge_proposal, dict),
@@ -5109,15 +5070,14 @@ class ProductRecoveryController:
             }
         if isinstance(prepared_bridge_request, dict) and prepared_bridge_request:
             verification_payload["prepared_request_reasoning_mode"] = str(
-                dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode") or ""
+                dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode")
+                or ""
             ).strip()
         return verification_payload
 
     @staticmethod
     def _runtime_bridge_fixture_final_output_path() -> str:
-        return str(
-            os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or ""
-        ).strip()
+        return str(os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or "").strip()
 
     def _runtime_bridge_fixture_final_output_source_path(self) -> str:
         fixture_path = self._runtime_bridge_fixture_final_output_path()
@@ -5144,9 +5104,7 @@ class ProductRecoveryController:
             "enabled": bool(payload.get("enabled")),
             "source_path": str(payload.get("source_path") or "").strip(),
             "load_status": str(payload.get("load_status") or "").strip(),
-            "proposal_build_status": str(
-                payload.get("proposal_build_status") or ""
-            ).strip(),
+            "proposal_build_status": str(payload.get("proposal_build_status") or "").strip(),
             "reason": str(payload.get("reason") or "").strip(),
         }
 
@@ -5169,9 +5127,7 @@ class ProductRecoveryController:
             return result
 
         bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-        reasoning_mode = str(
-            bridge_session.get("reasoning_mode") or ""
-        ).strip().lower()
+        reasoning_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
         resolved_path = Path(fixture_path).expanduser()
         try:
             resolved_path = resolved_path.resolve()
@@ -5182,37 +5138,27 @@ class ProductRecoveryController:
         if reasoning_mode != "multi_turn":
             result["load_status"] = "skipped"
             result["proposal_build_status"] = "skipped"
-            result["reason"] = (
-                "runtime bridge fixture replay requires reasoning_mode=multi_turn"
-            )
+            result["reason"] = "runtime bridge fixture replay requires reasoning_mode=multi_turn"
             return result
 
         if not resolved_path.exists():
             result["load_status"] = "missing"
             result["proposal_build_status"] = "skipped"
-            result["reason"] = (
-                f"fixture final_output artifact does not exist: {resolved_path}"
-            )
+            result["reason"] = f"fixture final_output artifact does not exist: {resolved_path}"
             return result
 
         try:
-            final_output_payload = json.loads(
-                resolved_path.read_text(encoding="utf-8")
-            )
+            final_output_payload = json.loads(resolved_path.read_text(encoding="utf-8"))
         except Exception as exc:
             result["load_status"] = "invalid_json"
             result["proposal_build_status"] = "skipped"
-            result["reason"] = (
-                f"failed to parse fixture final_output artifact: {exc}"
-            )
+            result["reason"] = f"failed to parse fixture final_output artifact: {exc}"
             return result
 
         if not isinstance(final_output_payload, dict) or not final_output_payload:
             result["load_status"] = "loaded"
             result["proposal_build_status"] = "rejected"
-            result["reason"] = (
-                "fixture final_output artifact did not contain a JSON object"
-            )
+            result["reason"] = "fixture final_output artifact did not contain a JSON object"
             return result
 
         result["final_output"] = deepcopy(final_output_payload)
@@ -5229,15 +5175,12 @@ class ProductRecoveryController:
         result["adapter_result"] = deepcopy(adapter_result)
         if isinstance(adapter_result, dict) and adapter_result.get("accepted") is True:
             result["proposal_build_status"] = "accepted"
-            result["proposal"] = deepcopy(
-                adapter_result.get("bridge_proposal") or {}
-            )
+            result["proposal"] = deepcopy(adapter_result.get("bridge_proposal") or {})
             return result
 
         result["proposal_build_status"] = "rejected"
         result["reason"] = str(
-            dict(adapter_result or {}).get("reason")
-            or "fixture final_output proposal build failed"
+            dict(adapter_result or {}).get("reason") or "fixture final_output proposal build failed"
         ).strip()
         return result
 
@@ -5271,7 +5214,9 @@ class ProductRecoveryController:
                     "bridge_outline_id": str(node.get("bridge_outline_id", "")).strip(),
                     "predecessor_outline_ids": deepcopy(node.get("predecessor_outline_ids") or []),
                     "recovery_group_id": str(node.get("recovery_group_id", "")).strip(),
-                    "recovery_parent_failure_id": str(node.get("recovery_parent_failure_id", "")).strip(),
+                    "recovery_parent_failure_id": str(
+                        node.get("recovery_parent_failure_id", "")
+                    ).strip(),
                     "recovery_kind": str(node.get("recovery_kind", "")).strip(),
                     "primary_obligation": deepcopy(node.get("primary_obligation") or {}),
                     "projected_snapshot": deepcopy(node.get("projected_snapshot") or {}),
@@ -5327,18 +5272,19 @@ class ProductRecoveryController:
         )
 
         system_state = deepcopy(base_state or {})
-        resource_states = dict(
-            self.process_planner._extract_resource_states(system_state)
-        )
+        resource_states = dict(self.process_planner._extract_resource_states(system_state))
         resource_entry = dict(resource_states.get(resource_jid) or {})
         resource_core = dict(bridge_snapshot.get("resource_core") or {})
-        resource_type = str(
-            resource_core.get("resource_type") or bridge_snapshot.get("resource_type") or ""
-        ).strip().lower()
+        resource_type = (
+            str(resource_core.get("resource_type") or bridge_snapshot.get("resource_type") or "")
+            .strip()
+            .lower()
+        )
         profile = get_resource_profile(resource_type or "resource")
         update: dict[str, Any] = {
             "resource_type": resource_type or None,
-            "current_state": resource_core.get("current_state") or bridge_snapshot.get("current_state"),
+            "current_state": resource_core.get("current_state")
+            or bridge_snapshot.get("current_state"),
             "current_location": (
                 resource_core.get("current_location")
                 if resource_core.get("current_location") is not None
@@ -5390,20 +5336,21 @@ class ProductRecoveryController:
             resource_snapshot_field_value,
         )
 
-        resource_type = str(
-            projected_snapshot.get("resource_type")
-            or dict(projected_snapshot.get("resource_core") or {}).get("resource_type")
-            or actual_snapshot.get("resource_type")
-            or dict(actual_snapshot.get("resource_core") or {}).get("resource_type")
+        resource_type = (
+            str(
+                projected_snapshot.get("resource_type")
+                or dict(projected_snapshot.get("resource_core") or {}).get("resource_type")
+                or actual_snapshot.get("resource_type")
+                or dict(actual_snapshot.get("resource_core") or {}).get("resource_type")
+                or "resource"
+            )
+            .strip()
+            .lower()
             or "resource"
-        ).strip().lower() or "resource"
+        )
         profile = get_resource_profile(resource_type)
         comparable_keys = ["current_state", "current_location", "active_work"]
-        comparable_keys.extend(
-            key
-            for key in profile.snapshot_fields
-            if key not in comparable_keys
-        )
+        comparable_keys.extend(key for key in profile.snapshot_fields if key not in comparable_keys)
         for extra_key in ("current_pose_ref",):
             if extra_key in projected_snapshot and extra_key not in comparable_keys:
                 comparable_keys.append(extra_key)
@@ -5411,7 +5358,9 @@ class ProductRecoveryController:
             if key not in projected_snapshot:
                 continue
             actual_value = resource_snapshot_field_value(actual_snapshot, key, profile=profile)
-            projected_value = resource_snapshot_field_value(projected_snapshot, key, profile=profile)
+            projected_value = resource_snapshot_field_value(
+                projected_snapshot, key, profile=profile
+            )
             if (
                 allow_missing_current_location
                 and key == "current_location"
@@ -5430,10 +5379,7 @@ class ProductRecoveryController:
             ):
                 continue
             if actual_value != projected_value:
-                return (
-                    f"projected {key}={projected_value!r} "
-                    f"but runtime observed {actual_value!r}"
-                )
+                return f"projected {key}={projected_value!r} but runtime observed {actual_value!r}"
         return ""
 
     def _bridge_part_entry_mismatch(
@@ -5468,9 +5414,7 @@ class ProductRecoveryController:
         request_id = f"runtime_plan_validation_{uuid.uuid4().hex}"
         if not isinstance(getattr(self, "_runtime_recovery_context", None), dict):
             self._runtime_recovery_context = {}
-        self._runtime_recovery_context["active_runtime_plan_validation_request_id"] = (
-            request_id
-        )
+        self._runtime_recovery_context["active_runtime_plan_validation_request_id"] = request_id
         payload = self._build_plan_validation_payload(
             skip_revalidation=skip_revalidation,
             skip_recovery_safety_validation=skip_recovery_safety_validation,
@@ -5570,9 +5514,7 @@ class ProductRecoveryController:
             }
             if isinstance(self.runtime_recovery.get("bridge_debug"), dict):
                 bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-                bridge_debug["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
+                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
                 self.runtime_recovery["bridge_debug"] = bridge_debug
         self._runtime_recovery_context = {}
         self._set_runtime_recovery(
@@ -5621,10 +5563,17 @@ class ProductRecoveryController:
             return False
 
         sequence_id = str(task_node.get("bridge_sequence_id", "")).strip()
-        if not sequence_id or sequence_id != str(active_bridge_sequence.get("bridge_sequence_id", "")).strip():
+        if (
+            not sequence_id
+            or sequence_id != str(active_bridge_sequence.get("bridge_sequence_id", "")).strip()
+        ):
             return False
 
-        macro_name = str((task_node.get("params") or {}).get("macro_name") or task_node.get("id") or "bridge_macro").strip()
+        macro_name = str(
+            (task_node.get("params") or {}).get("macro_name")
+            or task_node.get("id")
+            or "bridge_macro"
+        ).strip()
         failed_task_id = str(
             active_bridge_sequence.get("failed_task_id")
             or self.runtime_recovery.get("failed_task_id", "")
@@ -5772,19 +5721,13 @@ class ProductRecoveryController:
             next_sequence = deepcopy(completed_sequence)
             next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
             if generated_code_verification:
-                next_sequence["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
+                next_sequence["generated_code_verification"] = deepcopy(generated_code_verification)
             bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
             if generated_code_verification:
-                bridge_debug["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
+                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
             if tail_task_ids:
                 next_sequence["state"] = "executing"
-                continue_message = (
-                    f"Bridge macro '{macro_name}' matched projection; continuing generated-code verification tail."
-                )
+                continue_message = f"Bridge macro '{macro_name}' matched projection; continuing generated-code verification tail."
                 self._set_runtime_recovery(
                     status="resolved",
                     resolution_class="generated_bridge_verification",
@@ -5810,9 +5753,7 @@ class ProductRecoveryController:
             disabled_frontier = self._bridge_continuation_disabled_frontier(next_sequence)
             if disabled_frontier:
                 self._record_runtime_des_trace(
-                    graph_ready_event_ids=list(
-                        next_sequence.get("pending_nominal_task_ids") or []
-                    ),
+                    graph_ready_event_ids=list(next_sequence.get("pending_nominal_task_ids") or []),
                     plant_enabled_event_ids=[],
                     disabled_frontier=disabled_frontier,
                 )
@@ -5822,7 +5763,9 @@ class ProductRecoveryController:
                     active_bridge_sequence=next_sequence,
                 )
                 if repair_node:
-                    bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or bridge_debug)
+                    bridge_debug = deepcopy(
+                        self.runtime_recovery.get("bridge_debug") or bridge_debug
+                    )
                     if generated_code_verification:
                         bridge_debug["generated_code_verification"] = deepcopy(
                             generated_code_verification
@@ -5834,16 +5777,13 @@ class ProductRecoveryController:
                     await asyncio.to_thread(self._persist_product_state)
                     return True
 
-                message = (
-                    self._runtime_des_disabled_event_message(
-                        disabled_frontier[0] if disabled_frontier else {},
-                        human_required=True,
-                    )
-                    or (
-                        "Generated bridge verification matched macro projections, but "
-                        "the runtime DES continuation guard is still disabled. Human "
-                        "intervention required."
-                    )
+                message = self._runtime_des_disabled_event_message(
+                    disabled_frontier[0] if disabled_frontier else {},
+                    human_required=True,
+                ) or (
+                    "Generated bridge verification matched macro projections, but "
+                    "the runtime DES continuation guard is still disabled. Human "
+                    "intervention required."
                 )
                 self._mark_runtime_des_human_required(
                     disabled_frontier=disabled_frontier,
@@ -5869,12 +5809,8 @@ class ProductRecoveryController:
                         "Generated bridge macro sequence executed in Gazebo and matched the projected post-state."
                     ),
                 }
-                next_sequence["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
-                bridge_debug["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
+                next_sequence["generated_code_verification"] = deepcopy(generated_code_verification)
+                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
             verified_message = (
                 f"Generated bridge verification completed after macro '{macro_name}'; "
                 "resuming nominal execution."
@@ -5912,9 +5848,7 @@ class ProductRecoveryController:
             next_sequence = deepcopy(completed_sequence)
             next_sequence["state"] = "executing"
             next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
-            continue_message = (
-                f"Bridge macro '{macro_name}' matched projection; continuing the approved bridge tail."
-            )
+            continue_message = f"Bridge macro '{macro_name}' matched projection; continuing the approved bridge tail."
             self._set_runtime_recovery(
                 status="resolved",
                 resolution_class="des_with_llm_bridge",
@@ -5953,15 +5887,11 @@ class ProductRecoveryController:
             ).strip(),
         }
         repair_task_id = str(terminal_sequence.get("repair_task_id") or "").strip()
-        repair_target_task_id = str(
-            terminal_sequence.get("repair_target_task_id") or ""
-        ).strip()
+        repair_target_task_id = str(terminal_sequence.get("repair_target_task_id") or "").strip()
         disabled_frontier = self._bridge_continuation_disabled_frontier(terminal_sequence)
         if disabled_frontier:
             self._record_runtime_des_trace(
-                graph_ready_event_ids=list(
-                    terminal_sequence.get("pending_nominal_task_ids") or []
-                ),
+                graph_ready_event_ids=list(terminal_sequence.get("pending_nominal_task_ids") or []),
                 plant_enabled_event_ids=[],
                 disabled_frontier=disabled_frontier,
             )
@@ -6080,7 +6010,8 @@ class ProductRecoveryController:
             bridge_feedback_history=feedback_history,
             violations=violations,
             append_history=True,
-            history_message=history_message or (
+            history_message=history_message
+            or (
                 f"DES runtime recovery attempt {attempt_number}/{self._runtime_repair_max_attempts} started."
             ),
         )
@@ -6124,7 +6055,9 @@ class ProductRecoveryController:
             bridge_debug = result.get("bridge_debug")
             prepared_bridge_request = result.get("prepared_bridge_request")
             if awaiting_bridge_generation and isinstance(prepared_bridge_request, dict):
-                bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or bridge_debug or {})
+                bridge_debug = deepcopy(
+                    prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
+                )
                 bridge_debug = self._bridge_debug_with_runtime_handoff(
                     bridge_debug,
                     handoff_owner="product_agent",
@@ -6168,8 +6101,7 @@ class ProductRecoveryController:
                             prepared_bridge_request=prepared_bridge_request,
                         )
                         bridge_text = (
-                            ", ".join(str(item) for item in bridge_summary if item)
-                            or scenario_key
+                            ", ".join(str(item) for item in bridge_summary if item) or scenario_key
                         )
                         recovery = self._set_runtime_recovery(
                             status="llm_bridge",
@@ -6214,15 +6146,12 @@ class ProductRecoveryController:
                     )
                 selected_archive_path = self._runtime_bridge_session_archive_path()
                 selected_archive_label = self._runtime_bridge_session_archive_label()
-                message = (
-                    base_message
-                    or (
-                        "DES found no modeled continuation. Selected archived bridge run will auto-load and auto-run."
-                        if session_bridge_mode == "pre_ran" and selected_archive_path
-                        else "Pre-ran mode is selected, but no archived bridge run is selected."
-                        if session_bridge_mode == "pre_ran"
-                        else "DES found no modeled continuation. Bridge session is ready for LLM reasoning."
-                    )
+                message = base_message or (
+                    "DES found no modeled continuation. Selected archived bridge run will auto-load and auto-run."
+                    if session_bridge_mode == "pre_ran" and selected_archive_path
+                    else "Pre-ran mode is selected, but no archived bridge run is selected."
+                    if session_bridge_mode == "pre_ran"
+                    else "DES found no modeled continuation. Bridge session is ready for LLM reasoning."
                 )
                 recovery = self._set_runtime_recovery(
                     status="bridge_ready",
@@ -6252,9 +6181,7 @@ class ProductRecoveryController:
                 )
                 recovery = deepcopy(self.runtime_recovery)
                 self._clear_plan_safety_alert()
-                autostart_pre_ran = bool(
-                    session_bridge_mode == "pre_ran" and selected_archive_path
-                )
+                autostart_pre_ran = bool(session_bridge_mode == "pre_ran" and selected_archive_path)
                 if not autostart_pre_ran:
                     await asyncio.to_thread(self._persist_product_state)
                 if session_bridge_mode == "pre_ran":
@@ -6372,12 +6299,15 @@ class ProductRecoveryController:
                     )
                 return recovery
             if awaiting_bridge_approval and isinstance(bridge_proposal, dict):
-                bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                bridge_text = (
+                    ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                )
                 recovery = self._set_runtime_recovery(
                     status="llm_bridge",
                     trigger=trigger,
                     failed_task_id=failed_task_id,
-                    message=base_message or "Validated bridge proposal is ready for final approval.",
+                    message=base_message
+                    or "Validated bridge proposal is ready for final approval.",
                     attempts_used=attempt_number,
                     attempts_max=self._runtime_repair_max_attempts,
                     used_llm_bridge=True,
@@ -6574,9 +6504,7 @@ class ProductRecoveryController:
         expected_request_id = ""
         if isinstance(getattr(self, "_runtime_recovery_context", None), dict):
             expected_request_id = str(
-                self._runtime_recovery_context.get(
-                    "active_runtime_plan_validation_request_id"
-                )
+                self._runtime_recovery_context.get("active_runtime_plan_validation_request_id")
                 or ""
             ).strip()
         if incoming_request_id:
@@ -6593,9 +6521,7 @@ class ProductRecoveryController:
                     incoming_request_id,
                 )
                 return True
-            self._runtime_recovery_context.pop(
-                "active_runtime_plan_validation_request_id", None
-            )
+            self._runtime_recovery_context.pop("active_runtime_plan_validation_request_id", None)
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         validation_policy = self._normalize_runtime_bridge_validation_policy(
@@ -6625,9 +6551,7 @@ class ProductRecoveryController:
 
         if ok:
             verification_only = self._bridge_is_verification_only(active_bridge_sequence)
-            repair_task_id = str(
-                (active_bridge_sequence or {}).get("repair_task_id") or ""
-            ).strip()
+            repair_task_id = str((active_bridge_sequence or {}).get("repair_task_id") or "").strip()
             repair_target_task_id = str(
                 (active_bridge_sequence or {}).get("repair_target_task_id") or ""
             ).strip()
@@ -6681,7 +6605,9 @@ class ProductRecoveryController:
                     else "none"
                 ),
                 active_bridge_sequence=active_bridge_sequence,
-                generated_code_verification=self.runtime_recovery.get("generated_code_verification"),
+                generated_code_verification=self.runtime_recovery.get(
+                    "generated_code_verification"
+                ),
                 violations=[],
                 append_history=True,
                 history_message=success_message,
@@ -6704,10 +6630,8 @@ class ProductRecoveryController:
             len(violations),
         )
         try:
-            repaired_from_witness = (
-                self.process_planner.apply_validation_witness_ordering_repairs(
-                    violations
-                )
+            repaired_from_witness = self.process_planner.apply_validation_witness_ordering_repairs(
+                violations
             )
         except Exception:
             repaired_from_witness = False
@@ -6718,9 +6642,7 @@ class ProductRecoveryController:
             self.logger.info(
                 "[Product] Applied CCA validation witness ordering repair; resubmitting runtime plan validation."
             )
-            self._runtime_recovery_context.pop(
-                "active_runtime_plan_validation_request_id", None
-            )
+            self._runtime_recovery_context.pop("active_runtime_plan_validation_request_id", None)
             try:
                 await asyncio.to_thread(self.process_planner.compile_global_fsa)
                 if hasattr(self, "global_fsa_path"):
@@ -6813,7 +6735,9 @@ class ProductRecoveryController:
             violations=violations,
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
-            system_coordination_state=dict(self._runtime_recovery_context.get("system_coordination_state") or {}),
+            system_coordination_state=dict(
+                self._runtime_recovery_context.get("system_coordination_state") or {}
+            ),
             reset_attempts=False,
             history_message=(
                 f"Plan validation failed; rerunning DES recovery attempt "
@@ -6870,17 +6794,13 @@ class ProductRecoveryController:
                 self._compact_fixture_replay_status(fixture_replay) or {}
             )
             if isinstance(fixture_replay.get("final_output"), dict):
-                bridge_debug["final_output"] = deepcopy(
-                    fixture_replay.get("final_output") or {}
-                )
+                bridge_debug["final_output"] = deepcopy(fixture_replay.get("final_output") or {})
             if isinstance(fixture_replay.get("adapter_result"), dict):
                 bridge_debug["final_output_adapter"] = deepcopy(
                     fixture_replay.get("adapter_result") or {}
                 )
             if isinstance(fixture_replay.get("proposal"), dict):
-                bridge_debug["bridge_proposal"] = deepcopy(
-                    fixture_replay.get("proposal") or {}
-                )
+                bridge_debug["bridge_proposal"] = deepcopy(fixture_replay.get("proposal") or {})
                 bridge_debug["status"] = "fixture_replay_ready"
                 bridge_debug["message"] = (
                     "Loaded runtime bridge proposal from archived final_output fixture."
@@ -6888,8 +6808,7 @@ class ProductRecoveryController:
             else:
                 bridge_debug["status"] = "fixture_replay_failed"
                 bridge_debug["message"] = str(
-                    fixture_replay.get("reason")
-                    or "Runtime bridge fixture replay failed."
+                    fixture_replay.get("reason") or "Runtime bridge fixture replay failed."
                 ).strip()
             prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
             if hasattr(self.process_planner, "_set_last_bridge_debug"):
@@ -6913,7 +6832,9 @@ class ProductRecoveryController:
             10,
             int(
                 bridge_session.get("max_turns")
-                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get("max_turns")
+                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get(
+                    "max_turns"
+                )
                 or 0
             ),
         )
@@ -6981,7 +6902,9 @@ class ProductRecoveryController:
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
         bridge_debug = deepcopy(
-            prepared_bridge_request.get("bridge_debug") or self.runtime_recovery.get("bridge_debug") or {}
+            prepared_bridge_request.get("bridge_debug")
+            or self.runtime_recovery.get("bridge_debug")
+            or {}
         )
         fixture_replay_payload = self._compact_fixture_replay_status(
             bridge_debug.get("fixture_replay")
@@ -7021,7 +6944,9 @@ class ProductRecoveryController:
             bridge_approval_state="generating",
             bridge_stage="none",
             active_bridge_sequence=None,
-            bridge_feedback_history=list(self._runtime_recovery_context.get("bridge_feedback_history") or []),
+            bridge_feedback_history=list(
+                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            ),
             fixture_replay=fixture_replay_payload,
             violations=violations,
             append_history=True,
@@ -7052,9 +6977,7 @@ class ProductRecoveryController:
                     stop_after="outline",
                 )
             else:
-                proposal = await self._execute_runtime_bridge_generation(
-                    prepared_bridge_request
-                )
+                proposal = await self._execute_runtime_bridge_generation(prepared_bridge_request)
             bridge_debug = deepcopy(
                 prepared_bridge_request.get("bridge_debug")
                 or self.process_planner.get_last_bridge_debug()
@@ -7083,9 +7006,7 @@ class ProductRecoveryController:
                         else "Gazebo generated-code verification is disabled."
                     ),
                 )
-                bridge_debug["generated_code_verification"] = deepcopy(
-                    verification_payload
-                )
+                bridge_debug["generated_code_verification"] = deepcopy(verification_payload)
                 if isinstance(proposal, dict) and verification_enabled:
                     bridge_debug["execution_policy"] = {
                         "complete_full_tail": False,
@@ -7103,7 +7024,9 @@ class ProductRecoveryController:
             self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                 prepared_bridge_request
             )
-            bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or bridge_debug or {})
+            bridge_debug = deepcopy(
+                prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
+            )
             bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
             if session_bridge_mode == "manual" and bridge_status in {
                 "paused_after_outline_turn",
@@ -7137,7 +7060,9 @@ class ProductRecoveryController:
                 return recovery
             if isinstance(proposal, dict):
                 bridge_summary = self.process_planner._bridge_summary(proposal)
-                bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                bridge_text = (
+                    ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                )
                 recovery = self._set_runtime_recovery(
                     status="llm_bridge",
                     resolution_class="none",
@@ -7219,9 +7144,7 @@ class ProductRecoveryController:
                 return recovery
 
             if bridge_status == "paused_after_grounding":
-                message = (
-                    "LLM bridge grounding completed and is paused before outline generation for review."
-                )
+                message = "LLM bridge grounding completed and is paused before outline generation for review."
                 recovery = self._set_runtime_recovery(
                     status="llm_bridge",
                     resolution_class="none",
@@ -7253,9 +7176,7 @@ class ProductRecoveryController:
                 "ready_for_primitive_generation",
                 "paused_after_primitive_turn",
             }:
-                message = (
-                    "LLM bridge paused for another bounded multi-turn reasoning step."
-                )
+                message = "LLM bridge paused for another bounded multi-turn reasoning step."
                 recovery = self._set_runtime_recovery(
                     status="llm_bridge",
                     resolution_class="none",
@@ -7283,9 +7204,7 @@ class ProductRecoveryController:
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
             if bridge_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
-                message = (
-                    "LLM bridge primitive generation stalled before producing a validated final plan."
-                )
+                message = "LLM bridge primitive generation stalled before producing a validated final plan."
                 recovery = self._set_runtime_recovery(
                     status="human_required",
                     resolution_class="human_required",
@@ -7320,9 +7239,7 @@ class ProductRecoveryController:
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
-            message = (
-                "LLM bridge reasoning produced no validated final plan. Review the trace, refine, or retry DES."
-            )
+            message = "LLM bridge reasoning produced no validated final plan. Review the trace, refine, or retry DES."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -7375,7 +7292,9 @@ class ProductRecoveryController:
                 bridge_stage="none",
                 active_bridge_sequence=None,
                 fixture_replay=self.runtime_recovery.get("fixture_replay"),
-                generated_code_verification=self.runtime_recovery.get("generated_code_verification"),
+                generated_code_verification=self.runtime_recovery.get(
+                    "generated_code_verification"
+                ),
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
                 ),
@@ -7433,9 +7352,11 @@ class ProductRecoveryController:
         if not prepared_bridge_request:
             raise RuntimeError("no prepared bridge request is available")
 
-        final_output_payload, adapter_result, resolved_path = self._load_runtime_bridge_archive_bundle(
-            prepared_bridge_request=prepared_bridge_request,
-            artifact_path=artifact_path,
+        final_output_payload, adapter_result, resolved_path = (
+            self._load_runtime_bridge_archive_bundle(
+                prepared_bridge_request=prepared_bridge_request,
+                artifact_path=artifact_path,
+            )
         )
         proposal = deepcopy(adapter_result.get("bridge_proposal") or {})
         if not isinstance(proposal, dict) or not proposal:
@@ -7445,9 +7366,7 @@ class ProductRecoveryController:
         bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
         bridge_debug["source"] = "archived_final_output"
         bridge_debug["status"] = "archive_replay_ready"
-        bridge_debug["message"] = (
-            "Loaded archived bridge final output for final operator approval."
-        )
+        bridge_debug["message"] = "Loaded archived bridge final output for final operator approval."
         bridge_debug["validation_policy"] = validation_policy
         bridge_debug["archive_replay"] = {
             "source_path": str(resolved_path),
@@ -7479,9 +7398,9 @@ class ProductRecoveryController:
         recovery_safety_scope_id = str(
             self.runtime_recovery.get("recovery_safety_scope_id") or ""
         ).strip()
-        recovery_safety_status = str(
-            self.runtime_recovery.get("recovery_safety_status") or "none"
-        ).strip().lower()
+        recovery_safety_status = (
+            str(self.runtime_recovery.get("recovery_safety_status") or "none").strip().lower()
+        )
         recovery_safety_logic_json = str(
             self.runtime_recovery.get("recovery_safety_logic_json") or ""
         ).strip()
@@ -7518,9 +7437,7 @@ class ProductRecoveryController:
                     "recovery_safety_status": recovery_safety_status,
                     "recovery_safety_logic_json": recovery_safety_logic_json,
                     "result_path": str(
-                        archived_recovery_safety_result.get(
-                            "archived_recovery_safety_result_path"
-                        )
+                        archived_recovery_safety_result.get("archived_recovery_safety_result_path")
                         or ""
                     ).strip(),
                 }
@@ -7530,8 +7447,7 @@ class ProductRecoveryController:
                 )
             else:
                 recovery_safety_scope_id = (
-                    recovery_safety_scope_id
-                    or f"recovery_scope_{uuid.uuid4().hex[:8]}"
+                    recovery_safety_scope_id or f"recovery_scope_{uuid.uuid4().hex[:8]}"
                 )
                 recovery_safety_payload = self._dispatch_recovery_safety_generation_request(
                     prepared_bridge_request=prepared_bridge_request,
@@ -7628,9 +7544,11 @@ class ProductRecoveryController:
             raise RuntimeError("runtime recovery is already in progress")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting approval")
 
@@ -7686,7 +7604,9 @@ class ProductRecoveryController:
                 recovery_safety_scope_id=recovery_safety_scope_id,
             )
         except Exception as exc:
-            self.logger.exception("[Product] Outline approval recovery safety generation dispatch failed.")
+            self.logger.exception(
+                "[Product] Outline approval recovery safety generation dispatch failed."
+            )
             message = (
                 f"{self.agent_name}: outline approval could not start recovery safety generation "
                 f"({exc})."
@@ -7738,9 +7658,13 @@ class ProductRecoveryController:
             recovery_safety_scope_id=recovery_safety_scope_id,
             recovery_safety_status="generating",
             recovery_safety_logic_json="",
-            recovery_safety_dir=str(recovery_safety_payload.get("recovery_safety_dir") or "").strip(),
+            recovery_safety_dir=str(
+                recovery_safety_payload.get("recovery_safety_dir") or ""
+            ).strip(),
             recovery_plan_dir=str(recovery_safety_payload.get("recovery_plan_dir") or "").strip(),
-            recovery_safery_dir=str(recovery_safety_payload.get("recovery_safery_dir") or "").strip(),
+            recovery_safery_dir=str(
+                recovery_safety_payload.get("recovery_safery_dir") or ""
+            ).strip(),
             recovery_final_dir="",
             recovery_final_output_path="",
             recovery_enforced_task_ids=[],
@@ -7834,7 +7758,8 @@ class ProductRecoveryController:
 
             message = (
                 "LLM bridge primitive generation did not produce a reviewable primitive program."
-                if bridge_status not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
+                if bridge_status
+                not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
                 else "LLM bridge primitive generation stalled before producing a reviewable primitive program."
             )
             recovery = self._set_runtime_recovery(
@@ -7917,9 +7842,11 @@ class ProductRecoveryController:
             raise RuntimeError("runtime recovery is already in progress")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting refinement")
 
@@ -8103,9 +8030,11 @@ class ProductRecoveryController:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting rejection")
 
@@ -8154,9 +8083,11 @@ class ProductRecoveryController:
             raise RuntimeError("no active runtime DES recovery context is available")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting approval")
 
@@ -8233,9 +8164,11 @@ class ProductRecoveryController:
             raise RuntimeError("runtime recovery is already in progress")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting refinement")
 
@@ -8353,7 +8286,8 @@ class ProductRecoveryController:
 
             message = (
                 "LLM bridge primitive regeneration did not produce a reviewable primitive program."
-                if bridge_status not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
+                if bridge_status
+                not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
                 else "LLM bridge primitive generation stalled before producing a reviewable primitive program."
             )
             recovery = self._set_runtime_recovery(
@@ -8429,9 +8363,11 @@ class ProductRecoveryController:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        approval_state = str(
-            self.runtime_recovery.get("bridge_approval_state", "none") or "none"
-        ).strip().lower()
+        approval_state = (
+            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            .strip()
+            .lower()
+        )
         if status != "llm_bridge" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting rejection")
 
@@ -8575,13 +8511,12 @@ class ProductRecoveryController:
         if not scenario_key:
             raise ValueError("scenario_id is empty")
 
-        elapsed = (
-            time.perf_counter() - started_at
-            if started_at is not None
-            else 0.0
-        )
+        elapsed = time.perf_counter() - started_at if started_at is not None else 0.0
         cached_bundle = deepcopy(
-            (self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(scenario_key) or {}
+            (self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(
+                scenario_key
+            )
+            or {}
         )
         if isinstance(cached_bundle.get("proposal"), dict):
             normalized = deepcopy(cached_bundle["proposal"])
@@ -8628,7 +8563,9 @@ class ProductRecoveryController:
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         if status != "bridge_ready":
-            raise RuntimeError("preprogrammed bridge scenarios can only be loaded from the bridge-ready state")
+            raise RuntimeError(
+                "preprogrammed bridge scenarios can only be loaded from the bridge-ready state"
+            )
 
         scenario_key = str(scenario_id or "").strip()
         if not scenario_key:
@@ -8705,9 +8642,9 @@ class ProductRecoveryController:
         recovery_safety_scope_id = str(
             self.runtime_recovery.get("recovery_safety_scope_id") or ""
         ).strip()
-        recovery_safety_status = str(
-            self.runtime_recovery.get("recovery_safety_status") or "none"
-        ).strip().lower()
+        recovery_safety_status = (
+            str(self.runtime_recovery.get("recovery_safety_status") or "none").strip().lower()
+        )
         if status != "llm_bridge":
             if self._bridge_sequence_is_live(active_bridge_sequence):
                 warning = "Bridge already approved/executing for this recovery session."
@@ -8780,7 +8717,8 @@ class ProductRecoveryController:
                     ),
                     generated_code_verification=deepcopy(
                         self.runtime_recovery.get("generated_code_verification") or {}
-                    ) or None,
+                    )
+                    or None,
                     violations=list(self._runtime_recovery_context.get("violations") or []),
                     append_history=True,
                     history_message=message,
@@ -8923,9 +8861,7 @@ class ProductRecoveryController:
                 earliest_node = min(
                     nodes,
                     key=lambda node: (
-                        self.process_planner._task_sequence_index_key(
-                            node.get("sequence_index")
-                        ),
+                        self.process_planner._task_sequence_index_key(node.get("sequence_index")),
                         str(node.get("id", "")).strip(),
                     ),
                 )
@@ -9058,7 +8994,9 @@ class ProductRecoveryController:
                 if planner_global_fsa_snapshot is not None and hasattr(self, "global_fsa_path"):
                     self.process_planner.save_global_fsa(self.global_fsa_path)
             except Exception:
-                self.logger.exception("[Product] Failed to roll back planner state after approval failure.")
+                self.logger.exception(
+                    "[Product] Failed to roll back planner state after approval failure."
+                )
             message = f"{self.agent_name}: approved bridge proposal could not be compiled ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
@@ -9091,7 +9029,11 @@ class ProductRecoveryController:
         bridge_sequence_id = str(tasks[0].get("bridge_sequence_id", "")).strip() if tasks else ""
         active_bridge_sequence = None
         if bridge_sequence_id:
-            archive_replay = dict(bridge_debug.get("archive_replay") or {}) if isinstance(bridge_debug, dict) else {}
+            archive_replay = (
+                dict(bridge_debug.get("archive_replay") or {})
+                if isinstance(bridge_debug, dict)
+                else {}
+            )
             source_archive_path = str(
                 archive_replay.get("source_path")
                 or self._runtime_bridge_session_archive_path()
@@ -9169,9 +9111,7 @@ class ProductRecoveryController:
             bridge_debug["approval"] = {
                 "approved_at_utc": self._utc_now_iso(),
                 "entry_task_ids": deepcopy(resumable_task_ids),
-                "splice_before_task_ids_by_resource": deepcopy(
-                    splice_before_task_ids_by_resource
-                ),
+                "splice_before_task_ids_by_resource": deepcopy(splice_before_task_ids_by_resource),
                 "deleted_task_ids": deepcopy(deleted_task_ids),
                 "anchor_task_id": anchor_task_id,
                 "proposal_fingerprint": proposal_fingerprint,
@@ -9190,17 +9130,13 @@ class ProductRecoveryController:
             if generated_code_verification:
                 generated_code_verification["status"] = "executing"
                 generated_code_verification["updated_at_utc"] = self._utc_now_iso()
-                bridge_debug["generated_code_verification"] = deepcopy(
-                    generated_code_verification
-                )
+                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
                 if isinstance(active_bridge_sequence, dict):
                     active_bridge_sequence["generated_code_verification"] = deepcopy(
                         generated_code_verification
                     )
 
-        bridge_source = str(
-            (active_bridge_sequence or {}).get("source", "")
-        ).strip().lower()
+        bridge_source = str((active_bridge_sequence or {}).get("source", "")).strip().lower()
         archived_replay_approval = bridge_source == "archived_final_output"
         if isinstance(active_bridge_sequence, dict):
             sequence_execution_policy = deepcopy(
@@ -9253,18 +9189,10 @@ class ProductRecoveryController:
             recovery_safety_logic_json=str(
                 self.runtime_recovery.get("recovery_safety_logic_json") or ""
             ).strip(),
-            recovery_safety_dir=str(
-                self.runtime_recovery.get("recovery_safety_dir") or ""
-            ).strip(),
-            recovery_plan_dir=str(
-                self.runtime_recovery.get("recovery_plan_dir") or ""
-            ).strip(),
-            recovery_safery_dir=str(
-                self.runtime_recovery.get("recovery_safery_dir") or ""
-            ).strip(),
-            recovery_final_dir=str(
-                self.runtime_recovery.get("recovery_final_dir") or ""
-            ).strip(),
+            recovery_safety_dir=str(self.runtime_recovery.get("recovery_safety_dir") or "").strip(),
+            recovery_plan_dir=str(self.runtime_recovery.get("recovery_plan_dir") or "").strip(),
+            recovery_safery_dir=str(self.runtime_recovery.get("recovery_safery_dir") or "").strip(),
+            recovery_final_dir=str(self.runtime_recovery.get("recovery_final_dir") or "").strip(),
             recovery_final_output_path=str(
                 self.runtime_recovery.get("recovery_final_output_path") or ""
             ).strip(),
@@ -9311,7 +9239,9 @@ class ProductRecoveryController:
                 daemon=True,
             ).start()
         except Exception as exc:
-            self.logger.exception("[Product] Approved bridge proposal CCA runtime plan validation dispatch failed.")
+            self.logger.exception(
+                "[Product] Approved bridge proposal CCA runtime plan validation dispatch failed."
+            )
             message = (
                 f"{self.agent_name}: approved bridge proposal could not start runtime "
                 f"plan validation ({exc})."
@@ -9425,9 +9355,7 @@ class ProductRecoveryController:
     async def retry_runtime_recovery_des(self) -> dict[str, Any]:
         active_bridge_sequence = self._active_bridge_sequence()
         if self._bridge_sequence_is_live(active_bridge_sequence):
-            warning = (
-                "DES retry is blocked while the approved bridge sequence is still active."
-            )
+            warning = "DES retry is blocked while the approved bridge sequence is still active."
             self.logger.warning(
                 "[Product] %s product=%s bridge_sequence_id=%s",
                 warning,
@@ -9444,7 +9372,9 @@ class ProductRecoveryController:
         trigger = str(self._runtime_recovery_context.get("trigger", "") or "operator_retry")
         failed_task_id = str(self._runtime_recovery_context.get("failed_task_id", "")).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        system_coordination_state = dict(self._runtime_recovery_context.get("system_coordination_state") or {})
+        system_coordination_state = dict(
+            self._runtime_recovery_context.get("system_coordination_state") or {}
+        )
         self._clear_plan_safety_alert()
         return await self._run_des_runtime_recovery_attempt(
             violations=violations,

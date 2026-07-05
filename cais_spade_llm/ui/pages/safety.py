@@ -29,22 +29,21 @@ def render(bridge: SystemBridge) -> None:
     ui.label("Safety").classes("text-2xl font-bold px-6 pt-6")
 
     with ui.row().classes("w-full px-6 gap-6 items-start flex-nowrap"):
-      with ui.column().classes("flex-grow gap-6 min-w-0"):
+        with ui.column().classes("flex-grow gap-6 min-w-0"):
+            # ── Safety Requirements + Preview/Approval ───────────────────
+            _render_safety_requirements_card(bridge)
 
-        # ── Safety Requirements + Preview/Approval ───────────────────
-        _render_safety_requirements_card(bridge)
-
-      # ── Right column: chat panel ──────────────────────────
-      with ui.column().classes("w-96 shrink-0 sticky top-20 self-start"):
-        render_chat(bridge, agent_jid="cca", title="Central Controller Agent Chat")
+        # ── Right column: chat panel ──────────────────────────
+        with ui.column().classes("w-96 shrink-0 sticky top-20 self-start"):
+            render_chat(bridge, agent_jid="cca", title="Central Controller Agent Chat")
 
 
 def _render_safety_requirements_card(bridge: SystemBridge) -> None:
     with ui.card().classes("w-full"):
         ui.label("Safety Requirements").classes("text-lg font-semibold mb-2")
-        ui.label("Text files that define all runtime constraints, including ordering constraints.").classes(
-            "text-xs text-slate-500 mb-3"
-        )
+        ui.label(
+            "Text files that define all runtime constraints, including ordering constraints."
+        ).classes("text-xs text-slate-500 mb-3")
 
         _SAFETY_DIR.mkdir(parents=True, exist_ok=True)
         status_label = ui.label("").classes("text-sm")
@@ -66,28 +65,38 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 {},
                 label="Safety File",
             ).classes("w-56 shrink-0")
-            name_input = ui.input(label="New file", placeholder="e.g. safety_case3").classes("w-56 shrink-0")
+            name_input = ui.input(label="New file", placeholder="e.g. safety_case3").classes(
+                "w-56 shrink-0"
+            )
             create_btn = ui.button("Create", icon="add").props("flat")
 
         upload_widget = None
         with ui.row().classes("w-full"):
-            upload_widget = ui.upload(
-                label="Upload .txt",
-                auto_upload=True,
-                on_upload=lambda e: _handle_upload(e),
-                max_file_size=1_000_000,
-            ).props("accept=.txt flat dense max-files=1 hide-upload-progress").classes("w-40 compact-upload")
+            upload_widget = (
+                ui.upload(
+                    label="Upload .txt",
+                    auto_upload=True,
+                    on_upload=lambda e: _handle_upload(e),
+                    max_file_size=1_000_000,
+                )
+                .props("accept=.txt flat dense max-files=1 hide-upload-progress")
+                .classes("w-40 compact-upload")
+            )
         upload_info_label = ui.label("").classes("text-xs text-slate-600")
 
-        req_editor = ui.textarea(label="Edit requirements").classes(
-            "w-full font-mono"
-        ).props("outlined autogrow")
+        req_editor = (
+            ui.textarea(label="Edit requirements")
+            .classes("w-full font-mono")
+            .props("outlined autogrow")
+        )
         ui.label(
             "Optional refinement feedback: explain what was wrong in the previous preview and how it should change."
         ).classes("text-xs text-slate-500")
-        refinement_feedback = ui.textarea(label="Refinement Feedback").classes(
-            "w-full font-mono"
-        ).props("outlined autogrow")
+        refinement_feedback = (
+            ui.textarea(label="Refinement Feedback")
+            .classes("w-full font-mono")
+            .props("outlined autogrow")
+        )
 
         with ui.row().classes("w-full mt-2 items-start justify-between"):
             with ui.row().classes("gap-2 items-center"):
@@ -106,9 +115,15 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 generate_loading_row.style("display:none;")
             with ui.column().classes("items-end gap-2"):
                 with ui.row().classes("gap-2 items-end"):
-                    save_btn = ui.button("Save", on_click=lambda: _save_req(), icon="save").props("color=primary")
-                    reload_btn = ui.button("Reload", on_click=lambda: _load_req(), icon="refresh").props("flat")
-                    delete_btn = ui.button("Delete", on_click=lambda: _delete_req(), icon="delete").props("flat color=red")
+                    save_btn = ui.button("Save", on_click=lambda: _save_req(), icon="save").props(
+                        "color=primary"
+                    )
+                    reload_btn = ui.button(
+                        "Reload", on_click=lambda: _load_req(), icon="refresh"
+                    ).props("flat")
+                    delete_btn = ui.button(
+                        "Delete", on_click=lambda: _delete_req(), icon="delete"
+                    ).props("flat color=red")
                 with ui.row().classes("gap-2 items-end"):
                     intent_buttons["approve"] = ui.button(
                         "Verify Safety",
@@ -123,16 +138,18 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
 
         with ui.card().classes("w-full bg-slate-50 mt-3"):
             ui.label("Generated Safety Rule Preview").classes("text-base font-semibold mb-2")
-            ui.label(
-                "Generate first, review LTLf and DFA, then verify safety."
-            ).classes("text-xs text-slate-600 mb-2")
+            ui.label("Generate first, review LTLf and DFA, then verify safety.").classes(
+                "text-xs text-slate-600 mb-2"
+            )
 
             preview_failure_card = ui.card().classes("w-full bg-red-50 border border-red-200 mb-2")
             preview_failure_card.style("display:none;")
             with preview_failure_card:
                 ui.label("Latest Preview Failure").classes("text-sm font-semibold text-red-800")
                 preview_failure_title = ui.label("").classes("text-sm font-semibold text-red-900")
-                preview_failure_meta = ui.label("").classes("text-xs text-red-700 whitespace-pre-wrap")
+                preview_failure_meta = ui.label("").classes(
+                    "text-xs text-red-700 whitespace-pre-wrap"
+                )
                 preview_failure_summary = ui.label("").classes(
                     "w-full text-sm text-red-900 whitespace-pre-wrap"
                 )
@@ -184,7 +201,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ui.label("AP Mapping").classes("text-sm font-semibold mt-2")
             preview_ap_map = ui.code("{}", language="json").classes("w-full")
             ui.label("DFA Status").classes("text-sm font-semibold mt-2")
-            preview_dfa_status = ui.label("No DFA preview generated yet.").classes("text-sm text-slate-700")
+            preview_dfa_status = ui.label("No DFA preview generated yet.").classes(
+                "text-sm text-slate-700"
+            )
             ui.label("DFA Transitions").classes("text-sm font-semibold mt-2")
             preview_dfa_transitions = ui.table(
                 columns=[
@@ -196,14 +215,20 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 row_key="condition",
             ).classes("w-full")
             ui.label("DFA DOT").classes("text-sm font-semibold mt-2")
-            preview_dfa_dot = ui.code("No DFA DOT generated yet.", language="text").classes("w-full")
+            preview_dfa_dot = ui.code("No DFA DOT generated yet.", language="text").classes(
+                "w-full"
+            )
             ui.label("Preview History").classes("text-sm font-semibold mt-2")
             preview_history_table = ui.table(
                 columns=[
                     {"name": "preview_id", "label": "Preview ID", "field": "preview_id"},
                     {"name": "generated_at_utc", "label": "Generated", "field": "generated_at_utc"},
                     {"name": "parent_preview_id", "label": "Parent", "field": "parent_preview_id"},
-                    {"name": "refinement_feedback", "label": "Feedback", "field": "refinement_feedback"},
+                    {
+                        "name": "refinement_feedback",
+                        "label": "Feedback",
+                        "field": "refinement_feedback",
+                    },
                 ],
                 rows=[],
                 row_key="preview_id",
@@ -338,7 +363,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_dfa_gallery.clear()
             with preview_dfa_gallery:
                 if not rules:
-                    ui.label("No DFA graphs generated yet.").classes("text-sm text-slate-500 italic")
+                    ui.label("No DFA graphs generated yet.").classes(
+                        "text-sm text-slate-500 italic"
+                    )
                     return
                 for rule in rules:
                     if not isinstance(rule, dict):
@@ -348,7 +375,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
                     img_url = _png_url(str(rule.get("dfa_png_path", "")))
                     data_url = _png_data_url(str(rule.get("dfa_png_path", "")))
-                    with ui.card().classes("bg-white border border-slate-200 w-[calc(50%-0.5rem)] min-w-[18rem]"):
+                    with ui.card().classes(
+                        "bg-white border border-slate-200 w-[calc(50%-0.5rem)] min-w-[18rem]"
+                    ):
                         ui.label(rid).classes("text-sm font-semibold")
                         if dfa_status == "ok" and (img_url or data_url):
                             # Prefer the embedded data URL because that was the last
@@ -370,7 +399,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_interpretation_summary.text = (
                 "Generated rule interpretation will appear after preview generation."
             )
-            preview_refinement_feedback.content = "No refinement feedback recorded for this preview."
+            preview_refinement_feedback.content = (
+                "No refinement feedback recorded for this preview."
+            )
             preview_diff_summary.content = "No previous preview comparison available."
             preview_history_table.rows = []
 
@@ -408,7 +439,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 delete_btn.set_enabled(False)
                 generate_btn.set_enabled(False)
                 regenerate_btn.set_enabled(False)
-                create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
+                create_btn.set_enabled(
+                    (not bridge.system_running) and (not preview_generation_state["busy"])
+                )
                 if upload_widget is not None:
                     upload_widget.set_enabled(False)
                 if approve_btn:
@@ -428,7 +461,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 delete_btn.set_enabled(False)
                 generate_btn.set_enabled(False)
                 regenerate_btn.set_enabled(False)
-                create_btn.set_enabled((not bridge.system_running) and (not preview_generation_state["busy"]))
+                create_btn.set_enabled(
+                    (not bridge.system_running) and (not preview_generation_state["busy"])
+                )
                 if upload_widget is not None:
                     upload_widget.set_enabled(False)
                 if approve_btn:
@@ -441,9 +476,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_ready = bool(preview_payload.get("available", False)) and bool(
                 preview_payload.get("hash_matches_current", False)
             )
-            preview_record = preview_payload.get("record", {}) if isinstance(
-                preview_payload.get("record"), dict
-            ) else {}
+            preview_record = (
+                preview_payload.get("record", {})
+                if isinstance(preview_payload.get("record"), dict)
+                else {}
+            )
 
             approved = bool(evaluation.get("approved", False))
             reason_text = _intent_reason_text(str(evaluation.get("reason", "")))
@@ -461,7 +498,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 if not preview_ready:
                     preview_reason = _preview_reason_text(str(preview_payload.get("reason", "")))
                     generated_at = str(preview_record.get("generated_at_utc", "")).strip()
-                    if generated_at and not bool(preview_payload.get("hash_matches_current", False)):
+                    if generated_at and not bool(
+                        preview_payload.get("hash_matches_current", False)
+                    ):
                         preview_reason = "preview is stale after file edits"
                     intent_status_label.text = (
                         f"Safety intent: NOT VERIFIED ({reason_text}). "
@@ -489,7 +528,9 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             if approve_btn:
                 approve_btn.set_enabled(can_mutate_file and preview_ready)
             if revoke_btn:
-                revoke_btn.set_enabled(editable and bool(selected) and approved and not mutating_busy)
+                revoke_btn.set_enabled(
+                    editable and bool(selected) and approved and not mutating_busy
+                )
 
         def _refresh_preview() -> None:
             preview_rules_cache.clear()
@@ -569,14 +610,15 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 or "No generated rule interpretation available for this preview."
             )
             preview_refinement_feedback.content = str(
-                payload.get("refinement_feedback", "") or "No refinement feedback recorded for this preview."
+                payload.get("refinement_feedback", "")
+                or "No refinement feedback recorded for this preview."
             )
             preview_diff_summary.content = str(
                 payload.get("diff_summary", "") or "No previous preview comparison available."
             )
-            preview_history_table.rows = payload.get("history", []) if isinstance(
-                payload.get("history"), list
-            ) else []
+            preview_history_table.rows = (
+                payload.get("history", []) if isinstance(payload.get("history"), list) else []
+            )
 
             rows: list[dict] = []
             for idx, rule in enumerate(payload.get("rules", []), start=1):
@@ -649,7 +691,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 ui.notify("Cannot edit while system is running", type="warning")
                 return
             if _is_selected_verified():
-                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
+                ui.notify(
+                    "Selected safety file is verified. Unverify Safety before editing.",
+                    type="warning",
+                )
                 return
             if not req_select.value:
                 status_label.text = "No file selected"
@@ -666,7 +711,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 ui.notify("Cannot edit while system is running", type="warning")
                 return
             if _is_selected_verified():
-                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
+                ui.notify(
+                    "Selected safety file is verified. Unverify Safety before editing.",
+                    type="warning",
+                )
                 return
             if not req_select.value:
                 return
@@ -715,7 +763,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 ui.notify("Cannot edit while system is running", type="warning")
                 return
             if _is_selected_verified():
-                ui.notify("Selected safety file is verified. Unverify Safety before editing.", type="warning")
+                ui.notify(
+                    "Selected safety file is verified. Unverify Safety before editing.",
+                    type="warning",
+                )
                 return
             content = await e.file.read()
             original_name = str(getattr(e.file, "name", "") or "uploaded.txt")
@@ -756,7 +807,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 return
             dest.write_text("[Safety Requirements]\n- ")
             if name != original_name and name != f"{original_name}.txt":
-                status_label.text = f"Created {name} (normalized from \"{original_name}\")"
+                status_label.text = f'Created {name} (normalized from "{original_name}")'
             else:
                 status_label.text = f"Created {name}"
             status_label.classes(replace="text-sm text-green-600")
@@ -770,7 +821,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 ui.notify("Cannot generate safety preview while system is running", type="warning")
                 return
             if _is_selected_verified():
-                ui.notify("Selected safety file is verified. Unverify Safety before regenerating.", type="warning")
+                ui.notify(
+                    "Selected safety file is verified. Unverify Safety before regenerating.",
+                    type="warning",
+                )
                 return
             selected = str(req_select.value or "").strip()
             if not selected:
@@ -782,7 +836,10 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 status_label.text = f"Saved {selected_path.name}"
                 status_label.classes(replace="text-sm text-green-600")
             except Exception as exc:
-                ui.notify(f"Failed to save safety requirements before preview generation: {exc}", type="negative")
+                ui.notify(
+                    f"Failed to save safety requirements before preview generation: {exc}",
+                    type="negative",
+                )
                 return
             feedback_text = ""
             parent_preview_id = ""
@@ -872,7 +929,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
 
         def _on_preview_rule_select(e):
             selected_preview_rule["id"] = ""
-            for row in (e.selection or []):
+            for row in e.selection or []:
                 rid = str(row.get("id", "")).strip()
                 if rid:
                     selected_preview_rule["id"] = rid
@@ -899,7 +956,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         initial_refresh_timer["timer"] = ui.timer(0.1, _deferred_initial_refresh)
 
         def _update_readonly():
-            readonly = bridge.system_running or preview_generation_state["busy"] or verification_lock_state["locked"]
+            readonly = (
+                bridge.system_running
+                or preview_generation_state["busy"]
+                or verification_lock_state["locked"]
+            )
             req_editor.props(f"readonly={str(readonly).lower()}")
             refinement_feedback.props(f"readonly={str(readonly).lower()}")
             _refresh_intent_status()

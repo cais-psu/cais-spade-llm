@@ -34,6 +34,7 @@ ROBOT_ENV = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
 # Values: "dry_run", "simulation", "physical".
 _EXECUTION_MODE_OVERRIDE = os.environ.get("EXECUTION_MODE", "").strip().lower() or None
 
+
 def _normalize_camera_backend(raw: str | None) -> str:
     explicit = str(raw or "").strip().lower()
     if explicit in {"none", "mock", "gazebo_gt", "yolo"}:
@@ -94,6 +95,7 @@ def configure_runtime(
     except Exception:
         pass
 
+
 # FunctionAnalyzer consults this registry to decide which methods each agent is allowed to expose.
 ALLOWED_FUNCS: dict[str, set[str]] = defaultdict(set)
 
@@ -113,7 +115,7 @@ def _flat_or_nested_config(obj: dict) -> list[dict]:
 
 def _jid_pw(meta: dict, default_domain="localhost", default_pw="none"):
     """Derive SPADE credentials, falling back to name@domain plus a default password."""
-    jid = meta.get("jid") or f'{meta["name"]}@{meta.get("domain", default_domain)}'
+    jid = meta.get("jid") or f"{meta['name']}@{meta.get('domain', default_domain)}"
     pw = meta.get("password", default_pw)
     return jid, pw
 
@@ -134,6 +136,7 @@ def create_user():
         return User("user@localhost", "none")
     except Exception:
         return None
+
 
 def create_resource_agents(
     resource_init_list: Iterable[str],
@@ -169,7 +172,10 @@ def create_resource_agents(
                 or (isinstance(raw_declared, str) and raw_declared.strip().lower() == "auto")
             ):
                 fn_names = RobotAgent.resolve_registered_function_names(
-                    static_capabilities=env_block.get("static_capabilities", meta.get("static_capabilities")) or {},
+                    static_capabilities=env_block.get(
+                        "static_capabilities", meta.get("static_capabilities")
+                    )
+                    or {},
                     named_positions=env_block.get("named_positions", {}) or {},
                     controller_config=env_block.get("controller", {}) or {},
                 )
@@ -179,7 +185,9 @@ def create_resource_agents(
                 name=name,
                 instructions=meta.get("instructions"),
                 function_names=fn_names,
-                static_capabilities=env_block.get("static_capabilities", meta.get("static_capabilities")),
+                static_capabilities=env_block.get(
+                    "static_capabilities", meta.get("static_capabilities")
+                ),
                 cca_jid=cca_jid,  # <-- pass CCA JID into every resource agent
             )
 
@@ -188,9 +196,12 @@ def create_resource_agents(
             elif kind == "robot":
                 if isinstance(meta.get("failure_scenarios"), list):
                     common["failure_scenarios"] = list(meta.get("failure_scenarios") or [])
-                common["execution_mode"] = _EXECUTION_MODE_OVERRIDE or str(
-                    env_block.get("execution_mode", meta.get("execution_mode", "dry_run"))
-                ).strip().lower()
+                common["execution_mode"] = (
+                    _EXECUTION_MODE_OVERRIDE
+                    or str(env_block.get("execution_mode", meta.get("execution_mode", "dry_run")))
+                    .strip()
+                    .lower()
+                )
                 common["controller_config"] = env_block.get("controller", {})
                 common["named_positions"] = env_block.get("named_positions", {})
                 # Inject prewarmed controller if available for this robot.
@@ -200,9 +211,7 @@ def create_resource_agents(
                     common["prewarmed_controller"] = pw_ctrl
                 agent = RobotAgent(jid, pw, **common)
             else:
-                print(
-                    f"[WARN] Unknown resource type '{kind}' for {name} in {init_file}; skipped."
-                )
+                print(f"[WARN] Unknown resource type '{kind}' for {name} in {init_file}; skipped.")
                 continue
 
             agents.append(agent)
@@ -214,6 +223,7 @@ def create_resource_agents(
         except Exception:
             pass
     return agents
+
 
 def _default_requirement_file(product_name: str | None = None) -> str | None:
     """Return the default requirement file path for a product, falling back to the first .txt file."""
@@ -319,9 +329,7 @@ def create_product_agents(
                     or _default_product_order_file(name)
                 ),
                 product_specification_file=(
-                    product_requirement_file
-                    or meta.get("product_specification_file")
-                    or None
+                    product_requirement_file or meta.get("product_specification_file") or None
                 ),
                 product_geometry_file=meta.get("product_geometry_file"),
                 safety_file=(
@@ -343,8 +351,7 @@ def create_product_agents(
                     [
                         (
                             "user",
-                            (meta.get("inbox") or "")
-                            + f" Your product name is `{name}`.",
+                            (meta.get("inbox") or "") + f" Your product name is `{name}`.",
                         )
                     ]
                 )
@@ -387,7 +394,7 @@ def create_central_controller(
     if (meta.get("type") or "").lower() != "cca":
         raise ValueError("The 'cca' object must have type='cca'")
 
-    name = meta.get("name", "cca")   # default agent name = "cca"
+    name = meta.get("name", "cca")  # default agent name = "cca"
     jid = meta.get("jid")
     password = meta.get("password")
 
@@ -395,9 +402,7 @@ def create_central_controller(
         raise ValueError("CCA must have 'jid' and 'password' fields.")
 
     safety_file = (
-        meta.get("safety_file")
-        if safety_file_override is _UNSET_OVERRIDE
-        else safety_file_override
+        meta.get("safety_file") if safety_file_override is _UNSET_OVERRIDE else safety_file_override
     )
 
     controller = CentralControllerAgent(

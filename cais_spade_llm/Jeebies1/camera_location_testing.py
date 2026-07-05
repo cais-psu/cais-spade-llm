@@ -79,7 +79,9 @@ def list_devices(rs) -> None:
         print(f"  {index}. {name} | serial={serial} | firmware={firmware}")
 
 
-def deproject_pixel(depth_frame, rs, pixel: tuple[int, int]) -> tuple[float, float, float, float] | None:
+def deproject_pixel(
+    depth_frame, rs, pixel: tuple[int, int]
+) -> tuple[float, float, float, float] | None:
     x, y = pixel
     width = depth_frame.get_width()
     height = depth_frame.get_height()

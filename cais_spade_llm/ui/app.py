@@ -64,7 +64,9 @@ def _header(bridge: SystemBridge) -> None:
     with ui.header().classes(f"{_HEADER_BG} text-white items-center gap-4 px-6"):
         with ui.link(target="/").classes("no-underline flex items-center gap-3"):
             ui.image("/static/favicon.ico").classes("w-8 h-8")
-            ui.label("Penn State CAIS Lab Multi-Agent Manufacturing System").classes("text-lg font-bold text-white")
+            ui.label("Penn State CAIS Lab Multi-Agent Manufacturing System").classes(
+                "text-lg font-bold text-white"
+            )
         ui.space()
 
         # System status indicator.
@@ -86,7 +88,9 @@ def _header(bridge: SystemBridge) -> None:
 
         # Execution mode badge.
         _MODE_DISPLAY = {"dry_run": "Dry Run", "simulation": "Simulation", "physical": "Physical"}
-        mode_badge = ui.badge(_MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)).props("color=blue outline")
+        mode_badge = ui.badge(
+            _MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)
+        ).props("color=blue outline")
 
         def _update_badge():
             mode_badge.text = _MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)
@@ -96,11 +100,17 @@ def _header(bridge: SystemBridge) -> None:
 
 def _sidebar() -> None:
     # Use an explicit initial drawer state to avoid JS value probing timeout on slow/disconnecting clients.
-    with ui.left_drawer(value=True).classes(f"{_SIDEBAR_BG} text-white").props("width=240 bordered"):
-        ui.label("Navigation").classes("text-xs text-slate-400 uppercase tracking-wider px-4 pt-4 pb-2")
+    with (
+        ui.left_drawer(value=True).classes(f"{_SIDEBAR_BG} text-white").props("width=240 bordered")
+    ):
+        ui.label("Navigation").classes(
+            "text-xs text-slate-400 uppercase tracking-wider px-4 pt-4 pb-2"
+        )
         for label, path, icon in _NAV_ITEMS:
             with ui.link(target=path).classes("no-underline"):
-                with ui.row().classes("items-center gap-3 px-4 py-2 hover:bg-slate-700 rounded cursor-pointer w-full"):
+                with ui.row().classes(
+                    "items-center gap-3 px-4 py-2 hover:bg-slate-700 rounded cursor-pointer w-full"
+                ):
                     ui.icon(icon).classes("text-slate-300")
                     ui.label(label).classes("text-slate-200 text-sm leading-5")
 
@@ -122,7 +132,9 @@ def create_app() -> None:
 
     # Serve safety preview artifacts (DFA PNGs) so browsers that reject
     # large base64 data URLs (e.g. Microsoft Edge) can load images via URL.
-    _safety_previews_dir = Path(__file__).resolve().parent.parent / "user_verified_safety" / "previews"
+    _safety_previews_dir = (
+        Path(__file__).resolve().parent.parent / "user_verified_safety" / "previews"
+    )
     _safety_previews_dir.mkdir(parents=True, exist_ok=True)
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
@@ -185,6 +197,7 @@ def create_app() -> None:
     async def _on_shutdown() -> None:
         """Clean up all background resources when the app exits."""
         import logging
+
         log = logging.getLogger("ui.app")
         log.info("App shutdown: cleaning up resources...")
 
@@ -210,7 +223,9 @@ def create_app() -> None:
         # 1b) Stop tracked ROS2 launch processes unless the operator is
         # preserving Gazebo for a debug session.
         if keep_gazebo_on_exit():
-            log.info("App shutdown: CAIS_KEEP_GAZEBO_ON_EXIT=1; preserving Gazebo/MoveIt processes.")
+            log.info(
+                "App shutdown: CAIS_KEEP_GAZEBO_ON_EXIT=1; preserving Gazebo/MoveIt processes."
+            )
         else:
             try:
                 bridge.ros2_stop_all(reason="app_shutdown")

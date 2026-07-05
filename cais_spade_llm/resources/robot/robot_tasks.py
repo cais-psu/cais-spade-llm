@@ -29,6 +29,7 @@ def _task_docstring(frontmatter: dict[str, Any], description: str) -> str:
     yaml_block = yaml.safe_dump(payload, sort_keys=False).strip()
     return f"---\n{yaml_block}\n---\n{str(description or '').strip()}".strip()
 
+
 def _arg(name: str) -> dict[str, Any]:
     return {"$arg": str(name)}
 
@@ -77,9 +78,11 @@ class RobotTaskStep:
     failure_observations: dict[str, Any] = field(default_factory=dict)
 
     def render_capability_row(self) -> dict[str, Any]:
-        params = self.public_params if self.public_params is not None else {
-            key: value for key, value in self.params.items() if not str(key).startswith("_")
-        }
+        params = (
+            self.public_params
+            if self.public_params is not None
+            else {key: value for key, value in self.params.items() if not str(key).startswith("_")}
+        )
         row = {
             "primitive": self.op,
             "params": _render_decomposition_value(params),
@@ -173,10 +176,7 @@ class RobotTaskDefinition:
     handler: Callable[..., Awaitable[dict[str, Any]]] | None = None
 
     def argument_properties(self) -> dict[str, dict[str, Any]]:
-        return {
-            argument.name: argument.param_schema()
-            for argument in self.arguments
-        }
+        return {argument.name: argument.param_schema() for argument in self.arguments}
 
     def required_argument_names(self) -> list[str]:
         return [argument.name for argument in self.arguments if argument.required]
@@ -280,7 +280,9 @@ def _resolve_value(
         return deepcopy(_path_get(current, path) if path else current)
     if isinstance(value, dict) and "$format" in value:
         resolved_values = {
-            key: _resolve_value(item, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+            key: _resolve_value(
+                item, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+            )
             for key, item in dict(value.get("values") or {}).items()
         }
         return str(value.get("$format") or "").format_map(
@@ -288,21 +290,29 @@ def _resolve_value(
         )
     if isinstance(value, dict) and "$first" in value:
         for item in list(value.get("$first") or []):
-            resolved = _resolve_value(item, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+            resolved = _resolve_value(
+                item, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+            )
             if resolved not in (None, ""):
                 return deepcopy(resolved)
         return None
     if isinstance(value, dict) and "$sub" in value:
         left_raw, right_raw = list(value.get("$sub") or [0, 0])[:2]
-        left = _resolve_value(left_raw, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
-        right = _resolve_value(right_raw, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+        left = _resolve_value(
+            left_raw, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+        )
+        right = _resolve_value(
+            right_raw, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+        )
         try:
             return float(left or 0.0) - float(right or 0.0)
         except (TypeError, ValueError):
             return 0.0
     if isinstance(value, dict):
         return {
-            key: _resolve_value(item, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+            key: _resolve_value(
+                item, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -354,7 +364,9 @@ def _render_decomposition_value(value: Any, *, context: dict[str, Any] | None = 
             ]
         }
     if isinstance(value, dict):
-        return {key: _render_decomposition_value(item, context=context) for key, item in value.items()}
+        return {
+            key: _render_decomposition_value(item, context=context) for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_render_decomposition_value(item, context=context) for item in value]
     if isinstance(value, tuple):
@@ -462,7 +474,9 @@ def _normalize_pick_targets(raw: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _normalize_place_targets(raw: dict[str, Any], *, runtime_state: dict[str, Any]) -> dict[str, Any]:
+def _normalize_place_targets(
+    raw: dict[str, Any], *, runtime_state: dict[str, Any]
+) -> dict[str, Any]:
     payload = dict(raw or {})
     slot_x = float(payload.get("slot_x", 0.0) or 0.0)
     slot_y = float(payload.get("slot_y", 0.0) or 0.0)
@@ -602,7 +616,9 @@ async def _execute_task_step(
         ):
             return {"success": True, "skipped": True}
 
-    params = _resolve_value(step.params, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+    params = _resolve_value(
+        step.params, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+    )
     if not isinstance(params, dict):
         params = {}
 
@@ -667,7 +683,9 @@ def _apply_effect(
     runtime_state: dict[str, Any],
     step_outputs: dict[str, Any],
 ) -> None:
-    value = _resolve_value(effect.value, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
+    value = _resolve_value(
+        effect.value, args=args, runtime_state=runtime_state, step_outputs=step_outputs
+    )
 
     if effect.target == "task_ctx":
         if effect.action == "clear":
@@ -677,11 +695,7 @@ def _apply_effect(
             current = dict(runtime_state.get("_task_ctx") or {})
             incoming = dict(value or {})
             if effect.skip_empty_values:
-                incoming = {
-                    key: item
-                    for key, item in incoming.items()
-                    if item not in (None, "")
-                }
+                incoming = {key: item for key, item in incoming.items() if item not in (None, "")}
             current.update(deepcopy(incoming))
             runtime_state["_task_ctx"] = current
             return
@@ -778,7 +792,9 @@ async def execute_robot_task(
                 and task.name == "place_insert"
                 and step.id == "snap_part_to_slot"
             )
-            if (step.continue_on_failure and not simulation_snap_part_to_slot) or simulation_lift_after_release:
+            if (
+                step.continue_on_failure and not simulation_snap_part_to_slot
+            ) or simulation_lift_after_release:
                 raw = dict(result.get("raw") or {})
                 agent.logger.warning(
                     "[Robot] %s.%s soft-failed: %s",
@@ -1334,7 +1350,9 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "slot_y": _step_output("place_targets", "slot_y"),
                             "board_top_z": _step_output("place_targets", "board_top_z"),
                             "place_z": _step_output("place_targets", "place_z"),
-                            "place_part_origin_z": _step_output("place_targets", "place_part_origin_z"),
+                            "place_part_origin_z": _step_output(
+                                "place_targets", "place_part_origin_z"
+                            ),
                             "part_height": _step_output("place_targets", "part_height"),
                             "destination_location": _arg("destination_location"),
                             "model_name": _step_output("place_targets", "model_name"),

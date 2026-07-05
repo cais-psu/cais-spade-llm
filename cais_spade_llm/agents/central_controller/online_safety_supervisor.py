@@ -171,7 +171,9 @@ class OnlineSafetySupervisor:
                     default_domain = resource_jid.split("@", 1)[1] or default_domain
 
         for row in self.safety.tools_catalog:
-            owner = self.safety._resource_short_name(str(row.get("function_owner_agent") or "").strip())
+            owner = self.safety._resource_short_name(
+                str(row.get("function_owner_agent") or "").strip()
+            )
             if not owner:
                 continue
             resource_jid = owner_to_jid.get(owner) or f"{owner}@{default_domain}"
@@ -180,7 +182,9 @@ class OnlineSafetySupervisor:
         for transition in enabled.get(str(x0), []):
             task_id = str(transition.get("task_id") or "").strip()
             meta = task_meta_lookup.get(task_id, {})
-            resource_jid = str(meta.get("resource_jid") or transition.get("resource_jid") or "").strip()
+            resource_jid = str(
+                meta.get("resource_jid") or transition.get("resource_jid") or ""
+            ).strip()
             in_state = str(meta.get("in_state") or transition.get("in_state") or "").strip()
             if not resource_jid:
                 continue
@@ -219,7 +223,9 @@ class OnlineSafetySupervisor:
         return tuple(str(self.safety.current_states.get(rule_id, "1")) for rule_id in self.rule_ids)
 
     def _current_safety_state_map(self) -> dict[str, str]:
-        return {rule_id: str(self.safety.current_states.get(rule_id, "1")) for rule_id in self.rule_ids}
+        return {
+            rule_id: str(self.safety.current_states.get(rule_id, "1")) for rule_id in self.rule_ids
+        }
 
     def current_product_state(self) -> ProductState:
         x = str(self.fsa.current_state or "")
@@ -233,7 +239,9 @@ class OnlineSafetySupervisor:
             accepting_states = set(
                 str(s) for s in (self.safety.dfas.get(rule_id, {}).get("accepting_states") or [])
             )
-            violation_state = str(self.safety.dfas.get(rule_id, {}).get("violation_state") or "").strip()
+            violation_state = str(
+                self.safety.dfas.get(rule_id, {}).get("violation_state") or ""
+            ).strip()
             if violation_state and q_vec[idx] == violation_state:
                 continue
             if accepting_states and q_vec[idx] not in accepting_states:
@@ -243,7 +251,9 @@ class OnlineSafetySupervisor:
     def _violated_rule_ids(self, q_vec: tuple[str, ...]) -> list[str]:
         violated: list[str] = []
         for idx, rule_id in enumerate(self.rule_ids):
-            violation_state = str(self.safety.dfas.get(rule_id, {}).get("violation_state") or "").strip()
+            violation_state = str(
+                self.safety.dfas.get(rule_id, {}).get("violation_state") or ""
+            ).strip()
             if violation_state and q_vec[idx] == violation_state:
                 violated.append(rule_id)
         return violated
@@ -367,7 +377,9 @@ class OnlineSafetySupervisor:
                     | predicted_state_aps_all
                 )
             else:
-                sigma_all = frozenset(running_before_all | persistent_before_all | candidate_event_aps_all)
+                sigma_all = frozenset(
+                    running_before_all | persistent_before_all | candidate_event_aps_all
+                )
 
             checked_vec: list[str] = []
             committed_vec: list[str] = []
@@ -679,15 +691,15 @@ class OnlineSafetySupervisor:
             else:
                 if current not in self.W:
                     status = "inevitable_violation"
-                    reason = "No remaining accepting continuation exists in the current modeled plan."
+                    reason = (
+                        "No remaining accepting continuation exists in the current modeled plan."
+                    )
                 elif pending_rule_ids:
                     status = "pending_obligation"
                     reason = "Safety obligations remain open, but a safe continuation still exists."
                 else:
                     status = "safe"
-                    reason = (
-                        "Current execution state is recoverable and all tracked safety DFAs are accepting."
-                    )
+                    reason = "Current execution state is recoverable and all tracked safety DFAs are accepting."
 
         diagnosis = {
             "status": status,
@@ -735,9 +747,7 @@ class OnlineSafetySupervisor:
                 }
 
             matching_safe_edges = [
-                edge
-                for edge in matching_edges
-                if not edge.get("_violated_rule_ids")
+                edge for edge in matching_edges if not edge.get("_violated_rule_ids")
             ]
             if not matching_safe_edges:
                 return False, {
@@ -804,9 +814,7 @@ class OnlineSafetySupervisor:
                 }
 
             matching_safe_edges = [
-                edge
-                for edge in matching_edges
-                if not edge.get("_violated_rule_ids")
+                edge for edge in matching_edges if not edge.get("_violated_rule_ids")
             ]
             if not matching_safe_edges:
                 return False, {
@@ -858,7 +866,8 @@ class OnlineSafetySupervisor:
             return False, diagnosis
 
         matching_safe_edges = [
-            edge for edge in self._safe_edges_from(current)
+            edge
+            for edge in self._safe_edges_from(current)
             if str(edge.get("event") or "").strip() == event_label
         ]
         if matching_safe_edges:
@@ -869,7 +878,8 @@ class OnlineSafetySupervisor:
             }
 
         matching_edges = [
-            edge for edge in (self.graph.get(current, []) or [])
+            edge
+            for edge in (self.graph.get(current, []) or [])
             if str(edge.get("event") or "").strip() == event_label
         ]
         reason = (

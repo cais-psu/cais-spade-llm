@@ -135,7 +135,9 @@ class LlmAgent(Agent):
             fallback=selected_reasoning_effort,
         )
         self.model = selected_model  # Main LLM that supports tool calling.
-        self.non_function_model = selected_non_function_model  # Cheaper model for plain generations.
+        self.non_function_model = (
+            selected_non_function_model  # Cheaper model for plain generations.
+        )
         self.reasoning_effort = _normalize_reasoning_effort_for_model(
             selected_model,
             selected_reasoning_effort,
@@ -192,7 +194,11 @@ class LlmAgent(Agent):
         base = PROMPT_MAS_AGENT + "\n" + BASE_INSTRUCTIONS  # Shared prologue for every agent.
         role_block = ROLE_BLOCKS.get(agent_role.lower(), "")  # Role-specific reminders/live data.
         tail = f"\nCustom overrides:\n{overrides}\n" if overrides else ""  # User-provided tweaks.
-        prompt = base.replace("{agent_name}", agent_name) + ("\n" + role_block if role_block else "") + tail
+        prompt = (
+            base.replace("{agent_name}", agent_name)
+            + ("\n" + role_block if role_block else "")
+            + tail
+        )
         return prompt.strip()
 
     # ------------------------------------------------------------------ #
@@ -201,7 +207,9 @@ class LlmAgent(Agent):
     @classmethod
     def configure_shared_tools_catalogue(cls, path: str | Path | None = None) -> str:
         """Point all agents at a specific tools catalogue and clear any cached snapshot."""
-        resolved = Path(path) if path is not None else Path("cais_spade_llm/initialization/tools.json")
+        resolved = (
+            Path(path) if path is not None else Path("cais_spade_llm/initialization/tools.json")
+        )
         LlmAgent._TOOLS_CATALOG_PATH = resolved.resolve()
         LlmAgent._TOOLS_CATALOG = None
         LlmAgent._TOOLS_BY_FUNC = None
@@ -222,9 +230,7 @@ class LlmAgent(Agent):
             ) from exc
 
         LlmAgent._TOOLS_BY_FUNC = {
-            row["function"]: row
-            for row in (LlmAgent._TOOLS_CATALOG or [])
-            if "function" in row
+            row["function"]: row for row in (LlmAgent._TOOLS_CATALOG or []) if "function" in row
         }
 
     @property
@@ -245,16 +251,20 @@ class LlmAgent(Agent):
                 analyzed = self.function_analyzer.analyze_function(fn)
                 name = analyzed.get("name", fn_name)
                 description = analyzed.get("description", f"Tool: {name}")
-                parameters = analyzed.get("parameters", {"type": "object", "properties": {}, "required": []})
+                parameters = analyzed.get(
+                    "parameters", {"type": "object", "properties": {}, "required": []}
+                )
                 # Follow the OpenAI tool calling format; SPADE higher layers only need these descriptions.
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": parameters,
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": description,
+                            "parameters": parameters,
+                        },
                     }
-                })
+                )
             except Exception as e:
                 self.logger.exception(f"Function analysis failed for '{fn_name}': {e}")
         self.function_info = tools
@@ -281,8 +291,10 @@ class LlmAgent(Agent):
         Build a map of capability -> set of values across resource agents.
         Each resource agent may expose `.static_capabilities` as dict[str, Iterable].
         """
-        resources = list(resource_agents) if resource_agents is not None else list(
-            getattr(self, "resource_agents", []) or []
+        resources = (
+            list(resource_agents)
+            if resource_agents is not None
+            else list(getattr(self, "resource_agents", []) or [])
         )
 
         caps: dict[str, set[str]] = {}
@@ -292,16 +304,12 @@ class LlmAgent(Agent):
                 caps.setdefault(str(key).lower(), set()).update(map(str, iterable))
         return caps
 
-    def _static_caps_overview(
-        self, resource_agents: Iterable[Any] | None = None
-    ) -> str:
+    def _static_caps_overview(self, resource_agents: Iterable[Any] | None = None) -> str:
         """Human-friendly string summarizing capabilities for prompt grounding."""
         caps = self._capability_catalogue(resource_agents)
         if not caps:
             return "(no static capabilities registered)"
-        return " | ".join(
-            f"{k}: {', '.join(sorted(v))}" for k, v in caps.items()
-        )
+        return " | ".join(f"{k}: {', '.join(sorted(v))}" for k, v in caps.items())
 
     async def ask_llm(
         self,
@@ -312,13 +320,16 @@ class LlmAgent(Agent):
         temperature: float = 0.0,
     ) -> dict[str, Any] | str:
         """Call the configured LLM, optionally exposing this agent's tool catalogue to force tool selection."""
+
         def _call():
             """Blocking helper executed in a thread so SPADE behaviours stay async friendly."""
             msgs: list[dict[str, Any]] = []
             if self.instructions:
                 msgs.append({"role": "system", "content": self.instructions})
             # Allow callers to send either raw text or structured dicts (the latter is auto-serialized).
-            user_content = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
+            user_content = (
+                prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
+            )
             msgs.append({"role": "user", "content": user_content})
 
             # Only expose tool schemas when requested; some flows prefer a pure text response for speed.
@@ -335,14 +346,14 @@ class LlmAgent(Agent):
                             tools=tools,
                             tool_choice=("required" if force_tool else "auto"),
                             reasoning_effort=self.reasoning_effort,
-                            #temperature=temperature,
+                            # temperature=temperature,
                         )
                     else:
                         r = _client.chat.completions.create(
                             model=self.non_function_model,
                             messages=msgs,
                             reasoning_effort=self.non_function_reasoning_effort,
-                            #temperature=temperature,
+                            # temperature=temperature,
                         )
 
                     choice = r.choices[0].message
@@ -398,6 +409,7 @@ class LlmAgent(Agent):
         dict:
             The parsed structured response from the LLM.
         """
+
         def _call() -> dict[str, Any]:
             msgs: list[dict[str, Any]] = []
             if self.instructions:
@@ -428,40 +440,41 @@ class LlmAgent(Agent):
                         back = min(back * 2, 8.0)
                         last_err = e
                 else:
-                    raise RuntimeError(
-                        f"LLM call failed after retries: "
-                        f"{type(last_err).__name__}"
-                    )
+                    raise RuntimeError(f"LLM call failed after retries: {type(last_err).__name__}")
 
                 choice = r.choices[0].message
 
                 # Handle tool calls if the LLM wants to use a tool.
                 if getattr(choice, "tool_calls", None) and tool_executor:
-                    msgs.append({
-                        "role": "assistant",
-                        "content": choice.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in choice.tool_calls
-                        ],
-                    })
+                    msgs.append(
+                        {
+                            "role": "assistant",
+                            "content": choice.content or "",
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    },
+                                }
+                                for tc in choice.tool_calls
+                            ],
+                        }
+                    )
                     for tc in choice.tool_calls:
                         result = tool_executor(
                             tc.function.name,
                             json.loads(tc.function.arguments),
                         )
-                        msgs.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": json.dumps(result, default=str),
-                        })
+                        msgs.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": json.dumps(result, default=str),
+                            }
+                        )
                     continue
 
                 # No tool calls — return the structured response.

@@ -27,7 +27,7 @@ def _dedupe_tokens(values: list[str]) -> list[str]:
 def _modeled_gap_pending_tasks_by_id(llm_input: dict[str, Any]) -> dict[str, dict[str, Any]]:
     modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
     tasks_by_id: dict[str, dict[str, Any]] = {}
-    for raw_task in (modeled_gap.get("pending_nominal_tasks") or []):
+    for raw_task in modeled_gap.get("pending_nominal_tasks") or []:
         if not isinstance(raw_task, dict):
             continue
         task_id = str(raw_task.get("id") or "").strip()
@@ -39,7 +39,7 @@ def _modeled_gap_pending_tasks_by_id(llm_input: dict[str, Any]) -> dict[str, dic
 def _modeled_gap_unmet_conditions_by_id(llm_input: dict[str, Any]) -> dict[str, dict[str, Any]]:
     modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
     conditions_by_id: dict[str, dict[str, Any]] = {}
-    for raw_condition in (modeled_gap.get("unmet_continuation_conditions") or []):
+    for raw_condition in modeled_gap.get("unmet_continuation_conditions") or []:
         if not isinstance(raw_condition, dict):
             continue
         condition_id = str(raw_condition.get("condition_id") or "").strip()
@@ -49,11 +49,7 @@ def _modeled_gap_unmet_conditions_by_id(llm_input: dict[str, Any]) -> dict[str, 
 
 
 def _task_dependency_ids(task: dict[str, Any]) -> list[str]:
-    return [
-        str(item).strip()
-        for item in (task.get("predecessors") or [])
-        if str(item).strip()
-    ]
+    return [str(item).strip() for item in (task.get("predecessors") or []) if str(item).strip()]
 
 
 def _task_closes_condition_ids(task: dict[str, Any]) -> list[str]:
@@ -68,11 +64,7 @@ def _task_closes_condition_ids(task: dict[str, Any]) -> list[str]:
 
 def _task_enables_task_ids(task: dict[str, Any]) -> list[str]:
     return _dedupe_tokens(
-        [
-            str(item).strip()
-            for item in (task.get("enables_task_ids") or [])
-            if str(item).strip()
-        ]
+        [str(item).strip() for item in (task.get("enables_task_ids") or []) if str(item).strip()]
     )
 
 
@@ -118,17 +110,13 @@ def _extract_blocker_part_names(
     fallback_parts: list[str],
 ) -> list[str]:
     preferred_fallback = [
-        str(part_name).strip()
-        for part_name in fallback_parts
-        if str(part_name).strip()
+        str(part_name).strip() for part_name in fallback_parts if str(part_name).strip()
     ]
     if preferred_fallback:
         return preferred_fallback
     blocker_text = str(blocking_reason or "").strip().lower()
     blocker_parts = [
-        part_name
-        for part_name in parts_by_name
-        if part_name and part_name.lower() in blocker_text
+        part_name for part_name in parts_by_name if part_name and part_name.lower() in blocker_text
     ]
     return blocker_parts or preferred_fallback
 
@@ -178,17 +166,22 @@ def _continuation_prerequisite_task_ids(
     llm_input: dict[str, Any],
     parts_by_name: dict[str, dict[str, Any]],
 ) -> list[str]:
-    if _task_type_for_cca(
-        task,
-        task_types_by_id=task_types_by_id,
-    ) != "continuation_resume":
+    if (
+        _task_type_for_cca(
+            task,
+            task_types_by_id=task_types_by_id,
+        )
+        != "continuation_resume"
+    ):
         return []
     referenced_parts = _task_part_names(task)
     pending_nominal_task_ids: list[str] = []
     for part_name in referenced_parts:
         pending_nominal_task_ids.extend(
             str(item).strip()
-            for item in (dict(parts_by_name.get(part_name) or {}).get("pending_nominal_task_ids") or [])
+            for item in (
+                dict(parts_by_name.get(part_name) or {}).get("pending_nominal_task_ids") or []
+            )
             if str(item).strip()
         )
     unmet_conditions = [
@@ -212,12 +205,18 @@ def _continuation_prerequisite_task_ids(
                 if str(raw_task.get("resource_jid") or "").strip() != resource_jid:
                     continue
                 end_state = dict(raw_task.get("expected_end_state") or {})
-                end_token = str(end_state.get("current_state") or end_state.get("state") or "").strip()
+                end_token = str(
+                    end_state.get("current_state") or end_state.get("state") or ""
+                ).strip()
                 if end_token == expected_state:
                     prerequisite_ids.append(outline_id)
         elif kind == "safety_blocked_suffix_task":
             source_task_id = str(condition.get("source_task_id") or "").strip()
-            if pending_nominal_task_ids and source_task_id and source_task_id not in pending_nominal_task_ids:
+            if (
+                pending_nominal_task_ids
+                and source_task_id
+                and source_task_id not in pending_nominal_task_ids
+            ):
                 continue
             blocker_parts = _extract_blocker_part_names(
                 blocking_reason=str(condition.get("blocking_reason") or "").strip(),
@@ -237,9 +236,11 @@ def _continuation_prerequisite_task_ids(
                     if str(raw_task.get("part_name") or "").strip() != blocker_part:
                         continue
                     end_state = dict(raw_task.get("expected_end_state") or {})
-                    end_current_state = str(
-                        end_state.get("current_state") or end_state.get("state") or ""
-                    ).strip().lower()
+                    end_current_state = (
+                        str(end_state.get("current_state") or end_state.get("state") or "")
+                        .strip()
+                        .lower()
+                    )
                     end_location = _part_location(end_state)
                     if end_current_state in {"placed", "assembled"} or (
                         goal_location and end_location == goal_location
@@ -326,14 +327,12 @@ def _projected_enabled_task_ids(
 
 
 def _effective_task_part_name(task: dict[str, Any], signature: dict[str, Any]) -> str:
-    return str(
-        task.get("part_name") or signature.get("inferable_primary_part") or ""
-    ).strip()
+    return str(task.get("part_name") or signature.get("inferable_primary_part") or "").strip()
 
 
 def _bridge_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
-    for raw_rule in (llm_input.get("loaded_safety_rules") or []):
+    for raw_rule in llm_input.get("loaded_safety_rules") or []:
         if not isinstance(raw_rule, dict):
             continue
         ap_scope = str(raw_rule.get("ap_scope") or "").strip().lower()
@@ -416,7 +415,7 @@ def _bridge_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
     if explicit_bridge_aps:
         return explicit_bridge_aps
     derived_aps: list[dict[str, Any]] = []
-    for raw_ap in (raw_rule.get("aps") or []):
+    for raw_ap in raw_rule.get("aps") or []:
         if not isinstance(raw_ap, dict):
             continue
         label = str(raw_ap.get("label") or "").strip()
@@ -485,7 +484,7 @@ def _bridge_rule_lookup(rules: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 def _bridge_rule_labels(rules: list[dict[str, Any]]) -> set[str]:
     labels: set[str] = set()
     for raw_rule in rules:
-        for raw_ap in (raw_rule.get("bridge_aps") or []):
+        for raw_ap in raw_rule.get("bridge_aps") or []:
             if not isinstance(raw_ap, dict):
                 continue
             label = str(raw_ap.get("label") or "").strip()
@@ -555,9 +554,7 @@ def _selector_matches_event(
         return False
     if mode == "move_part_to_destination":
         return bool(
-            signature.get("changes_part_world")
-            and effective_part_name
-            and destination_tokens
+            signature.get("changes_part_world") and effective_part_name and destination_tokens
         )
     if mode == "resource_move_to_destination":
         return bool(destination_tokens)
@@ -575,9 +572,7 @@ def _selector_matches_state(
     resource_selector = _normalize_token(selector.get("resource") or "any")
     part_selector = _normalize_token(selector.get("part") or "any")
     allowed_states = {
-        _normalize_token(item)
-        for item in (selector.get("states") or [])
-        if _normalize_token(item)
+        _normalize_token(item) for item in (selector.get("states") or []) if _normalize_token(item)
     }
     if mode == "part_goal_satisfied":
         for part_name, raw_row in (parts_by_name or {}).items():
@@ -641,7 +636,7 @@ def project_outline_macro_bridge_aps(
     predicted_state_aps: list[str] = []
     current_state_aps: list[str] = []
     for raw_rule in rules:
-        for raw_ap in (raw_rule.get("bridge_aps") or []):
+        for raw_ap in raw_rule.get("bridge_aps") or []:
             if not isinstance(raw_ap, dict):
                 continue
             label = str(raw_ap.get("label") or "").strip()
@@ -747,14 +742,10 @@ def _blocked_suffix_proxy_task(
     return {
         "outline_id": str(blocked_task.get("id") or condition.get("entity") or "").strip(),
         "resource_jid": str(
-            blocked_task.get("resource")
-            or condition.get("blocked_resource_jid")
-            or ""
+            blocked_task.get("resource") or condition.get("blocked_resource_jid") or ""
         ).strip(),
         "part_name": str(
-            blocked_task.get("part")
-            or condition.get("blocked_part_name")
-            or ""
+            blocked_task.get("part") or condition.get("blocked_part_name") or ""
         ).strip(),
         "action_target": {
             "target_location": destination,
@@ -807,7 +798,10 @@ def _safe_next_task_ids_after_projection(
             pre_parts=projected_parts,
             projected_resources=projected_resources,
             projected_parts=projected_parts,
-            llm_input={"loaded_safety_rules": [rule], "bridge_safety_context": llm_input.get("bridge_safety_context") or {}},
+            llm_input={
+                "loaded_safety_rules": [rule],
+                "bridge_safety_context": llm_input.get("bridge_safety_context") or {},
+            },
         )
         monitor = _build_bridge_safety_monitor(
             rules=[rule],
@@ -845,9 +839,7 @@ def validate_outline_macro_bridge_safety(
         llm_input=llm_input,
     )
     claimed_condition_ids = [
-        str(item).strip()
-        for item in (task.get("closes_condition_ids") or [])
-        if str(item).strip()
+        str(item).strip() for item in (task.get("closes_condition_ids") or []) if str(item).strip()
     ]
     conditions_by_id = _modeled_gap_unmet_conditions_by_id(llm_input)
     pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
@@ -902,7 +894,8 @@ def validate_outline_macro_bridge_safety(
     safety_ctx = {
         "rule_ids": [violated_rule_id] if violated_rule_id else [],
         "running_aps": _dedupe_tokens(
-            list(info.get("running_snapshot") or []) + list(projection.get("current_state_aps") or [])
+            list(info.get("running_snapshot") or [])
+            + list(projection.get("current_state_aps") or [])
         ),
         "candidate_aps": list(info.get("candidate_aps") or projection.get("candidate_aps") or []),
         "predicted_state_aps": list(
@@ -1134,9 +1127,7 @@ def validate_outline_macro_cca_constraints(
     claimed_task_ids = _task_enables_task_ids(task)
     if claimed_task_ids:
         not_pending = [
-            task_id
-            for task_id in claimed_task_ids
-            if task_id not in pending_tasks_by_id
+            task_id for task_id in claimed_task_ids if task_id not in pending_tasks_by_id
         ]
         if not_pending:
             findings.append(
@@ -1158,7 +1149,10 @@ def validate_outline_macro_cca_constraints(
             if task_id in pending_tasks_by_id
             and not [
                 str(item).strip()
-                for item in (dict(pending_tasks_by_id.get(task_id) or {}).get("blocked_by_condition_ids") or [])
+                for item in (
+                    dict(pending_tasks_by_id.get(task_id) or {}).get("blocked_by_condition_ids")
+                    or []
+                )
                 if str(item).strip()
             ]
         ]
@@ -1183,8 +1177,7 @@ def validate_outline_macro_cca_constraints(
         not_enabled = [
             task_id
             for task_id in claimed_task_ids
-            if task_id in pending_tasks_by_id
-            and task_id not in projected_enabled_task_ids
+            if task_id in pending_tasks_by_id and task_id not in projected_enabled_task_ids
         ]
         if not_enabled:
             findings.append(
@@ -1210,18 +1203,10 @@ def validate_outline_macro_cca_constraints(
         current_index = int(task_index_by_id.get(task_id) or 0)
         has_future_continuation = any(
             isinstance(candidate_task, dict)
-            and int(
-                task_index_by_id.get(
-                    str(candidate_task.get("outline_id") or "").strip()
-                )
-                or -1
-            )
+            and int(task_index_by_id.get(str(candidate_task.get("outline_id") or "").strip()) or -1)
             > current_index
             and str(
-                task_types_by_id.get(
-                    str(candidate_task.get("outline_id") or "").strip()
-                )
-                or ""
+                task_types_by_id.get(str(candidate_task.get("outline_id") or "").strip()) or ""
             ).strip()
             == "continuation_resume"
             for candidate_task in (outline_tasks or [])

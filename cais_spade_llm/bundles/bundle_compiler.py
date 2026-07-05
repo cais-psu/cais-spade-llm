@@ -99,7 +99,9 @@ class BundleCompiler:
             for key, meta in entries:
                 jid = str(meta.get("jid") or f"{key}@{meta.get('domain', 'localhost')}")
                 env_block = meta.get(robot_env, {}) if isinstance(meta.get(robot_env), dict) else {}
-                static_caps = env_block.get("static_capabilities", meta.get("static_capabilities", {}))
+                static_caps = env_block.get(
+                    "static_capabilities", meta.get("static_capabilities", {})
+                )
                 refs.append(
                     SimpleNamespace(
                         jid=jid,
@@ -127,7 +129,9 @@ class BundleCompiler:
             raise ValueError(f"parent plan set not found: {bid}")
 
         root = self.store.bundle_dir(bid)
-        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
 
         requirements_nodes: list[dict[str, Any]] = []
         requirements_rel = str(artifacts.get("requirements_json", "")).strip()
@@ -192,7 +196,11 @@ class BundleCompiler:
         rule_ids = cls._safety_rule_ids([rule for rule in rules if isinstance(rule, dict)])
 
         dfa_map: dict[str, str] = {}
-        for raw_dot in descriptor.get("dfa_dot_files", []) if isinstance(descriptor.get("dfa_dot_files", []), list) else []:
+        for raw_dot in (
+            descriptor.get("dfa_dot_files", [])
+            if isinstance(descriptor.get("dfa_dot_files", []), list)
+            else []
+        ):
             dot_src = Path(str(raw_dot or "").strip()).resolve()
             if not dot_src.exists():
                 raise FileNotFoundError(f"approved safety DFA missing: {dot_src}")
@@ -209,7 +217,11 @@ class BundleCompiler:
                 + ", ".join(missing_rule_ids)
             )
 
-        for raw_png in descriptor.get("dfa_png_files", []) if isinstance(descriptor.get("dfa_png_files", []), list) else []:
+        for raw_png in (
+            descriptor.get("dfa_png_files", [])
+            if isinstance(descriptor.get("dfa_png_files", []), list)
+            else []
+        ):
             png_src = Path(str(raw_png or "").strip()).resolve()
             if not png_src.exists():
                 raise FileNotFoundError(f"approved safety DFA image missing: {png_src}")
@@ -234,7 +246,9 @@ class BundleCompiler:
 
     @staticmethod
     def _task_nodes_hash(nodes: list[dict[str, Any]]) -> str:
-        task_nodes = [node for node in nodes if isinstance(node, dict) and node.get("type") == "task"]
+        task_nodes = [
+            node for node in nodes if isinstance(node, dict) and node.get("type") == "task"
+        ]
         canonical = json.dumps(task_nodes, sort_keys=True, separators=(",", ":"), default=str)
         return sha256_text(canonical)
 
@@ -436,7 +450,9 @@ class BundleCompiler:
         auto_replan_max_attempts = max(0, min(int(auto_replan_max_attempts), 10))
         refinement_feedback = str(refinement_feedback or "").strip()
         parent_bundle_id = str(parent_bundle_id or "").strip()
-        previous_preview_requirements, previous_preview_tasks = self._load_parent_plan_context(parent_bundle_id)
+        previous_preview_requirements, previous_preview_tasks = self._load_parent_plan_context(
+            parent_bundle_id
+        )
 
         with self.store.generation_lock(timeout_sec=0.0):
             tmp_dir = self.store.create_temp_bundle_dir(bundle_id)
@@ -458,7 +474,9 @@ class BundleCompiler:
                 or f"{product_name}@{product_meta.get('domain', 'localhost')}"
             )
             cca_pw = str(cca_meta.get("password", "none"))
-            cca_jid = str(cca_meta.get("jid") or f"{cca_name}@{cca_meta.get('domain', 'localhost')}")
+            cca_jid = str(
+                cca_meta.get("jid") or f"{cca_name}@{cca_meta.get('domain', 'localhost')}"
+            )
 
             product_agent = ProductAgent(
                 product_jid,
@@ -503,10 +521,16 @@ class BundleCompiler:
                     )
                     safety_payload = self._load_json(safety_logic_path)
                     raw_rules = safety_payload.get("rules", [])
-                    safety_rules = [rule for rule in raw_rules if isinstance(rule, dict)] if isinstance(raw_rules, list) else []
+                    safety_rules = (
+                        [rule for rule in raw_rules if isinstance(rule, dict)]
+                        if isinstance(raw_rules, list)
+                        else []
+                    )
                     safety_source = {
                         "mode": "approved_preview",
-                        "preview_id": str(precomputed_safety_artifacts.get("preview_id", "")).strip(),
+                        "preview_id": str(
+                            precomputed_safety_artifacts.get("preview_id", "")
+                        ).strip(),
                         "preview_generated_at_utc": str(
                             precomputed_safety_artifacts.get("preview_generated_at_utc", "") or ""
                         ).strip(),
@@ -562,9 +586,7 @@ class BundleCompiler:
                     )
                 except Exception as exc:
                     initial_compile_error = str(exc or "").strip() or exc.__class__.__name__
-                    plan_generation_mode = (
-                        BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
-                    )
+                    plan_generation_mode = BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
                     log.warning(
                         "Initial global_fsa compile failed for bundle %s; retrying without offline safety constraints: %s",
                         bundle_id,
@@ -620,7 +642,8 @@ class BundleCompiler:
                 ok = bool(validation_payload.get("ok", False))
                 status = (
                     BUNDLE_STATUS_DRAFT
-                    if plan_generation_mode == BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
+                    if plan_generation_mode
+                    == BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
                     or ok
                     else BUNDLE_STATUS_INVALID
                 )
@@ -628,8 +651,7 @@ class BundleCompiler:
                 manifest = {
                     "bundle_id": bundle_id,
                     "display_name": (
-                        f"{product_name} | {execution_mode}/{robot_env} | "
-                        f"{status_label} | {stamp}"
+                        f"{product_name} | {execution_mode}/{robot_env} | {status_label} | {stamp}"
                     ),
                     "created_at_utc": utc_now_iso(),
                     "status": status,

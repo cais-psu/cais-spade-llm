@@ -42,17 +42,11 @@ def _dedupe_tokens(values: list[str]) -> list[str]:
 
 
 def _task_resource_jid(task: dict[str, Any]) -> str:
-    return str(
-        task.get("resource_jid")
-        or ""
-    ).strip()
+    return str(task.get("resource_jid") or "").strip()
 
 
 def _task_part_name(task: dict[str, Any]) -> str:
-    return str(
-        task.get("part_name")
-        or ""
-    ).strip()
+    return str(task.get("part_name") or "").strip()
 
 
 def _task_action_target(task: dict[str, Any]) -> dict[str, Any]:
@@ -60,16 +54,8 @@ def _task_action_target(task: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(action_target) if isinstance(action_target, dict) else {}
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
-    source_ref = str(
-        task.get("source_ref")
-        or _state_location_token(start_state)
-        or ""
-    ).strip()
-    target_ref = str(
-        task.get("target_ref")
-        or _state_location_token(end_state)
-        or ""
-    ).strip()
+    source_ref = str(task.get("source_ref") or _state_location_token(start_state) or "").strip()
+    target_ref = str(task.get("target_ref") or _state_location_token(end_state) or "").strip()
     if source_ref and "source_location" not in normalized and "source_ref" not in normalized:
         normalized["source_ref"] = source_ref
         normalized["source_location"] = source_ref
@@ -126,9 +112,7 @@ def _state_pose_value(state: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _state_pose_ref_token(state: dict[str, Any]) -> str:
-    token = str(
-        _first_non_empty(state, "current_pose_ref", "pose_ref", "named_pose") or ""
-    ).strip()
+    token = str(_first_non_empty(state, "current_pose_ref", "pose_ref", "named_pose") or "").strip()
     if token:
         return token
     current_pose = state.get("current_pose")
@@ -143,9 +127,7 @@ def _state_pose_ref_token(state: dict[str, Any]) -> str:
 
 
 def _state_resource_state_token(state: dict[str, Any]) -> str:
-    return str(
-        _first_non_empty(state, "current_state", "state", "resource_state") or ""
-    ).strip()
+    return str(_first_non_empty(state, "current_state", "state", "resource_state") or "").strip()
 
 
 def _state_part_state_token(state: dict[str, Any]) -> str:
@@ -169,8 +151,7 @@ def _state_effect_part_state_token(state: dict[str, Any]) -> str:
 
 def _part_row_location_token(part_row: dict[str, Any]) -> str:
     token = str(
-        _first_non_empty(part_row, "current_location", "location", "current_pose_ref")
-        or ""
+        _first_non_empty(part_row, "current_location", "location", "current_pose_ref") or ""
     ).strip()
     if token:
         return token
@@ -188,15 +169,13 @@ def _part_row_pose_value(part_row: dict[str, Any]) -> dict[str, Any] | None:
 
 def _part_row_holder_token(part_row: dict[str, Any]) -> str:
     return str(
-        _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid")
-        or ""
+        _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid") or ""
     ).strip()
 
 
 def _state_part_holder_token(state: dict[str, Any]) -> str:
     return str(
-        _first_non_empty(state, "part_holder_resource_jid", "current_holder_resource_jid")
-        or ""
+        _first_non_empty(state, "part_holder_resource_jid", "current_holder_resource_jid") or ""
     ).strip()
 
 
@@ -207,7 +186,7 @@ def _part_row_observed_pose_aliases(part_row: dict[str, Any]) -> set[str]:
     observed_store_as = str(part_row.get("observed_store_as") or "").strip()
     if observed_store_as:
         aliases.add(observed_store_as)
-    for raw_alias in (part_row.get("observed_aliases") or []):
+    for raw_alias in part_row.get("observed_aliases") or []:
         alias = str(raw_alias or "").strip()
         if alias:
             aliases.add(alias)
@@ -232,9 +211,7 @@ def _resource_named_pose_tokens(resource_row: dict[str, Any]) -> list[str]:
     raw_named_poses = resource_row.get("named_poses")
     if isinstance(raw_named_poses, dict):
         named_pose_tokens.extend(
-            str(pose_name).strip()
-            for pose_name in raw_named_poses.keys()
-            if str(pose_name).strip()
+            str(pose_name).strip() for pose_name in raw_named_poses.keys() if str(pose_name).strip()
         )
     else:
         named_pose_tokens.extend(
@@ -326,9 +303,7 @@ def _known_location_tokens(
                 continue
             location_tokens.extend([clean_name, f"{clean_name}@anchor"])
             anchor_pose = dict(
-                staging_row.get("anchor_pose")
-                or staging_row.get("board_center")
-                or {}
+                staging_row.get("anchor_pose") or staging_row.get("board_center") or {}
             )
             coords: list[str] = []
             for axis in ("x", "y", "z"):
@@ -378,9 +353,7 @@ def _part_names_matching_location(
         if canonical_location == "observed_pose" and _part_row_pose_value(row) is not None:
             matches.append(str(part_name))
             continue
-        current_location = str(
-            row.get("current_location") or row.get("location") or ""
-        ).strip()
+        current_location = str(row.get("current_location") or row.get("location") or "").strip()
         goal_location = str(row.get("goal_location") or "").strip()
         if include_current and current_location and current_location == normalized_location:
             matches.append(str(part_name))
@@ -424,9 +397,7 @@ def _task_part_binding(
         candidates.extend(
             _part_names_matching_location(
                 location_token=str(
-                    action_target.get("source_location")
-                    or task.get("source_ref")
-                    or ""
+                    action_target.get("source_location") or task.get("source_ref") or ""
                 ).strip(),
                 parts_by_name=parts_by_name,
                 include_current=True,
@@ -436,9 +407,7 @@ def _task_part_binding(
         candidates.extend(
             _part_names_matching_location(
                 location_token=str(
-                    action_target.get("target_location")
-                    or task.get("target_ref")
-                    or ""
+                    action_target.get("target_location") or task.get("target_ref") or ""
                 ).strip(),
                 parts_by_name=parts_by_name,
                 include_current=False,
@@ -583,7 +552,9 @@ def _infer_operation_kind(
     end_location = _state_location_token(end_state)
     start_pose = _state_pose_value(start_state)
     end_pose = _state_pose_value(end_state)
-    has_source_anchor = bool(str(action_target.get("source_location") or "").strip() or start_location or start_pose)
+    has_source_anchor = bool(
+        str(action_target.get("source_location") or "").strip() or start_location or start_pose
+    )
     has_target_anchor = bool(
         str(action_target.get("target_location") or "").strip()
         or str(action_target.get("named_pose") or "").strip()
@@ -592,10 +563,7 @@ def _infer_operation_kind(
     )
     acquires_part = bool(
         part_name
-        and (
-            end_held_part == part_name
-            or _state_part_holder_token(end_state)
-        )
+        and (end_held_part == part_name or _state_part_holder_token(end_state))
         and start_held_part != part_name
     )
     releases_part = bool(part_name and start_held_part == part_name and end_held_part != part_name)
@@ -643,7 +611,7 @@ def _task_is_projectable(
         or str(action_target.get("target_location") or "").strip()
         or str(action_target.get("named_pose") or "").strip()
         or _state_part_state_token(start_state)
-            or _state_part_state_token(end_state)
+        or _state_part_state_token(end_state)
         or _state_part_holder_token(start_state)
         or _state_part_holder_token(end_state)
         or _state_pose_value(start_state)
@@ -779,9 +747,7 @@ def _build_preconditions_and_effects(
             ("held_part", end_state.get("held_part")),
             (
                 "location",
-                _state_location_token(end_state)
-                or _state_pose_ref_token(end_state)
-                or None,
+                _state_location_token(end_state) or _state_pose_ref_token(end_state) or None,
             ),
         )
         if value not in (None, "", [], {})
@@ -828,8 +794,7 @@ def _build_preconditions_and_effects(
         expected_part_effect["holder"] = None
 
     part_affecting = any(
-        key in expected_part_effect
-        for key in ("state", "location", "pose", "holder")
+        key in expected_part_effect for key in ("state", "location", "pose", "holder")
     )
     requires_acquisition = bool(
         part_affecting
@@ -854,8 +819,10 @@ def _build_preconditions_and_effects(
             fallback_start_state=start_state,
         )
 
-    if requires_acquisition and expected_part_effect.get("holder") in (None, "") and not (
-        requested_target_location or part_location or part_pose is not None
+    if (
+        requires_acquisition
+        and expected_part_effect.get("holder") in (None, "")
+        and not (requested_target_location or part_location or part_pose is not None)
     ):
         expected_part_effect["holder"] = resource_jid
         expected_part_effect.setdefault("location", f"{resource_jid}_gripper")
@@ -875,7 +842,9 @@ def _build_preconditions_and_effects(
             for key, value in (
                 (
                     "current_state",
-                    _first_non_empty(part_row, "current_state", "state", "part_state", "part_status")
+                    _first_non_empty(
+                        part_row, "current_state", "state", "part_state", "part_status"
+                    )
                     or None,
                 ),
                 ("location", _part_row_location_token(part_row) or None),
@@ -888,7 +857,9 @@ def _build_preconditions_and_effects(
     if source_ref is not None:
         preconditions["source_ref"] = deepcopy(source_ref)
 
-    effect_scope = "resource_and_part" if expected_resource_effect and part_affecting else "part_only"
+    effect_scope = (
+        "resource_and_part" if expected_resource_effect and part_affecting else "part_only"
+    )
     return (
         preconditions,
         {"resource": expected_resource_effect, "part": expected_part_effect},
@@ -957,7 +928,10 @@ def _grounded_action(
             operation_kind = "part_transfer"
         elif requires_acquisition:
             operation_kind = "part_acquire"
-        elif has_target and dict(expected_effect.get("part") or {}).get("holder", "__missing__") is None:
+        elif (
+            has_target
+            and dict(expected_effect.get("part") or {}).get("holder", "__missing__") is None
+        ):
             operation_kind = "part_release"
         elif not operation_kind:
             operation_kind = "part_interaction"
@@ -1058,12 +1032,14 @@ def _outline_contract_finding(
                 continue
             expected = deepcopy(start_state.get(field_name))
             if actual is _EXACT_STATE_UNAVAILABLE or actual != expected:
-                mismatches.append({
-                    "field": field_name,
-                    "expected": expected,
-                    "actual": None if actual is _EXACT_STATE_UNAVAILABLE else deepcopy(actual),
-                    "available": actual is not _EXACT_STATE_UNAVAILABLE,
-                })
+                mismatches.append(
+                    {
+                        "field": field_name,
+                        "expected": expected,
+                        "actual": None if actual is _EXACT_STATE_UNAVAILABLE else deepcopy(actual),
+                        "available": actual is not _EXACT_STATE_UNAVAILABLE,
+                    }
+                )
 
         if part_name:
             for field_name, actual in (
@@ -1074,16 +1050,26 @@ def _outline_contract_finding(
                     continue
                 expected = deepcopy(start_state.get(field_name))
                 if actual is _EXACT_STATE_UNAVAILABLE or actual != expected:
-                    mismatches.append({
-                        "field": field_name,
-                        "expected": expected,
-                        "actual": None if actual is _EXACT_STATE_UNAVAILABLE else deepcopy(actual),
-                        "available": actual is not _EXACT_STATE_UNAVAILABLE,
-                    })
+                    mismatches.append(
+                        {
+                            "field": field_name,
+                            "expected": expected,
+                            "actual": None
+                            if actual is _EXACT_STATE_UNAVAILABLE
+                            else deepcopy(actual),
+                            "available": actual is not _EXACT_STATE_UNAVAILABLE,
+                        }
+                    )
 
         if mismatches:
             field_names = ", ".join(
-                sorted({str(item.get("field") or "").strip() for item in mismatches if str(item.get("field") or "").strip()})
+                sorted(
+                    {
+                        str(item.get("field") or "").strip()
+                        for item in mismatches
+                        if str(item.get("field") or "").strip()
+                    }
+                )
             )
             return _binding_finding(
                 task=task,
@@ -1123,13 +1109,19 @@ def _outline_contract_finding(
 
     if bool(contract.get("require_release_destination_for_release")) and resource_jid and part_name:
         current_holder = str(
-            (None if _exact_mapping_value(part_row, "part_holder_resource_jid") is _EXACT_STATE_UNAVAILABLE
-             else _exact_mapping_value(part_row, "part_holder_resource_jid"))
+            (
+                None
+                if _exact_mapping_value(part_row, "part_holder_resource_jid")
+                is _EXACT_STATE_UNAVAILABLE
+                else _exact_mapping_value(part_row, "part_holder_resource_jid")
+            )
             or ""
         ).strip()
         current_held_part = str(resource_row.get("held_part") or "").strip()
         start_held_part = str(start_state.get("held_part") or "").strip()
-        release_requested = ("held_part" in end_state and end_state.get("held_part") in (None, "")) and (
+        release_requested = (
+            "held_part" in end_state and end_state.get("held_part") in (None, "")
+        ) and (
             current_held_part == part_name
             or current_holder == resource_jid
             or start_held_part == part_name
@@ -1178,7 +1170,8 @@ def _outline_contract_finding(
                 str(value or "").strip() == resource_jid
                 for value in (
                     None
-                    if _exact_mapping_value(part_row, "part_holder_resource_jid") is _EXACT_STATE_UNAVAILABLE
+                    if _exact_mapping_value(part_row, "part_holder_resource_jid")
+                    is _EXACT_STATE_UNAVAILABLE
                     else _exact_mapping_value(part_row, "part_holder_resource_jid"),
                 )
             )
@@ -1315,9 +1308,7 @@ def compile_grounded_outline_task(
     ]
 
     if not resource_jid or resource_jid not in resources_by_jid:
-        reason = (
-            f"task '{task_id}' does not bind a resource that exists in current bridge state"
-        )
+        reason = f"task '{task_id}' does not bind a resource that exists in current bridge state"
         return {
             "status": "resource_unbound",
             "grounded_action": None,
@@ -1444,11 +1435,11 @@ def compile_grounded_outline_task(
         operation_kind=operation_kind,
     )
     preconditions = dict(grounded_action.get("preconditions") or {})
-    requires_acquisition = bool(
-        dict(preconditions.get("part") or {}).get("requires_acquisition")
-    )
-    if task_kind != "resource_only" and requires_acquisition and not dict(
-        preconditions.get("source_ref") or {}
+    requires_acquisition = bool(dict(preconditions.get("part") or {}).get("requires_acquisition"))
+    if (
+        task_kind != "resource_only"
+        and requires_acquisition
+        and not dict(preconditions.get("source_ref") or {})
     ):
         reason = (
             f"task '{task_id}' changes part '{effective_part_name}' but does not ground a "

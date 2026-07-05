@@ -44,9 +44,7 @@ class BridgeSessionMixin:
             return self._normalize_bridge_reasoning_mode(raw_mode)
         bundle = dict(getattr(product_agent, "precomputed_bundle", {}) or {})
         precomputed_policy = (
-            bundle.get("replan_policy", {})
-            if isinstance(bundle.get("replan_policy"), dict)
-            else {}
+            bundle.get("replan_policy", {}) if isinstance(bundle.get("replan_policy"), dict) else {}
         )
         return self._normalize_bridge_reasoning_mode(
             precomputed_policy.get("bridge_reasoning_mode", "multi_turn")
@@ -109,9 +107,7 @@ class BridgeSessionMixin:
                 {
                     "requirement_id": req_id,
                     "summary": str(
-                        raw_node.get("description")
-                        or raw_node.get("raw_text")
-                        or ""
+                        raw_node.get("description") or raw_node.get("raw_text") or ""
                     ).strip(),
                     "raw_text": str(raw_node.get("raw_text") or "").strip(),
                     "phase": deepcopy(raw_node.get("phase")),
@@ -180,10 +176,14 @@ class BridgeSessionMixin:
                 isinstance(task.get("status"), str) and str(task.get("status")).startswith("failed")
                 for task in req_tasks
             )
-            all_completed = bool(req_tasks) and all(task.get("status") == "completed" for task in req_tasks)
+            all_completed = bool(req_tasks) and all(
+                task.get("status") == "completed" for task in req_tasks
+            )
 
             if total_tasks > 0:
-                requirements_status[req_id]["completion"] = int((completed_tasks / total_tasks) * 100)
+                requirements_status[req_id]["completion"] = int(
+                    (completed_tasks / total_tasks) * 100
+                )
 
             if has_failed:
                 requirements_status[req_id]["status"] = "failed"
@@ -431,9 +431,7 @@ class BridgeSessionMixin:
             return []
 
         active_rule_id_set = {
-            str(rule_id or "").strip()
-            for rule_id in active_rule_ids
-            if str(rule_id or "").strip()
+            str(rule_id or "").strip() for rule_id in active_rule_ids if str(rule_id or "").strip()
         }
         resource_tokens = {
             self._normalize_resource_token(resource_jid)
@@ -474,7 +472,15 @@ class BridgeSessionMixin:
             ).lower()
 
             matches = False
-            if rule_id and rule_id in active_rule_id_set or rule_resource_tokens and resource_tokens.intersection(rule_resource_tokens) or destination and destination in location_tokens or any(part_token in search_blob for part_token in part_tokens):
+            if (
+                rule_id
+                and rule_id in active_rule_id_set
+                or rule_resource_tokens
+                and resource_tokens.intersection(rule_resource_tokens)
+                or destination
+                and destination in location_tokens
+                or any(part_token in search_blob for part_token in part_tokens)
+            ):
                 matches = True
 
             if not matches:
@@ -618,9 +624,7 @@ class BridgeSessionMixin:
                 if str(task.get("task_id") or "").strip()
             ]
             pending_related_task_ids = [
-                task_id
-                for task_id in related_task_ids
-                if task_id in pending_task_ids
+                task_id for task_id in related_task_ids if task_id in pending_task_ids
             ]
             relevant_requirements.append(
                 {
@@ -656,7 +660,9 @@ class BridgeSessionMixin:
         return pose
 
     @staticmethod
-    def _pose_distance(left: dict[str, float] | None, right: dict[str, float] | None) -> float | None:
+    def _pose_distance(
+        left: dict[str, float] | None, right: dict[str, float] | None
+    ) -> float | None:
         if left is None or right is None:
             return None
         return sqrt(
@@ -746,8 +752,7 @@ class BridgeSessionMixin:
             entry = deepcopy(raw_entry if isinstance(raw_entry, dict) else {})
             cutoff = completed_by_resource.get(str(resource_jid or "").strip())
             pending_tasks = [
-                task for task in (entry.get("pending_tasks") or [])
-                if isinstance(task, dict)
+                task for task in (entry.get("pending_tasks") or []) if isinstance(task, dict)
             ]
             if cutoff is None:
                 refined[str(resource_jid)] = entry
@@ -821,9 +826,9 @@ class BridgeSessionMixin:
             "source_function_name": str(entry.get("source_function_name") or "").strip(),
             "blocking_rule_id": str(entry.get("blocking_rule_id") or "").strip(),
         }
-        digest = sha1(
-            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:12]
+        digest = sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[
+            :12
+        ]
         return f"cond_{digest}"
 
     @staticmethod
@@ -894,12 +899,16 @@ class BridgeSessionMixin:
             "parts": {},
             "goal": {
                 "goal_state": str(goal_state or "").strip(),
-                "pending_parts": [str(part_name) for part_name in (P_id or []) if str(part_name).strip()],
+                "pending_parts": [
+                    str(part_name) for part_name in (P_id or []) if str(part_name).strip()
+                ],
             },
             "focused_resource_jid": str(focused_resource_jid or "").strip(),
             "obligation_targets": deepcopy(obligation_targets or []),
         }
-        focused_profile = get_resource_profile(str(focused_snapshot.get("resource_type") or "resource"))
+        focused_profile = get_resource_profile(
+            str(focused_snapshot.get("resource_type") or "resource")
+        )
         context["resource"].update(
             resource_snapshot_fields_map(
                 focused_snapshot,
@@ -912,7 +921,9 @@ class BridgeSessionMixin:
         for resource_jid, raw_entry in (bridge_resources or {}).items():
             if not isinstance(raw_entry, dict):
                 continue
-            resource_snapshot = dict(raw_entry.get("bridge_snapshot") or raw_entry.get("primitive_snapshot") or {})
+            resource_snapshot = dict(
+                raw_entry.get("bridge_snapshot") or raw_entry.get("primitive_snapshot") or {}
+            )
             resource_type = resolve_bridge_resource_type(
                 snapshot=resource_snapshot,
                 modeled_state=dict(raw_entry.get("modeled_state") or {}),
@@ -985,7 +996,9 @@ class BridgeSessionMixin:
                                 target["part_height"] = float(geometry["part_height_m"])
                             if geometry.get("model_name"):
                                 target["model_name"] = str(geometry["model_name"])
-                            product_location = str(getattr(self.product_agent, "jid", "") or "").strip()
+                            product_location = str(
+                                getattr(self.product_agent, "jid", "") or ""
+                            ).strip()
                             if product_location:
                                 target["location"] = product_location.split("@", 1)[0]
                         except (TypeError, ValueError):
@@ -1067,12 +1080,8 @@ class BridgeSessionMixin:
                     None,
                 )
                 if callable(execution_catalog_method):
-                    execution_catalog_value = await asyncio.to_thread(
-                        execution_catalog_method
-                    )
-                    execution_primitive_catalog = list(
-                        execution_catalog_value or []
-                    )
+                    execution_catalog_value = await asyncio.to_thread(execution_catalog_method)
+                    execution_primitive_catalog = list(execution_catalog_value or [])
                 else:
                     execution_primitive_catalog = (
                         build_execution_primitive_catalog(resource_agent=resource) or []
@@ -1084,18 +1093,22 @@ class BridgeSessionMixin:
                     None,
                 )
                 if callable(synthesis_catalog_method):
-                    synthesis_catalog_value = await asyncio.to_thread(
-                        synthesis_catalog_method
-                    )
+                    synthesis_catalog_value = await asyncio.to_thread(synthesis_catalog_method)
                     primitive_catalog = list(synthesis_catalog_value or [])
                 elif resource_type == "robot":
-                    primitive_catalog = build_robot_synthesis_primitive_catalog(
-                        primitive_catalog=execution_primitive_catalog,
-                    ) or []
+                    primitive_catalog = (
+                        build_robot_synthesis_primitive_catalog(
+                            primitive_catalog=execution_primitive_catalog,
+                        )
+                        or []
+                    )
                 else:
-                    primitive_catalog = build_synthesis_primitive_catalog(
-                        primitive_catalog=execution_primitive_catalog,
-                    ) or []
+                    primitive_catalog = (
+                        build_synthesis_primitive_catalog(
+                            primitive_catalog=execution_primitive_catalog,
+                        )
+                        or []
+                    )
                 adapter_capabilities = bridge_resource_capabilities(
                     resource_type,
                     primitive_catalog=execution_primitive_catalog,
@@ -1115,7 +1128,9 @@ class BridgeSessionMixin:
                 }
                 if resource_jid == target_jid:
                     focused_primitive_catalog = (
-                        primitive_catalog if adapter_capabilities.get("supports_executable_bridge") else None
+                        primitive_catalog
+                        if adapter_capabilities.get("supports_executable_bridge")
+                        else None
                     )
                     focused_bridge_snapshot = bridge_snapshot or None
 
@@ -1175,9 +1190,7 @@ class BridgeSessionMixin:
             entry = raw_entry if isinstance(raw_entry, dict) else {}
             modeled_state = dict(entry.get("modeled_state") or {})
             snapshot = dict(
-                (projected_resource_snapshots or {}).get(jid)
-                or entry.get("bridge_snapshot")
-                or {}
+                (projected_resource_snapshots or {}).get(jid) or entry.get("bridge_snapshot") or {}
             )
             normalized_snapshot = adapt_bridge_resource_snapshot(
                 resource_jid=jid,
@@ -1193,14 +1206,10 @@ class BridgeSessionMixin:
                 modeled_state=modeled_state,
             )
             resource_core = dict(
-                normalized_snapshot.get("resource_core")
-                or entry.get("resource_core")
-                or {}
+                normalized_snapshot.get("resource_core") or entry.get("resource_core") or {}
             )
             resource_facets = dict(
-                normalized_snapshot.get("resource_facets")
-                or entry.get("resource_facets")
-                or {}
+                normalized_snapshot.get("resource_facets") or entry.get("resource_facets") or {}
             )
             profile = get_resource_profile(
                 str(
@@ -1209,7 +1218,9 @@ class BridgeSessionMixin:
                     or snapshot.get("resource_type")
                     or modeled_state.get("resource_type")
                     or "resource"
-                ).strip().lower()
+                )
+                .strip()
+                .lower()
                 or "resource"
             )
             effective[jid] = {
@@ -1304,7 +1315,10 @@ class BridgeSessionMixin:
             if part_name:
                 if carried_entity and carried_entity != part_name:
                     continue
-                if part_locations.get(part_name) == carried_location and carried_entity != part_name:
+                if (
+                    part_locations.get(part_name) == carried_location
+                    and carried_entity != part_name
+                ):
                     continue
 
             ctx_map = dict(tool_row.get("context_mapping") or {})
@@ -1352,7 +1366,12 @@ class BridgeSessionMixin:
             expected = entry.get("expected")
             if not entity_kind or not entity or not field or expected in (None, ""):
                 return
-            entry["_key"] = (entity_kind, entity, field, json.dumps(expected, sort_keys=True, default=str))
+            entry["_key"] = (
+                entity_kind,
+                entity,
+                field,
+                json.dumps(expected, sort_keys=True, default=str),
+            )
             requirement_entries.append(entry)
 
         for resource_jid, raw_entry in (bridge_resources or {}).items():
@@ -1361,8 +1380,7 @@ class BridgeSessionMixin:
                 continue
             entry = raw_entry if isinstance(raw_entry, dict) else {}
             pending_tasks = [
-                task for task in (entry.get("pending_tasks") or [])
-                if isinstance(task, dict)
+                task for task in (entry.get("pending_tasks") or []) if isinstance(task, dict)
             ]
             if not pending_tasks:
                 continue
@@ -1425,9 +1443,8 @@ class BridgeSessionMixin:
                                 "role": role,
                             }
                         )
-                        parts_ctx = (
-                            (prepared_bridge_request.get("grounding_context") or {})
-                            .get("parts", {})
+                        parts_ctx = (prepared_bridge_request.get("grounding_context") or {}).get(
+                            "parts", {}
                         )
                         part_ctx = parts_ctx.get(part_name) if isinstance(parts_ctx, dict) else {}
                         if not isinstance(part_ctx, dict):
@@ -1467,7 +1484,9 @@ class BridgeSessionMixin:
                     tools_catalog=tools_catalog,
                 )
                 entry_task_id = str(first_task.get("id", "")).strip()
-                entry_part_name = str((first_task.get("params") or {}).get("part_name") or "").strip()
+                entry_part_name = str(
+                    (first_task.get("params") or {}).get("part_name") or ""
+                ).strip()
                 entry_in_state = str(first_tool.get("in_state") or "").strip()
                 entry_part_state = str(first_tool.get("part_in_state") or "").strip()
                 suffix_summary.update(
@@ -1484,7 +1503,9 @@ class BridgeSessionMixin:
                 ctx_map = dict(first_tool.get("context_mapping") or {})
                 location_param = str(ctx_map.get("location_param") or "").strip()
                 location_type = str(ctx_map.get("location_type") or "").strip()
-                location_value = first_task.get("params", {}).get(location_param) if location_param else None
+                location_value = (
+                    first_task.get("params", {}).get(location_param) if location_param else None
+                )
                 if location_param and location_value not in (None, ""):
                     suffix_summary["required_location"] = location_value
                     suffix_summary["required_location_type"] = location_type
@@ -1612,19 +1633,13 @@ class BridgeSessionMixin:
         if not isinstance(raw, dict):
             raw = {}
         raw["constraints"] = [
-            deepcopy(item)
-            for item in (raw.get("constraints") or [])
-            if isinstance(item, dict)
+            deepcopy(item) for item in (raw.get("constraints") or []) if isinstance(item, dict)
         ]
         raw["safety_rules"] = [
-            deepcopy(item)
-            for item in (raw.get("safety_rules") or [])
-            if isinstance(item, dict)
+            deepcopy(item) for item in (raw.get("safety_rules") or []) if isinstance(item, dict)
         ]
         raw["rule_ids"] = [
-            str(rule_id).strip()
-            for rule_id in (raw.get("rule_ids") or [])
-            if str(rule_id).strip()
+            str(rule_id).strip() for rule_id in (raw.get("rule_ids") or []) if str(rule_id).strip()
         ]
         return raw
 
@@ -1673,19 +1688,25 @@ class BridgeSessionMixin:
                     rule_ids.append(token)
 
             for task_id in (
-                raw_bridge.get("safe_next_task_ids")
-                or safety_ctx.get("safe_next_task_ids")
-                or []
+                raw_bridge.get("safe_next_task_ids") or safety_ctx.get("safe_next_task_ids") or []
             ):
                 token = str(task_id or "").strip()
                 if token and token not in seen_next_task_ids:
                     seen_next_task_ids.add(token)
                     safe_next_task_ids.append(token)
 
-            running_aps.extend(list(raw_bridge.get("running_aps") or safety_ctx.get("running_aps") or []))
-            candidate_aps.extend(list(raw_bridge.get("candidate_aps") or safety_ctx.get("candidate_aps") or []))
+            running_aps.extend(
+                list(raw_bridge.get("running_aps") or safety_ctx.get("running_aps") or [])
+            )
+            candidate_aps.extend(
+                list(raw_bridge.get("candidate_aps") or safety_ctx.get("candidate_aps") or [])
+            )
             predicted_state_aps.extend(
-                list(raw_bridge.get("predicted_state_aps") or safety_ctx.get("predicted_state_aps") or [])
+                list(
+                    raw_bridge.get("predicted_state_aps")
+                    or safety_ctx.get("predicted_state_aps")
+                    or []
+                )
             )
             status = str(raw_bridge.get("status") or safety_ctx.get("status") or "").strip()
             if status:
@@ -1694,7 +1715,7 @@ class BridgeSessionMixin:
             if reason:
                 reasons.append(reason)
 
-            for constraint in (raw_bridge.get("constraints") or safety_ctx.get("constraints") or []):
+            for constraint in raw_bridge.get("constraints") or safety_ctx.get("constraints") or []:
                 if not isinstance(constraint, dict):
                     continue
                 signature = self._bridge_constraint_signature(constraint)
@@ -1703,7 +1724,7 @@ class BridgeSessionMixin:
                 seen_constraint_signatures.add(signature)
                 constraints.append(deepcopy(constraint))
 
-            for rule in (raw_bridge.get("safety_rules") or safety_ctx.get("safety_rules") or []):
+            for rule in raw_bridge.get("safety_rules") or safety_ctx.get("safety_rules") or []:
                 if not isinstance(rule, dict):
                     continue
                 signature = self._bridge_safety_rule_signature(rule)
@@ -1755,7 +1776,9 @@ class BridgeSessionMixin:
     def _prepare_trace_lines(self, context_summary: dict[str, Any]) -> list[str]:
         fault_event = dict(context_summary.get("fault_event") or {})
         current_product_state = dict(context_summary.get("current_product_state") or {})
-        relevant_assembly_requirements = list(context_summary.get("relevant_assembly_requirements") or [])
+        relevant_assembly_requirements = list(
+            context_summary.get("relevant_assembly_requirements") or []
+        )
         modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
         resources = list(current_product_state.get("resources") or [])
         parts = list(current_product_state.get("parts") or [])
@@ -1924,7 +1947,11 @@ class BridgeSessionMixin:
             return []
         summary: list[str] = []
         primary_obligation = proposal.get("primary_obligation") or {}
-        rule_id = str(primary_obligation.get("rule_id") or "").strip() if isinstance(primary_obligation, dict) else ""
+        rule_id = (
+            str(primary_obligation.get("rule_id") or "").strip()
+            if isinstance(primary_obligation, dict)
+            else ""
+        )
         if rule_id:
             summary.append(f"rule:{rule_id}")
         for task in proposal.get("macro_tasks") or []:
@@ -1984,7 +2011,7 @@ class BridgeSessionMixin:
         observations = details.get("observations")
         observations = observations if isinstance(observations, dict) else {}
         affected_parts: list[dict[str, Any]] = []
-        for entity in (details.get("affected_entities") or []):
+        for entity in details.get("affected_entities") or []:
             if not isinstance(entity, dict):
                 continue
             if str(entity.get("entity_type") or "").strip().lower() != "part":
@@ -2029,9 +2056,7 @@ class BridgeSessionMixin:
     ) -> dict[str, Any]:
         failure_anchor = dict(prepared_bridge_request.get("failure_anchor") or {})
         focused_resource_jid = str(
-            failure_anchor.get("failed_resource_jid")
-            or prepared_bridge_request.get("ra_jid")
-            or ""
+            failure_anchor.get("failed_resource_jid") or prepared_bridge_request.get("ra_jid") or ""
         ).strip()
         bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
         grounding_context = dict(prepared_bridge_request.get("grounding_context") or {})
@@ -2052,8 +2077,7 @@ class BridgeSessionMixin:
             ).strip()
             profile = get_resource_profile(resource_type)
             pending_tasks = [
-                task for task in (entry.get("pending_tasks") or [])
-                if isinstance(task, dict)
+                task for task in (entry.get("pending_tasks") or []) if isinstance(task, dict)
             ]
             current_location, current_location_basis = self._resolve_resource_location(
                 resource_jid=resource_jid,
@@ -2069,7 +2093,9 @@ class BridgeSessionMixin:
                     "current_location": deepcopy(current_location),
                     "current_location_basis": current_location_basis,
                     "availability": deepcopy(snapshot.get("availability")),
-                    "held_part": deepcopy(resource_snapshot_carried_entity(snapshot, profile=profile)),
+                    "held_part": deepcopy(
+                        resource_snapshot_carried_entity(snapshot, profile=profile)
+                    ),
                     "held_part_location": resource_snapshot_carried_entity_location(
                         resource_jid=resource_jid,
                         snapshot=snapshot,
@@ -2084,14 +2110,20 @@ class BridgeSessionMixin:
             )
 
         parts_ctx = dict(grounding_context.get("parts") or {})
-        part_names = sorted({
-            str(name).strip()
-            for name in (list(prepared_bridge_request.get("part_tracker") or {}) + list(parts_ctx))
-            if str(name).strip()
-        })
+        part_names = sorted(
+            {
+                str(name).strip()
+                for name in (
+                    list(prepared_bridge_request.get("part_tracker") or {}) + list(parts_ctx)
+                )
+                if str(name).strip()
+            }
+        )
         parts: list[dict[str, Any]] = []
         for part_name in part_names:
-            tracker_entry = dict((prepared_bridge_request.get("part_tracker") or {}).get(part_name) or {})
+            tracker_entry = dict(
+                (prepared_bridge_request.get("part_tracker") or {}).get(part_name) or {}
+            )
             ctx_entry = dict(parts_ctx.get(part_name) or {})
             target = dict(ctx_entry.get("target") or {})
             part_location = (
@@ -2104,11 +2136,7 @@ class BridgeSessionMixin:
             location_basis = str(
                 tracker_entry.get("location_basis")
                 or ctx_entry.get("location_basis")
-                or (
-                    "part_tracker"
-                    if part_location not in (None, "")
-                    else "unavailable"
-                )
+                or ("part_tracker" if part_location not in (None, "") else "unavailable")
             ).strip()
             parts.append(
                 {
@@ -2120,9 +2148,7 @@ class BridgeSessionMixin:
                         if ctx_entry.get("state") is not None
                         else None
                     ),
-                    "location": deepcopy(
-                        part_location
-                    ),
+                    "location": deepcopy(part_location),
                     "location_basis": location_basis,
                     "observed_pose": deepcopy(
                         tracker_entry.get("observed_pose")
@@ -2195,10 +2221,13 @@ class BridgeSessionMixin:
         # has not yet been assembled, find pending place_approach tasks for the
         # blocked part and inject them as continuation conditions.  This ensures
         # the LLM sees the full scope of the deadlock, not just the xarm6 state gap.
-        for _rule in (prepared_bridge_request.get("loaded_safety_rules") or []):
+        for _rule in prepared_bridge_request.get("loaded_safety_rules") or []:
             if not isinstance(_rule, dict):
                 continue
-            if str(_rule.get("constraint_type") or "").strip() != "ordering_place_approach_priority":
+            if (
+                str(_rule.get("constraint_type") or "").strip()
+                != "ordering_place_approach_priority"
+            ):
                 continue
             _rule_id = str(_rule.get("id") or _rule.get("rule_id") or "").strip()
             _products = [str(p or "").lower().strip() for p in (_rule.get("product") or [])]
@@ -2226,31 +2255,35 @@ class BridgeSessionMixin:
             for _raw_entry in bridge_resources.values():
                 if not isinstance(_raw_entry, dict):
                     continue
-                for _task in (_raw_entry.get("pending_tasks") or []):
+                for _task in _raw_entry.get("pending_tasks") or []:
                     if not isinstance(_task, dict):
                         continue
                     _fn = str(_task.get("function_name") or "").strip()
-                    _task_part = str((_task.get("params") or {}).get("part_name") or "").lower().strip()
+                    _task_part = (
+                        str((_task.get("params") or {}).get("part_name") or "").lower().strip()
+                    )
                     _task_id = str(_task.get("id") or "").strip()
                     if (
                         _task_id
                         and _task_part == _blocked_lower
                         and (_blocked_event and _fn == _blocked_event)
                     ):
-                        unmet_continuation_conditions.append({
-                            "kind": "safety_blocked_suffix_task",
-                            "condition_family": "continuation",
-                            "entity_kind": "task",
-                            "entity": _task_id,
-                            "field": "safety_gate",
-                            "expected": "unblocked",
-                            "actual": f"blocked_by_{_rule_id}",
-                            "blocking_rule_id": _rule_id,
-                            "blocking_reason": (
-                                f"{_gateway_lower.upper()} must be placed at {_dest!r} "
-                                f"before {_blocked_lower.upper()} place_approach"
-                            ),
-                        })
+                        unmet_continuation_conditions.append(
+                            {
+                                "kind": "safety_blocked_suffix_task",
+                                "condition_family": "continuation",
+                                "entity_kind": "task",
+                                "entity": _task_id,
+                                "field": "safety_gate",
+                                "expected": "unblocked",
+                                "actual": f"blocked_by_{_rule_id}",
+                                "blocking_rule_id": _rule_id,
+                                "blocking_reason": (
+                                    f"{_gateway_lower.upper()} must be placed at {_dest!r} "
+                                    f"before {_blocked_lower.upper()} place_approach"
+                                ),
+                            }
+                        )
 
         unsatisfied_conditions: list[dict[str, Any]] = []
         seen_unsatisfied_signatures: set[tuple[str, str, str, str, str]] = set()
@@ -2309,7 +2342,9 @@ class BridgeSessionMixin:
         modeled_continuation_gap = {
             "basis": "remaining modeled suffix requirements",
             "goal_state": deepcopy(prepared_bridge_request.get("goal_state")),
-            "remaining_suffixes": deepcopy(marked_reentry_context.get("pending_suffix_summary") or []),
+            "remaining_suffixes": deepcopy(
+                marked_reentry_context.get("pending_suffix_summary") or []
+            ),
             "pending_nominal_task_ids": [
                 str(task.get("id") or "").strip()
                 for raw_entry in bridge_resources.values()
@@ -2341,9 +2376,15 @@ class BridgeSessionMixin:
                     if isinstance(failure_anchor.get("resource_state_after"), dict)
                     else None
                 )
-                or deepcopy((prepared_bridge_request.get("stuck_state") or {}).get("resource_state")),
-                "current_location": deepcopy((prepared_bridge_request.get("stuck_state") or {}).get("current_location")),
-                "resource_state_before": deepcopy(failure_anchor.get("resource_state_before") or {}),
+                or deepcopy(
+                    (prepared_bridge_request.get("stuck_state") or {}).get("resource_state")
+                ),
+                "current_location": deepcopy(
+                    (prepared_bridge_request.get("stuck_state") or {}).get("current_location")
+                ),
+                "resource_state_before": deepcopy(
+                    failure_anchor.get("resource_state_before") or {}
+                ),
                 "resource_state_after": deepcopy(failure_anchor.get("resource_state_after") or {}),
                 "affected_parts": deepcopy(failure_anchor.get("affected_parts") or []),
             },
@@ -2502,7 +2543,7 @@ class BridgeSessionMixin:
         pending_task_ids_by_part: dict[str, list[str]] = {}
         for resource_jid in sorted(bridge_resources):
             raw_entry = dict(bridge_resources.get(resource_jid) or {})
-            for task in (raw_entry.get("pending_tasks") or []):
+            for task in raw_entry.get("pending_tasks") or []:
                 if not isinstance(task, dict):
                     continue
                 task_id = str(task.get("id") or "").strip()
@@ -2530,9 +2571,7 @@ class BridgeSessionMixin:
                 requirements_by_product.setdefault(product, []).append(requirement_entry)
 
         current_parts = [
-            dict(row)
-            for row in (current_product_state.get("parts") or [])
-            if isinstance(row, dict)
+            dict(row) for row in (current_product_state.get("parts") or []) if isinstance(row, dict)
         ]
         current_part_by_name = {
             str(row.get("part_name") or "").strip(): row
@@ -2541,7 +2580,9 @@ class BridgeSessionMixin:
         }
         tracker_by_part = {
             str(part_name or "").strip(): dict(raw_entry or {})
-            for part_name, raw_entry in dict(prepared_bridge_request.get("part_tracker") or {}).items()
+            for part_name, raw_entry in dict(
+                prepared_bridge_request.get("part_tracker") or {}
+            ).items()
             if str(part_name or "").strip() and isinstance(raw_entry, dict)
         }
         ordered_part_names: list[str] = []
@@ -2597,7 +2638,7 @@ class BridgeSessionMixin:
 
         affected_part_names: list[str] = []
         seen_part_names: set[str] = set()
-        for raw_entry in (fault_event.get("affected_parts") or []):
+        for raw_entry in fault_event.get("affected_parts") or []:
             if isinstance(raw_entry, dict):
                 part_name = str(raw_entry.get("part_name") or "").strip()
             else:
@@ -2664,13 +2705,10 @@ class BridgeSessionMixin:
 
         prompt_snapshot = {
             "resource_jid": str(
-                resource_entry.get("resource_jid")
-                or resource_core.get("resource_jid")
-                or ""
+                resource_entry.get("resource_jid") or resource_core.get("resource_jid") or ""
             ).strip(),
             "resource_type": deepcopy(
-                bridge_snapshot.get("resource_type")
-                or resource_core.get("resource_type")
+                bridge_snapshot.get("resource_type") or resource_core.get("resource_type")
             ),
             "current_state": deepcopy(
                 bridge_snapshot.get("current_state")
@@ -2693,9 +2731,7 @@ class BridgeSessionMixin:
                 else resource_core.get("active_work")
             ),
             "occupancy": deepcopy(
-                bridge_snapshot.get("occupancy")
-                or resource_core.get("occupancy")
-                or {}
+                bridge_snapshot.get("occupancy") or resource_core.get("occupancy") or {}
             ),
             "held_part": deepcopy(
                 bridge_snapshot.get("held_part")
@@ -2727,9 +2763,7 @@ class BridgeSessionMixin:
             ),
         }
         return {
-            key: value
-            for key, value in prompt_snapshot.items()
-            if value not in (None, "", [], {})
+            key: value for key, value in prompt_snapshot.items() if value not in (None, "", [], {})
         }
 
     @staticmethod
@@ -2741,7 +2775,7 @@ class BridgeSessionMixin:
         preview_output_map = dict(profile.preview_output_map or {})
         extract_output_map = dict(profile.extract_output_map or {})
         prompt_catalog: list[dict[str, Any]] = []
-        for raw_item in (resource_entry.get("primitive_catalog") or []):
+        for raw_item in resource_entry.get("primitive_catalog") or []:
             if not isinstance(raw_item, dict):
                 continue
             primitive_name = str(raw_item.get("name") or "").strip()
@@ -2763,11 +2797,7 @@ class BridgeSessionMixin:
             if primitive_kind:
                 prompt_item["primitive_kind"] = primitive_kind
             output_schema = dict(raw_item.get("output_schema") or {})
-            output_fields = [
-                str(field).strip()
-                for field in output_schema
-                if str(field).strip()
-            ]
+            output_fields = [str(field).strip() for field in output_schema if str(field).strip()]
             if output_fields:
                 prompt_item["output_fields"] = output_fields
             hard_preconditions = deepcopy(raw_item.get("preconditions") or {})
@@ -2785,11 +2815,7 @@ class BridgeSessionMixin:
                     if str(item).strip()
                 ]
                 event_fact_any_of_param_sets = [
-                    [
-                        str(item).strip()
-                        for item in (param_set or [])
-                        if str(item).strip()
-                    ]
+                    [str(item).strip() for item in (param_set or []) if str(item).strip()]
                     for param_set in (event_fact_contract.get("any_of_param_sets") or [])
                     if isinstance(param_set, (list, tuple))
                 ]
@@ -2841,7 +2867,9 @@ class BridgeSessionMixin:
             observed_row = dict(observed_by_jid.get(resource_jid) or {})
             resource_type = str(
                 bridge_entry.get("resource_type")
-                or dict((bridge_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get("resource_type")
+                or dict((bridge_entry.get("bridge_snapshot") or {}).get("resource_core") or {}).get(
+                    "resource_type"
+                )
                 or "unknown"
             ).strip()
             prompt_resources.append(
@@ -2852,9 +2880,7 @@ class BridgeSessionMixin:
                         observed_row.get("role")
                         or ("focused" if resource_jid == focused_resource_jid else "supporting")
                     ),
-                    "allowed_primitives": self._build_prompt_allowed_primitives(
-                        bridge_entry
-                    ),
+                    "allowed_primitives": self._build_prompt_allowed_primitives(bridge_entry),
                 }
             )
         return {

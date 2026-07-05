@@ -223,9 +223,7 @@ class GazeboPickPlaceController:
         self.gripper_move_time_sec = need_float(
             gripper, "move_time_sec", "controller.gripper.move_time_sec"
         )
-        self.gripper_settle_sec = need_float(
-            gripper, "settle_sec", "controller.gripper.settle_sec"
-        )
+        self.gripper_settle_sec = need_float(gripper, "settle_sec", "controller.gripper.settle_sec")
         self.gripper_feedback_timeout_pad_sec = need_float(
             gripper,
             "feedback_timeout_pad_sec",
@@ -235,21 +233,15 @@ class GazeboPickPlaceController:
             gripper, "position_tolerance", "controller.gripper.position_tolerance"
         )
 
-        self.service_detect_all = need_str(
-            services, "detect_all", "controller.services.detect_all"
-        )
+        self.service_detect_all = need_str(services, "detect_all", "controller.services.detect_all")
         self.service_cartesian_path = need_str(
             services, "cartesian_path", "controller.services.cartesian_path"
         )
         self.service_execute_traj = need_str(
             services, "execute_trajectory", "controller.services.execute_trajectory"
         )
-        self.service_attach = need_str(
-            services, "attach", "controller.services.attach"
-        )
-        self.service_detach = need_str(
-            services, "detach", "controller.services.detach"
-        )
+        self.service_attach = need_str(services, "attach", "controller.services.attach")
+        self.service_detach = need_str(services, "detach", "controller.services.detach")
         self.service_set_entity_state = need_str(
             services, "set_entity_state", "controller.services.set_entity_state"
         )
@@ -419,9 +411,8 @@ class GazeboPickPlaceController:
 
         self._config_valid = not self._config_errors
         if not self._config_valid:
-            self._last_failure_message = (
-                "invalid controller_config; missing/invalid: "
-                + ", ".join(sorted(set(self._config_errors)))
+            self._last_failure_message = "invalid controller_config; missing/invalid: " + ", ".join(
+                sorted(set(self._config_errors))
             )
 
         self._initialized = False
@@ -513,8 +504,7 @@ class GazeboPickPlaceController:
         except Exception as exc:
             msg = str(exc)
             is_context_invalid = (
-                "context is not valid" in msg.lower()
-                or exc.__class__.__name__ == "RCLError"
+                "context is not valid" in msg.lower() or exc.__class__.__name__ == "RCLError"
             )
             if self._shutdown_requested and is_context_invalid:
                 self._log().debug(f"Executor stopped during shutdown: {msg}")
@@ -606,9 +596,7 @@ class GazeboPickPlaceController:
         )
 
         if self.gripper_topic and self.gripper_joint:
-            self._gripper_pub = self._node.create_publisher(
-                JointTrajectory, self.gripper_topic, 10
-            )
+            self._gripper_pub = self._node.create_publisher(JointTrajectory, self.gripper_topic, 10)
 
         if self.arm_trajectory_topic:
             self._arm_pub = self._node.create_publisher(
@@ -698,9 +686,7 @@ class GazeboPickPlaceController:
                 self._detect_all_client_legacy, self.service_detect_all, deadline
             ):
                 return False
-        if not self._wait_service(
-            self._cart_client, self.service_cartesian_path, deadline
-        ):
+        if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
             return False
         if not self._wait_action_server(self._exec_client, self.service_execute_traj, deadline):
             return False
@@ -722,9 +708,7 @@ class GazeboPickPlaceController:
             time.sleep(0.1)
         else:
             self._log().error(f"TF not ready for {self.frame_id} -> {self.ee_link}")
-            self._last_failure_message = (
-                f"tf not ready for {self.frame_id} -> {self.ee_link}"
-            )
+            self._last_failure_message = f"tf not ready for {self.frame_id} -> {self.ee_link}"
             return False
 
         # Best effort gripper feedback readiness. Keep the warmup short so
@@ -774,9 +758,8 @@ class GazeboPickPlaceController:
         target_x = float(x)
         target_y = float(y)
         target_z = float(z)
-        same_xy = (
-            math.isclose(float(ee.position.x), target_x, abs_tol=1e-6)
-            and math.isclose(float(ee.position.y), target_y, abs_tol=1e-6)
+        same_xy = math.isclose(float(ee.position.x), target_x, abs_tol=1e-6) and math.isclose(
+            float(ee.position.y), target_y, abs_tol=1e-6
         )
         if same_xy:
             return self._move_pose_direct(
@@ -895,9 +878,8 @@ class GazeboPickPlaceController:
         ee = self._get_ee_pose()
         if ee is None:
             return {"success": False, "message": "cannot read current ee pose"}
-        same_xy = (
-            math.isclose(float(ee.position.x), float(x), abs_tol=1e-6)
-            and math.isclose(float(ee.position.y), float(y), abs_tol=1e-6)
+        same_xy = math.isclose(float(ee.position.x), float(x), abs_tol=1e-6) and math.isclose(
+            float(ee.position.y), float(y), abs_tol=1e-6
         )
         if same_xy:
             return self._move_pose_direct(
@@ -955,7 +937,9 @@ class GazeboPickPlaceController:
             duration_sec=duration_sec,
         ):
             return {"success": True, "message": f"moved to named pose '{pose_name}'"}
-        if self._exec_client and self._move_joints_via_moveit(joint_values, duration_sec=duration_sec):
+        if self._exec_client and self._move_joints_via_moveit(
+            joint_values, duration_sec=duration_sec
+        ):
             return {"success": True, "message": f"moved to named pose '{pose_name}' via MoveIt"}
         return {"success": False, "message": f"failed to move to named pose '{pose_name}'"}
 
@@ -1087,8 +1071,7 @@ class GazeboPickPlaceController:
                     return {
                         "success": True,
                         "message": (
-                            f"verified detached {target_model or 'held part'} "
-                            "after gripper opened"
+                            f"verified detached {target_model or 'held part'} after gripper opened"
                         ),
                         "release_mode": "verified_open_after_detach_timeout",
                     }
@@ -1164,10 +1147,7 @@ class GazeboPickPlaceController:
         rollback_message = (
             "reopened gripper after failed attach"
             if rollback_ok
-            else (
-                self._last_failure_message
-                or "failed to reopen gripper after failed attach"
-            )
+            else (self._last_failure_message or "failed to reopen gripper after failed attach")
         )
         return {
             "success": False,
@@ -1312,10 +1292,7 @@ class GazeboPickPlaceController:
         rollback_message = (
             "reclosed gripper after failed detach"
             if rollback_ok
-            else (
-                self._last_failure_message
-                or "failed to reclose gripper after failed detach"
-            )
+            else (self._last_failure_message or "failed to reclose gripper after failed detach")
         )
         return {
             "success": False,
@@ -1407,8 +1384,7 @@ class GazeboPickPlaceController:
         return {
             "success": True,
             "message": (
-                f"released {display_name} after gripper opened "
-                "(detach verification unavailable)"
+                f"released {display_name} after gripper opened (detach verification unavailable)"
             ),
             "release_mode": "verification_unavailable_after_detach_timeout",
         }
@@ -1458,8 +1434,7 @@ class GazeboPickPlaceController:
         ):
             return True
         self._log().warn(
-            f"Arm joint trajectory command did not converge within {timeout_sec:.2f}s; "
-            "falling back"
+            f"Arm joint trajectory command did not converge within {timeout_sec:.2f}s; falling back"
         )
         return False
 
@@ -1642,7 +1617,11 @@ class GazeboPickPlaceController:
                 target = next((p for p in parts if p.get("part_name") == part_name), None)
                 if target is None:
                     detected_names = sorted(
-                        {str(p.get("part_name")) for p in parts if str(p.get("part_name") or "").strip()}
+                        {
+                            str(p.get("part_name"))
+                            for p in parts
+                            if str(p.get("part_name") or "").strip()
+                        }
                     )
                     return {
                         "success": False,
@@ -1669,10 +1648,7 @@ class GazeboPickPlaceController:
         target_height = _as_float(geo.get("part_height_m"), 0.08)
         pose_model_name = target_pose.get("model_name") if isinstance(target_pose, dict) else ""
         target_model = str(
-            geo.get("model_name")
-            or (target or {}).get("model_name")
-            or pose_model_name
-            or ""
+            geo.get("model_name") or (target or {}).get("model_name") or pose_model_name or ""
         )
 
         ee = self._get_ee_pose()
@@ -1829,7 +1805,9 @@ class GazeboPickPlaceController:
             grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
                 pick_ctx.get("tz"), 0.0
             )
-            tcp_offset_z = _as_float(pick_ctx.get("tcp_offset_z"), self._get_ee_tcp_world_z_offset())
+            tcp_offset_z = _as_float(
+                pick_ctx.get("tcp_offset_z"), self._get_ee_tcp_world_z_offset()
+            )
         else:
             # Recovery insert macros may only know the target geometry, not the earlier pick context.
             grasp_tcp_to_part_origin_z = max(
@@ -1841,7 +1819,9 @@ class GazeboPickPlaceController:
         target_point = str(target_reference.get("target_point") or "").strip()
         reference_z = target_origin_pose.get("z")
         place_part_origin_z_source = "slot_geometry"
-        origin_pose = pick_ctx.get("origin_pose") if isinstance(pick_ctx.get("origin_pose"), dict) else {}
+        origin_pose = (
+            pick_ctx.get("origin_pose") if isinstance(pick_ctx.get("origin_pose"), dict) else {}
+        )
         pick_origin_location = str(pick_ctx.get("origin_resource_location") or "").strip()
         requested_destination = str(destination_location or "").strip()
         use_measured_origin_pose = (
@@ -2093,7 +2073,9 @@ class GazeboPickPlaceController:
         return mapping.get(code, f"error_code={code}")
 
     def _move_joints_via_moveit(
-        self, positions: list[float], duration_sec: float = 4.0,
+        self,
+        positions: list[float],
+        duration_sec: float = 4.0,
     ) -> bool:
         """Move to joint positions using the MoveIt execute_trajectory action."""
         if len(positions) != len(self.arm_joint_names):
@@ -2210,7 +2192,9 @@ class GazeboPickPlaceController:
         req = self._SetEntityState.Request()
         req.state = state
         future = self._set_state_client.call_async(req)
-        response = self._wait_future(future, timeout_sec=5.0, label=f"set_entity_pose:{target_model}")
+        response = self._wait_future(
+            future, timeout_sec=5.0, label=f"set_entity_pose:{target_model}"
+        )
         if response and response.success:
             return {"success": True, "message": f"entity pose reset for {target_model}"}
         detail = getattr(response, "status_message", "") if response is not None else ""
@@ -2269,9 +2253,7 @@ class GazeboPickPlaceController:
             )
             return tcp_tf.transform.translation.z - ee_tf.transform.translation.z
         except Exception:
-            self._log().warn(
-                "Could not get world EE-to-TCP offset, using default -0.17m"
-            )
+            self._log().warn("Could not get world EE-to-TCP offset, using default -0.17m")
             return -0.17
 
     def _on_joint_state(self, msg):
@@ -2287,9 +2269,7 @@ class GazeboPickPlaceController:
 
             prefix = f"{self.robot_name}_"
             prefixed_name = (
-                joint_name
-                if str(joint_name).startswith(prefix)
-                else f"{prefix}{joint_name}"
+                joint_name if str(joint_name).startswith(prefix) else f"{prefix}{joint_name}"
             )
             prefixed = self._joint_positions.get(prefixed_name)
             if prefixed is not None:
@@ -2337,9 +2317,7 @@ class GazeboPickPlaceController:
         prefix = f"{self.robot_name}_"
         for joint_name in self.arm_joint_names:
             exact_name = str(joint_name)
-            prefixed_name = (
-                exact_name if exact_name.startswith(prefix) else f"{prefix}{exact_name}"
-            )
+            prefixed_name = exact_name if exact_name.startswith(prefix) else f"{prefix}{exact_name}"
             if exact_name in available_names:
                 resolved.append(exact_name)
             elif prefixed_name in available_names:
@@ -2685,9 +2663,8 @@ class GazeboPickPlaceController:
         if not joint_traj.points:
             return
         for point in joint_traj.points:
-            total_ns = (
-                int(point.time_from_start.sec) * 1_000_000_000
-                + int(point.time_from_start.nanosec)
+            total_ns = int(point.time_from_start.sec) * 1_000_000_000 + int(
+                point.time_from_start.nanosec
             )
             scaled_ns = max(1, int(total_ns * scale))
             point.time_from_start.sec = scaled_ns // 1_000_000_000
@@ -2715,9 +2692,7 @@ class GazeboPickPlaceController:
             req.link2_name = "link"
 
             future = self._attach_client.call_async(req)
-            response = self._wait_future(
-                future, timeout_sec=5.0, label=f"attach:{link_name}"
-            )
+            response = self._wait_future(future, timeout_sec=5.0, label=f"attach:{link_name}")
             if response is None:
                 continue
             if response and response.success:
@@ -2799,7 +2774,11 @@ class GazeboPickPlaceController:
                 link_name = str(link or "").strip()
                 if link_name and link_name not in links_to_try:
                     links_to_try.append(link_name)
-        if not prefer_attached_link and self._attached_link and self._attached_link not in links_to_try:
+        if (
+            not prefer_attached_link
+            and self._attached_link
+            and self._attached_link not in links_to_try
+        ):
             links_to_try.append(self._attached_link)
         max_link_attempts = (
             len(links_to_try)
@@ -2826,7 +2805,7 @@ class GazeboPickPlaceController:
                 self._attached_model = None
                 self._attached_link = None
                 return True
-            
+
             if response is None:
                 if log_failure:
                     suffix = "skipping remaining links" if break_on_timeout else "trying next link"
@@ -2989,9 +2968,7 @@ class GazeboPickPlaceController:
                     break
             if attempt_idx == 0:
                 time.sleep(self._scaled_wall_wait_sec(0.05))
-        self._log().error(
-            f"Failed to attach {target_model} to assembly_board_v1: {last_message}"
-        )
+        self._log().error(f"Failed to attach {target_model} to assembly_board_v1: {last_message}")
         return False
 
     def _detach_part_from_assembly_board(self, model_name: str, board_link: str) -> bool:
@@ -3053,9 +3030,7 @@ class GazeboPickPlaceController:
             )
             return False
         if response.fraction < 0.999 and not allow_partial:
-            self._last_failure_message = (
-                f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
-            )
+            self._last_failure_message = f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
             self._log().error(
                 f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
             )
@@ -3081,9 +3056,7 @@ class GazeboPickPlaceController:
         code = result.result.error_code.val if result else None
         if code != 1:
             err_msg = self._format_moveit_error(code)
-            self._last_failure_message = (
-                f"[{label}] execute_trajectory failed: {err_msg}"
-            )
+            self._last_failure_message = f"[{label}] execute_trajectory failed: {err_msg}"
             self._log().error(self._last_failure_message)
             return False
         self._last_failure_message = ""
@@ -3223,13 +3196,10 @@ class GazeboPickPlaceController:
 
         current = self._get_ee_pose()
         if current is None:
-            self._log().error(
-                f"[{label_prefix}] cannot read current EE pose for staged fallback"
-            )
+            self._log().error(f"[{label_prefix}] cannot read current EE pose for staged fallback")
             return False
-        if (
-            math.isclose(float(current.position.x), float(target_x), abs_tol=1e-6)
-            and math.isclose(float(current.position.y), float(target_y), abs_tol=1e-6)
+        if math.isclose(float(current.position.x), float(target_x), abs_tol=1e-6) and math.isclose(
+            float(current.position.y), float(target_y), abs_tol=1e-6
         ):
             self._log().warn(
                 f"[{label_prefix}] direct Cartesian move failed with no XY delta; "
@@ -3300,9 +3270,7 @@ class GazeboPickPlaceController:
             )
             for step_index, (step_x, step_y) in enumerate(step_targets, start=1):
                 step_suffix = (
-                    f", step {step_index}/{len(step_targets)}"
-                    if len(step_targets) > 1
-                    else ""
+                    f", step {step_index}/{len(step_targets)}" if len(step_targets) > 1 else ""
                 )
                 if not self._cartesian_move(
                     self._make_pose(step_x, step_y, z, orientation),

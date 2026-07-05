@@ -13,7 +13,10 @@ _PHASES = ["idle", "at_pick", "picked", "positioned", "placed"]
 
 # Friendly labels for ROS2 processes.
 _ROS2_LABELS = {
-    "gazebo_moveit": ("Gazebo + MoveIt", "Launches dual-robot Gazebo simulation with MoveIt motion planning and RViz"),
+    "gazebo_moveit": (
+        "Gazebo + MoveIt",
+        "Launches dual-robot Gazebo simulation with MoveIt motion planning and RViz",
+    ),
     "perception": ("Perception", "Part detection via Gazebo ground-truth camera"),
     "teleop_xarm6": ("Teleop xArm6", "Keyboard teleoperation for xArm6"),
     "teleop_ur5e": ("Teleop UR5e", "Keyboard teleoperation for UR5e"),
@@ -36,7 +39,9 @@ def render(bridge: SystemBridge) -> None:
 
             if not states:
                 with robot_container:
-                    ui.label("No robots available — start the system first").classes("text-slate-400 italic")
+                    ui.label("No robots available — start the system first").classes(
+                        "text-slate-400 italic"
+                    )
                 return
 
             with robot_container:
@@ -98,6 +103,7 @@ def _simulation_controls(bridge: SystemBridge) -> None:
                 # Utility buttons.
                 ui.separator()
                 with ui.row().classes("gap-4"):
+
                     def _stop_all():
                         bridge.ros2_stop_all()
                         ui.notify("All ROS2 processes stopped", type="info")
@@ -106,8 +112,12 @@ def _simulation_controls(bridge: SystemBridge) -> None:
                         bridge.ros2_kill_gazebo()
                         ui.notify("Killed orphan Gazebo processes", type="info")
 
-                    ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props("flat dense").classes("text-red-600")
-                    ui.button("Kill Orphan Gazebo", on_click=_kill_gazebo, icon="delete_sweep").props("flat dense").classes("text-orange-600")
+                    ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props(
+                        "flat dense"
+                    ).classes("text-red-600")
+                    ui.button(
+                        "Kill Orphan Gazebo", on_click=_kill_gazebo, icon="delete_sweep"
+                    ).props("flat dense").classes("text-orange-600")
 
         ui.timer(3.0, _refresh_procs)
 
@@ -139,7 +149,9 @@ def _robot_card(bridge: SystemBridge, name: str, state: dict) -> None:
             with ui.row().classes("gap-4 mt-2"):
                 for axis in ("x", "y", "z"):
                     val = pos.get(axis, 0)
-                    ui.label(f"{axis}: {val:.3f}" if isinstance(val, float) else f"{axis}: {val}").classes("text-xs font-mono text-slate-500")
+                    ui.label(
+                        f"{axis}: {val:.3f}" if isinstance(val, float) else f"{axis}: {val}"
+                    ).classes("text-xs font-mono text-slate-500")
 
         # Config editor (expandable).
         with ui.expansion("Configuration", icon="settings").classes("w-full mt-2"):
@@ -152,10 +164,14 @@ def _robot_card(bridge: SystemBridge, name: str, state: dict) -> None:
                 except Exception:
                     config_data = {}
 
-                editor = ui.textarea(
-                    value=json.dumps(config_data, indent=2),
-                    label=f"Config: {config_path.split('/')[-1]}",
-                ).classes("w-full font-mono text-xs").props("rows=15")
+                editor = (
+                    ui.textarea(
+                        value=json.dumps(config_data, indent=2),
+                        label=f"Config: {config_path.split('/')[-1]}",
+                    )
+                    .classes("w-full font-mono text-xs")
+                    .props("rows=15")
+                )
 
                 def _save(p=config_path, e=editor):
                     try:

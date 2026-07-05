@@ -28,10 +28,11 @@ from cais_spade_llm.agent_creator import ALLOWED_FUNCS
 from cais_spade_llm.function_analyzer import FunctionAnalyzer
 
 # Static filesystem locations for initialization payloads and generated tool catalogues.
-PRODUCT_DIR  = "cais_spade_llm/initialization/products/"
+PRODUCT_DIR = "cais_spade_llm/initialization/products/"
 RESOURCE_DIR = "cais_spade_llm/initialization/resources/"
-TOOLS_OUT    = "cais_spade_llm/initialization/tools.json"
-CCA_INIT     = "cais_spade_llm/initialization/cca.json"
+TOOLS_OUT = "cais_spade_llm/initialization/tools.json"
+CCA_INIT = "cais_spade_llm/initialization/cca.json"
+
 
 def _archive_dir(dir_path: Path, pattern: str, *, label: str) -> None:
     """Archive matching files under dir_path into dir_path/archive/<timestamp>/."""
@@ -47,16 +48,15 @@ def _archive_dir(dir_path: Path, pattern: str, *, label: str) -> None:
         try:
             shutil.move(str(p), str(run_archive / p.name))
         except Exception:
-            logging.getLogger("spade_main").exception(
-                "Failed to archive %s file: %s", label, p
-            )
+            logging.getLogger("spade_main").exception("Failed to archive %s file: %s", label, p)
+
 
 async def spade_main():
     """Orchestrate the entire SPADE session: load configs, spawn agents, register tools, and keep the loop alive."""
     # Archive previous monitor outputs at startup
     _archive_dir(Path("cais_spade_llm/monitor/history"), "*.jsonl", label="history")
-    _archive_dir(Path("cais_spade_llm/monitor/plan"),    "*.json",  label="plan")
-    _archive_dir(Path("cais_spade_llm/monitor/state"),   "*.json",  label="state")
+    _archive_dir(Path("cais_spade_llm/monitor/plan"), "*.json", label="plan")
+    _archive_dir(Path("cais_spade_llm/monitor/state"), "*.json", label="state")
     bridge_runtime_dir = Path(
         "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"
     )
@@ -65,13 +65,15 @@ async def spade_main():
 
     # Collect initialization payloads describing products and hardware resources.
     prod_files = utils.get_init_files(PRODUCT_DIR)
-    res_files  = utils.get_init_files(RESOURCE_DIR)
+    res_files = utils.get_init_files(RESOURCE_DIR)
 
     # Instantiate the user agent plus every resource/product agent defined in the JSON payloads.
-    user       = agent_creator.create_user()
-    resources  = agent_creator.create_resource_agents(res_files, CCA_INIT)
-    products   = agent_creator.create_product_agents(prod_files, resources, CCA_INIT)
-    cca        = agent_creator.create_central_controller(CCA_INIT, resources)  # <-- pass resources for capability overview
+    user = agent_creator.create_user()
+    resources = agent_creator.create_resource_agents(res_files, CCA_INIT)
+    products = agent_creator.create_product_agents(prod_files, resources, CCA_INIT)
+    cca = agent_creator.create_central_controller(
+        CCA_INIT, resources
+    )  # <-- pass resources for capability overview
 
     # Build the single tools catalogue consumed by the LLM so it knows which agent functions are callable.
     FunctionAnalyzer.build_tools_catalogue(
@@ -107,6 +109,7 @@ async def spade_main():
                 await a.stop()
             except:
                 pass
+
 
 if __name__ == "__main__":
     # Launch the SPADE runtime with an embedded XMPP server so the agents can communicate locally.

@@ -94,9 +94,8 @@ class SafetyLogic:
                 ap_map[label] = full
 
         normalized = re.sub(r"\s+", "", ltlf)
-        order_match = (
-            re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
-            or re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
+        order_match = re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized) or re.fullmatch(
+            r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized
         )
         response_match = re.fullmatch(r"G\((ap\d+)->F(ap\d+)\)", normalized)
 
@@ -143,7 +142,9 @@ class SafetyLogic:
             if not isinstance(rule, dict):
                 continue
             rid = str(rule.get("id", "")).strip() or "rule"
-            interp = str(rule.get("generated_interpretation", "")).strip() or cls._fallback_rule_interpretation(rule)
+            interp = str(
+                rule.get("generated_interpretation", "")
+            ).strip() or cls._fallback_rule_interpretation(rule)
             lines.append(f"- {rid}: {interp}")
         return "\n".join(lines) if lines else "No generated rule interpretation available."
 
@@ -286,7 +287,8 @@ class SafetyLogic:
 
     def _tool_rows(self) -> list[dict[str, Any]]:
         return [
-            row for row in (getattr(self.controller_agent, "tools_catalog", []) or [])
+            row
+            for row in (getattr(self.controller_agent, "tools_catalog", []) or [])
             if isinstance(row, dict)
         ]
 
@@ -359,9 +361,7 @@ class SafetyLogic:
     @staticmethod
     def _row_required_context_keys(row: dict[str, Any]) -> tuple[str, ...]:
         keys = [
-            str(key).strip()
-            for key in (row.get("required_context_keys") or [])
-            if str(key).strip()
+            str(key).strip() for key in (row.get("required_context_keys") or []) if str(key).strip()
         ]
         return tuple(SafetyLogic._dedupe_keep_order(keys))
 
@@ -417,12 +417,17 @@ class SafetyLogic:
                 self._normalize_resource_token(row.get("function_owner_agent"))
                 for row in self._tool_rows()
                 if self._normalize_resource_token(row.get("function_owner_agent"))
-                and self._normalize_resource_type_token(row.get("resource_type")) in allowed_resource_types
+                and self._normalize_resource_type_token(row.get("resource_type"))
+                in allowed_resource_types
             }
         else:
             typed_resources = set(allowed_resources)
         if concrete:
-            return [resource for resource in self._dedupe_keep_order(concrete) if resource in typed_resources]
+            return [
+                resource
+                for resource in self._dedupe_keep_order(concrete)
+                if resource in typed_resources
+            ]
         return sorted(typed_resources)
 
     @staticmethod
@@ -460,7 +465,9 @@ class SafetyLogic:
         ]
         return products[0] if len(products) == 1 else "any"
 
-    def _normalize_atom_context(self, rule: dict[str, Any], node: dict[str, Any]) -> dict[str, str] | None:
+    def _normalize_atom_context(
+        self, rule: dict[str, Any], node: dict[str, Any]
+    ) -> dict[str, str] | None:
         explicit = self._normalize_context_object(node.get("context"))
         if explicit:
             return explicit
@@ -579,17 +586,11 @@ class SafetyLogic:
         candidate_rows = base_rows
         if explicit_states:
             candidate_rows = [
-                row
-                for row in base_rows
-                if self._row_persistent_state_name(row) in explicit_states
+                row for row in base_rows if self._row_persistent_state_name(row) in explicit_states
             ]
             if not candidate_rows:
                 available_states = sorted(
-                    {
-                        state
-                        for row in base_rows
-                        if (state := self._row_persistent_state_name(row))
-                    }
+                    {state for row in base_rows if (state := self._row_persistent_state_name(row))}
                 )
                 raise RuntimeError(
                     f"selector for rule {rule.get('id')} requested states {sorted(explicit_states)} "
@@ -600,11 +601,7 @@ class SafetyLogic:
         selector_context = match_spec["context"]
         if selector_context:
             supported_keys = self._dedupe_keep_order(
-                [
-                    key
-                    for row in candidate_rows
-                    for key in self._row_required_context_keys(row)
-                ]
+                [key for row in candidate_rows for key in self._row_required_context_keys(row)]
             )
             selector_keys = list(selector_context.keys())
             unsupported_keys = [key for key in selector_keys if key not in supported_keys]
@@ -614,9 +611,7 @@ class SafetyLogic:
                     and len(unsupported_keys) == 1
                     and len(supported_keys) == 1
                 ):
-                    selector_context = {
-                        supported_keys[0]: selector_context[selector_keys[0]]
-                    }
+                    selector_context = {supported_keys[0]: selector_context[selector_keys[0]]}
                 else:
                     raise RuntimeError(
                         f"selector for rule {rule.get('id')} uses unresolved context keys {unsupported_keys}; "
@@ -811,9 +806,9 @@ class SafetyLogic:
             if explicit_states and out_state not in explicit_states:
                 continue
             if out_state not in state_process:
-                state_process[out_state] = str(
-                    row.get("process") or rule.get("process") or "any"
-                ).strip().lower() or "any"
+                state_process[out_state] = (
+                    str(row.get("process") or rule.get("process") or "any").strip().lower() or "any"
+                )
             persistent_states.append(out_state)
 
         persistent_state_set = set(persistent_states)
@@ -827,9 +822,9 @@ class SafetyLogic:
                     continue
                 if in_state in persistent_state_set:
                     continue
-                process_token = str(
-                    row.get("process") or rule.get("process") or "any"
-                ).strip().lower() or "any"
+                process_token = (
+                    str(row.get("process") or rule.get("process") or "any").strip().lower() or "any"
+                )
                 function_name = str(row.get("function", "")).strip()
                 if not function_name:
                     continue
@@ -852,7 +847,10 @@ class SafetyLogic:
                     "/".join(
                         [
                             "ap_state",
-                            state_process.get(state_name, str(rule.get("process") or "any").strip().lower() or "any"),
+                            state_process.get(
+                                state_name,
+                                str(rule.get("process") or "any").strip().lower() or "any",
+                            ),
                             product_token,
                             resource,
                             state_name,
@@ -863,15 +861,18 @@ class SafetyLogic:
 
         return self._dedupe_keep_order(expanded)
 
-    def _compile_ast_event_atom(self, rule: dict[str, Any], node: dict[str, Any]) -> tuple[str, list[str]]:
+    def _compile_ast_event_atom(
+        self, rule: dict[str, Any], node: dict[str, Any]
+    ) -> tuple[str, list[str]]:
         function_name = str(node.get("function", "")).strip()
         if not function_name:
             raise RuntimeError("ap_event_atom is missing function")
         resource = self._normalize_atom_resource(rule, node)
         tool_row = self._tool_row_for_action(resource, function_name)
-        process_token = str(
-            (tool_row or {}).get("process") or rule.get("process") or "any"
-        ).strip().lower() or "any"
+        process_token = (
+            str((tool_row or {}).get("process") or rule.get("process") or "any").strip().lower()
+            or "any"
+        )
         product_token = self._normalize_atom_product(rule, node)
         context_token = self._serialize_context_object(self._normalize_atom_context(rule, node))
         ap = "/".join(
@@ -886,12 +887,16 @@ class SafetyLogic:
         )
         return ap, [ap]
 
-    def _compile_ast_state_atom(self, rule: dict[str, Any], node: dict[str, Any]) -> tuple[str, list[str]]:
+    def _compile_ast_state_atom(
+        self, rule: dict[str, Any], node: dict[str, Any]
+    ) -> tuple[str, list[str]]:
         state_name = self._normalize_state_name(node.get("state"))
         if not state_name:
             raise RuntimeError("ap_state_atom is missing state")
         resource = self._normalize_atom_resource(rule, node)
-        process_token = self._normalize_process_token(node.get("process") or rule.get("process")) or "any"
+        process_token = (
+            self._normalize_process_token(node.get("process") or rule.get("process")) or "any"
+        )
         product_token = self._normalize_atom_product(rule, node)
         context_token = self._serialize_context_object(self._normalize_atom_context(rule, node))
         ap = "/".join(
@@ -1017,22 +1022,16 @@ class SafetyLogic:
         """
         try:
             if not self.safety_file.exists():
-                self.logger.warning(
-                    "[SafetyLogic] Safety file missing: %s", self.safety_file
-                )
+                self.logger.warning("[SafetyLogic] Safety file missing: %s", self.safety_file)
                 return None
 
             txt = self.safety_file.read_text(encoding="utf-8").strip()
             if not txt:
-                self.logger.warning(
-                    "[SafetyLogic] Safety file is empty: %s", self.safety_file
-                )
+                self.logger.warning("[SafetyLogic] Safety file is empty: %s", self.safety_file)
                 return None
 
             self.safety_text_sha256 = self.compute_safety_text_sha256(txt)
-            self.logger.info(
-                "[SafetyLogic] Loaded NL safety text from %s", self.safety_file
-            )
+            self.logger.info("[SafetyLogic] Loaded NL safety text from %s", self.safety_file)
             return txt
 
         except Exception as exc:
@@ -1087,9 +1086,7 @@ class SafetyLogic:
             )
         except Exception as exc:
             if self.logger:
-                self.logger.exception(
-                    "[SafetyLogic] LLM safety parsing failed: %s", exc
-                )
+                self.logger.exception("[SafetyLogic] LLM safety parsing failed: %s", exc)
             structured = []
 
         allowed_functions, function_process, allowed_resources, allowed_processes = (
@@ -1100,9 +1097,9 @@ class SafetyLogic:
         for idx, r in enumerate(structured, start=1):
             rule_id = r.get("id") or f"SAFE_{idx}"
 
-            raw_text        = r.get("raw_text", "")
+            raw_text = r.get("raw_text", "")
             constraint_type = r.get("constraint_type")
-            process_raw     = str(r.get("process", "") or "").strip().lower()
+            process_raw = str(r.get("process", "") or "").strip().lower()
 
             product_raw = r.get("product")
             products = []
@@ -1110,10 +1107,10 @@ class SafetyLogic:
                 # Filter out empty strings/nulls
                 products = [str(p).strip() for p in product_raw if p]
 
-            resources       = r.get("resources") or []
+            resources = r.get("resources") or []
             resource_types_raw = r.get("resource_types")
-            event_raw       = str(r.get("event", "") or "").strip()
-            context         = r.get("context")       # expected to be dict or None
+            event_raw = str(r.get("event", "") or "").strip()
+            context = r.get("context")  # expected to be dict or None
 
             event: str | None = event_raw if event_raw in allowed_functions else None
             if event_raw and event is None and self.logger:
@@ -1184,7 +1181,7 @@ class SafetyLogic:
                 "resources": resources,
                 "resource_types": resource_types,
                 "event": event,
-                "context": context,   # dict or None
+                "context": context,  # dict or None
             }
 
             self.rules.append(node)
@@ -1237,9 +1234,7 @@ class SafetyLogic:
             )
         except Exception as exc:
             if self.logger:
-                self.logger.exception(
-                    "[SafetyLogic] LLM safety logic generation failed: %s", exc
-                )
+                self.logger.exception("[SafetyLogic] LLM safety logic generation failed: %s", exc)
             self.logic_raw = {}
             raise RuntimeError(f"safety logic generation failed: {exc}") from exc
 
@@ -1315,7 +1310,9 @@ class SafetyLogic:
             interpretation = by_id.get(rid) or self._fallback_rule_interpretation(rule)
             rule["generated_interpretation"] = interpretation
 
-        self.preview_interpretation_summary = self._fallback_preview_interpretation_summary(self.rules)
+        self.preview_interpretation_summary = self._fallback_preview_interpretation_summary(
+            self.rules
+        )
 
         return {
             "preview_summary": self.preview_interpretation_summary,
@@ -1367,9 +1364,7 @@ class SafetyLogic:
 
         if isinstance(raw, dict):
             if self.logger:
-                self.logger.error(
-                    "[SafetyLogic] ask_llm returned dict, expected JSON string."
-                )
+                self.logger.error("[SafetyLogic] ask_llm returned dict, expected JSON string.")
             raise RuntimeError("ask_llm returned dict; expected JSON string.")
 
         try:
@@ -1402,15 +1397,15 @@ class SafetyLogic:
 
             cleaned.append(
                 {
-                    "id":              r.get("id") or f"SAFE_{idx}",
-                    "raw_text":        r.get("raw_text", ""),
+                    "id": r.get("id") or f"SAFE_{idx}",
+                    "raw_text": r.get("raw_text", ""),
                     "constraint_type": r.get("constraint_type"),
-                    "process":         r.get("process"),
-                    "product":         r.get("product"),
-                    "resources":       resources,
-                    "resource_types":  resource_types,
-                    "event":           r.get("event"),
-                    "context":         context,
+                    "process": r.get("process"),
+                    "product": r.get("product"),
+                    "resources": resources,
+                    "resource_types": resource_types,
+                    "event": r.get("event"),
+                    "context": context,
                 }
             )
 
@@ -1474,9 +1469,7 @@ class SafetyLogic:
         allowed_functions, function_process, allowed_resources, _ = self._tool_grounding()
         allowed_states = self._allowed_state_names()
         rules_by_id = {
-            str(r.get("id")): r
-            for r in self.rules
-            if isinstance(r, dict) and r.get("id")
+            str(r.get("id")): r for r in self.rules if isinstance(r, dict) and r.get("id")
         }
         unresolved: dict[str, list[str]] = {}
 
@@ -1554,7 +1547,10 @@ class SafetyLogic:
                 context_token = rule_context_token or str(ap_context).strip() or "any"
 
                 resource_token = self._normalize_resource_token(ap_resource)
-                if resource_token not in {"any", "robot"} and resource_token not in allowed_resources:
+                if (
+                    resource_token not in {"any", "robot"}
+                    and resource_token not in allowed_resources
+                ):
                     resource_token = fallback_resource
                 if resource_token == "robot":
                     resource_token = "any"
@@ -1601,11 +1597,7 @@ class SafetyLogic:
                                 state_token,
                             )
                         continue
-                    process_token = (
-                        str(ap_process).strip().lower()
-                        or rule_process
-                        or "any"
-                    )
+                    process_token = str(ap_process).strip().lower() or rule_process or "any"
                     normalized_ap = "/".join(
                         [
                             "ap_state",
@@ -1657,11 +1649,11 @@ class SafetyLogic:
             }
             result[str(rid)] = compiled
 
-        blocking = {rid: evs for rid, evs in unresolved.items() if not result.get(rid, {}).get("aps")}
+        blocking = {
+            rid: evs for rid, evs in unresolved.items() if not result.get(rid, {}).get("aps")
+        }
         if blocking:
-            detail = ", ".join(
-                f"{rid}={events}" for rid, events in sorted(blocking.items())
-            )
+            detail = ", ".join(f"{rid}={events}" for rid, events in sorted(blocking.items()))
             raise RuntimeError(
                 "Safety logic references unsupported events that cannot be grounded to catalog actions: "
                 f"{detail}. Supported functions: {sorted(allowed_functions)}"
@@ -1706,7 +1698,7 @@ class SafetyLogic:
 
         # If we didn't actually split, just return the whole thing
         return parts or [f]
-    
+
     def _split_rules_on_independent_conjuncts(self) -> None:
         """
         For each rule's raw LTLf (before AP labels), check if it is a
@@ -1935,7 +1927,7 @@ class SafetyLogic:
             aps = rule.get("aps", [])
             for ap in aps:
                 label = ap.get("label")
-                full  = ap.get("full")
+                full = ap.get("full")
                 if label and full:
                     global_ap_map[label] = full
 
@@ -1995,7 +1987,9 @@ class SafetyLogic:
                 if self.logger:
                     self.logger.exception(
                         "[SafetyLogic] Failed to build DFA for rule %s (formula '%s'): %s",
-                        rid, phi, exc,
+                        rid,
+                        phi,
+                        exc,
                     )
                 continue
 
@@ -2021,7 +2015,8 @@ class SafetyLogic:
             if self.logger:
                 self.logger.info(
                     "[SafetyLogic] DFA (DOT) for %s built and saved to %s",
-                    rid, dot_path,
+                    rid,
+                    dot_path,
                 )
 
             # Render PNG via Graphviz
@@ -2042,13 +2037,15 @@ class SafetyLogic:
                 if self.logger:
                     self.logger.info(
                         "[SafetyLogic] DFA graph for %s rendered to %s",
-                        rid, render_path,
+                        rid,
+                        render_path,
                     )
             except Exception as exc:
                 if self.logger:
                     self.logger.exception(
                         "[SafetyLogic] Graphviz rendering failed for %s: %s",
-                        rid, exc,
+                        rid,
+                        exc,
                     )
 
         return self.rule_dfas
@@ -2076,8 +2073,7 @@ class SafetyLogic:
         except Exception as exc:
             if self.logger:
                 self.logger.exception(
-                    "[SafetyLogic] Failed to build DFA from formula '%s': %s",
-                    formula_str, exc
+                    "[SafetyLogic] Failed to build DFA from formula '%s': %s", formula_str, exc
                 )
             return None
 
@@ -2115,9 +2111,7 @@ class SafetyLogic:
         try:
             src = Source(dfa_dot)
             render_path = src.render(
-                filename=str(out_dir / "cca_safety_dfa"),
-                format="png",
-                cleanup=True
+                filename=str(out_dir / "cca_safety_dfa"), format="png", cleanup=True
             )
             if self.logger:
                 self.logger.info("[SafetyLogic] DFA graph rendered to %s", render_path)
@@ -2127,8 +2121,6 @@ class SafetyLogic:
                 self.logger.exception("[SafetyLogic] Graphviz rendering failed: %s", exc)
 
         return dfa_dot
-    
-
 
     # ------------------------------------------------------------------ #
     # Persistence helpers
@@ -2162,9 +2154,7 @@ class SafetyLogic:
         p = Path(path) if path else self.structured_safety_path
         if not p.exists():
             if self.logger:
-                self.logger.warning(
-                    "[SafetyLogic] Safety file missing: %s", p
-                )
+                self.logger.warning("[SafetyLogic] Safety file missing: %s", p)
             return
 
         with p.open("r", encoding="utf-8") as f:

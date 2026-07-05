@@ -23,8 +23,14 @@ _GAZEBO_VARIANTS = {
 }
 
 _HARDWARE_STACKS = {
-    "xarm6": ("xArm6 Hardware Stack", "Start xArm6 MoveIt realmove stack (includes embedded driver)"),
-    "ur5e": ("UR5e Hardware Stack", "Auto sequence: start RTDE trajectory server, RG2 gripper bridge, and MoveIt"),
+    "xarm6": (
+        "xArm6 Hardware Stack",
+        "Start xArm6 MoveIt realmove stack (includes embedded driver)",
+    ),
+    "ur5e": (
+        "UR5e Hardware Stack",
+        "Auto sequence: start RTDE trajectory server, RG2 gripper bridge, and MoveIt",
+    ),
 }
 _HARDWARE_PROC_NAMES = (
     "hardware_xarm6_driver",
@@ -87,17 +93,25 @@ def _render_ur5e_rtde_and_rg2_status(status: dict) -> None:
             ui.label(f"{prefix}RTDE trajectory: {rtde_message}").classes("text-xs text-slate-500")
         rtde_blocked = str(source.get("rtde_trajectory_blocked_reason") or "").strip()
         if rtde_blocked:
-            ui.label(f"{prefix}RTDE trajectory blocked: {rtde_blocked}").classes("text-xs text-red-700")
+            ui.label(f"{prefix}RTDE trajectory blocked: {rtde_blocked}").classes(
+                "text-xs text-red-700"
+            )
         joint_states_fresh = source.get("joint_states_fresh")
         if joint_states_fresh is not None:
-            ui.label(f"{prefix}UR5e /joint_states fresh: {bool(joint_states_fresh)}").classes("text-xs text-slate-500")
+            ui.label(f"{prefix}UR5e /joint_states fresh: {bool(joint_states_fresh)}").classes(
+                "text-xs text-slate-500"
+            )
         max_velocity = source.get("rtde_trajectory_max_segment_velocity_rad_s")
         if max_velocity is not None:
             try:
                 value = float(max_velocity)
-                ui.label(f"{prefix}RTDE max segment velocity: {value:.3f} rad/s").classes("text-xs text-slate-500")
+                ui.label(f"{prefix}RTDE max segment velocity: {value:.3f} rad/s").classes(
+                    "text-xs text-slate-500"
+                )
             except (TypeError, ValueError):
-                ui.label(f"{prefix}RTDE max segment velocity: {max_velocity}").classes("text-xs text-slate-500")
+                ui.label(f"{prefix}RTDE max segment velocity: {max_velocity}").classes(
+                    "text-xs text-slate-500"
+                )
         time_scale = source.get("rtde_trajectory_time_scale_applied")
         if time_scale is not None:
             try:
@@ -111,7 +125,9 @@ def _render_ur5e_rtde_and_rg2_status(status: dict) -> None:
             ui.label(f"{prefix}RG2 bridge: {str(gripper_state)}").classes("text-xs text-slate-500")
         gripper_action = str(source.get("gripper_action") or "").strip()
         if gripper_action:
-            ui.label(f"{prefix}RG2 bridge: action {gripper_action}").classes("text-xs text-slate-500")
+            ui.label(f"{prefix}RG2 bridge: action {gripper_action}").classes(
+                "text-xs text-slate-500"
+            )
 
 
 def _install_control_key_scroll_blocker() -> None:
@@ -179,7 +195,9 @@ def _launch_section(bridge: SystemBridge) -> None:
             with ui.row().classes("items-center gap-2"):
                 ur5e_ping_icon = ui.icon("circle", color="grey").classes("text-xs")
                 ur5e_ping = ui.label("UR5e: checking...").classes("text-xs")
-            hw_warning = ui.label("").classes("text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded")
+            hw_warning = ui.label("").classes(
+                "text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded"
+            )
             hw_warning.set_visibility(False)
 
             def _format_ping(name: str, entry: dict) -> str:
@@ -200,8 +218,12 @@ def _launch_section(bridge: SystemBridge) -> None:
                 return "red"
 
             with ui.row().classes("items-end gap-3 flex-wrap"):
-                xarm_ip_input = ui.input("xArm6 IP", value=ips.get("xarm6", "")).props("dense").classes("w-44")
-                ur5e_ip_input = ui.input("UR5e IP", value=ips.get("ur5e", "")).props("dense").classes("w-44")
+                xarm_ip_input = (
+                    ui.input("xArm6 IP", value=ips.get("xarm6", "")).props("dense").classes("w-44")
+                )
+                ur5e_ip_input = (
+                    ui.input("UR5e IP", value=ips.get("ur5e", "")).props("dense").classes("w-44")
+                )
 
                 def _refresh_ping_labels() -> None:
                     if not _client_alive(xarm_ping):
@@ -213,11 +235,15 @@ def _launch_section(bridge: SystemBridge) -> None:
                     ur5e_ping.set_text(_format_ping("UR5e", ur5e_entry))
                     xarm_ping_icon.props(f"color={_ping_color(xarm_entry)}")
                     ur5e_ping_icon.props(f"color={_ping_color(ur5e_entry)}")
-                    all_ok = all(hw_links.get(r, {}).get("reachable", False) for r in ("xarm6", "ur5e"))
+                    all_ok = all(
+                        hw_links.get(r, {}).get("reachable", False) for r in ("xarm6", "ur5e")
+                    )
                     if all_ok:
                         hw_warning.set_visibility(False)
                     else:
-                        hw_warning.set_text("One or more hardware robots are unreachable. Check power/network before launch.")
+                        hw_warning.set_text(
+                            "One or more hardware robots are unreachable. Check power/network before launch."
+                        )
                         hw_warning.set_visibility(True)
 
                 async def _refresh_ping_async(force: bool = False) -> None:
@@ -250,7 +276,9 @@ def _launch_section(bridge: SystemBridge) -> None:
                     ui.notify("Hardware IPs updated", type="positive", timeout=1200)
                     asyncio.create_task(_refresh_ping_async(force=True))
 
-                ui.button("Apply Hardware IPs", on_click=_apply_hw_ips, icon="save").props("outline dense")
+                ui.button("Apply Hardware IPs", on_click=_apply_hw_ips, icon="save").props(
+                    "outline dense"
+                )
 
             _refresh_ping_labels()
 
@@ -284,7 +312,9 @@ def _launch_section(bridge: SystemBridge) -> None:
             launch_container.clear()
             asyncio.create_task(_refresh_ping_async())
             any_gazebo_running = any(statuses.get(name) == "running" for name in _GAZEBO_VARIANTS)
-            any_hardware_running = any(statuses.get(name) == "running" for name in _HARDWARE_PROC_NAMES)
+            any_hardware_running = any(
+                statuses.get(name) == "running" for name in _HARDWARE_PROC_NAMES
+            )
 
             with launch_container:
                 # Gazebo variants.
@@ -293,7 +323,14 @@ def _launch_section(bridge: SystemBridge) -> None:
                     blocked_reason = None
                     if any_hardware_running and statuses.get(name, "stopped") != "running":
                         blocked_reason = "Blocked: hardware stack is running. Stop hardware first."
-                    _proc_row(bridge, name, label, desc, statuses.get(name, "stopped"), blocked_reason=blocked_reason)
+                    _proc_row(
+                        bridge,
+                        name,
+                        label,
+                        desc,
+                        statuses.get(name, "stopped"),
+                        blocked_reason=blocked_reason,
+                    )
 
                 ui.separator().classes("my-2")
 
@@ -303,7 +340,9 @@ def _launch_section(bridge: SystemBridge) -> None:
                     stack_status = bridge.hardware_stack_status(robot)
                     if any_gazebo_running and stack_status.get("overall") != "running":
                         blocked_reason = "Blocked: Gazebo is running. Stop Gazebo first."
-                    _hardware_stack_row(bridge, robot, label, desc, stack_status, blocked_reason=blocked_reason)
+                    _hardware_stack_row(
+                        bridge, robot, label, desc, stack_status, blocked_reason=blocked_reason
+                    )
 
                 ui.separator().classes("my-2")
 
@@ -316,6 +355,7 @@ def _launch_section(bridge: SystemBridge) -> None:
 
                 # Utility buttons.
                 with ui.row().classes("gap-4"):
+
                     async def _stop_all_async():
                         await asyncio.to_thread(bridge.ros2_stop_all)
                         ui.notify("Stopped all tracked processes", type="info")
@@ -334,15 +374,24 @@ def _launch_section(bridge: SystemBridge) -> None:
 
                     async def _cleanup_async():
                         await asyncio.to_thread(bridge.ros2_cleanup_processes)
-                        ui.notify("Cleanup complete: removed stale ROS2/MoveIt/driver processes", type="info")
+                        ui.notify(
+                            "Cleanup complete: removed stale ROS2/MoveIt/driver processes",
+                            type="info",
+                        )
                         _refresh(force=True)
 
                     def _cleanup():
                         asyncio.create_task(_cleanup_async())
 
-                    ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props("flat dense").classes("text-red-600")
-                    ui.button("Reset Gazebo Scene", on_click=_reset_gazebo, icon="restart_alt").props("flat dense").classes("text-blue-700")
-                    ui.button("Cleanup", on_click=_cleanup, icon="cleaning_services").props("flat dense").classes("text-amber-700")
+                    ui.button("Stop All", on_click=_stop_all, icon="stop_circle").props(
+                        "flat dense"
+                    ).classes("text-red-600")
+                    ui.button(
+                        "Reset Gazebo Scene", on_click=_reset_gazebo, icon="restart_alt"
+                    ).props("flat dense").classes("text-blue-700")
+                    ui.button("Cleanup", on_click=_cleanup, icon="cleaning_services").props(
+                        "flat dense"
+                    ).classes("text-amber-700")
 
         _refresh(force=True)
         ui.timer(3.0, _refresh)
@@ -525,7 +574,9 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
             container.clear()
             with container:
                 active_target = _digital_twin_active_target(rows)
-                with ui.row().classes("w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"):
+                with ui.row().classes(
+                    "w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"
+                ):
                     ui.label("target").classes("w-44")
                     ui.label("gazebo").classes("w-48")
                     ui.label("moviet").classes("w-36")
@@ -573,7 +624,9 @@ def _digital_twin_active_target(rows: dict[str, dict]) -> str:
     return ""
 
 
-def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_callback, *, active_target: str = "") -> None:
+def _digital_twin_row(
+    bridge: SystemBridge, target: str, row: dict, refresh_callback, *, active_target: str = ""
+) -> None:
     gazebo = dict(row.get("gazebo") or {})
     moviet = dict(row.get("moviet") or {})
     hardware = dict(row.get("hardware") or {})
@@ -595,7 +648,9 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
     is_running = _digital_twin_row_is_running(row)
     other_target_running = bool(active_target and active_target != target)
 
-    with ui.row().classes("w-full items-stretch gap-3 border-b border-slate-100 px-2 py-3 flex-wrap"):
+    with ui.row().classes(
+        "w-full items-stretch gap-3 border-b border-slate-100 px-2 py-3 flex-wrap"
+    ):
         with ui.column().classes("w-44 gap-2"):
             ui.label(target).classes("font-semibold text-sm")
             ui.label("digital twin").classes("text-xs text-slate-400")
@@ -639,7 +694,12 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                 asyncio.create_task(_stop_twin_async())
 
             retry_sync = is_running and sync_process_status != "running"
-            start_disabled = (not supported) or other_target_running or (is_running and not retry_sync) or bool(blocked_reason)
+            start_disabled = (
+                (not supported)
+                or other_target_running
+                or (is_running and not retry_sync)
+                or bool(blocked_reason)
+            )
             stop_disabled = (not supported) or not is_running or other_target_running
             with ui.row().classes("gap-1"):
                 ui.button("Start Twin", on_click=_start_twin, icon="play_arrow").props(
@@ -650,18 +710,23 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                 ).classes("text-red-600")
 
             if supported and len(sim_modes) > 1:
+
                 def _handle_sim_mode_change(e) -> None:
                     err = bridge.digital_twin_set_sim_mode(target, str(e.value or ""))
                     if err:
                         ui.notify(err, type="warning", timeout=3500)
                     refresh_callback(force=True)
 
-                sim_mode_select = ui.select(
-                    {m: _DT_MODE_LABELS.get(m, m) for m in sim_modes},
-                    value=sim_mode,
-                    label="mode",
-                    on_change=_handle_sim_mode_change,
-                ).props("dense").classes("w-40")
+                sim_mode_select = (
+                    ui.select(
+                        {m: _DT_MODE_LABELS.get(m, m) for m in sim_modes},
+                        value=sim_mode,
+                        label="mode",
+                        on_change=_handle_sim_mode_change,
+                    )
+                    .props("dense")
+                    .classes("w-40")
+                )
                 if is_running:
                     sim_mode_select.props("disable")
                 ui.label(
@@ -700,7 +765,9 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
                     )
                     ui.label(domain_text).classes("text-xs text-slate-500")
                 else:
-                    ui.label(f"ROS_DOMAIN_ID={domains.get('hardware', '')}").classes("text-xs text-slate-500")
+                    ui.label(f"ROS_DOMAIN_ID={domains.get('hardware', '')}").classes(
+                        "text-xs text-slate-500"
+                    )
                 rg2 = dict(hardware.get("rg2") or {})
                 if rg2:
                     state = str(rg2.get("state") or "unknown")
@@ -728,7 +795,9 @@ def _digital_twin_row(bridge: SystemBridge, target: str, row: dict, refresh_call
             if marker_message:
                 ui.label(f"dual_drag_markers: {marker_message}").classes("text-xs text-slate-500")
             if marker_last_error:
-                ui.label(f"dual_drag_markers last_error: {marker_last_error}").classes("text-xs text-red-700")
+                ui.label(f"dual_drag_markers last_error: {marker_last_error}").classes(
+                    "text-xs text-red-700"
+                )
 
             status_bits = []
             status_age_ms = sync.get("status_age_ms")
@@ -754,16 +823,24 @@ def _function_record_panel(bridge: SystemBridge) -> None:
     if not targets:
         return
     active_target = _digital_twin_active_target(rows)
-    initial_target = active_target if active_target in targets else ("dual robots" if "dual robots" in targets else targets[0])
+    initial_target = (
+        active_target
+        if active_target in targets
+        else ("dual robots" if "dual robots" in targets else targets[0])
+    )
 
     with ui.card().classes("w-full"):
         ui.label("Function Record / Replay").classes("text-lg font-semibold mb-1")
         with ui.row().classes("items-center gap-2 w-full"):
-            target_select = ui.select(
-                targets,
-                label="target",
-                value=initial_target,
-            ).props("dense").classes("w-44")
+            target_select = (
+                ui.select(
+                    targets,
+                    label="target",
+                    value=initial_target,
+                )
+                .props("dense")
+                .classes("w-44")
+            )
             if active_target:
                 target_select.disable()
 
@@ -785,9 +862,7 @@ def _function_record_panel(bridge: SystemBridge) -> None:
                 return
             current_rows = bridge.digital_twin_statuses()
             current_targets = [
-                target
-                for target, row in current_rows.items()
-                if bool(row.get("supported", False))
+                target for target, row in current_rows.items() if bool(row.get("supported", False))
             ]
             if not current_targets:
                 return
@@ -863,7 +938,9 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
 
     robot_value = robots[0] if robots else ""
     with ui.row().classes("items-center gap-2 w-full"):
-        robot_select = ui.select(robots, label="robot", value=robot_value).props("dense").classes("w-32")
+        robot_select = (
+            ui.select(robots, label="robot", value=robot_value).props("dense").classes("w-32")
+        )
         saved_function_select = ui.select([], label="saved function").props("dense").classes("w-52")
         function_input = ui.input(label="function name", value="").props("dense").classes("w-52")
 
@@ -872,11 +949,15 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
 
     with ui.row().classes("items-center gap-2 w-full"):
         step_name_input = ui.input(label="step name", value="step_1").props("dense").classes("w-44")
-        step_type_select = ui.select(
-            step_types,
-            label="step type",
-            value="move_cartesian",
-        ).props("dense").classes("w-48")
+        step_type_select = (
+            ui.select(
+                step_types,
+                label="step type",
+                value="move_cartesian",
+            )
+            .props("dense")
+            .classes("w-48")
+        )
 
     count_label = ui.label("").classes("text-xs font-semibold")
     saved_count_label = ui.label("").classes("text-xs font-semibold")
@@ -950,8 +1031,7 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
                 return 0
             for step in steps:
                 positions = ", ".join(
-                    f"{float(value):.2f}"
-                    for value in list(step.get("joint_positions") or [])
+                    f"{float(value):.2f}" for value in list(step.get("joint_positions") or [])
                 )
                 suffix = f" [{positions}]" if positions else ""
                 source = str(step.get("source") or "").strip()
@@ -1005,7 +1085,11 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
         options = bridge.digital_twin_saved_function_names(target, _current_robot())
         saved_function_select.options = options
         if saved_function_select.value not in options:
-            saved_function_select.value = _current_function() if _current_function() in options else (options[0] if options else None)
+            saved_function_select.value = (
+                _current_function()
+                if _current_function() in options
+                else (options[0] if options else None)
+            )
         if not _current_function() and saved_function_select.value:
             function_input.value = str(saved_function_select.value)
             function_input.update()
@@ -1228,11 +1312,17 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
 
     with ui.row().classes("items-center gap-2 mt-1"):
         ui.button("New Function", on_click=_new_function, icon="add").props("flat dense")
-        ui.button("Capture Step", on_click=_capture_current_step, icon="fiber_manual_record").props("flat dense")
-        ui.button("Clear Unsaved Steps", on_click=_clear_steps, icon="delete").props("flat dense").classes("text-red-600")
+        ui.button("Capture Step", on_click=_capture_current_step, icon="fiber_manual_record").props(
+            "flat dense"
+        )
+        ui.button("Clear Unsaved Steps", on_click=_clear_steps, icon="delete").props(
+            "flat dense"
+        ).classes("text-red-600")
     with ui.row().classes("items-center gap-2"):
         ui.button("Save Function", on_click=_save_function, icon="save").props("flat dense")
-        ui.button("Delete Function", on_click=_delete_function, icon="delete_forever").props("flat dense").classes("text-red-600")
+        ui.button("Delete Function", on_click=_delete_function, icon="delete_forever").props(
+            "flat dense"
+        ).classes("text-red-600")
 
     ui.separator().classes("my-2")
     ui.label("Single Robot Replay").classes("text-xs font-semibold")
@@ -1243,15 +1333,23 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
         ).classes("text-xs text-slate-500")
     with ui.row().classes("items-center gap-2"):
         saved_step_select = ui.select([], label="saved step").props("dense").classes("w-56")
-        single_repeat_input = ui.number(
-            label="repeat count",
-            value=1,
-            min=1,
-            max=999,
-            precision=0,
-        ).props("dense").classes("w-32")
-        ui.button("Preview in Gazebo", on_click=_preview_gazebo, icon="visibility").props("flat dense")
-        ui.button("Replay Selected Step", on_click=_replay_step_twin, icon="play_arrow").props("flat dense")
+        single_repeat_input = (
+            ui.number(
+                label="repeat count",
+                value=1,
+                min=1,
+                max=999,
+                precision=0,
+            )
+            .props("dense")
+            .classes("w-32")
+        )
+        ui.button("Preview in Gazebo", on_click=_preview_gazebo, icon="visibility").props(
+            "flat dense"
+        )
+        ui.button("Replay Selected Step", on_click=_replay_step_twin, icon="play_arrow").props(
+            "flat dense"
+        )
 
         with ui.dialog() as replay_confirm, ui.card().classes("gap-3"):
             ui.label("Replay Function in Twin?").classes("font-semibold")
@@ -1267,7 +1365,9 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
                         repeat_count=_repeat_count(single_repeat_input),
                     )
 
-                ui.button("Replay Function", on_click=_replay_twin_confirmed, icon="send").props("color=red")
+                ui.button("Replay Function", on_click=_replay_twin_confirmed, icon="send").props(
+                    "color=red"
+                )
 
         ui.button(
             "Replay Function",
@@ -1291,10 +1391,18 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
             step_select.update()
 
         with ui.row().classes("items-center gap-2 w-full"):
-            xarm_saved_select = ui.select(_dual_saved_options("xarm6"), label="xarm6 function").props("dense").classes("w-52")
+            xarm_saved_select = (
+                ui.select(_dual_saved_options("xarm6"), label="xarm6 function")
+                .props("dense")
+                .classes("w-52")
+            )
             xarm_step_select = ui.select([], label="xarm6 step").props("dense").classes("w-56")
         with ui.row().classes("items-center gap-2 w-full"):
-            ur5e_saved_select = ui.select(_dual_saved_options("ur5e"), label="ur5e function").props("dense").classes("w-52")
+            ur5e_saved_select = (
+                ui.select(_dual_saved_options("ur5e"), label="ur5e function")
+                .props("dense")
+                .classes("w-52")
+            )
             ur5e_step_select = ui.select([], label="ur5e step").props("dense").classes("w-56")
 
         def _refresh_dual_all() -> None:
@@ -1341,7 +1449,9 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
             xarm_step = _selected_step_index(xarm_step_select.value)
             ur5e_step = _selected_step_index(ur5e_step_select.value)
             if xarm_step is None or ur5e_step is None:
-                _notify("Select one saved step for xarm6 and one saved step for ur5e.", type="warning")
+                _notify(
+                    "Select one saved step for xarm6 and one saved step for ur5e.", type="warning"
+                )
                 return
             result = await asyncio.to_thread(
                 bridge.digital_twin_replay_dual_step,
@@ -1367,15 +1477,23 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
             await _replay_dual_step("twin")
 
         with ui.row().classes("items-center gap-2"):
-            ui.button("Preview Dual in Gazebo", on_click=_preview_dual_gazebo, icon="visibility").props("flat dense")
-            ui.button("Replay Dual Selected Step", on_click=_replay_dual_step_twin, icon="play_arrow").props("flat dense")
-            dual_repeat_input = ui.number(
-                label="repeat count",
-                value=1,
-                min=1,
-                max=999,
-                precision=0,
-            ).props("dense").classes("w-32")
+            ui.button(
+                "Preview Dual in Gazebo", on_click=_preview_dual_gazebo, icon="visibility"
+            ).props("flat dense")
+            ui.button(
+                "Replay Dual Selected Step", on_click=_replay_dual_step_twin, icon="play_arrow"
+            ).props("flat dense")
+            dual_repeat_input = (
+                ui.number(
+                    label="repeat count",
+                    value=1,
+                    min=1,
+                    max=999,
+                    precision=0,
+                )
+                .props("dense")
+                .classes("w-32")
+            )
 
             with ui.dialog() as dual_replay_confirm, ui.card().classes("gap-3"):
                 ui.label("Replay Dual Function in Twin?").classes("font-semibold")
@@ -1391,7 +1509,9 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
                             repeat_count=_repeat_count(dual_repeat_input),
                         )
 
-                    ui.button("Replay Dual Function", on_click=_dual_replay_twin_confirmed, icon="send").props("color=red")
+                    ui.button(
+                        "Replay Dual Function", on_click=_dual_replay_twin_confirmed, icon="send"
+                    ).props("color=red")
 
             ui.button(
                 "Replay Dual Function",
@@ -1403,15 +1523,20 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
 
     robot_select.on_value_change(lambda _e: _refresh_all())
     saved_function_select.on_value_change(_saved_function_changed)
-    function_input.on_value_change(lambda _e: (_refresh_info(), _refresh_steps(), _refresh_saved_steps()))
+    function_input.on_value_change(
+        lambda _e: (_refresh_info(), _refresh_steps(), _refresh_saved_steps())
+    )
     _refresh_all()
-
 
 
 # =====================================================================
 # Teleop Section
 # =====================================================================
-_AXIS_KEYS = {"x": ("ArrowRight", "ArrowLeft"), "y": ("ArrowUp", "ArrowDown"), "z": ("PageUp", "PageDown")}
+_AXIS_KEYS = {
+    "x": ("ArrowRight", "ArrowLeft"),
+    "y": ("ArrowUp", "ArrowDown"),
+    "z": ("PageUp", "PageDown"),
+}
 _TELEOP_PROFILE_MULTIPLIER = {
     "precision": 0.35,
     "fast": 1.0,
@@ -1444,10 +1569,10 @@ def _teleop_section(bridge: SystemBridge) -> None:
             ui.label("Robot:").classes("font-semibold text-sm")
             robot_select = ui.toggle(["xarm6", "ur5e"], value="xarm6").classes("text-sm")
 
-        mode_state = {"mode": "cartesian"}   # cartesian | gripper | joint
-        axis_state = {"axis": "y"}           # x | y | z
-        joint_state = {"idx": 1}             # 1..6
-        profile_state = {"mode": "fast"}     # precision | fast
+        mode_state = {"mode": "cartesian"}  # cartesian | gripper | joint
+        axis_state = {"axis": "y"}  # x | y | z
+        joint_state = {"idx": 1}  # 1..6
+        profile_state = {"mode": "fast"}  # precision | fast
         velocity_state = {
             "xarm6": {"arm_vel": 1.0, "gripper_vel": 1.0},
             "ur5e": {"arm_vel": 1.0, "gripper_vel": 1.0},
@@ -1610,14 +1735,14 @@ def _teleop_section(bridge: SystemBridge) -> None:
             note_label = profile_note["label"]
             if note_label is not None:
                 note_label.set_text(
-                    f'{profile_state["mode"].title()} mode applies velocity x{multiplier:.2f} '
+                    f"{profile_state['mode'].title()} mode applies velocity x{multiplier:.2f} "
                     "and profile step presets."
                 )
             for robot_name, label in effective_labels.items():
                 arm = _effective_velocity(robot_name, "arm_vel", 1.0)
                 grip = _effective_velocity(robot_name, "gripper_vel", 1.0)
                 label.set_text(
-                    f'Applied velocity: arm {arm:.2f}, gripper {grip:.2f} (x{multiplier:.2f})'
+                    f"Applied velocity: arm {arm:.2f}, gripper {grip:.2f} (x{multiplier:.2f})"
                 )
 
         with ui.row().classes("items-center gap-3 mb-2"):
@@ -1632,7 +1757,9 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 _apply_profile_steps(mode)
                 _refresh_effective_labels()
                 if changed:
-                    ui.notify(f"{mode.title()} mode", type="info", position="bottom-right", timeout=900)
+                    ui.notify(
+                        f"{mode.title()} mode", type="info", position="bottom-right", timeout=900
+                    )
 
             profile_toggle = ui.toggle(
                 ["Precision", "Fast"],
@@ -1641,61 +1768,138 @@ def _teleop_section(bridge: SystemBridge) -> None:
             ).props("dense")
             profile_note["label"] = ui.label("").classes("text-xs text-slate-500")
 
-        with ui.element("div").classes("w-full columns-1 lg:columns-2 xl:columns-3").style("column-gap: 1.5rem;"):
+        with (
+            ui.element("div")
+            .classes("w-full columns-1 lg:columns-2 xl:columns-3")
+            .style("column-gap: 1.5rem;")
+        ):
             # ── Cartesian Jog Pad ────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
                 ui.label("Cartesian Jog").classes("font-semibold text-sm mb-2")
-                step_input = ui.number("Step (mm)", value=10.0, min=0.1, max=100.0, step=0.1).classes("w-32 mb-3")
+                step_input = ui.number(
+                    "Step (mm)", value=10.0, min=0.1, max=100.0, step=0.1
+                ).classes("w-32 mb-3")
                 step_inputs["cartesian"] = step_input
-                ui.label("Switching Precision/Fast also updates this step value.").classes("text-xs text-slate-500 mb-2")
+                ui.label("Switching Precision/Fast also updates this step value.").classes(
+                    "text-xs text-slate-500 mb-2"
+                )
 
                 # X/Y pad (top-down view).
                 ui.label("X / Y Axes").classes("text-xs text-slate-500 mb-1")
                 with ui.column().classes("items-center gap-1"):
-                    _jog_btn(bridge, robot_select, step_input, _effective_velocity, "Y+", "y", 1, "arrow_upward")
+                    _jog_btn(
+                        bridge,
+                        robot_select,
+                        step_input,
+                        _effective_velocity,
+                        "Y+",
+                        "y",
+                        1,
+                        "arrow_upward",
+                    )
                     with ui.row().classes("gap-1"):
-                        _jog_btn(bridge, robot_select, step_input, _effective_velocity, "X-", "x", -1, "arrow_back")
-                        ui.button(icon="radio_button_unchecked").props("flat dense disable").classes("w-12 h-12")
-                        _jog_btn(bridge, robot_select, step_input, _effective_velocity, "X+", "x", 1, "arrow_forward")
-                    _jog_btn(bridge, robot_select, step_input, _effective_velocity, "Y-", "y", -1, "arrow_downward")
+                        _jog_btn(
+                            bridge,
+                            robot_select,
+                            step_input,
+                            _effective_velocity,
+                            "X-",
+                            "x",
+                            -1,
+                            "arrow_back",
+                        )
+                        ui.button(icon="radio_button_unchecked").props(
+                            "flat dense disable"
+                        ).classes("w-12 h-12")
+                        _jog_btn(
+                            bridge,
+                            robot_select,
+                            step_input,
+                            _effective_velocity,
+                            "X+",
+                            "x",
+                            1,
+                            "arrow_forward",
+                        )
+                    _jog_btn(
+                        bridge,
+                        robot_select,
+                        step_input,
+                        _effective_velocity,
+                        "Y-",
+                        "y",
+                        -1,
+                        "arrow_downward",
+                    )
 
                 # Z axis.
                 ui.label("Z Axis").classes("text-xs text-slate-500 mt-3 mb-1")
                 with ui.row().classes("gap-2 justify-center"):
-                    _jog_btn(bridge, robot_select, step_input, _effective_velocity, "Z+", "z", 1, "expand_less")
-                    _jog_btn(bridge, robot_select, step_input, _effective_velocity, "Z-", "z", -1, "expand_more")
+                    _jog_btn(
+                        bridge,
+                        robot_select,
+                        step_input,
+                        _effective_velocity,
+                        "Z+",
+                        "z",
+                        1,
+                        "expand_less",
+                    )
+                    _jog_btn(
+                        bridge,
+                        robot_select,
+                        step_input,
+                        _effective_velocity,
+                        "Z-",
+                        "z",
+                        -1,
+                        "expand_more",
+                    )
 
             # ── Joint Jog ────────────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
                 ui.label("Joint Jog").classes("font-semibold text-sm mb-2")
-                joint_step_input = ui.number("Step (deg)", value=2.0, min=0.05, max=30.0, step=0.05).classes("w-32 mb-2")
+                joint_step_input = ui.number(
+                    "Step (deg)", value=2.0, min=0.05, max=30.0, step=0.05
+                ).classes("w-32 mb-2")
                 step_inputs["joint"] = joint_step_input
                 _apply_profile_steps(profile_state["mode"])
-                selected_joint_label = ui.label("Selected: J1").classes("text-xs text-slate-500 mb-2")
+                selected_joint_label = ui.label("Selected: J1").classes(
+                    "text-xs text-slate-500 mb-2"
+                )
 
                 def _select_joint(idx: int):
                     joint_state["idx"] = idx
                     mode_state["mode"] = "joint"
                     selected_joint_label.set_text(f"Selected: J{idx}")
-                    ui.notify(f"Joint mode: J{idx}", type="info", position="bottom-right", timeout=900)
+                    ui.notify(
+                        f"Joint mode: J{idx}", type="info", position="bottom-right", timeout=900
+                    )
 
                 with ui.row().classes("gap-1 mb-2"):
                     for idx in range(1, 7):
-                        ui.button(str(idx), on_click=lambda _=None, j=idx: _select_joint(j)).props("outline dense")
+                        ui.button(str(idx), on_click=lambda _=None, j=idx: _select_joint(j)).props(
+                            "outline dense"
+                        )
 
                 with ui.row().classes("gap-2"):
+
                     def _joint_minus():
                         step_deg = joint_step_input.value or 2.0
                         arm_vel = _effective_velocity(robot_select.value, "arm_vel", 1.0)
                         asyncio.create_task(
-                            _send_joint(bridge, robot_select.value, joint_state["idx"], -step_deg, arm_vel)
+                            _send_joint(
+                                bridge, robot_select.value, joint_state["idx"], -step_deg, arm_vel
+                            )
                         )
 
                     def _joint_plus():
                         step_deg = joint_step_input.value or 2.0
                         arm_vel = _effective_velocity(robot_select.value, "arm_vel", 1.0)
                         asyncio.create_task(
-                            _send_joint(bridge, robot_select.value, joint_state["idx"], step_deg, arm_vel)
+                            _send_joint(
+                                bridge, robot_select.value, joint_state["idx"], step_deg, arm_vel
+                            )
                         )
 
                     ui.button("-", on_click=_joint_minus, icon="remove").props("outline")
@@ -1706,28 +1910,39 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 ui.label("Gripper").classes("font-semibold text-sm mb-2")
 
                 with ui.row().classes("gap-2 justify-center"):
+
                     def _full_open():
                         mode_state["mode"] = "gripper"
                         grip_vel = _effective_velocity(robot_select.value, "gripper_vel", 1.0)
-                        asyncio.create_task(_send_gripper(bridge, robot_select.value, "open", 1.0, grip_vel))
+                        asyncio.create_task(
+                            _send_gripper(bridge, robot_select.value, "open", 1.0, grip_vel)
+                        )
 
                     def _full_close():
                         mode_state["mode"] = "gripper"
                         grip_vel = _effective_velocity(robot_select.value, "gripper_vel", 1.0)
-                        asyncio.create_task(_send_gripper(bridge, robot_select.value, "close", 1.0, grip_vel))
+                        asyncio.create_task(
+                            _send_gripper(bridge, robot_select.value, "close", 1.0, grip_vel)
+                        )
 
                     def _step_open():
                         mode_state["mode"] = "gripper"
                         grip_vel = _effective_velocity(robot_select.value, "gripper_vel", 1.0)
-                        asyncio.create_task(_send_gripper(bridge, robot_select.value, "open", None, grip_vel))
+                        asyncio.create_task(
+                            _send_gripper(bridge, robot_select.value, "open", None, grip_vel)
+                        )
 
                     def _step_close():
                         mode_state["mode"] = "gripper"
                         grip_vel = _effective_velocity(robot_select.value, "gripper_vel", 1.0)
-                        asyncio.create_task(_send_gripper(bridge, robot_select.value, "close", None, grip_vel))
+                        asyncio.create_task(
+                            _send_gripper(bridge, robot_select.value, "close", None, grip_vel)
+                        )
 
                     ui.button("Full Open", on_click=_full_open, icon="open_with").props("outline")
-                    ui.button("Full Close", on_click=_full_close, icon="close_fullscreen").props("outline")
+                    ui.button("Full Close", on_click=_full_close, icon="close_fullscreen").props(
+                        "outline"
+                    )
                 with ui.row().classes("gap-2 justify-center"):
                     ui.button("Open", on_click=_step_open, icon="add").props("outline")
                     ui.button("Close", on_click=_step_close, icon="remove").props("outline")
@@ -1738,7 +1953,9 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 def _go_home():
                     asyncio.create_task(_send_home(bridge, robot_select.value))
 
-                ui.button("Move Home", on_click=_go_home, icon="home").props("outline").classes("w-full")
+                ui.button("Move Home", on_click=_go_home, icon="home").props("outline").classes(
+                    "w-full"
+                )
 
             # ── Keyboard Help ────────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
@@ -1767,15 +1984,25 @@ def _teleop_section(bridge: SystemBridge) -> None:
             # ── Current Pose/Joints ──────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
                 ui.label("Current Position").classes("font-semibold text-sm mb-2")
-                state_labels["status"] = ui.label("State: checking...").classes("text-xs text-slate-500 mb-1")
-                state_labels["xyz"] = ui.label("X/Y/Z [m]: -- / -- / --").classes("text-xs font-mono")
-                state_labels["rpy"] = ui.label("Rx/Ry/Rz [deg]: -- / -- / --").classes("text-xs font-mono mb-1")
+                state_labels["status"] = ui.label("State: checking...").classes(
+                    "text-xs text-slate-500 mb-1"
+                )
+                state_labels["xyz"] = ui.label("X/Y/Z [m]: -- / -- / --").classes(
+                    "text-xs font-mono"
+                )
+                state_labels["rpy"] = ui.label("Rx/Ry/Rz [deg]: -- / -- / --").classes(
+                    "text-xs font-mono mb-1"
+                )
                 with ui.row().classes("gap-3"):
                     for idx in range(1, 4):
-                        state_labels["joints"].append(ui.label(f"J{idx}: --").classes("text-xs font-mono"))
+                        state_labels["joints"].append(
+                            ui.label(f"J{idx}: --").classes("text-xs font-mono")
+                        )
                 with ui.row().classes("gap-3"):
                     for idx in range(4, 7):
-                        state_labels["joints"].append(ui.label(f"J{idx}: --").classes("text-xs font-mono"))
+                        state_labels["joints"].append(
+                            ui.label(f"J{idx}: --").classes("text-xs font-mono")
+                        )
 
             # ── Speeds ───────────────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
@@ -1819,7 +2046,12 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 def _save_current() -> None:
                     name = str(save_name_input.value or "").strip()
                     if not name:
-                        ui.notify("Enter a position name", type="warning", position="bottom-right", timeout=1800)
+                        ui.notify(
+                            "Enter a position name",
+                            type="warning",
+                            position="bottom-right",
+                            timeout=1800,
+                        )
                         return
                     asyncio.create_task(_save_position(bridge, robot_select.value, name))
 
@@ -1829,13 +2061,19 @@ def _teleop_section(bridge: SystemBridge) -> None:
             # ── Named Positions (Go To) ─────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
                 ui.label("Named Positions").classes("font-semibold text-sm mb-2")
-                ui.label(
-                    "Select a stored position and press Go to move the robot there."
-                ).classes("text-xs text-slate-500 mb-2")
+                ui.label("Select a stored position and press Go to move the robot there.").classes(
+                    "text-xs text-slate-500 mb-2"
+                )
                 named_pos_env_label = ui.label("").classes("text-xs text-slate-500 mb-1")
-                named_pos_select = ui.select(
-                    [], label="Position", value=None,
-                ).props("dense").classes("w-48")
+                named_pos_select = (
+                    ui.select(
+                        [],
+                        label="Position",
+                        value=None,
+                    )
+                    .props("dense")
+                    .classes("w-48")
+                )
                 named_pos_busy = {"moving": False}
 
                 def _refresh_named_positions() -> None:
@@ -1853,28 +2091,54 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     name = named_pos_select.value
                     robot = robot_select.value
                     if not name:
-                        ui.notify("Select a position first", type="warning", position="bottom-right", timeout=1800)
+                        ui.notify(
+                            "Select a position first",
+                            type="warning",
+                            position="bottom-right",
+                            timeout=1800,
+                        )
                         return
                     if named_pos_busy["moving"]:
-                        ui.notify("Already moving...", type="info", position="bottom-right", timeout=900)
+                        ui.notify(
+                            "Already moving...", type="info", position="bottom-right", timeout=900
+                        )
                         return
                     named_pos_busy["moving"] = True
                     go_btn.props("loading")
                     try:
                         ok, msg = await asyncio.to_thread(bridge.teleop_go_to_position, robot, name)
                         if ok:
-                            ui.notify(f"{robot}: moved to '{name}'", type="positive", position="bottom-right", timeout=1800)
+                            ui.notify(
+                                f"{robot}: moved to '{name}'",
+                                type="positive",
+                                position="bottom-right",
+                                timeout=1800,
+                            )
                         else:
-                            ui.notify(f"{robot}: failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+                            ui.notify(
+                                f"{robot}: failed ({msg})",
+                                type="negative",
+                                position="bottom-right",
+                                timeout=3500,
+                            )
                     except Exception as exc:
-                        ui.notify(f"{robot}: error ({exc})", type="negative", position="bottom-right", timeout=3500)
+                        ui.notify(
+                            f"{robot}: error ({exc})",
+                            type="negative",
+                            position="bottom-right",
+                            timeout=3500,
+                        )
                     finally:
                         named_pos_busy["moving"] = False
                         go_btn.props(remove="loading")
 
                 with ui.row().classes("gap-2 items-center mt-2"):
-                    go_btn = ui.button("Go", on_click=_go_to_named, icon="play_arrow").props("color=primary")
-                    ui.button("Refresh", on_click=_refresh_named_positions, icon="refresh").props("outline dense")
+                    go_btn = ui.button("Go", on_click=_go_to_named, icon="play_arrow").props(
+                        "color=primary"
+                    )
+                    ui.button("Refresh", on_click=_refresh_named_positions, icon="refresh").props(
+                        "outline dense"
+                    )
 
                 _refresh_named_positions()
                 robot_select.on_value_change(lambda _: _refresh_named_positions())
@@ -1897,7 +2161,12 @@ def _teleop_section(bridge: SystemBridge) -> None:
 
                 if key_lower == "t":
                     robot_select.value = "ur5e" if robot == "xarm6" else "xarm6"
-                    ui.notify(f"Robot: {robot_select.value}", type="info", position="bottom-right", timeout=900)
+                    ui.notify(
+                        f"Robot: {robot_select.value}",
+                        type="info",
+                        position="bottom-right",
+                        timeout=900,
+                    )
                 elif key_lower == "m":
                     mode_state["mode"] = "cartesian"
                     ui.notify(
@@ -1926,12 +2195,22 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     ui.notify("Gripper mode", type="info", position="bottom-right", timeout=900)
                 elif key_lower == "j":
                     mode_state["mode"] = "joint"
-                    ui.notify(f"Joint mode: J{joint_state['idx']}", type="info", position="bottom-right", timeout=900)
+                    ui.notify(
+                        f"Joint mode: J{joint_state['idx']}",
+                        type="info",
+                        position="bottom-right",
+                        timeout=900,
+                    )
                 elif key_lower in {"1", "2", "3", "4", "5", "6"}:
                     joint_state["idx"] = int(key_lower)
                     mode_state["mode"] = "joint"
                     selected_joint_label.set_text(f"Selected: J{joint_state['idx']}")
-                    ui.notify(f"Joint mode: J{joint_state['idx']}", type="info", position="bottom-right", timeout=900)
+                    ui.notify(
+                        f"Joint mode: J{joint_state['idx']}",
+                        type="info",
+                        position="bottom-right",
+                        timeout=900,
+                    )
                 elif key_lower == "h":
                     asyncio.create_task(_send_home(bridge, robot))
                 elif key_lower == "s":
@@ -1951,9 +2230,13 @@ def _teleop_section(bridge: SystemBridge) -> None:
                         asyncio.create_task(_send_gripper(bridge, robot, "close", None, grip_vel))
                 elif mode_state["mode"] == "joint":
                     if key_name == "ArrowUp":
-                        asyncio.create_task(_send_joint(bridge, robot, joint_state["idx"], step_deg, arm_vel))
+                        asyncio.create_task(
+                            _send_joint(bridge, robot, joint_state["idx"], step_deg, arm_vel)
+                        )
                     elif key_name == "ArrowDown":
-                        asyncio.create_task(_send_joint(bridge, robot, joint_state["idx"], -step_deg, arm_vel))
+                        asyncio.create_task(
+                            _send_joint(bridge, robot, joint_state["idx"], -step_deg, arm_vel)
+                        )
                 elif mode_state["mode"] == "cartesian":
                     # XY uses left/right only, as requested.
                     axis = axis_state["axis"]
@@ -1996,9 +2279,16 @@ async def _send_jog(
     """Send one Cartesian jog command through the ROS2 teleop backend."""
     ok, msg = await asyncio.to_thread(bridge.teleop_jog, robot, axis, step_mm, velocity_scale)
     if ok:
-        ui.notify(f"{robot}: jog {axis} {step_mm:+.0f}mm", type="positive", position="bottom-right", timeout=1200)
+        ui.notify(
+            f"{robot}: jog {axis} {step_mm:+.0f}mm",
+            type="positive",
+            position="bottom-right",
+            timeout=1200,
+        )
         return
-    ui.notify(f"{robot}: jog failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+    ui.notify(
+        f"{robot}: jog failed ({msg})", type="negative", position="bottom-right", timeout=3500
+    )
 
 
 async def _send_gripper(
@@ -2010,13 +2300,27 @@ async def _send_gripper(
 ) -> None:
     """Send one gripper open/close command through the ROS2 teleop backend."""
     try:
-        ok, msg = await asyncio.to_thread(bridge.teleop_gripper, robot, action, step, velocity_scale)
+        ok, msg = await asyncio.to_thread(
+            bridge.teleop_gripper, robot, action, step, velocity_scale
+        )
         if ok:
-            ui.notify(f"{robot}: gripper {action}", type="positive", position="bottom-right", timeout=1200)
+            ui.notify(
+                f"{robot}: gripper {action}", type="positive", position="bottom-right", timeout=1200
+            )
             return
-        ui.notify(f"{robot}: gripper failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+        ui.notify(
+            f"{robot}: gripper failed ({msg})",
+            type="negative",
+            position="bottom-right",
+            timeout=3500,
+        )
     except Exception as exc:
-        ui.notify(f"{robot}: gripper failed ({exc})", type="negative", position="bottom-right", timeout=3500)
+        ui.notify(
+            f"{robot}: gripper failed ({exc})",
+            type="negative",
+            position="bottom-right",
+            timeout=3500,
+        )
 
 
 async def _send_home(bridge: SystemBridge, robot: str) -> None:
@@ -2024,11 +2328,23 @@ async def _send_home(bridge: SystemBridge, robot: str) -> None:
     try:
         ok, msg = await asyncio.to_thread(bridge.teleop_home, robot)
         if ok:
-            ui.notify(f"{robot}: moving home", type="positive", position="bottom-right", timeout=1200)
+            ui.notify(
+                f"{robot}: moving home", type="positive", position="bottom-right", timeout=1200
+            )
             return
-        ui.notify(f"{robot}: move home failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+        ui.notify(
+            f"{robot}: move home failed ({msg})",
+            type="negative",
+            position="bottom-right",
+            timeout=3500,
+        )
     except Exception as exc:
-        ui.notify(f"{robot}: move home failed ({exc})", type="negative", position="bottom-right", timeout=3500)
+        ui.notify(
+            f"{robot}: move home failed ({exc})",
+            type="negative",
+            position="bottom-right",
+            timeout=3500,
+        )
 
 
 async def _send_joint(
@@ -2039,7 +2355,9 @@ async def _send_joint(
     velocity_scale: float = 1.0,
 ) -> None:
     """Send one joint jog command through the ROS2 teleop backend."""
-    ok, msg = await asyncio.to_thread(bridge.teleop_joint, robot, joint_idx, delta_deg, velocity_scale)
+    ok, msg = await asyncio.to_thread(
+        bridge.teleop_joint, robot, joint_idx, delta_deg, velocity_scale
+    )
     if ok:
         ui.notify(
             f"{robot}: J{joint_idx} {delta_deg:+.2f}deg",
@@ -2048,7 +2366,9 @@ async def _send_joint(
             timeout=1200,
         )
         return
-    ui.notify(f"{robot}: joint jog failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+    ui.notify(
+        f"{robot}: joint jog failed ({msg})", type="negative", position="bottom-right", timeout=3500
+    )
 
 
 async def _save_position(bridge: SystemBridge, robot: str, name: str) -> None:
@@ -2057,4 +2377,6 @@ async def _save_position(bridge: SystemBridge, robot: str, name: str) -> None:
     if ok:
         ui.notify(f"{robot}: {msg}", type="positive", position="bottom-right", timeout=2200)
         return
-    ui.notify(f"{robot}: save failed ({msg})", type="negative", position="bottom-right", timeout=3500)
+    ui.notify(
+        f"{robot}: save failed ({msg})", type="negative", position="bottom-right", timeout=3500
+    )

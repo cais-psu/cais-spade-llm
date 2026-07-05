@@ -104,13 +104,16 @@ def adapt_bridge_resource_snapshot(
     """Adapt a raw resource snapshot into the stable bridge runtime shape."""
     raw_snapshot = dict(snapshot or {})
     if isinstance(raw_snapshot.get("resource_core"), dict):
-        current_state = str(
-            raw_snapshot.get("current_state")
-            if raw_snapshot.get("current_state") is not None
-            else raw_snapshot.get("resource_core", {}).get("current_state")
-            or (modeled_state or {}).get("resource_state")
-            or ""
-        ).strip() or "unknown"
+        current_state = (
+            str(
+                raw_snapshot.get("current_state")
+                if raw_snapshot.get("current_state") is not None
+                else raw_snapshot.get("resource_core", {}).get("current_state")
+                or (modeled_state or {}).get("resource_state")
+                or ""
+            ).strip()
+            or "unknown"
+        )
         current_location = (
             raw_snapshot.get("current_location")
             if raw_snapshot.get("current_location") is not None
@@ -119,12 +122,14 @@ def adapt_bridge_resource_snapshot(
             else (modeled_state or {}).get("current_location")
         )
     else:
-        current_state = str(
-            raw_snapshot.get("current_state")
-            if raw_snapshot.get("current_state") is not None
-            else (modeled_state or {}).get("resource_state")
-            or ""
-        ).strip() or "unknown"
+        current_state = (
+            str(
+                raw_snapshot.get("current_state")
+                if raw_snapshot.get("current_state") is not None
+                else (modeled_state or {}).get("resource_state") or ""
+            ).strip()
+            or "unknown"
+        )
         current_location = (
             raw_snapshot.get("current_location")
             if raw_snapshot.get("current_location") is not None

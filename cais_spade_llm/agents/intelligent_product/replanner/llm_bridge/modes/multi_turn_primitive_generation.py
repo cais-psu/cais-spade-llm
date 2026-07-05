@@ -89,11 +89,9 @@ def _outline_source_ref(outline_event: dict[str, Any] | None) -> str:
 def _outline_description(outline_event: dict[str, Any] | None) -> str:
     if not isinstance(outline_event, dict):
         return ""
-    return str(
-        outline_event.get("description")
-        or outline_event.get("rationale")
-        or ""
-    ).strip()
+    return str(outline_event.get("description") or outline_event.get("rationale") or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Cursor / active-event helpers
 # ---------------------------------------------------------------------------
@@ -290,40 +288,18 @@ def _record_primitive_no_progress(
         ),
         "last_signature": signature,
         "same_signature_streak": (
-            int(prior_guard.get("same_signature_streak") or 0) + 1
-            if same_signature
-            else 1
+            int(prior_guard.get("same_signature_streak") or 0) + 1 if same_signature else 1
         ),
-        "feedback_history": (
-            list(prior_guard.get("feedback_history") or [])
-            if same_event
-            else []
-        )
-        + [
-            deepcopy(row)
-            for row in (feedback_rows or [])
-            if isinstance(row, dict)
-        ],
+        "feedback_history": (list(prior_guard.get("feedback_history") or []) if same_event else [])
+        + [deepcopy(row) for row in (feedback_rows or []) if isinstance(row, dict)],
         "context_error_history": (
-            list(prior_guard.get("context_error_history") or [])
-            if same_event
-            else []
+            list(prior_guard.get("context_error_history") or []) if same_event else []
         )
-        + [
-            deepcopy(row)
-            for row in (context_errors or [])
-            if isinstance(row, dict)
-        ],
+        + [deepcopy(row) for row in (context_errors or []) if isinstance(row, dict)],
         "input_diagnostic_history": (
-            list(prior_guard.get("input_diagnostic_history") or [])
-            if same_event
-            else []
+            list(prior_guard.get("input_diagnostic_history") or []) if same_event else []
         )
-        + [
-            deepcopy(row)
-            for row in (input_diagnostics or [])
-            if isinstance(row, dict)
-        ],
+        + [deepcopy(row) for row in (input_diagnostics or []) if isinstance(row, dict)],
     }
     session_state["primitive_event_guard"] = deepcopy(updated_guard)
     return updated_guard
@@ -331,23 +307,18 @@ def _record_primitive_no_progress(
 
 def _primitive_event_should_escalate(guard_state: dict[str, Any]) -> bool:
     return (
-        int(guard_state.get("same_signature_streak") or 0)
-        >= _STUCK_GUARD_SAME_SIGNATURE_LIMIT
-        or int(guard_state.get("no_progress_turns") or 0)
-        >= _STUCK_GUARD_NO_PROGRESS_LIMIT
+        int(guard_state.get("same_signature_streak") or 0) >= _STUCK_GUARD_SAME_SIGNATURE_LIMIT
+        or int(guard_state.get("no_progress_turns") or 0) >= _STUCK_GUARD_NO_PROGRESS_LIMIT
     )
 
 
 def _primitive_rows_summary(rows: list[dict[str, Any]] | None) -> str:
     items: list[str] = []
-    for row in (rows or []):
+    for row in rows or []:
         if not isinstance(row, dict):
             continue
         label = str(
-            row.get("constraint_code")
-            or row.get("context_ref")
-            or row.get("reason")
-            or ""
+            row.get("constraint_code") or row.get("context_ref") or row.get("reason") or ""
         ).strip()
         reason = str(row.get("reason") or "").strip()
         if label and reason and label != reason:
@@ -365,7 +336,7 @@ def _count_named_rows(
     key: str,
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
-    for row in (rows or []):
+    for row in rows or []:
         if not isinstance(row, dict):
             continue
         token = str(row.get(key) or "").strip()
@@ -375,11 +346,7 @@ def _count_named_rows(
 
 
 def _counter_summary(counter: Counter[str], *, limit: int = 3) -> str:
-    parts = [
-        f"{token} x{count}"
-        for token, count in counter.most_common(limit)
-        if token
-    ]
+    parts = [f"{token} x{count}" for token, count in counter.most_common(limit) if token]
     return ", ".join(parts)
 
 
@@ -402,9 +369,7 @@ def _primitive_event_stuck_reason(
         feedback_history = [dict(row) for row in (feedback_rows or []) if isinstance(row, dict)]
     feedback_counts = _count_named_rows(feedback_history, key="constraint_code")
     if feedback_counts:
-        reason_parts.append(
-            f"repeated validator blockers: {_counter_summary(feedback_counts)}"
-        )
+        reason_parts.append(f"repeated validator blockers: {_counter_summary(feedback_counts)}")
     elif feedback_rows:
         feedback_summary = _primitive_rows_summary(feedback_rows)
         if feedback_summary:
@@ -412,9 +377,7 @@ def _primitive_event_stuck_reason(
     context_error_history = list(guard_state.get("context_error_history") or [])
     if not context_error_history:
         context_error_history = [
-            dict(row)
-            for row in (context_errors or [])
-            if isinstance(row, dict)
+            dict(row) for row in (context_errors or []) if isinstance(row, dict)
         ]
     context_error_counts = _count_named_rows(context_error_history, key="context_ref")
     if context_error_counts:
@@ -424,9 +387,7 @@ def _primitive_event_stuck_reason(
     input_diagnostic_history = list(guard_state.get("input_diagnostic_history") or [])
     if not input_diagnostic_history:
         input_diagnostic_history = [
-            dict(row)
-            for row in (input_diagnostics or [])
-            if isinstance(row, dict)
+            dict(row) for row in (input_diagnostics or []) if isinstance(row, dict)
         ]
     if input_diagnostic_history:
         input_summary = _primitive_rows_summary(input_diagnostic_history[:2])
@@ -449,50 +410,51 @@ def _record_primitive_escalation_diagnostic(
     event = dict(outline_event or {})
     trigger = (
         "same_signature_streak"
-        if int(guard_state.get("same_signature_streak") or 0)
-        >= _STUCK_GUARD_SAME_SIGNATURE_LIMIT
+        if int(guard_state.get("same_signature_streak") or 0) >= _STUCK_GUARD_SAME_SIGNATURE_LIMIT
         else "no_progress_turns"
     )
-    diagnostics = [{
-        "outline_id": str(event.get("outline_id") or "").strip(),
-        "resource_jid": _outline_resource_jid(event),
-        "part_name": _outline_part_name(event) or None,
-        "cursor": int(cursor),
-        "trigger": trigger,
-        "no_progress_turns": int(guard_state.get("no_progress_turns") or 0),
-        "same_signature_streak": int(guard_state.get("same_signature_streak") or 0),
-        "reason": str(reason or "").strip(),
-        "repeated_validator_blockers": [
-            {"constraint_code": code, "count": count}
-            for code, count in _count_named_rows(
-                list(guard_state.get("feedback_history") or []),
-                key="constraint_code",
-            ).most_common()
-        ],
-        "repeated_context_errors": [
-            {"context_ref": ref, "count": count}
-            for ref, count in _count_named_rows(
-                list(guard_state.get("context_error_history") or []),
-                key="context_ref",
-            ).most_common()
-        ],
-        "input_diagnostics": deepcopy(
-            [
-                dict(row)
-                for row in (
-                    list(guard_state.get("input_diagnostic_history") or [])
-                    or list(input_diagnostics or [])
-                )
-                if isinstance(row, dict)
-            ]
-        ),
-        "last_validator_feedback": deepcopy(
-            [dict(row) for row in (feedback_rows or []) if isinstance(row, dict)]
-        ),
-        "last_context_errors": deepcopy(
-            [dict(row) for row in (context_errors or []) if isinstance(row, dict)]
-        ),
-    }]
+    diagnostics = [
+        {
+            "outline_id": str(event.get("outline_id") or "").strip(),
+            "resource_jid": _outline_resource_jid(event),
+            "part_name": _outline_part_name(event) or None,
+            "cursor": int(cursor),
+            "trigger": trigger,
+            "no_progress_turns": int(guard_state.get("no_progress_turns") or 0),
+            "same_signature_streak": int(guard_state.get("same_signature_streak") or 0),
+            "reason": str(reason or "").strip(),
+            "repeated_validator_blockers": [
+                {"constraint_code": code, "count": count}
+                for code, count in _count_named_rows(
+                    list(guard_state.get("feedback_history") or []),
+                    key="constraint_code",
+                ).most_common()
+            ],
+            "repeated_context_errors": [
+                {"context_ref": ref, "count": count}
+                for ref, count in _count_named_rows(
+                    list(guard_state.get("context_error_history") or []),
+                    key="context_ref",
+                ).most_common()
+            ],
+            "input_diagnostics": deepcopy(
+                [
+                    dict(row)
+                    for row in (
+                        list(guard_state.get("input_diagnostic_history") or [])
+                        or list(input_diagnostics or [])
+                    )
+                    if isinstance(row, dict)
+                ]
+            ),
+            "last_validator_feedback": deepcopy(
+                [dict(row) for row in (feedback_rows or []) if isinstance(row, dict)]
+            ),
+            "last_context_errors": deepcopy(
+                [dict(row) for row in (context_errors or []) if isinstance(row, dict)]
+            ),
+        }
+    ]
     session_state["primitive_escalation_diagnostics"] = deepcopy(diagnostics)
     return diagnostics
 
@@ -510,9 +472,7 @@ def _capability_decomposition_names_for_resource(
     if not isinstance(payload, dict):
         return []
     return sorted(
-        name
-        for name, row in payload.items()
-        if str(name).strip() and isinstance(row, dict)
+        name for name, row in payload.items() if str(name).strip() and isinstance(row, dict)
     )
 
 
@@ -543,12 +503,16 @@ def _resource_type_for_resource(
     bridge_entry = _resource_bridge_entry(prepared_bridge_request, resource_jid)
     bridge_snapshot = dict(bridge_entry.get("bridge_snapshot") or {})
     resource_core = dict(bridge_snapshot.get("resource_core") or {})
-    return str(
-        bridge_entry.get("resource_type")
-        or bridge_snapshot.get("resource_type")
-        or resource_core.get("resource_type")
-        or ""
-    ).strip().lower()
+    return (
+        str(
+            bridge_entry.get("resource_type")
+            or bridge_snapshot.get("resource_type")
+            or resource_core.get("resource_type")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
 
 
 def _capability_decomposition_for_resource(
@@ -574,9 +538,7 @@ def _resource_bridge_entry(
     prepared_bridge_request: dict[str, Any],
     resource_jid: str,
 ) -> dict[str, Any]:
-    return dict(
-        dict(prepared_bridge_request.get("bridge_resources") or {}).get(resource_jid) or {}
-    )
+    return dict(dict(prepared_bridge_request.get("bridge_resources") or {}).get(resource_jid) or {})
 
 
 def _resource_snapshot_with_caps(
@@ -690,7 +652,7 @@ def _primitive_propagated_outline_entities(
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
 
     resources_by_jid: dict[str, dict[str, Any]] = {}
-    for row in (observed_runtime_state.get("resources") or []):
+    for row in observed_runtime_state.get("resources") or []:
         if not isinstance(row, dict):
             continue
         resource_jid = str(row.get("resource_jid") or "").strip()
@@ -702,7 +664,7 @@ def _primitive_propagated_outline_entities(
             resources_by_jid[token] = deepcopy(row)
 
     parts_by_name: dict[str, dict[str, Any]] = {}
-    for row in (llm_input.get("part_facts") or []):
+    for row in llm_input.get("part_facts") or []:
         if not isinstance(row, dict):
             continue
         part_name = str(row.get("part_name") or "").strip()
@@ -726,7 +688,7 @@ def _primitive_propagated_outline_entities(
         if pose:
             part_row["observed_pose"] = deepcopy(pose)
     fact_producers: dict[tuple[str, str, str], str | None] = {}
-    for row in (session_state.get("accepted_primitive_program") or []):
+    for row in session_state.get("accepted_primitive_program") or []:
         if not isinstance(row, dict):
             continue
         _apply_entity_scoped_outline_state(
@@ -826,27 +788,31 @@ def _primitive_start_state_conflict_diagnostic(
         compared_fields.append(field_name)
 
         if field_name not in current_outline_state:
-            mismatches.append({
-                "field": field_name,
-                "entity_scope": fact_key[0] if fact_key else None,
-                "entity_id": fact_key[1] if fact_key else None,
-                "expected": deepcopy(expected_value),
-                "actual": None,
-                "actual_unavailable": True,
-                "previous_outline_id": fact_producers.get(fact_key) if fact_key else None,
-            })
+            mismatches.append(
+                {
+                    "field": field_name,
+                    "entity_scope": fact_key[0] if fact_key else None,
+                    "entity_id": fact_key[1] if fact_key else None,
+                    "expected": deepcopy(expected_value),
+                    "actual": None,
+                    "actual_unavailable": True,
+                    "previous_outline_id": fact_producers.get(fact_key) if fact_key else None,
+                }
+            )
             continue
         actual_value = current_outline_state.get(field_name)
         if actual_value != expected_value:
-            mismatches.append({
-                "field": field_name,
-                "entity_scope": fact_key[0] if fact_key else None,
-                "entity_id": fact_key[1] if fact_key else None,
-                "expected": deepcopy(expected_value),
-                "actual": deepcopy(actual_value),
-                "actual_unavailable": False,
-                "previous_outline_id": fact_producers.get(fact_key) if fact_key else None,
-            })
+            mismatches.append(
+                {
+                    "field": field_name,
+                    "entity_scope": fact_key[0] if fact_key else None,
+                    "entity_id": fact_key[1] if fact_key else None,
+                    "expected": deepcopy(expected_value),
+                    "actual": deepcopy(actual_value),
+                    "actual_unavailable": False,
+                    "previous_outline_id": fact_producers.get(fact_key) if fact_key else None,
+                }
+            )
     if not mismatches:
         return None
 
@@ -1256,15 +1222,17 @@ def _primitive_resource_sequence_findings(
             primitive_catalog=deepcopy(primitive_catalog),
         )
     except Exception as exc:
-        return [{
-            "outline_id": str(outline_event.get("outline_id") or "").strip(),
-            "resource_jid": _outline_resource_jid(outline_event),
-            "part_name": _outline_part_name(outline_event) or None,
-            "constraint_owner": "resource",
-            "constraint_family": "primitive_sequence",
-            "constraint_code": "primitive_sequence_validator_error",
-            "reason": f"resource primitive sequence validator failed: {exc}",
-        }]
+        return [
+            {
+                "outline_id": str(outline_event.get("outline_id") or "").strip(),
+                "resource_jid": _outline_resource_jid(outline_event),
+                "part_name": _outline_part_name(outline_event) or None,
+                "constraint_owner": "resource",
+                "constraint_family": "primitive_sequence",
+                "constraint_code": "primitive_sequence_validator_error",
+                "reason": f"resource primitive sequence validator failed: {exc}",
+            }
+        ]
     return [dict(row) for row in (raw_findings or []) if isinstance(row, dict)]
 
 
@@ -1287,20 +1255,24 @@ def _visible_primitive_catalog_card(
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        card.append({
-            "name": name,
-            "description": str(entry.get("description") or entry.get("semantic_summary") or "").strip(),
-            "params": deepcopy(entry.get("params") or {}),
-            "required_params": [
-                str(item).strip()
-                for item in (entry.get("required_params") or [])
-                if str(item).strip()
-            ],
-            "preconditions": deepcopy(entry.get("preconditions") or {}),
-            "effects": deepcopy(entry.get("effects") or {}),
-            "output_schema": deepcopy(entry.get("output_schema") or {}),
-            "primitive_kind": str(entry.get("primitive_kind") or "").strip() or None,
-        })
+        card.append(
+            {
+                "name": name,
+                "description": str(
+                    entry.get("description") or entry.get("semantic_summary") or ""
+                ).strip(),
+                "params": deepcopy(entry.get("params") or {}),
+                "required_params": [
+                    str(item).strip()
+                    for item in (entry.get("required_params") or [])
+                    if str(item).strip()
+                ],
+                "preconditions": deepcopy(entry.get("preconditions") or {}),
+                "effects": deepcopy(entry.get("effects") or {}),
+                "output_schema": deepcopy(entry.get("output_schema") or {}),
+                "primitive_kind": str(entry.get("primitive_kind") or "").strip() or None,
+            }
+        )
     return card
 
 
@@ -1361,11 +1333,7 @@ def _primitive_authoring_event_context(
     candidate_outline_id = str(outline_event.get("candidate_outline_id") or "").strip()
     if candidate_outline_id:
         row["candidate_outline_id"] = candidate_outline_id
-    return {
-        key: value
-        for key, value in row.items()
-        if value not in (None, "", [], {})
-    }
+    return {key: value for key, value in row.items() if value not in (None, "", [], {})}
 
 
 def _primitive_action_token(outline_event: dict[str, Any]) -> str:
@@ -1416,15 +1384,17 @@ def _log_primitive_turn_summary(
     thought = _truncate_for_log(parsed_response.get("thought"))
     rationale = _truncate_for_log(parsed_response.get("rationale"))
     notes_raw = parsed_response.get("notes") or []
-    notes = [
-        _truncate_for_log(note, 80)
-        for note in notes_raw
-        if isinstance(notes_raw, list) and note not in (None, "")
-    ] if isinstance(notes_raw, list) else []
+    notes = (
+        [
+            _truncate_for_log(note, 80)
+            for note in notes_raw
+            if isinstance(notes_raw, list) and note not in (None, "")
+        ]
+        if isinstance(notes_raw, list)
+        else []
+    )
     context_requests = [
-        str(r).strip()
-        for r in (parsed_response.get("context_requests") or [])
-        if str(r).strip()
+        str(r).strip() for r in (parsed_response.get("context_requests") or []) if str(r).strip()
     ]
     primitive_steps = parsed_response.get("primitive_steps") or []
     step_count = len(primitive_steps) if isinstance(primitive_steps, list) else 0
@@ -1595,11 +1565,14 @@ def _resolve_context_ref(
             return None, "resources ref requires <resource_jid>"
         resource_jid = rest[0]
         if resource_jid == _outline_resource_jid(outline_event):
-            start_snapshot = _primitive_resource_start_views(
-                session_state=session_state,
-                prepared_bridge_request=prepared_bridge_request,
-                outline_event=outline_event,
-            ).get("prompt_snapshot") or {}
+            start_snapshot = (
+                _primitive_resource_start_views(
+                    session_state=session_state,
+                    prepared_bridge_request=prepared_bridge_request,
+                    outline_event=outline_event,
+                ).get("prompt_snapshot")
+                or {}
+            )
         else:
             start_snapshot = _build_literal_resource_start_snapshot(
                 base_snapshot=_resource_snapshot_with_caps(
@@ -1832,9 +1805,7 @@ def _validate_single_event_primitive_steps(
     )
     start_snapshot = dict(start_state_views.get("executor_snapshot") or {})
     start_diagnostics = [
-        dict(row)
-        for row in (start_state_views.get("diagnostics") or [])
-        if isinstance(row, dict)
+        dict(row) for row in (start_state_views.get("diagnostics") or []) if isinstance(row, dict)
     ]
     primitive_catalog = _primitive_catalog_for_resource(
         prepared_bridge_request,
@@ -1870,7 +1841,9 @@ def _validate_single_event_primitive_steps(
         feedback = [
             _primitive_feedback_row(
                 outline_event=outline_event,
-                constraint_code=str(row.get("constraint_code") or "primitive_start_state_contradiction"),
+                constraint_code=str(
+                    row.get("constraint_code") or "primitive_start_state_contradiction"
+                ),
                 reason=str(row.get("reason") or "primitive start state is contradictory"),
                 finding=row,
             )
@@ -1945,9 +1918,7 @@ def _primitive_batch_session_state(
 ) -> dict[str, Any]:
     carried = deepcopy(carried_session_state or {})
     accepted_outline_prefix = [
-        deepcopy(row)
-        for row in (assigned_outline_events or [])
-        if isinstance(row, dict)
+        deepcopy(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
     ]
     session_state = {
         "current_phase": "primitive_generation",
@@ -1964,25 +1935,15 @@ def _primitive_batch_session_state(
         "primitive_outline_turn_counters": {},
         "accepted_primitive_program": [],
         "primitive_rejection_feedback": [],
-        "primitive_served_context": deepcopy(
-            carried.get("primitive_served_context") or {}
-        ),
-        "primitive_context_errors": deepcopy(
-            carried.get("primitive_context_errors") or []
-        ),
+        "primitive_served_context": deepcopy(carried.get("primitive_served_context") or {}),
+        "primitive_context_errors": deepcopy(carried.get("primitive_context_errors") or []),
         "primitive_input_diagnostics": [],
         "primitive_event_guard": {},
         "primitive_escalation_diagnostics": [],
-        "primitive_authoring_memo": deepcopy(
-            carried.get("primitive_authoring_memo") or []
-        ),
+        "primitive_authoring_memo": deepcopy(carried.get("primitive_authoring_memo") or []),
         "observation_store": deepcopy(carried.get("observation_store") or {}),
-        "base_symbolic_resources": deepcopy(
-            carried.get("base_symbolic_resources") or {}
-        ),
-        "base_symbolic_parts": deepcopy(
-            carried.get("base_symbolic_parts") or {}
-        ),
+        "base_symbolic_resources": deepcopy(carried.get("base_symbolic_resources") or {}),
+        "base_symbolic_parts": deepcopy(carried.get("base_symbolic_parts") or {}),
         "symbolic_resources": deepcopy(carried.get("symbolic_resources") or {}),
         "symbolic_parts": deepcopy(carried.get("symbolic_parts") or {}),
     }
@@ -2014,17 +1975,13 @@ def _write_primitive_subturn_artifact(
         "primitive_batch_resume_checkpoint": {
             "prepared_bridge_request": deepcopy(prepared_bridge_request),
             "assigned_outline_events": [
-                deepcopy(row)
-                for row in (assigned_outline_events or [])
-                if isinstance(row, dict)
+                deepcopy(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
             ],
             "session_state": deepcopy(session_state),
             "bridge_session_id": str(bridge_session_id or "").strip(),
             "resource_jid": str(turn_entry.get("resource_jid") or "").strip(),
             "current_turn": deepcopy(turn_entry),
-            "final_output_turn_base": int(
-                session_state.get("final_output_turn_base") or 0
-            ),
+            "final_output_turn_base": int(session_state.get("final_output_turn_base") or 0),
         },
     }
     try:
@@ -2099,14 +2056,10 @@ async def generate_primitive_batch_with_llm_agent(
         )
 
     assigned_events = [
-        deepcopy(row)
-        for row in (assigned_outline_events or [])
-        if isinstance(row, dict)
+        deepcopy(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
     ]
     resource_jids = {
-        _outline_resource_jid(row)
-        for row in assigned_events
-        if _outline_resource_jid(row)
+        _outline_resource_jid(row) for row in assigned_events if _outline_resource_jid(row)
     }
     resource_jid = next(iter(resource_jids)) if len(resource_jids) == 1 else ""
     llm_input = dict(prepared_bridge_request.get("llm_input") or {})
@@ -2152,9 +2105,7 @@ async def generate_primitive_batch_with_llm_agent(
             prompt=prompt_text,
             response_format=response_schema,
         )
-        parsed_response = (
-            deepcopy(raw_response) if isinstance(raw_response, dict) else {}
-        )
+        parsed_response = deepcopy(raw_response) if isinstance(raw_response, dict) else {}
         decision, turn_entry = await _handle_primitive_generation_phase(
             session_state=session_state,
             parsed_response=parsed_response,
@@ -2172,9 +2123,10 @@ async def generate_primitive_batch_with_llm_agent(
         turn_entry["response_schema"] = deepcopy(response_schema)
         turn_entry["system_instructions"] = system_instructions
         raw_response = deepcopy(parsed_response)
-        if str(turn_entry.get("decision") or "").strip() and not str(
-            raw_response.get("decision") or ""
-        ).strip():
+        if (
+            str(turn_entry.get("decision") or "").strip()
+            and not str(raw_response.get("decision") or "").strip()
+        ):
             raw_response["decision"] = str(turn_entry.get("decision") or "").strip()
         turn_entry["raw_response"] = raw_response
         _write_primitive_subturn_artifact(
@@ -2246,19 +2198,40 @@ _PUBLISHED_REF_SCHEMA: list[dict[str, str]] = [
     {"ref": "/resources/<jid>/snapshot", "description": "full resource snapshot"},
     {"ref": "/resources/<jid>/current_pose", "description": "current pose for the resource"},
     {"ref": "/resources/<jid>/held_part", "description": "currently held part, if any"},
-    {"ref": "/resources/<jid>/static_capabilities", "description": "named poses, workspace bounds, staging areas"},
+    {
+        "ref": "/resources/<jid>/static_capabilities",
+        "description": "named poses, workspace bounds, staging areas",
+    },
     {"ref": "/parts/<name>/snapshot", "description": "full part state"},
-    {"ref": "/parts/<name>/observed_pose", "description": "last observed pose for the part, if any"},
+    {
+        "ref": "/parts/<name>/observed_pose",
+        "description": "last observed pose for the part, if any",
+    },
     {"ref": "/parts/<name>/target", "description": "destination geometry if grounded"},
-    {"ref": "/primitive_catalog/<jid>", "description": "visible primitive catalog for the resource"},
-    {"ref": "/primitive_contracts/<name>", "description": "contract card for one visible primitive"},
-    {"ref": "/projected_snapshot/<jid>", "description": "last accepted projected snapshot for this resource"},
+    {
+        "ref": "/primitive_catalog/<jid>",
+        "description": "visible primitive catalog for the resource",
+    },
+    {
+        "ref": "/primitive_contracts/<name>",
+        "description": "contract card for one visible primitive",
+    },
+    {
+        "ref": "/projected_snapshot/<jid>",
+        "description": "last accepted projected snapshot for this resource",
+    },
     {"ref": "/observation_store", "description": "session observation store"},
     {"ref": "/accepted_outline_prefix", "description": "full accepted outline prefix (all events)"},
     {"ref": "/remaining_outline_events", "description": "events at/after the current cursor"},
     {"ref": "/safety_rules", "description": "loaded safety rules with raw text"},
-    {"ref": "/capability_decompositions/<function_name>", "description": "primary modeled source for how the active resource composes bridge-visible low-level primitives"},
-    {"ref": "/memo/primitive_authoring", "description": "session-scoped memo of previously accepted decompositions"},
+    {
+        "ref": "/capability_decompositions/<function_name>",
+        "description": "primary modeled source for how the active resource composes bridge-visible low-level primitives",
+    },
+    {
+        "ref": "/memo/primitive_authoring",
+        "description": "session-scoped memo of previously accepted decompositions",
+    },
 ]
 
 
@@ -2277,15 +2250,9 @@ def build_primitive_generation_prompt_context(
             "remaining_events_count": len(remaining_events),
         },
         "primitive_published_ref_schema": deepcopy(_PUBLISHED_REF_SCHEMA),
-        "primitive_served_context": deepcopy(
-            session_state.get("primitive_served_context") or {}
-        ),
-        "primitive_context_errors": deepcopy(
-            session_state.get("primitive_context_errors") or []
-        ),
-        "primitive_authoring_memo_summary": _relevant_authoring_memo(
-            session_state, active_event
-        ),
+        "primitive_served_context": deepcopy(session_state.get("primitive_served_context") or {}),
+        "primitive_context_errors": deepcopy(session_state.get("primitive_context_errors") or []),
+        "primitive_authoring_memo_summary": _relevant_authoring_memo(session_state, active_event),
     }
     if active_event is None:
         context["primitive_visible_catalog"] = []
@@ -2379,7 +2346,8 @@ def _maybe_escalate_primitive_event(
                 key="constraint_code",
             ),
             limit=5,
-        ) or "<none>",
+        )
+        or "<none>",
     )
     return "primitive_event_stuck", turn_entry
 
@@ -2403,18 +2371,12 @@ async def _handle_primitive_generation_phase(
     cursor, active_event, accepted_prefix = _active_primitive_outline_event(session_state)
     remaining_events = accepted_prefix[cursor:] if cursor < len(accepted_prefix) else []
     outline_id = str(
-        (active_event or {}).get("outline_id")
-        or parsed_response.get("outline_id")
-        or ""
+        (active_event or {}).get("outline_id") or parsed_response.get("outline_id") or ""
     )
     resource_jid = str(
-        _outline_resource_jid(active_event)
-        or parsed_response.get("resource_jid")
-        or ""
+        _outline_resource_jid(active_event) or parsed_response.get("resource_jid") or ""
     )
-    primitive_turn_counters = dict(
-        session_state.get("primitive_outline_turn_counters") or {}
-    )
+    primitive_turn_counters = dict(session_state.get("primitive_outline_turn_counters") or {})
     primitive_local_turn_index = 0
     if outline_id:
         primitive_local_turn_index = int(primitive_turn_counters.get(outline_id) or 0) + 1
@@ -2483,9 +2445,7 @@ async def _handle_primitive_generation_phase(
     turn_entry["primitive_input_diagnostics"] = deepcopy(input_diagnostics)
 
     turn_entry["primitive_response"] = {
-        key: deepcopy(
-            response_decision if key == "decision" else parsed_response.get(key)
-        )
+        key: deepcopy(response_decision if key == "decision" else parsed_response.get(key))
         for key in (
             "outline_id",
             "resource_jid",
@@ -2836,9 +2796,7 @@ async def _handle_primitive_generation_phase(
         outline_event=active_event,
         primitive_steps=primitive_steps,
         projected_snapshot=dict(per_event_result.get("projected_snapshot") or {}),
-        projected_outline_state=dict(
-            per_event_result.get("projected_outline_state") or {}
-        ),
+        projected_outline_state=dict(per_event_result.get("projected_outline_state") or {}),
     )
     accepted_program = list(session_state.get("accepted_primitive_program") or [])
     accepted_program.append(deepcopy(accepted_row))
@@ -2862,7 +2820,9 @@ async def _handle_primitive_generation_phase(
     turn_entry["projected_snapshot"] = deepcopy(accepted_row.get("projected_snapshot") or {})
     turn_entry["primitive_steps"] = deepcopy(primitive_steps)
 
-    is_final_event = int(session_state.get("primitive_generation_cursor") or 0) >= len(accepted_prefix)
+    is_final_event = int(session_state.get("primitive_generation_cursor") or 0) >= len(
+        accepted_prefix
+    )
     if is_final_event:
         session_state["status"] = "paused_after_primitive_generation"
         return "draft_ready", turn_entry

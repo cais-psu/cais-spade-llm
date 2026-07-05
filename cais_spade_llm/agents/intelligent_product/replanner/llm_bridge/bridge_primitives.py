@@ -73,9 +73,7 @@ def _is_event_fact_ref(ref: str, grounding_context: dict[str, Any] | None = None
     if first == "event_facts":
         return True
     roots = {
-        _normalized_symbol(key)
-        for key in dict(grounding_context or {}).keys()
-        if str(key).strip()
+        _normalized_symbol(key) for key in dict(grounding_context or {}).keys() if str(key).strip()
     }
     return first not in roots and first not in _KNOWN_CONTEXT_ROOTS and len(tokens) > 1
 
@@ -340,7 +338,9 @@ def _apply_effect_spec(
         x = float(base_pose.get("x", 0.0) or 0.0) + float(params.get(str(keys[0]), 0.0) or 0.0)
         y = float(base_pose.get("y", 0.0) or 0.0) + float(params.get(str(keys[1]), 0.0) or 0.0)
         z = float(base_pose.get("z", 0.0) or 0.0) + float(params.get(str(keys[2]), 0.0) or 0.0)
-        return resource_snapshot_set_field(updated, field, {"x": x, "y": y, "z": z}, profile=profile)
+        return resource_snapshot_set_field(
+            updated, field, {"x": x, "y": y, "z": z}, profile=profile
+        )
     return updated
 
 
@@ -383,7 +383,9 @@ def apply_effects_to_snapshot(
     )
     effects = dict(primitive_meta.get("effects") or {})
     for field, effect_spec in effects.items():
-        updated = _apply_effect_spec(str(field), dict(effect_spec or {}), params, updated, profile=profile)
+        updated = _apply_effect_spec(
+            str(field), dict(effect_spec or {}), params, updated, profile=profile
+        )
     return _refresh_canonical_mirrors(updated)
 
 
@@ -413,7 +415,9 @@ def _infer_resource_type_for_primitive(primitive: str) -> str:
         return "resource"
     for resource_type in ("robot", "printer", "resource"):
         profile = get_resource_profile(resource_type)
-        if target in dict(profile.extract_output_map or {}) or target in dict(profile.preview_output_map or {}):
+        if target in dict(profile.extract_output_map or {}) or target in dict(
+            profile.preview_output_map or {}
+        ):
             return resource_type
     return "resource"
 
@@ -479,11 +483,14 @@ def validate_and_project_steps_with_trace(
         if isinstance(entry, dict) and str(entry.get("name") or "").strip()
     }
     projected = deepcopy(snapshot or {})
-    runtime_resource_type = str(
-        dict(projected.get("resource_core") or {}).get("resource_type")
-        or projected.get("resource_type")
+    runtime_resource_type = (
+        str(
+            dict(projected.get("resource_core") or {}).get("resource_type")
+            or projected.get("resource_type")
+            or "resource"
+        ).strip()
         or "resource"
-    ).strip() or "resource"
+    )
     event_facts: dict[str, Any] = {}
     step_results: list[dict[str, Any]] = []
 
@@ -632,9 +639,7 @@ def validate_and_project_steps_with_trace(
             )
             step_result["preview_error"] = preview_error
             if preview_error is not None:
-                validation_error = (
-                    f"{preview_error} at step {step_index} ({primitive})"
-                )
+                validation_error = f"{preview_error} at step {step_index} ({primitive})"
                 step_result["validation_error"] = validation_error
                 step_results.append(step_result)
                 return {
@@ -709,7 +714,10 @@ def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, s
         if not isinstance(actual, list):
             return False, f"{path or 'value'} expected list, actual={type(actual).__name__}"
         if len(actual) < len(expected):
-            return False, f"{path or 'value'} expected list length>={len(expected)}, actual={len(actual)}"
+            return (
+                False,
+                f"{path or 'value'} expected list length>={len(expected)}, actual={len(actual)}",
+            )
         for index, expected_item in enumerate(expected):
             ok, message = _compare_subset(actual[index], expected_item, f"{path}[{index}]")
             if not ok:
@@ -720,15 +728,22 @@ def _compare_subset(actual: Any, expected: Any, path: str = "") -> tuple[bool, s
     return True, None
 
 
-def snapshot_matches_expected(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool, str | None]:
+def snapshot_matches_expected(
+    actual: dict[str, Any], expected: dict[str, Any]
+) -> tuple[bool, str | None]:
     """Compare an expected snapshot subset against the runtime snapshot."""
-    resource_type = str(
-        expected.get("resource_type")
-        or dict(expected.get("resource_core") or {}).get("resource_type")
-        or actual.get("resource_type")
-        or dict(actual.get("resource_core") or {}).get("resource_type")
+    resource_type = (
+        str(
+            expected.get("resource_type")
+            or dict(expected.get("resource_core") or {}).get("resource_type")
+            or actual.get("resource_type")
+            or dict(actual.get("resource_core") or {}).get("resource_type")
+            or "resource"
+        )
+        .strip()
+        .lower()
         or "resource"
-    ).strip().lower() or "resource"
+    )
     profile = get_resource_profile(resource_type)
     comparable_fields = {
         "current_state",

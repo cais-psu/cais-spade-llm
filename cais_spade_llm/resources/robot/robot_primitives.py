@@ -453,7 +453,8 @@ def _robot_target_payload_has_pose(payload: Any, *, target_kind: str) -> bool:
     for key in nested_keys:
         nested = payload.get(key)
         if isinstance(nested, dict) and _robot_target_payload_has_pose(
-            nested, target_kind=target_kind,
+            nested,
+            target_kind=target_kind,
         ):
             return True
     return False
@@ -516,7 +517,10 @@ def _robot_seed_trace_facts_from_context(
             if event_part and not _robot_part_matches(payload, event_part):
                 continue
             alias_token = _robot_lower(alias)
-            if _normalized_xyz_pose(payload.get("observed_pose") or payload.get("pose")) is not None:
+            if (
+                _normalized_xyz_pose(payload.get("observed_pose") or payload.get("pose"))
+                is not None
+            ):
                 _robot_add_trace_fact(
                     facts,
                     fact="part_observed",
@@ -619,9 +623,7 @@ def _robot_primitive_contracts(
     profile_contract = dict(ROBOT_PRIMITIVE_TRACE_FACT_MAP.get(primitive_name) or {})
     catalog_entry = dict(primitive_catalog_by_name.get(primitive_name) or {})
     entry_contract = dict(
-        catalog_entry.get("trace_fact_contract")
-        or catalog_entry.get("trace_facts")
-        or {}
+        catalog_entry.get("trace_fact_contract") or catalog_entry.get("trace_facts") or {}
     )
     merged: dict[str, Any] = {}
     for key in ("establishes", "requires"):
@@ -688,9 +690,7 @@ def robot_primitive_sequence_validator(
     gripper_location = _robot_gripper_location(resource_jid)
 
     acquisition_required = bool(
-        event_part
-        and end_held_token == event_part
-        and start_held_token != event_part
+        event_part and end_held_token == event_part and start_held_token != event_part
     )
     release_required = bool(
         event_part
@@ -734,7 +734,10 @@ def robot_primitive_sequence_validator(
         ]
         event_fact_path = str(step_result.get("event_fact_path") or "").strip()
 
-        if primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"} and event_fact_path:
+        if (
+            primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"}
+            and event_fact_path
+        ):
             part_token = _robot_token(params.get("part_name") or authored_params.get("part_name"))
             if part_token:
                 normalized_fact = event_fact_path.replace("/", ".").strip(".")
@@ -798,23 +801,16 @@ def robot_primitive_sequence_validator(
             target_location
             and contract_param_fields
             and (
-                (
-                    "release_to_target" in contract_conditions
-                    and release_to_target_required
-                )
-                or (
-                    contract_event_families
-                    and event_family in contract_event_families
-                )
+                ("release_to_target" in contract_conditions and release_to_target_required)
+                or (contract_event_families and event_family in contract_event_families)
             )
         )
         if target_contract_applies:
             authored_destination = ""
             authored_field_name = ""
             for field_name in contract_param_fields:
-                authored_destination = (
-                    _robot_token(params.get(field_name))
-                    or _robot_token(authored_params.get(field_name))
+                authored_destination = _robot_token(params.get(field_name)) or _robot_token(
+                    authored_params.get(field_name)
                 )
                 if authored_destination:
                     authored_field_name = field_name
@@ -1043,7 +1039,9 @@ def _preview_pose_output(
 ) -> tuple[dict[str, Any] | None, str | None]:
     raw_pose = (
         ((grounding_context or {}).get("resource") or {}).get("current_pose")
-        or dict((snapshot.get("resource_facets") or {}).get("manipulator") or {}).get("current_pose")
+        or dict((snapshot.get("resource_facets") or {}).get("manipulator") or {}).get(
+            "current_pose"
+        )
         or snapshot.get("current_pose")
         or {}
     )
@@ -1091,14 +1089,22 @@ def _preview_pick_targets_output(
     if target_pose is not None and not isinstance(target_pose, dict):
         return None, "params.target_pose must be an object when provided"
     item_info = (grounding_context or {}).get("parts", {}).get(item_name, {})
-    observed_pose = _normalized_xyz_pose(target_pose) or _normalized_xyz_pose((item_info or {}).get("observed_pose")) or {
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0,
-    }
+    observed_pose = (
+        _normalized_xyz_pose(target_pose)
+        or _normalized_xyz_pose((item_info or {}).get("observed_pose"))
+        or {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+        }
+    )
     current_pose = (
         _normalized_xyz_pose(((grounding_context or {}).get("resource") or {}).get("current_pose"))
-        or _normalized_xyz_pose(dict((snapshot.get("resource_facets") or {}).get("manipulator") or {}).get("current_pose"))
+        or _normalized_xyz_pose(
+            dict((snapshot.get("resource_facets") or {}).get("manipulator") or {}).get(
+                "current_pose"
+            )
+        )
         or {"x": 0.0, "y": 0.0, "z": 0.0}
     )
     geometry = dict(product_geometry or {})
@@ -1177,7 +1183,10 @@ def _preview_place_targets_output(
     normalized_pick_ctx = dict(pick_ctx or {})
     item_name = str(params.get("part_name") or normalized_pick_ctx.get("part_name") or "").strip()
     if not item_name:
-        return None, "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name"
+        return (
+            None,
+            "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name",
+        )
     geometry = resolve_place_geometry(
         part_name=item_name,
         destination_location=str(params.get("destination_location") or ""),
@@ -1202,13 +1211,15 @@ def _preview_place_targets_output(
         slot_x = float(board_center.get("x", normalized_pick_ctx.get("tx", 0.0)) or 0.0)
         slot_y = float(board_center.get("y", normalized_pick_ctx.get("ty", 0.0)) or 0.0)
     board_top_z = float(geometry.get("slot_floor_z_m", board_center.get("z", 1.025)) or 1.025)
-    part_height = float(geometry.get("part_height_m", normalized_pick_ctx.get("part_height", 0.08)) or 0.08)
+    part_height = float(
+        geometry.get("part_height_m", normalized_pick_ctx.get("part_height", 0.08)) or 0.08
+    )
     target_reference = dict(geometry.get("target_reference") or {})
     target_origin_pose = dict(geometry.get("target_origin_pose") or {})
     if normalized_pick_ctx:
-        grasp_tcp_to_part_origin_z = float(normalized_pick_ctx.get("pick_tcp_z", 0.0) or 0.0) - float(
-            normalized_pick_ctx.get("tz", 0.0) or 0.0
-        )
+        grasp_tcp_to_part_origin_z = float(
+            normalized_pick_ctx.get("pick_tcp_z", 0.0) or 0.0
+        ) - float(normalized_pick_ctx.get("tz", 0.0) or 0.0)
         tcp_offset_z = float(normalized_pick_ctx.get("tcp_offset_z", -0.17) or -0.17)
     else:
         grasp_tcp_to_part_origin_z = max(0.003, min(0.02, part_height * 0.25))
@@ -1233,7 +1244,12 @@ def _preview_place_targets_output(
             slot_y = origin_y
         if origin_z is not None:
             target_origin_z = origin_z
-            target_origin_pose = {"x": slot_x, "y": slot_y, "z": target_origin_z, "source": "pick_ctx.origin_pose"}
+            target_origin_pose = {
+                "x": slot_x,
+                "y": slot_y,
+                "z": target_origin_z,
+                "source": "pick_ctx.origin_pose",
+            }
             place_part_origin_z_source = "pick_ctx.origin_pose"
     if str(target_reference.get("target_point") or "").strip() == "part_origin":
         place_part_origin_z = (
@@ -1269,7 +1285,9 @@ def _preview_place_targets_output(
         "grasp_tcp_to_part_origin_z": grasp_tcp_to_part_origin_z,
         "target_reference": target_reference,
         "target_origin_pose": target_origin_pose,
-        "model_name": str(geometry.get("model_name") or normalized_pick_ctx.get("model_name") or ""),
+        "model_name": str(
+            geometry.get("model_name") or normalized_pick_ctx.get("model_name") or ""
+        ),
     }, None
 
 
@@ -1381,7 +1399,9 @@ def _extract_place_targets_output(
         "approach_pose": {
             "x": float((step_result.get("approach_pose") or {}).get("x", step_result["slot_x"])),
             "y": float((step_result.get("approach_pose") or {}).get("y", step_result["slot_y"])),
-            "z": float((step_result.get("approach_pose") or {}).get("z", step_result["place_z"] + 0.05)),
+            "z": float(
+                (step_result.get("approach_pose") or {}).get("z", step_result["place_z"] + 0.05)
+            ),
         },
         "target_pose": {
             "x": float((step_result.get("target_pose") or {}).get("x", step_result["slot_x"])),
@@ -1436,7 +1456,10 @@ def _event_fact_key_place_targets(
 ) -> tuple[str | None, str | None]:
     item_name = _part_token_from_event_fact_params(params)
     if not item_name:
-        return None, "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name"
+        return (
+            None,
+            "event_facts.place_targets requires params.part_name or params.pick_ctx.part_name",
+        )
     return f"place_targets.{item_name}", None
 
 
@@ -1655,7 +1678,9 @@ def _part_target_info(prepared_bridge_request: dict[str, Any], *, part_name: str
     return dict((parts.get(str(part_name or "").strip()) or {}).get("target") or {})
 
 
-def _part_pick_geometry(prepared_bridge_request: dict[str, Any], *, part_name: str) -> dict[str, Any]:
+def _part_pick_geometry(
+    prepared_bridge_request: dict[str, Any], *, part_name: str
+) -> dict[str, Any]:
     target = _part_target_info(prepared_bridge_request, part_name=part_name)
     slot_pose = dict(target.get("slot_pose") or {})
     board_top_z = target.get("board_top_z")
@@ -1697,7 +1722,9 @@ def _primitive_allows_start_state(
     start_state: str,
 ) -> bool:
     bridge_resources = dict((prepared_bridge_request or {}).get("bridge_resources") or {})
-    primitive_catalog = list(dict(bridge_resources.get(resource_jid) or {}).get("primitive_catalog") or [])
+    primitive_catalog = list(
+        dict(bridge_resources.get(resource_jid) or {}).get("primitive_catalog") or []
+    )
     for entry in primitive_catalog:
         if not isinstance(entry, dict):
             continue
@@ -1717,7 +1744,9 @@ def _primitive_allows_start_state(
 
 def _home_steps(compiler: Any, *, resource_jid: str, speed: float = 0.25) -> list[dict[str, Any]]:
     if _named_pose_available(compiler, resource_jid=resource_jid, pose_name="home"):
-        return [{"primitive": "move_to_named_pose", "params": {"pose_name": "home", "speed": speed}}]
+        return [
+            {"primitive": "move_to_named_pose", "params": {"pose_name": "home", "speed": speed}}
+        ]
     return []
 
 
@@ -1755,13 +1784,16 @@ def _orientation_params(compiler: Any, *, fact_path: str) -> dict[str, Any]:
     }
 
 
-def _stage_destination(prepared_bridge_request: dict[str, Any], *, event: dict[str, Any], resource_jid: str) -> str:
+def _stage_destination(
+    prepared_bridge_request: dict[str, Any], *, event: dict[str, Any], resource_jid: str
+) -> str:
     item_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
     if str(part_delta.get("location_to", "")).strip():
         return str(part_delta.get("location_to")).strip()
     part_context = dict(
-        ((prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}).get(item_name) or {}
+        ((prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}).get(item_name)
+        or {}
     )
     for key in ("origin_resource_location", "last_known_location", "location"):
         token = str(part_context.get(key) or "").strip()
@@ -1770,7 +1802,9 @@ def _stage_destination(prepared_bridge_request: dict[str, Any], *, event: dict[s
     bridge_resources = prepared_bridge_request.get("bridge_resources") or {}
     resource_entry = dict((bridge_resources.get(resource_jid) or {}).get("bridge_snapshot") or {})
     manipulator = dict((resource_entry.get("resource_facets") or {}).get("manipulator") or {})
-    token = str(manipulator.get("current_pose_ref") or resource_entry.get("current_pose_ref") or "").strip()
+    token = str(
+        manipulator.get("current_pose_ref") or resource_entry.get("current_pose_ref") or ""
+    ).strip()
     if token:
         return token
     return f"{resource_jid}_staging"
@@ -1830,11 +1864,15 @@ def _compile_clear_macro(
                 },
             },
         ]
-    out_state = str((event.get("expected_resource_delta") or {}).get("to", "") or "idle").strip() or "idle"
+    out_state = (
+        str((event.get("expected_resource_delta") or {}).get("to", "") or "idle").strip() or "idle"
+    )
     return {
         "resource_jid": resource_jid,
         "macro_name": str(event.get("event_name") or "clear_resource").strip() or "clear_resource",
-        "description": str(event.get("rationale") or "Move the resource to a safe clear state.").strip(),
+        "description": str(
+            event.get("rationale") or "Move the resource to a safe clear state."
+        ).strip(),
         "rationale": str(event.get("rationale") or "").strip(),
         "expected_start_state": start_state,
         "part_name": "",
@@ -1883,7 +1921,10 @@ def _compile_pick_macro(
         "primitive_steps": [
             {"primitive": "detect_parts", "params": {"part_name": part_name}},
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "compute_pick_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
+            {
+                "primitive": "compute_pick_targets",
+                "params": {"part_name": part_name, "product_geometry": geometry},
+            },
             {
                 "primitive": "move_cartesian",
                 "params": {
@@ -1911,7 +1952,10 @@ def _compile_pick_macro(
                     "part_name": part_name,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45}},
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45},
+            },
         ],
     }
 
@@ -1939,7 +1983,9 @@ def _compile_release_macro(
     return {
         "resource_jid": resource_jid,
         "macro_name": str(event.get("event_name") or f"stage_{part_name.lower()}").strip(),
-        "description": str(event.get("rationale") or f"Release {part_name} at a safe intermediate location.").strip(),
+        "description": str(
+            event.get("rationale") or f"Release {part_name} at a safe intermediate location."
+        ).strip(),
         "rationale": str(event.get("rationale") or "").strip(),
         "expected_start_state": start_state,
         "part_name": part_name,
@@ -1948,12 +1994,17 @@ def _compile_release_macro(
             "in_state": start_state,
             "out_state": out_state or "idle",
             "required_context_keys": ["destination_location"] if destination_location else [],
-            "context_mapping": {"location_param": "destination_location"} if destination_location else {},
+            "context_mapping": {"location_param": "destination_location"}
+            if destination_location
+            else {},
             "part_transition": part_transition,
         },
         "primitive_steps": [
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": -0.03, "speed": 0.45}},
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": -0.03, "speed": 0.45},
+            },
             {"primitive": "open_gripper", "params": {}},
             {
                 "primitive": "detach_part",
@@ -1962,8 +2013,12 @@ def _compile_release_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45},
+            },
+        ]
+        + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -1979,7 +2034,10 @@ def _compile_place_macro(
     part_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
     target_info = _part_target_info(prepared_bridge_request, part_name=part_name)
-    destination_location = str(part_delta.get("location_to", "")).strip() or str(target_info.get("location") or "").strip()
+    destination_location = (
+        str(part_delta.get("location_to", "")).strip()
+        or str(target_info.get("location") or "").strip()
+    )
     geometry = _part_pick_geometry(prepared_bridge_request, part_name=part_name)
     out_state, part_transition = _transition_from_event(
         event=event,
@@ -1989,21 +2047,30 @@ def _compile_place_macro(
     return {
         "resource_jid": resource_jid,
         "macro_name": str(event.get("event_name") or f"place_{part_name.lower()}").strip(),
-        "description": str(event.get("rationale") or f"Place {part_name} at its destination.").strip(),
+        "description": str(
+            event.get("rationale") or f"Place {part_name} at its destination."
+        ).strip(),
         "rationale": str(event.get("rationale") or "").strip(),
         "expected_start_state": start_state,
         "part_name": part_name,
-        "task_params": {"destination_location": destination_location} if destination_location else {},
+        "task_params": {"destination_location": destination_location}
+        if destination_location
+        else {},
         "task_metadata": {
             "in_state": start_state,
             "out_state": out_state or "idle",
             "required_context_keys": ["destination_location"] if destination_location else [],
-            "context_mapping": {"location_param": "destination_location"} if destination_location else {},
+            "context_mapping": {"location_param": "destination_location"}
+            if destination_location
+            else {},
             "part_transition": part_transition,
         },
         "primitive_steps": [
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "compute_place_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
+            {
+                "primitive": "compute_place_targets",
+                "params": {"part_name": part_name, "product_geometry": geometry},
+            },
             {
                 "primitive": "move_cartesian",
                 "params": {
@@ -2031,8 +2098,12 @@ def _compile_place_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45},
+            },
+        ]
+        + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 
@@ -2048,7 +2119,10 @@ def _compile_pick_place_macro(
     part_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
     target_info = _part_target_info(prepared_bridge_request, part_name=part_name)
-    destination_location = str(part_delta.get("location_to", "")).strip() or str(target_info.get("location") or "").strip()
+    destination_location = (
+        str(part_delta.get("location_to", "")).strip()
+        or str(target_info.get("location") or "").strip()
+    )
     geometry = _part_pick_geometry(prepared_bridge_request, part_name=part_name)
     out_state, part_transition = _transition_from_event(
         event=event,
@@ -2062,18 +2136,25 @@ def _compile_pick_place_macro(
         "rationale": str(event.get("rationale") or "").strip(),
         "expected_start_state": start_state,
         "part_name": part_name,
-        "task_params": {"destination_location": destination_location} if destination_location else {},
+        "task_params": {"destination_location": destination_location}
+        if destination_location
+        else {},
         "task_metadata": {
             "in_state": start_state,
             "out_state": out_state or "idle",
             "required_context_keys": ["destination_location"] if destination_location else [],
-            "context_mapping": {"location_param": "destination_location"} if destination_location else {},
+            "context_mapping": {"location_param": "destination_location"}
+            if destination_location
+            else {},
             "part_transition": part_transition,
         },
         "primitive_steps": [
             {"primitive": "detect_parts", "params": {"part_name": part_name}},
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "compute_pick_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
+            {
+                "primitive": "compute_pick_targets",
+                "params": {"part_name": part_name, "product_geometry": geometry},
+            },
             {
                 "primitive": "move_cartesian",
                 "params": {
@@ -2101,9 +2182,15 @@ def _compile_pick_place_macro(
                     "part_name": part_name,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45}},
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": 0.05, "speed": 0.45},
+            },
             {"primitive": "get_current_pose", "params": {}},
-            {"primitive": "compute_place_targets", "params": {"part_name": part_name, "product_geometry": geometry}},
+            {
+                "primitive": "compute_place_targets",
+                "params": {"part_name": part_name, "product_geometry": geometry},
+            },
             {
                 "primitive": "move_cartesian",
                 "params": {
@@ -2131,8 +2218,12 @@ def _compile_pick_place_macro(
                     "assume_released_if_open": True,
                 },
             },
-            {"primitive": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45}},
-        ] + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
+            {
+                "primitive": "move_relative",
+                "params": {"dx": 0.0, "dy": 0.0, "dz": 0.08, "speed": 0.45},
+            },
+        ]
+        + _optional_recovery_home_steps(compiler, resource_jid=resource_jid, speed=0.25),
     }
 
 

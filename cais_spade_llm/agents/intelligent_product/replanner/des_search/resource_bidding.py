@@ -17,21 +17,23 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BidRequest:
     """PA → RA: request a feasible action sequence for recovery."""
+
     request_id: str
     pa_jid: str
-    x_c: dict                  # current state: {resource_state, part_states, part_locations}
-    P_id: list[str]            # parts that must reach goal state
+    x_c: dict  # current state: {resource_state, part_states, part_locations}
+    P_id: list[str]  # parts that must reach goal state
 
 
 @dataclass
 class Bid:
     """RA → PA: feasible event sequence in response to a BidRequest."""
+
     request_id: str
     ra_jid: str
-    str_e: list[dict]          # sequence of events: [{function_name, params}]
-    str_x: list[dict]          # sequence of states after each event
+    str_e: list[dict]  # sequence of events: [{function_name, params}]
+    str_x: list[dict]  # sequence of states after each event
     prp_p_achieved: list[str]  # which P_id parts this bid assembles
-    complete: bool             # True = fully satisfies P_id; False = partial (reaches staging)
+    complete: bool  # True = fully satisfies P_id; False = partial (reaches staging)
 
 
 # ------------------------------------------------------------------ #
@@ -92,11 +94,19 @@ def compute_bid(
     }
 
     # BFS queue: (rs, cp, cl, ps_frozen, pl_frozen, events, states)
-    queue: deque = deque([(
-        init["rs"], init["cp"], init["cl"],
-        frozenset(init["ps"].items()), frozenset(init["pl"].items()),
-        [], [start_state],
-    )])
+    queue: deque = deque(
+        [
+            (
+                init["rs"],
+                init["cp"],
+                init["cl"],
+                frozenset(init["ps"].items()),
+                frozenset(init["pl"].items()),
+                [],
+                [start_state],
+            )
+        ]
+    )
     visited: set = set([_key(init["rs"], init["cp"], init["cl"], init["ps"], init["pl"])])
     best_partial: tuple | None = None
 
@@ -108,10 +118,7 @@ def compute_bid(
 
         # --- complete goal ---
         parts_complete = all(ps.get(p) == goal_state for p in P_id)
-        resource_complete = (
-            goal_resource_state is None
-            or rs == goal_resource_state
-        )
+        resource_complete = goal_resource_state is None or rs == goal_resource_state
         if not goal_event_signatures and parts_complete and resource_complete:
             return Bid(
                 request_id="",
@@ -125,8 +132,7 @@ def compute_bid(
         # --- partial goal: resource is at a staging area ---
         if (
             not goal_event_signatures
-            and
-            goal_resource_state is None
+            and goal_resource_state is None
             and cl in staging_names
             and events
             and best_partial is None
@@ -135,7 +141,17 @@ def compute_bid(
 
         # --- expand ---
         for new_rs, new_cp, new_cl, new_ps, new_pl, event_dict in _expand(
-            resource_tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resource_jid, goal_state
+            resource_tools,
+            rs,
+            cp,
+            cl,
+            ps,
+            pl,
+            P_id,
+            reachability,
+            staging_names,
+            resource_jid,
+            goal_state,
         ):
             new_key = _key(new_rs, new_cp, new_cl, new_ps, new_pl)
             if new_key in visited:
@@ -147,7 +163,10 @@ def compute_bid(
                 "part_states": new_ps,
                 "part_locations": new_pl,
             }
-            if goal_event_signatures and str(event_dict.get("_tool_signature", "")) in goal_event_signatures:
+            if (
+                goal_event_signatures
+                and str(event_dict.get("_tool_signature", "")) in goal_event_signatures
+            ):
                 clean_event = {k: v for k, v in event_dict.items() if not str(k).startswith("_")}
                 return Bid(
                     request_id="",
@@ -158,12 +177,17 @@ def compute_bid(
                     complete=True,
                 )
             visited.add(new_key)
-            queue.append((
-                new_rs, new_cp, new_cl,
-                frozenset(new_ps.items()), frozenset(new_pl.items()),
-                events + [{k: v for k, v in event_dict.items() if not str(k).startswith("_")}],
-                states + [new_state],
-            ))
+            queue.append(
+                (
+                    new_rs,
+                    new_cp,
+                    new_cl,
+                    frozenset(new_ps.items()),
+                    frozenset(new_pl.items()),
+                    events + [{k: v for k, v in event_dict.items() if not str(k).startswith("_")}],
+                    states + [new_state],
+                )
+            )
 
     if best_partial:
         ev, st = best_partial
@@ -284,7 +308,7 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
         out = tool.get("out_state")
         part_in = tool.get("part_in_state")
         part_effect = tool.get("part_transition", {}).get("completed", {})
-        
+
         # Generic location parameter mapping
         ctx_map = tool.get("context_mapping", {})
         loc_param = ctx_map.get("location_param")
@@ -295,7 +319,11 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
         if cp is None and not part_in and not loc_type:
             next_cl = None if str(out or "").strip().lower() == "idle" else cl
             yield (
-                out or rs, None, next_cl, dict(ps), dict(pl),
+                out or rs,
+                None,
+                next_cl,
+                dict(ps),
+                dict(pl),
                 {"function_name": fn, "params": {}, "_tool_signature": _tool_signature(tool)},
             )
             continue
@@ -308,7 +336,11 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                 loc = pl.get(part)
                 if loc and loc in reachability:
                     yield (
-                        out, part, loc, dict(ps), dict(pl),
+                        out,
+                        part,
+                        loc,
+                        dict(ps),
+                        dict(pl),
                         {
                             "function_name": fn,
                             "params": {loc_param: loc, "part_name": part},
@@ -316,7 +348,7 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                         },
                     )
             continue
-            
+
         # Tools that require a specific part logic state
         if cp:
             if part_in and ps.get(cp) != part_in:
@@ -325,7 +357,7 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
             part_effect = tool.get("part_transition", {}).get("completed", {})
             new_ps = {**ps}
             new_pl = {**pl}
-            
+
             if "state" in part_effect:
                 new_ps[cp] = part_effect["state"]
 
@@ -338,8 +370,8 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
 
                 # If the action places the part down (assembly), resource no longer holds it
                 next_cp = None if new_ps[cp] == goal_state else cp
-                next_cl = None if next_cp is None else cl 
-                
+                next_cl = None if next_cp is None else cl
+
                 # If picking or transferring physically into the gripper template
                 if loc_template:
                     formatted_loc = loc_template.replace("{resource_jid}", resource_jid)
@@ -349,33 +381,43 @@ def _expand(tools, rs, cp, cl, ps, pl, P_id, reachability, staging_names, resour
                     new_pl[cp] = cl
 
                 yield (
-                    out, next_cp, next_cl, new_ps, new_pl,
+                    out,
+                    next_cp,
+                    next_cl,
+                    new_ps,
+                    new_pl,
                     {
                         "function_name": fn,
                         "params": params,
                         "_tool_signature": _tool_signature(tool),
                     },
                 )
-                
+
             # Tools that traverse to an explicit new destination (e.g. place_approach)
             elif loc_type == "reachable_location":
                 dest_options = [
-                    d for d in list(reachability) + (list(staging_names) if goal_state not in new_ps.get(cp, "") else [])
+                    d
+                    for d in list(reachability)
+                    + (list(staging_names) if goal_state not in new_ps.get(cp, "") else [])
                     if d != cl
                 ]
-                
+
                 for dest in dest_options:
                     p_copy = dict(new_pl)
-                    
+
                     if loc_template:
                         p_copy[cp] = loc_template.replace("{resource_jid}", resource_jid)
-                    
+
                     event_params = dict(params)
                     if loc_param:
                         event_params[loc_param] = dest
-                        
+
                     yield (
-                        out, cp, dest, new_ps, p_copy,
+                        out,
+                        cp,
+                        dest,
+                        new_ps,
+                        p_copy,
                         {
                             "function_name": fn,
                             "params": event_params,

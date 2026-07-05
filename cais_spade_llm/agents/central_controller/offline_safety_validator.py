@@ -9,4 +9,3 @@ from cais_spade_llm.agents.central_controller.plan_safety_validator import (
 
 class OfflineSafetyValidator(PlanSafetyValidator):
     """Legacy alias retained during the plan validator migration."""
-

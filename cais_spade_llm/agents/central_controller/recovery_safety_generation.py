@@ -39,9 +39,7 @@ def _fixed_state_surface_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            field: {"type": "string"} for field in _FIXED_STATE_FIELDS
-        },
+        "properties": {field: {"type": "string"} for field in _FIXED_STATE_FIELDS},
         "required": list(_FIXED_STATE_FIELDS),
     }
 
@@ -175,10 +173,7 @@ def _compact_state_surface(value: Any) -> dict[str, Any]:
 
 def _complete_state_surface(value: Any) -> dict[str, str]:
     state = dict(value or {})
-    return {
-        field: str(state.get(field) or "").strip()
-        for field in _FIXED_STATE_FIELDS
-    }
+    return {field: str(state.get(field) or "").strip() for field in _FIXED_STATE_FIELDS}
 
 
 def _brief_outline_event(row: dict[str, Any]) -> dict[str, Any]:
@@ -203,7 +198,7 @@ def _brief_pending_nominal_task(row: dict[str, Any]) -> dict[str, Any]:
             f"{field}={value}"
             for field, value in _compact_state_surface(state or {}).items()
             if str(field).strip() and str(value).strip()
-    }
+        }
     destination_location = str(row.get("destination_location") or "").strip()
     return {
         "id": str(row.get("id") or row.get("task_id") or "").strip(),
@@ -433,8 +428,7 @@ def _grounded_bindings_from_row(
             {
                 f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
                 for item in recovery_states
-                if str(item.get("field") or "").strip()
-                and str(item.get("value") or "").strip()
+                if str(item.get("field") or "").strip() and str(item.get("value") or "").strip()
             }
         ),
         "nominal_task_ids": sorted(
@@ -469,8 +463,7 @@ def _grounded_bindings_from_row(
             {
                 f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
                 for item in nominal_states
-                if str(item.get("field") or "").strip()
-                and str(item.get("value") or "").strip()
+                if str(item.get("field") or "").strip() and str(item.get("value") or "").strip()
             }
         ),
     }
@@ -742,9 +735,7 @@ def _nominal_event_rows_for_ids(
                 "resource": str(
                     nominal_row.get("resource") or nominal_row.get("resource_jid") or ""
                 ).strip(),
-                "part": str(
-                    nominal_row.get("part") or nominal_row.get("part_name") or ""
-                ).strip(),
+                "part": str(nominal_row.get("part") or nominal_row.get("part_name") or "").strip(),
                 "blocked_by_condition_ids": [
                     str(token).strip()
                     for token in (nominal_row.get("blocked_by_condition_ids") or [])
@@ -1048,7 +1039,7 @@ def _dedupe_ap_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _rule_state_symbols(rule: dict[str, Any]) -> set[str]:
     symbols: set[str] = set()
     for source_key in ("aps", "bridge_aps"):
-        for ap in (rule.get(source_key) or []):
+        for ap in rule.get(source_key) or []:
             if not isinstance(ap, dict):
                 continue
             full = str(ap.get("full") or "").strip()
@@ -1116,7 +1107,9 @@ def _recovery_state_rows_relevant_to_rule(
         accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
         if not accepted_row:
             continue
-        if destination_required and destination_required not in _row_destination_tokens(accepted_row):
+        if destination_required and destination_required not in _row_destination_tokens(
+            accepted_row
+        ):
             continue
         token = f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
         if token not in _row_completion_state_tokens(accepted_row):
@@ -1173,12 +1166,7 @@ def _matched_recovery_events_for_family(
             for row in recovery_events
             if _recovery_row_matches_precedence_side(
                 source_rule,
-                dict(
-                    accepted_by_outline_id.get(
-                        str(row.get("outline_id") or "").strip()
-                    )
-                    or {}
-                ),
+                dict(accepted_by_outline_id.get(str(row.get("outline_id") or "").strip()) or {}),
                 destination_required=destination_required,
             )
         ]
@@ -1197,12 +1185,7 @@ def _matched_recovery_events_for_family(
                 not destination_required
                 or destination_required
                 in _row_destination_tokens(
-                    dict(
-                        accepted_by_outline_id.get(
-                            str(row.get("outline_id") or "").strip()
-                        )
-                        or {}
-                    )
+                    dict(accepted_by_outline_id.get(str(row.get("outline_id") or "").strip()) or {})
                 )
             )
         ]
@@ -1257,9 +1240,7 @@ def _nominal_task_ids_for_recovery_selection(
             if _normalize_resource_token(row.get("resource_jid"))
         }
         for task_id, row in nominal_by_id.items():
-            row_resource = _normalize_resource_token(
-                row.get("resource") or row.get("resource_jid")
-            )
+            row_resource = _normalize_resource_token(row.get("resource") or row.get("resource_jid"))
             if not row_resource or row_resource not in rule_resources:
                 continue
             if row_resource in recovery_resources:
@@ -1292,9 +1273,7 @@ def _grounding_response_from_rule_results(
                 "selected_recovery_state_tokens": deepcopy(
                     row.get("selected_recovery_state_tokens") or []
                 ),
-                "selected_nominal_task_ids": deepcopy(
-                    row.get("selected_nominal_task_ids") or []
-                ),
+                "selected_nominal_task_ids": deepcopy(row.get("selected_nominal_task_ids") or []),
                 "selected_nominal_state_tokens": deepcopy(
                     row.get("selected_nominal_state_tokens") or []
                 ),
@@ -1362,8 +1341,7 @@ def _deterministic_rule_result_from_selection(
             *[
                 f"{str(row.get('field') or '').strip()}={str(row.get('value') or '').strip()}"
                 for row in projected_nominal_states
-                if str(row.get("field") or "").strip()
-                and str(row.get("value") or "").strip()
+                if str(row.get("field") or "").strip() and str(row.get("value") or "").strip()
             ],
         }
     )
@@ -1394,7 +1372,12 @@ def _deterministic_rule_result_from_selection(
         rule_result["failure_reason"] = normalized["reason"]
         return rule_result
 
-    if missing_recovery_ids or missing_nominal_ids or unmatched_recovery_tokens or unmatched_nominal_tokens:
+    if (
+        missing_recovery_ids
+        or missing_nominal_ids
+        or unmatched_recovery_tokens
+        or unmatched_nominal_tokens
+    ):
         details = []
         if missing_recovery_ids:
             details.append(f"unknown recovery outline ids: {missing_recovery_ids}")
@@ -1607,11 +1590,17 @@ def _normalize_grounded_bindings(items: Any) -> dict[str, Any]:
     payload = dict(items or {})
     return {
         "recovery_outline_ids": _normalize_string_tokens(payload.get("recovery_outline_ids") or []),
-        "recovery_llm_outline_ids": _normalize_string_tokens(payload.get("recovery_llm_outline_ids") or []),
-        "recovery_resource_jids": _normalize_string_tokens(payload.get("recovery_resource_jids") or []),
+        "recovery_llm_outline_ids": _normalize_string_tokens(
+            payload.get("recovery_llm_outline_ids") or []
+        ),
+        "recovery_resource_jids": _normalize_string_tokens(
+            payload.get("recovery_resource_jids") or []
+        ),
         "recovery_event_names": _normalize_string_tokens(payload.get("recovery_event_names") or []),
         "recovery_part_names": _normalize_string_tokens(payload.get("recovery_part_names") or []),
-        "recovery_state_tokens": _normalize_string_tokens(payload.get("recovery_state_tokens") or []),
+        "recovery_state_tokens": _normalize_string_tokens(
+            payload.get("recovery_state_tokens") or []
+        ),
         "nominal_task_ids": _normalize_string_tokens(payload.get("nominal_task_ids") or []),
         "nominal_resources": _normalize_string_tokens(payload.get("nominal_resources") or []),
         "nominal_functions": _normalize_string_tokens(payload.get("nominal_functions") or []),
@@ -1670,9 +1659,7 @@ def _validate_grounded_rule_result(
         if isinstance(item, dict)
     ]
     normalized_aps = [
-        dict(item)
-        for item in (rule_result.get("generated_aps") or [])
-        if isinstance(item, dict)
+        dict(item) for item in (rule_result.get("generated_aps") or []) if isinstance(item, dict)
     ]
     source_rule_ap_fulls = {
         str(item.get("full") or "").strip()
@@ -1684,7 +1671,9 @@ def _validate_grounded_rule_result(
         outline_id = str(item.get("outline_id") or "").strip()
         accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
         if not accepted_row:
-            return f"grounded recovery event references unknown outline_id {outline_id or '<missing>'}"
+            return (
+                f"grounded recovery event references unknown outline_id {outline_id or '<missing>'}"
+            )
         for key in ("llm_outline_id", "event_name", "resource_jid", "part_name"):
             token = str(item.get(key) or "").strip()
             accepted_token = str(accepted_row.get(key) or "").strip()
@@ -1698,12 +1687,12 @@ def _validate_grounded_rule_result(
         outline_id = str(item.get("outline_id") or "").strip()
         accepted_row = dict(accepted_by_outline_id.get(outline_id) or {})
         if not accepted_row:
-            return f"grounded recovery state references unknown outline_id {outline_id or '<missing>'}"
+            return (
+                f"grounded recovery state references unknown outline_id {outline_id or '<missing>'}"
+            )
         token = f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
         if token not in _row_completion_state_tokens(accepted_row):
-            return (
-                f"grounded recovery state for {outline_id} does not preserve accepted completion token {token or '<missing>'}"
-            )
+            return f"grounded recovery state for {outline_id} does not preserve accepted completion token {token or '<missing>'}"
 
     for item in nominal_events:
         task_id = str(item.get("id") or "").strip()
@@ -1711,8 +1700,12 @@ def _validate_grounded_rule_result(
         if not pending_row:
             return f"grounded nominal event references unknown task id {task_id or '<missing>'}"
         expected_values = {
-            "function": str(pending_row.get("function") or pending_row.get("function_name") or "").strip(),
-            "resource": str(pending_row.get("resource") or pending_row.get("resource_jid") or "").strip(),
+            "function": str(
+                pending_row.get("function") or pending_row.get("function_name") or ""
+            ).strip(),
+            "resource": str(
+                pending_row.get("resource") or pending_row.get("resource_jid") or ""
+            ).strip(),
             "part": str(pending_row.get("part") or pending_row.get("part_name") or "").strip(),
         }
         for key, expected_value in expected_values.items():
@@ -1739,9 +1732,7 @@ def _validate_grounded_rule_result(
             for field, value in pending_surface.items():
                 pending_tokens.add(f"{field}={value}")
         if pending_tokens and token not in pending_tokens:
-            return (
-                f"grounded nominal state for {task_id} does not preserve pending token {token or '<missing>'}"
-            )
+            return f"grounded nominal state for {task_id} does not preserve pending token {token or '<missing>'}"
 
     for item in normalized_aps:
         full = str(item.get("full") or "").strip()
@@ -1760,7 +1751,9 @@ def _validate_grounded_rule_result(
             ):
                 return f"generated recovery event AP for {outline_id} does not preserve accepted event_name"
             if kind == "ap_state":
-                token = f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
+                token = (
+                    f"{str(item.get('field') or '').strip()}={str(item.get('value') or '').strip()}"
+                )
                 if token not in _row_completion_state_tokens(accepted_row):
                     return f"generated recovery state AP for {outline_id} does not preserve accepted completion token {token or '<missing>'}"
         if source == "nominal":
@@ -1769,8 +1762,7 @@ def _validate_grounded_rule_result(
                 return f"generated nominal AP references unknown task id {task_id or '<missing>'}"
 
     recovery_side_present = bool(recovery_events or recovery_states) or any(
-        str(item.get("source") or "").strip() == "recovery"
-        for item in normalized_aps
+        str(item.get("source") or "").strip() == "recovery" for item in normalized_aps
     )
     if not recovery_side_present:
         return "grounded rule omitted recovery-side binding"
@@ -1789,9 +1781,7 @@ async def generate_recovery_safety_bundle(
         or ""
     ).strip()
     if not recovery_safety_dir_raw:
-        raise RuntimeError(
-            "recovery safety generation requires recovery_safety_dir"
-        )
+        raise RuntimeError("recovery safety generation requires recovery_safety_dir")
     recovery_safety_dir = Path(recovery_safety_dir_raw)
     recovery_plan_dir = recovery_safety_dir
     recovery_safery_dir = recovery_safety_dir
@@ -1800,9 +1790,7 @@ async def generate_recovery_safety_bundle(
     tools_catalog = [
         deepcopy(row)
         for row in (
-            payload.get("tools_catalog")
-            or getattr(controller_agent, "tools_catalog", [])
-            or []
+            payload.get("tools_catalog") or getattr(controller_agent, "tools_catalog", []) or []
         )
         if isinstance(row, dict)
     ]
@@ -1813,9 +1801,7 @@ async def generate_recovery_safety_bundle(
         "pending_nominal_tasks": deepcopy(payload.get("pending_nominal_tasks") or []),
         "pending_nominal_task_ids": deepcopy(payload.get("pending_nominal_task_ids") or []),
         "nominal_candidate_tasks": deepcopy(payload.get("nominal_candidate_tasks") or []),
-        "nominal_candidate_task_ids": deepcopy(
-            payload.get("nominal_candidate_task_ids") or []
-        ),
+        "nominal_candidate_task_ids": deepcopy(payload.get("nominal_candidate_task_ids") or []),
         "loaded_safety_rules": deepcopy(payload.get("loaded_safety_rules") or []),
         "bridge_safety_context": deepcopy(payload.get("bridge_safety_context") or {}),
         "tools_catalog": deepcopy(tools_catalog),
@@ -1865,9 +1851,7 @@ async def generate_recovery_safety_bundle(
         if str(rule.get("id") or rule.get("rule_id") or "").strip()
     }
     selection_rows = [
-        deepcopy(row)
-        for row in (grounding.get("rules") or [])
-        if isinstance(row, dict)
+        deepcopy(row) for row in (grounding.get("rules") or []) if isinstance(row, dict)
     ]
     accepted_by_outline_id = {
         str(row.get("outline_id") or "").strip(): dict(row)
@@ -1877,9 +1861,7 @@ async def generate_recovery_safety_bundle(
     nominal_candidate_tasks = [
         deepcopy(row)
         for row in (
-            payload.get("nominal_candidate_tasks")
-            or payload.get("pending_nominal_tasks")
-            or []
+            payload.get("nominal_candidate_tasks") or payload.get("pending_nominal_tasks") or []
         )
         if isinstance(row, dict)
     ]
@@ -1978,15 +1960,11 @@ async def generate_recovery_safety_bundle(
         rule["grounded_recovery_events"] = deepcopy(
             rule_result.get("grounded_recovery_events") or []
         )
-        rule["grounded_nominal_events"] = deepcopy(
-            rule_result.get("grounded_nominal_events") or []
-        )
+        rule["grounded_nominal_events"] = deepcopy(rule_result.get("grounded_nominal_events") or [])
         rule["grounded_recovery_states"] = deepcopy(
             rule_result.get("grounded_recovery_states") or []
         )
-        rule["grounded_nominal_states"] = deepcopy(
-            rule_result.get("grounded_nominal_states") or []
-        )
+        rule["grounded_nominal_states"] = deepcopy(rule_result.get("grounded_nominal_states") or [])
         rule["recovery_side_aps"] = deepcopy(rule_result.get("recovery_side_aps") or [])
         rule["nominal_side_aps"] = deepcopy(rule_result.get("nominal_side_aps") or [])
 

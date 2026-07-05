@@ -131,26 +131,24 @@ def _lg_before_mcp_validator() -> PlanSafetyValidator:
     ]
     validator = PlanSafetyValidator(
         rules=rules,
-        dfa_map={
-            "SAFE_LG_BEFORE_MCP": 'digraph { init -> q0; q0 -> q0 [label="true"]; }'
-        },
+        dfa_map={"SAFE_LG_BEFORE_MCP": 'digraph { init -> q0; q0 -> q0 [label="true"]; }'},
         tools_catalog=_tools_catalog(),
     )
     validator.dfas["SAFE_LG_BEFORE_MCP"] = {
-            "initial": "q0",
-            "transitions": {
-                "q0": [
-                    ["ap002", "violation"],
-                    ["ap001", "q1"],
-                    ["true", "q0"],
-                ],
-                "q1": [["true", "q1"]],
-                "violation": [["true", "violation"]],
-            },
-            "violation_state": "violation",
-            "accepting_states": ["q0", "q1"],
-            "ap_symbols": ["ap001", "ap002"],
-        }
+        "initial": "q0",
+        "transitions": {
+            "q0": [
+                ["ap002", "violation"],
+                ["ap001", "q1"],
+                ["true", "q0"],
+            ],
+            "q1": [["true", "q1"]],
+            "violation": [["true", "violation"]],
+        },
+        "violation_state": "violation",
+        "accepting_states": ["q0", "q1"],
+        "ap_symbols": ["ap001", "ap002"],
+    }
     return validator
 
 
@@ -404,7 +402,9 @@ def test_runtime_safety_fast_path_keeps_ap_relevant_task_on_cca_check(tmp_path: 
     assert "start_safety_mode" not in params
 
 
-def test_assembly_board_place_insert_forces_cca_check_when_safety_requirements_loaded(tmp_path: Path):
+def test_assembly_board_place_insert_forces_cca_check_when_safety_requirements_loaded(
+    tmp_path: Path,
+):
     agent = _fast_path_agent(tmp_path)
     task_node = {
         "type": "task",
@@ -774,7 +774,11 @@ def test_product_order_planner_builds_all_nine_parts():
     planner = _planner(_order(parts="all"))
     task_nodes = [node for node in planner.nodes if node.get("type") == "task"]
     assert len(task_nodes) == 45
-    assert {node["params"].get("part_name") for node in task_nodes if node["function_name"] != "move_home"} == {
+    assert {
+        node["params"].get("part_name")
+        for node in task_nodes
+        if node["function_name"] != "move_home"
+    } == {
         "SG",
         "MG",
         "LG",
@@ -791,7 +795,11 @@ def test_product_order_planner_builds_specific_subset():
     planner = _planner(_order(parts=["LG", "MCP"]))
     task_nodes = [node for node in planner.nodes if node.get("type") == "task"]
     assert len(task_nodes) == 10
-    assert {node["params"].get("part_name") for node in task_nodes if node["function_name"] != "move_home"} == {
+    assert {
+        node["params"].get("part_name")
+        for node in task_nodes
+        if node["function_name"] != "move_home"
+    } == {
         "LG",
         "MCP",
     }
@@ -823,10 +831,7 @@ def test_product_order_bidding_keeps_small_gear_on_ur5e_from_prusa_mk3():
     assert row["source_location"] == "prusa-mk3"
     rejected = _candidate_rows(row, "xarm6@localhost")
     assert rejected
-    assert any(
-        "source pose outside gripper_reach" in candidate["reason"]
-        for candidate in rejected
-    )
+    assert any("source pose outside gripper_reach" in candidate["reason"] for candidate in rejected)
 
 
 @pytest.mark.parametrize("part_name", ["MG", "MRP", "MCP"])
@@ -839,10 +844,7 @@ def test_product_order_bidding_keeps_medium_set_on_ur5e_side(part_name: str):
     rejected = _candidate_rows(row, "xarm6@localhost")
     assert rejected
     assert all(candidate["status"] == "incomplete" for candidate in rejected)
-    assert any(
-        "source pose outside gripper_reach" in candidate["reason"]
-        for candidate in rejected
-    )
+    assert any("source pose outside gripper_reach" in candidate["reason"] for candidate in rejected)
 
 
 @pytest.mark.parametrize("part_name", ["LRP", "LCP"])
@@ -855,10 +857,7 @@ def test_product_order_bidding_keeps_large_set_on_xarm6_side(part_name: str):
     rejected = _candidate_rows(row, "ur5e@localhost")
     assert rejected
     assert all(candidate["status"] == "incomplete" for candidate in rejected)
-    assert any(
-        "source pose outside gripper_reach" in candidate["reason"]
-        for candidate in rejected
-    )
+    assert any("source pose outside gripper_reach" in candidate["reason"] for candidate in rejected)
 
 
 def test_product_order_source_pose_gripper_reach_filter_representative_parts():
@@ -883,26 +882,41 @@ def test_product_order_source_pose_gripper_reach_filter_representative_parts():
     assert sg_error == ""
     assert mg_error == ""
     assert lrp_error == ""
-    assert planner._product_order_pose_in_gripper_reach(
-        pose=sg_pose,
-        gripper_reach=xarm_reach,
-    )[0] is False
-    assert planner._product_order_pose_in_gripper_reach(
-        pose=sg_pose,
-        gripper_reach=ur5e_reach,
-    )[0] is True
-    assert planner._product_order_pose_in_gripper_reach(
-        pose=mg_pose,
-        gripper_reach=ur5e_reach,
-    )[0] is True
-    assert planner._product_order_pose_in_gripper_reach(
-        pose=lrp_pose,
-        gripper_reach=xarm_reach,
-    )[0] is True
-    assert planner._product_order_pose_in_gripper_reach(
-        pose=lrp_pose,
-        gripper_reach=ur5e_reach,
-    )[0] is False
+    assert (
+        planner._product_order_pose_in_gripper_reach(
+            pose=sg_pose,
+            gripper_reach=xarm_reach,
+        )[0]
+        is False
+    )
+    assert (
+        planner._product_order_pose_in_gripper_reach(
+            pose=sg_pose,
+            gripper_reach=ur5e_reach,
+        )[0]
+        is True
+    )
+    assert (
+        planner._product_order_pose_in_gripper_reach(
+            pose=mg_pose,
+            gripper_reach=ur5e_reach,
+        )[0]
+        is True
+    )
+    assert (
+        planner._product_order_pose_in_gripper_reach(
+            pose=lrp_pose,
+            gripper_reach=xarm_reach,
+        )[0]
+        is True
+    )
+    assert (
+        planner._product_order_pose_in_gripper_reach(
+            pose=lrp_pose,
+            gripper_reach=ur5e_reach,
+        )[0]
+        is False
+    )
 
 
 def test_product_order_bidding_source_selection_respects_source_anchor():
@@ -959,7 +973,12 @@ def test_product_order_runtime_commit_first_ready_part_compiles_fsa():
     assert record["part"] == "LG"
     assert len(record["task_ids"]) == 5
     assert all(node["status"] == "pending_validation" for node in planner.nodes)
-    assert planner.last_product_order_artifact["bid_evidence_by_part"]["LG"]["selected_bid"]["event_count"] == 5
+    assert (
+        planner.last_product_order_artifact["bid_evidence_by_part"]["LG"]["selected_bid"][
+            "event_count"
+        ]
+        == 5
+    )
 
     fsa = planner.recompile_committed_product_order_fsa()
     assert fsa
@@ -1065,9 +1084,7 @@ def test_active_window_fsa_excludes_completed_nodes_and_keeps_unfinished_nodes()
     fsa = planner.recompile_committed_product_order_fsa()
     assert fsa
     transition_task_ids = {
-        str(t.get("task_id") or "")
-        for t in fsa["A"]["Tr"]
-        if str(t.get("task_id") or "")
+        str(t.get("task_id") or "") for t in fsa["A"]["Tr"] if str(t.get("task_id") or "")
     }
     assert not set(lg["task_ids"]) & transition_task_ids
     assert set(mcp["task_ids"]) <= transition_task_ids
@@ -1154,9 +1171,7 @@ def test_active_window_monitor_restore_replays_task_progress_not_state_alias():
     assert new_monitor.has_state(old_monitor.current_state)
     new_monitor.restore_runtime_progress(running_task_ids=[mrp["task_ids"][0]])
 
-    assert "ur5e@localhost=(k=0,run=REQ_2_T1:pick_approach)" in str(
-        new_monitor.current_state
-    )
+    assert "ur5e@localhost=(k=0,run=REQ_2_T1:pick_approach)" in str(new_monitor.current_state)
     assert "xarm6@localhost=(k=0,idle)" in str(new_monitor.current_state)
     assert "xarm6@localhost=(k=1,idle)" not in str(new_monitor.current_state)
 
@@ -1195,10 +1210,7 @@ def test_gazebo_dual_launch_command_adds_fast_forward_args():
     assert bridge._render_ros2_launch_cmd(
         "gazebo_dual",
         fast_forward_simulation=True,
-    ) == (
-        "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
-        "fast_sim:=true launch_rviz:=false"
-    )
+    ) == ("ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py fast_sim:=true launch_rviz:=false")
 
 
 def test_dashboard_current_task_dag_nodes_keep_completed_tasks_for_current_part():
@@ -1305,9 +1317,7 @@ def test_dashboard_current_task_dag_nodes_fall_back_to_raw_non_product_order_nod
         }
     ]
     bridge = SystemBridge()
-    bridge.product_agents = [
-        SimpleNamespace(process_planner=SimpleNamespace(nodes=raw_nodes))
-    ]
+    bridge.product_agents = [SimpleNamespace(process_planner=SimpleNamespace(nodes=raw_nodes))]
 
     assert bridge.get_current_task_dag_nodes() == raw_nodes
 
@@ -1407,8 +1417,7 @@ def test_safety_ordering_constraint_blocks_mcp_place_until_lg_place_done():
         for row in step.get("blocked_operations", [])
     ]
     assert any(
-        row["task_id"] == mcp_place["id"]
-        and lg_place["id"] in row.get("missing_predecessors", [])
+        row["task_id"] == mcp_place["id"] and lg_place["id"] in row.get("missing_predecessors", [])
         for row in blocked_rows
     )
     assert simulation["monitor_state"]["status"] == "completed"

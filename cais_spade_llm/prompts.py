@@ -71,16 +71,20 @@ ROLE_BLOCKS = {
     "central": CENTRAL_CONTROLLER_AGENT_INSTRUCTIONS,
 }
 
+
 # ----------------------------------------------------------------------
 # Instruction helpers
 # ----------------------------------------------------------------------
-def build_agent_instructions(*, agent_name: str, agent_role: str, overrides: str | None = None) -> str:
+def build_agent_instructions(
+    *, agent_name: str, agent_role: str, overrides: str | None = None
+) -> str:
     base = PROMPT_MAS_AGENT + "\n" + BASE_INSTRUCTIONS
     role_block = ROLE_BLOCKS.get(agent_role.lower(), "")
     tail = f"\nCustom overrides:\n{overrides}\n" if overrides else ""
-    return (base.replace("{agent_name}", agent_name)
-            + ("\n" + role_block if role_block else "")
-            + tail).strip()
+    return (
+        base.replace("{agent_name}", agent_name) + ("\n" + role_block if role_block else "") + tail
+    ).strip()
+
 
 TASK_EXPANSION_INSTRUCTIONS = dedent("""\
 You are a manufacturing process planner LLM.
@@ -156,9 +160,7 @@ def build_task_expansion_prompt(
     previous_requirements_json = json.dumps(
         previous_preview_requirements or [], ensure_ascii=False, indent=2
     )
-    previous_tasks_json = json.dumps(
-        previous_preview_tasks or [], ensure_ascii=False, indent=2
-    )
+    previous_tasks_json = json.dumps(previous_preview_tasks or [], ensure_ascii=False, indent=2)
     refinement_section = ""
     feedback_text = str(refinement_feedback or "").strip()
     if feedback_text or previous_preview_requirements or previous_preview_tasks:
@@ -199,6 +201,7 @@ SAFETY CONSTRAINTS:
 {safety_text if safety_text else "No specific safety constraints provided."}
 {refinement_section}
 """)
+
 
 from textwrap import dedent
 
@@ -253,6 +256,7 @@ Guidelines:
 - Never fabricate machines, parts, or locations that are not implied.
 """)
 
+
 def build_requirement_parse_prompt(
     requirement_text: str,
     tools_catalog: list,
@@ -290,6 +294,7 @@ TOOLS_CATALOGUE (for reference):
 Convert the following instructions into structured requirements:
 {requirement_text}
 """)
+
 
 # ----------------------------------------------------------------------
 # Safety parsing prompt
@@ -405,9 +410,7 @@ def build_safety_parse_prompt(
     Includes tools and capability information for grounding.
     """
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
-    previous_preview_json = json.dumps(
-        previous_preview_rules or [], ensure_ascii=False, indent=2
-    )
+    previous_preview_json = json.dumps(previous_preview_rules or [], ensure_ascii=False, indent=2)
     refinement_section = ""
     feedback_text = str(refinement_feedback or "").strip()
     if feedback_text or previous_preview_rules:
@@ -444,6 +447,7 @@ and canonical context identifiers.
 SAFETY_TEXT:
 {safety_text}
 """).strip()
+
 
 # ----------------------------------------------------------------------
 # SAFETY LOGIC: structured rules -> APs + LTLf
@@ -616,6 +620,7 @@ Allowed temporal operator nodes:
 - {"op": "U", "left": node1, "right": node2}
 """).strip()
 
+
 # ----------------------------------------------------------------------
 # Safety logic prompt
 # ----------------------------------------------------------------------
@@ -631,9 +636,7 @@ def build_safety_logic_prompt(
     """
     rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
     tools_json = json.dumps(tools_catalog, ensure_ascii=False, indent=2)
-    previous_preview_json = json.dumps(
-        previous_preview_rules or [], ensure_ascii=False, indent=2
-    )
+    previous_preview_json = json.dumps(previous_preview_rules or [], ensure_ascii=False, indent=2)
     allowed_events = sorted(
         {
             str(t.get("function", "")).strip()
@@ -792,6 +795,7 @@ Return valid JSON only:
 GENERATED_RULES:
 {rules_json}
 """).strip()
+
 
 # ----------------------------------------------------------------------
 # Replanning prompt
@@ -1128,6 +1132,7 @@ FINAL JSON STRUCTURE:
 }
 """)
 
+
 # ----------------------------------------------------------------------
 # Replanning prompt builder
 # ----------------------------------------------------------------------
@@ -1138,7 +1143,7 @@ def build_replan_prompt(
     tools_catalog: list,
     resource_infos: list,
     source: str = "offline",  # "offline" or "online"
-    safety_text: str = "",   # Assembly constraints and safety rules
+    safety_text: str = "",  # Assembly constraints and safety rules
     system_state: dict | None = None,  # Runtime state (resources, parts, timeline, requirements)
 ) -> str:
     """
@@ -1224,10 +1229,7 @@ def build_replan_prompt(
 
     # Filter plan: only show non-completed nodes so the LLM focuses on what needs repair.
     # Completed nodes are preserved in execution_timeline in system_state.
-    actionable_nodes = [
-        n for n in failed_plan_nodes
-        if n.get("status") != "completed"
-    ]
+    actionable_nodes = [n for n in failed_plan_nodes if n.get("status") != "completed"]
 
     # Format safety constraints
     safety_section = ""
@@ -1265,9 +1267,7 @@ SAFETY CONSTRAINTS (MUST PRESERVE):
             if rs.get("current_location") not in (None, ""):
                 extras.append(f"location={rs.get('current_location')}")
             extra_text = f", {', '.join(extras)}" if extras else ""
-            resource_lines.append(
-                f"  {jid}: type={resource_type}, state={state}{extra_text}"
-            )
+            resource_lines.append(f"  {jid}: type={resource_type}, state={state}{extra_text}")
 
         part_lines = []
         for pname, ps in parts.items():

@@ -14,47 +14,47 @@ from cais_spade_llm.prompts import build_replan_prompt
 
 class ProcessRecoveryPlanner:
     EXPORTED_METHODS = (
-        '_build_des_replan_result',
-        '_set_last_bridge_debug',
-        'get_last_bridge_debug',
-        '_tool_signature',
-        '_resource_by_jid',
-        '_resource_short_name',
-        '_tool_row_for_task',
-        '_pending_resource_tasks',
-        '_reconcile_search_state_for_task',
-        '_entry_task_ids_from_violations',
-        '_coerce_xyz_pose',
-        '_identify_stuck_resource',
-        '_resource_jid_for_task_id',
-        '_function_name_for_task_id',
-        '_extract_resource_states',
-        '_default_resource_state',
-        '_build_resource_search_state',
-        '_project_resource_suffix_state',
-        '_collect_obligation_targets',
-        '_primary_failure_context',
-        '_node_exists',
-        '_bridge_sequence_nodes',
-        'remove_bridge_sequence_tail',
-        '_path_to_recovery_tasks',
-        '_gate_tasks_after_recovery_tail',
-        '_splice_runtime_des_repair_before_task',
-        '_splice_bridge_chain_before_task',
-        'build_bridge_macro_proposal_patch',
-        'apply_bridge_macro_proposal',
-        '_apply_primitive_bridge_proposal',
-        '_task_ids_running_in_fsa_state',
-        'apply_validation_witness_ordering_repairs',
-        'replan_with_feedback_offline',
-        'replan_with_feedback_online',
-        'replan_with_feedback_des',
-        '_resolve_goal_part_state',
-        '_derive_part_tracker_from_violations',
-        '_preview_replan_patch',
-        '_apply_replan_patch',
-        '_deduplicate_tools_catalog',
-        '_dump_replan_debug',
+        "_build_des_replan_result",
+        "_set_last_bridge_debug",
+        "get_last_bridge_debug",
+        "_tool_signature",
+        "_resource_by_jid",
+        "_resource_short_name",
+        "_tool_row_for_task",
+        "_pending_resource_tasks",
+        "_reconcile_search_state_for_task",
+        "_entry_task_ids_from_violations",
+        "_coerce_xyz_pose",
+        "_identify_stuck_resource",
+        "_resource_jid_for_task_id",
+        "_function_name_for_task_id",
+        "_extract_resource_states",
+        "_default_resource_state",
+        "_build_resource_search_state",
+        "_project_resource_suffix_state",
+        "_collect_obligation_targets",
+        "_primary_failure_context",
+        "_node_exists",
+        "_bridge_sequence_nodes",
+        "remove_bridge_sequence_tail",
+        "_path_to_recovery_tasks",
+        "_gate_tasks_after_recovery_tail",
+        "_splice_runtime_des_repair_before_task",
+        "_splice_bridge_chain_before_task",
+        "build_bridge_macro_proposal_patch",
+        "apply_bridge_macro_proposal",
+        "_apply_primitive_bridge_proposal",
+        "_task_ids_running_in_fsa_state",
+        "apply_validation_witness_ordering_repairs",
+        "replan_with_feedback_offline",
+        "replan_with_feedback_online",
+        "replan_with_feedback_des",
+        "_resolve_goal_part_state",
+        "_derive_part_tracker_from_violations",
+        "_preview_replan_patch",
+        "_apply_replan_patch",
+        "_deduplicate_tools_catalog",
+        "_dump_replan_debug",
     )
 
     def __init__(self, planner: Any) -> None:
@@ -97,7 +97,9 @@ class ProcessRecoveryPlanner:
             "des_recovery_missing": bool(des_recovery_missing),
             "message": str(message).strip(),
             "bridge_summary": list(bridge_summary or []),
-            "bridge_proposal": deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None,
+            "bridge_proposal": deepcopy(bridge_proposal)
+            if isinstance(bridge_proposal, dict)
+            else None,
             "bridge_debug": deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None,
             "prepared_bridge_request": (
                 deepcopy(prepared_bridge_request)
@@ -170,9 +172,7 @@ class ProcessRecoveryPlanner:
         ignored_task_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         ignored = {
-            str(task_id).strip()
-            for task_id in (ignored_task_ids or set())
-            if str(task_id).strip()
+            str(task_id).strip() for task_id in (ignored_task_ids or set()) if str(task_id).strip()
         }
         pending: list[dict[str, Any]] = []
         for node in self.nodes:
@@ -286,9 +286,7 @@ class ProcessRecoveryPlanner:
         violations: list[dict[str, Any]],
     ) -> bool:
         task_nodes = [
-            node
-            for node in self.nodes
-            if isinstance(node, dict) and node.get("type") == "task"
+            node for node in self.nodes if isinstance(node, dict) and node.get("type") == "task"
         ]
         node_map = {
             str(node.get("id") or "").strip(): node
@@ -345,9 +343,7 @@ class ProcessRecoveryPlanner:
                     break
                 running_task_ids = [
                     task_id
-                    for task_id in self._task_ids_running_in_fsa_state(
-                        transition.get("from")
-                    )
+                    for task_id in self._task_ids_running_in_fsa_state(transition.get("from"))
                     if task_id in node_map and task_id != target_task_id
                 ]
                 if not running_task_ids:
@@ -367,9 +363,7 @@ class ProcessRecoveryPlanner:
                     added_predecessors.append(running_task_id)
                 if not added_predecessors:
                     continue
-                predecessors = list(
-                    dict.fromkeys(existing_predecessors + added_predecessors)
-                )
+                predecessors = list(dict.fromkeys(existing_predecessors + added_predecessors))
                 modifications.append(
                     {
                         "id": target_task_id,
@@ -494,7 +488,9 @@ class ProcessRecoveryPlanner:
         return ""
 
     @staticmethod
-    def _extract_resource_states(system_coordination_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    def _extract_resource_states(
+        system_coordination_state: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
         if not isinstance(system_coordination_state, dict):
             return {}
 
@@ -508,7 +504,8 @@ class ProcessRecoveryPlanner:
     def _default_resource_state(tools_catalog: list[dict[str, Any]]) -> str:
         all_out_states = {t.get("out_state") for t in tools_catalog if t.get("out_state")}
         root_states = [
-            t.get("in_state") for t in tools_catalog
+            t.get("in_state")
+            for t in tools_catalog
             if t.get("in_state") and t.get("in_state") not in all_out_states
         ]
         return str(root_states[0] or "idle") if root_states else "idle"
@@ -529,9 +526,7 @@ class ProcessRecoveryPlanner:
         rs = resource_states.get(resource_jid, {})
         resource_type = str(rs.get("resource_type", "") or "").strip().lower()
         profile = get_resource_profile(resource_type or "resource")
-        current_part = rs.get(
-            str(profile.carried_entity_field or "current_part")
-        )
+        current_part = rs.get(str(profile.carried_entity_field or "current_part"))
         return {
             "resource_state": rs.get("current_state", default_resource_state),
             "current_part": current_part,
@@ -580,7 +575,9 @@ class ProcessRecoveryPlanner:
 
         ra = self._resource_by_jid(resource_jid)
         reachability = getattr(ra, "static_capabilities", {}).get("reachability", []) if ra else []
-        staging_areas = getattr(ra, "static_capabilities", {}).get("staging_areas", {}) if ra else {}
+        staging_areas = (
+            getattr(ra, "static_capabilities", {}).get("staging_areas", {}) if ra else {}
+        )
         last_task_id = ""
         for task in pending:
             fn = str(task.get("function_name", "")).strip()
@@ -804,9 +801,7 @@ class ProcessRecoveryPlanner:
                 "product_jid": str(self.product_agent.jid),
                 "task_id": task_id,
             }
-            reason = (
-                f"INSERTION: {change_prefix} — {event['function_name']} on {event.get('ra_jid', 'unknown')}"
-            )
+            reason = f"INSERTION: {change_prefix} — {event['function_name']} on {event.get('ra_jid', 'unknown')}"
             if macro_name:
                 reason = (
                     f"INSERTION: {change_prefix} '{macro_name}' step {index}/{total_steps} — "
@@ -902,8 +897,7 @@ class ProcessRecoveryPlanner:
             existing_preds = [
                 str(pred).strip()
                 for pred in (existing.get("predecessors") or [])
-                if str(pred or "").strip()
-                and str(pred).strip() not in deleted_task_id_set
+                if str(pred or "").strip() and str(pred).strip() not in deleted_task_id_set
             ]
             gated_by_resume_chain = any(pred in resume_task_ids for pred in existing_preds)
             preds = (
@@ -982,13 +976,9 @@ class ProcessRecoveryPlanner:
         repair_resource_jid = str((repair_task or {}).get("resource_jid") or "").strip()
         target_resource_jid = str(target_task.get("resource_jid") or "").strip()
         if not repair_resource_jid:
-            raise ValueError(
-                f"repair task '{repair_task_id}' is missing resource_jid"
-            )
+            raise ValueError(f"repair task '{repair_task_id}' is missing resource_jid")
         if not target_resource_jid:
-            raise ValueError(
-                f"target task '{target_task_id}' is missing resource_jid"
-            )
+            raise ValueError(f"target task '{target_task_id}' is missing resource_jid")
         if repair_resource_jid != target_resource_jid:
             raise ValueError(
                 f"repair task '{repair_task_id}' resource '{repair_resource_jid}' "
@@ -1009,9 +999,7 @@ class ProcessRecoveryPlanner:
         skipped_completed_predecessors: list[str] = []
         for predecessor_task_id in target_predecessors:
             predecessor_task = self._find_node(predecessor_task_id)
-            predecessor_status = (
-                str((predecessor_task or {}).get("status") or "").strip().lower()
-            )
+            predecessor_status = str((predecessor_task or {}).get("status") or "").strip().lower()
             if predecessor_task is not None and predecessor_status in {"completed", "finished"}:
                 skipped_completed_predecessors.append(predecessor_task_id)
                 continue
@@ -1041,9 +1029,7 @@ class ProcessRecoveryPlanner:
                 for succ in (predecessor_task.get("successors") or [])
                 if str(succ or "").strip()
             ]
-            new_successors = [
-                succ for succ in old_successors if succ != target_task_id
-            ]
+            new_successors = [succ for succ in old_successors if succ != target_task_id]
             if repair_task_id not in new_successors:
                 new_successors.append(repair_task_id)
             modified_tasks.append(
@@ -1072,9 +1058,7 @@ class ProcessRecoveryPlanner:
             ]
             if target_task_id not in old_successors:
                 continue
-            new_successors = [
-                succ for succ in old_successors if succ != target_task_id
-            ]
+            new_successors = [succ for succ in old_successors if succ != target_task_id]
             modified_tasks.append(
                 {
                     "id": predecessor_task_id,
@@ -1133,9 +1117,7 @@ class ProcessRecoveryPlanner:
                     f"MODIFICATION: {change_prefix} — shift {node_id} after inserted repair {repair_task_id}"
                 )
             modified_tasks.append(patch)
-            sequence_shift_logs.append(
-                (node_id, old_sequence_index, next_sequence_index)
-            )
+            sequence_shift_logs.append((node_id, old_sequence_index, next_sequence_index))
             next_sequence_index += 1
 
         self.logger.info(
@@ -1208,20 +1190,14 @@ class ProcessRecoveryPlanner:
 
         target_task = self._find_node(target_task_id)
         if not isinstance(target_task, dict):
-            raise ValueError(
-                f"target task '{target_task_id}' was not found for bridge splice"
-            )
+            raise ValueError(f"target task '{target_task_id}' was not found for bridge splice")
 
         repair_resource_jid = str(first_repair_task.get("resource_jid") or "").strip()
         target_resource_jid = str(target_task.get("resource_jid") or "").strip()
         if not repair_resource_jid:
-            raise ValueError(
-                f"bridge task '{first_repair_task_id}' is missing resource_jid"
-            )
+            raise ValueError(f"bridge task '{first_repair_task_id}' is missing resource_jid")
         if not target_resource_jid:
-            raise ValueError(
-                f"target task '{target_task_id}' is missing resource_jid"
-            )
+            raise ValueError(f"target task '{target_task_id}' is missing resource_jid")
         if repair_resource_jid != target_resource_jid:
             raise ValueError(
                 f"bridge task '{first_repair_task_id}' resource '{repair_resource_jid}' "
@@ -1242,9 +1218,7 @@ class ProcessRecoveryPlanner:
         skipped_completed_predecessors: list[str] = []
         for predecessor_task_id in target_predecessors:
             predecessor_task = self._find_node(predecessor_task_id)
-            predecessor_status = (
-                str((predecessor_task or {}).get("status") or "").strip().lower()
-            )
+            predecessor_status = str((predecessor_task or {}).get("status") or "").strip().lower()
             if predecessor_task is not None and predecessor_status in {"completed", "finished"}:
                 skipped_completed_predecessors.append(predecessor_task_id)
                 continue
@@ -1285,9 +1259,7 @@ class ProcessRecoveryPlanner:
                 for succ in (predecessor_task.get("successors") or [])
                 if str(succ or "").strip()
             ]
-            new_successors = [
-                succ for succ in old_successors if succ != target_task_id
-            ]
+            new_successors = [succ for succ in old_successors if succ != target_task_id]
             if first_repair_task_id not in new_successors:
                 new_successors.append(first_repair_task_id)
             modified_tasks.append(
@@ -1316,9 +1288,7 @@ class ProcessRecoveryPlanner:
             ]
             if target_task_id not in old_successors:
                 continue
-            new_successors = [
-                succ for succ in old_successors if succ != target_task_id
-            ]
+            new_successors = [succ for succ in old_successors if succ != target_task_id]
             modified_tasks.append(
                 {
                     "id": predecessor_task_id,
@@ -1390,9 +1360,7 @@ class ProcessRecoveryPlanner:
                     ),
                 }
             )
-            sequence_shift_logs.append(
-                (node_id, old_sequence_index, next_sequence_index)
-            )
+            sequence_shift_logs.append((node_id, old_sequence_index, next_sequence_index))
             next_sequence_index += 1
 
         self.logger.info(
@@ -1445,8 +1413,7 @@ class ProcessRecoveryPlanner:
         )
         self._apply_replan_patch(patch_rows)
         return [
-            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task)
-            for task in tasks
+            deepcopy(self._find_node(str(task.get("id") or "").strip()) or task) for task in tasks
         ]
 
     def build_bridge_macro_proposal_patch(
@@ -1481,7 +1448,9 @@ class ProcessRecoveryPlanner:
                 {
                     "function_name": function_name,
                     "params": dict(step.get("params") or {}),
-                    "ra_jid": str(step.get("resource_jid") or proposal.get("resource_jid") or "").strip(),
+                    "ra_jid": str(
+                        step.get("resource_jid") or proposal.get("resource_jid") or ""
+                    ).strip(),
                 }
             )
 
@@ -1502,9 +1471,7 @@ class ProcessRecoveryPlanner:
                 task_groups_by_resource.setdefault(resource_jid, []).append(task)
         patch_rows: list[dict[str, Any]] = []
         spliced_task_ids: set[str] = set()
-        for resource_jid, target_task_id in dict(
-            splice_before_task_ids_by_resource or {}
-        ).items():
+        for resource_jid, target_task_id in dict(splice_before_task_ids_by_resource or {}).items():
             repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
             if not repair_tasks:
                 continue
@@ -1515,7 +1482,9 @@ class ProcessRecoveryPlanner:
                 change_prefix="Approved bridge recovery",
             )
             spliced_task_ids.update(
-                str(task.get("id") or "").strip() for task in repair_tasks if str(task.get("id") or "").strip()
+                str(task.get("id") or "").strip()
+                for task in repair_tasks
+                if str(task.get("id") or "").strip()
             )
         for task in tasks:
             task_id = str(task.get("id") or "").strip()
@@ -1577,12 +1546,11 @@ class ProcessRecoveryPlanner:
                 or proposal.get("macro_name")
                 or f"bridge_recovery_macro_{index}"
             ).strip()
-            outline_id = str(
-                macro_task.get("outline_id")
-                or f"bridge_outline_{index}"
-            ).strip()
+            outline_id = str(macro_task.get("outline_id") or f"bridge_outline_{index}").strip()
             llm_outline_id = str(macro_task.get("llm_outline_id") or "").strip()
-            resource_jid = str(macro_task.get("resource_jid") or proposal.get("resource_jid") or "").strip()
+            resource_jid = str(
+                macro_task.get("resource_jid") or proposal.get("resource_jid") or ""
+            ).strip()
             primitive_steps = list(macro_task.get("primitive_steps") or [])
             expected_start_state_payload = macro_task.get("expected_start_state")
             if isinstance(expected_start_state_payload, dict):
@@ -1683,7 +1651,9 @@ class ProcessRecoveryPlanner:
                 predecessor_task_ids = [anchor_predecessor]
 
             step_summary = ", ".join(
-                str(step.get("primitive", "?")) for step in primitive_steps[:5] if isinstance(step, dict)
+                str(step.get("primitive", "?"))
+                for step in primitive_steps[:5]
+                if isinstance(step, dict)
             )
             if len(primitive_steps) > 5:
                 step_summary += f", ... ({len(primitive_steps)} total)"
@@ -1712,9 +1682,7 @@ class ProcessRecoveryPlanner:
             }
             if llm_outline_id:
                 task_node["llm_outline_id"] = llm_outline_id
-            event_name = str(
-                dict(outline_semantics or {}).get("event_name") or ""
-            ).strip()
+            event_name = str(dict(outline_semantics or {}).get("event_name") or "").strip()
             if event_name:
                 task_node["event_name"] = event_name
 
@@ -1724,7 +1692,9 @@ class ProcessRecoveryPlanner:
                 if task_metadata.get("out_state"):
                     task_node["out_state"] = str(task_metadata["out_state"])
                 if task_metadata.get("required_context_keys"):
-                    task_node["required_context_keys"] = list(task_metadata["required_context_keys"])
+                    task_node["required_context_keys"] = list(
+                        task_metadata["required_context_keys"]
+                    )
                 if task_metadata.get("context_mapping"):
                     task_node["context_mapping"] = dict(task_metadata["context_mapping"])
                 if task_metadata.get("part_transition"):
@@ -1750,9 +1720,7 @@ class ProcessRecoveryPlanner:
                 task_groups_by_resource.setdefault(resource_jid, []).append(task)
         patch_rows: list[dict[str, Any]] = []
         spliced_task_ids: set[str] = set()
-        for resource_jid, target_task_id in dict(
-            splice_before_task_ids_by_resource or {}
-        ).items():
+        for resource_jid, target_task_id in dict(splice_before_task_ids_by_resource or {}).items():
             repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
             if not repair_tasks:
                 continue
@@ -1763,7 +1731,9 @@ class ProcessRecoveryPlanner:
                 change_prefix="Approved bridge recovery",
             )
             spliced_task_ids.update(
-                str(task.get("id") or "").strip() for task in repair_tasks if str(task.get("id") or "").strip()
+                str(task.get("id") or "").strip()
+                for task in repair_tasks
+                if str(task.get("id") or "").strip()
             )
         for task in compiled_nodes:
             task_id = str(task.get("id") or "").strip()
@@ -1788,9 +1758,14 @@ class ProcessRecoveryPlanner:
         if not conflict_task_ids:
             self.logger.warning("[Planner] No conflict task IDs found; sending full plan context.")
 
-        tools_catalog = self._deduplicate_tools_catalog(getattr(self.product_agent, "tools_catalog", []))
+        tools_catalog = self._deduplicate_tools_catalog(
+            getattr(self.product_agent, "tools_catalog", [])
+        )
         resource_infos = [
-            {"jid": str(getattr(ra, "jid", "")), "static_capabilities": getattr(ra, "static_capabilities", {})}
+            {
+                "jid": str(getattr(ra, "jid", "")),
+                "static_capabilities": getattr(ra, "static_capabilities", {}),
+            }
             for ra in self.resource_agents
         ]
 
@@ -1804,8 +1779,14 @@ class ProcessRecoveryPlanner:
             system_state=None,
         )
         raw = await self.product_agent.ask_llm(prompt=prompt, with_functions=False, temperature=0.0)
-        self._dump_replan_debug(source="offline", prompt=prompt, violations=violations,
-                                resource_infos=resource_infos, system_state=None, llm_response=raw)
+        self._dump_replan_debug(
+            source="offline",
+            prompt=prompt,
+            violations=violations,
+            resource_infos=resource_infos,
+            system_state=None,
+            llm_response=raw,
+        )
         try:
             modified_tasks = json.loads(raw).get("tasks", [])
             if not modified_tasks:
@@ -1856,9 +1837,7 @@ class ProcessRecoveryPlanner:
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
         self._set_last_bridge_debug({})
         ignored_task_ids = {
-            str(task_id).strip()
-            for task_id in (ignored_task_ids or set())
-            if str(task_id).strip()
+            str(task_id).strip() for task_id in (ignored_task_ids or set()) if str(task_id).strip()
         }
 
         # 1. Build P_id: parts not yet at goal state
@@ -1899,7 +1878,8 @@ class ProcessRecoveryPlanner:
         tools_catalog = getattr(self.product_agent, "tools_catalog", [])
         goal_state = self._resolve_goal_part_state(tools_catalog)
         P_id = [
-            name for name, info in part_tracker.items()
+            name
+            for name, info in part_tracker.items()
             if not goal_state or info.get("state") != goal_state
         ]
 
@@ -1981,22 +1961,16 @@ class ProcessRecoveryPlanner:
                                 and str(tool.get("in_state", "")).strip().lower() == "any"
                             ]
                             if any_state_tools:
-                                last_pending_id = str(
-                                    pending_suffix[-1].get("id", "")
-                                ).strip()
+                                last_pending_id = str(pending_suffix[-1].get("id", "")).strip()
                                 direct_tool = any_state_tools[0]
                                 direct_path = [
                                     {
-                                        "function_name": str(
-                                            direct_tool["function_name"]
-                                        ),
+                                        "function_name": str(direct_tool["function_name"]),
                                         "ra_jid": target_ra_jid,
                                         "params": {},
                                     }
                                 ]
-                                if best_path is None or len(direct_path) < len(
-                                    best_path
-                                ):
+                                if best_path is None or len(direct_path) < len(best_path):
                                     best_target = target
                                     best_path = direct_path
                                     stuck_ra_jid = target_ra_jid
@@ -2101,7 +2075,9 @@ class ProcessRecoveryPlanner:
                     part_states=part_states,
                     part_locations=part_locations,
                 )
-                self.logger.info("[Planner] Fast-tracking to bridge request (skipping DES search for preprogrammed scenarios).")
+                self.logger.info(
+                    "[Planner] Fast-tracking to bridge request (skipping DES search for preprogrammed scenarios)."
+                )
             else:
                 if bids:
                     x_c = bids[0].str_x[0]
@@ -2161,7 +2137,9 @@ class ProcessRecoveryPlanner:
                     bridge_summary=bridge_summary,
                     bridge_debug=None,
                 )
-            self.logger.info("[Planner] DES found no modeled continuation; requesting bridge proposal.")
+            self.logger.info(
+                "[Planner] DES found no modeled continuation; requesting bridge proposal."
+            )
             prepared_bridge_request = await self.prepare_bridge_request(
                 stuck_state=x_c,
                 P_id=P_id,
@@ -2184,8 +2162,10 @@ class ProcessRecoveryPlanner:
                 {
                     "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
                     "handoff_owner": "product_agent",
-                    "bridge_generation_mode": str(bridge_generation_mode or "auto").strip().lower() or "auto",
-                    "auto_start_requested": str(bridge_generation_mode or "auto").strip().lower() == "auto",
+                    "bridge_generation_mode": str(bridge_generation_mode or "auto").strip().lower()
+                    or "auto",
+                    "auto_start_requested": str(bridge_generation_mode or "auto").strip().lower()
+                    == "auto",
                     "auto_start_started": False,
                 }
             )
@@ -2228,7 +2208,8 @@ class ProcessRecoveryPlanner:
             anchor_task_id=anchor,
         )
         entry_task_ids = [
-            task_id for task_id in self._entry_task_ids_from_violations(violations)
+            task_id
+            for task_id in self._entry_task_ids_from_violations(violations)
             if task_id and task_id != anchor
         ]
         if tasks and entry_task_ids:
@@ -2325,9 +2306,7 @@ class ProcessRecoveryPlanner:
                     continue
                 entry = derived.setdefault(part_name, {"state": "unknown", "location": None})
                 force_keys = {
-                    str(key).strip()
-                    for key in (entry.get("_force_keys") or [])
-                    if str(key).strip()
+                    str(key).strip() for key in (entry.get("_force_keys") or []) if str(key).strip()
                 }
                 state = observed_part_state or str(entity.get("state") or "").strip()
                 if state:
@@ -2407,11 +2386,16 @@ class ProcessRecoveryPlanner:
 
             target = node_map[tid]
 
-            if "function_name" in t: target["function_name"] = t["function_name"]
-            if "params" in t: target["params"] = params
-            if "resource_jid" in t: target["resource_jid"] = t["resource_jid"]
-            if "sequence_index" in t: target["sequence_index"] = t["sequence_index"]
-            if "requirement_id" in t: target["requirement_id"] = deepcopy(t["requirement_id"])
+            if "function_name" in t:
+                target["function_name"] = t["function_name"]
+            if "params" in t:
+                target["params"] = params
+            if "resource_jid" in t:
+                target["resource_jid"] = t["resource_jid"]
+            if "sequence_index" in t:
+                target["sequence_index"] = t["sequence_index"]
+            if "requirement_id" in t:
+                target["requirement_id"] = deepcopy(t["requirement_id"])
 
             if "predecessors" in t:
                 target["predecessors"] = t["predecessors"]
@@ -2500,7 +2484,9 @@ class ProcessRecoveryPlanner:
                 continue
             if fn not in seen:
                 merged = {k: v for k, v in row.items() if k != "function_owner_agent"}
-                merged["capable_agents"] = [row["function_owner_agent"]] if row.get("function_owner_agent") else []
+                merged["capable_agents"] = (
+                    [row["function_owner_agent"]] if row.get("function_owner_agent") else []
+                )
                 seen[fn] = merged
             else:
                 agent = row.get("function_owner_agent")
@@ -2547,7 +2533,9 @@ class ProcessRecoveryPlanner:
                 "",
                 "## System State (runtime context: robot states, part tracker, timeline)",
                 "",
-                _json_block(system_state) if system_state else "_No system state (offline replan)._",
+                _json_block(system_state)
+                if system_state
+                else "_No system state (offline replan)._",
                 "",
                 "## Prompt (full text sent to LLM)",
                 "",

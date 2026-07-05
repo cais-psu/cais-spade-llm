@@ -78,9 +78,7 @@ def digital_twin_hardware_processes_for_robot(
     per_robot = hardware_processes.get(robot_key)
     if isinstance(per_robot, dict):
         return {
-            str(key): str(value)
-            for key, value in per_robot.items()
-            if str(value or "").strip()
+            str(key): str(value) for key, value in per_robot.items() if str(value or "").strip()
         }
     return {
         str(key): str(value)
@@ -116,8 +114,7 @@ def digital_twin_allowed_sim_modes(
 ) -> tuple[str, ...]:
     """Return allowed sim modes for a `digital_twin` target entry."""
     modes = tuple(
-        normalize_digital_twin_sim_mode(mode, aliases)
-        for mode in (cfg.get("sim_modes") or ())
+        normalize_digital_twin_sim_mode(mode, aliases) for mode in (cfg.get("sim_modes") or ())
     )
     canonical_modes = tuple(dict.fromkeys(mode for mode in modes if mode))
     return canonical_modes or sim_modes
@@ -247,12 +244,7 @@ def robot_function_path(
     function_key = robot_function_safe_function_name(function_name)
     safe_name = robot_function_safe_name(name)
     source_key = str(storage_source or "hardware").strip()
-    return (
-        Path(taught_functions_dir)
-        / robot_key
-        / function_key
-        / f"{safe_name}__{source_key}.json"
-    )
+    return Path(taught_functions_dir) / robot_key / function_key / f"{safe_name}__{source_key}.json"
 
 
 def robot_function_step_waypoint(step: dict[str, Any]) -> dict[str, Any] | None:
@@ -298,14 +290,18 @@ def digital_twin_prepared_replay_path(
     """Return the prepared replay path for a `digital_twin` recording."""
     slug = digital_twin_slug(cfg)
     digest = digital_twin_recording_hash(recording)[:16]
-    safe_source = "".join(
-        c if (c.isalnum() or c in "-_") else "_"
-        for c in str(source or "recording").strip()
-    ) or "recording"
-    safe_replay = "".join(
-        c if (c.isalnum() or c in "-_") else "_"
-        for c in str(replay_target or "twin").strip()
-    ) or "twin"
+    safe_source = (
+        "".join(
+            c if (c.isalnum() or c in "-_") else "_" for c in str(source or "recording").strip()
+        )
+        or "recording"
+    )
+    safe_replay = (
+        "".join(
+            c if (c.isalnum() or c in "-_") else "_" for c in str(replay_target or "twin").strip()
+        )
+        or "twin"
+    )
     return Path(status_root) / (
         f"cais_digital_twin_{slug}_{safe_source}_{safe_replay}_{digest}_prepared.json"
     )

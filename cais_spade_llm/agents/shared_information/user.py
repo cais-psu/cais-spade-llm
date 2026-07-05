@@ -14,6 +14,7 @@ from spade.template import Template
 
 class User(Agent):
     """Minimal operator agent that tracks inbox messages and task statuses."""
+
     agent_role = "user"
 
     def __init__(self, jid: str, password: str, *, name: str = "user"):
@@ -31,23 +32,28 @@ class User(Agent):
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
         fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        fh = logging.FileHandler(f"cais_spade_llm/log/{self.name}_actions.log", mode="a"); fh.setFormatter(fmt)
-        ch = logging.StreamHandler(); ch.setFormatter(fmt)
+        fh = logging.FileHandler(f"cais_spade_llm/log/{self.name}_actions.log", mode="a")
+        fh.setFormatter(fmt)
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
         if not self.logger.handlers:
-            self.logger.addHandler(fh); self.logger.addHandler(ch)
+            self.logger.addHandler(fh)
+            self.logger.addHandler(ch)
 
     async def setup(self):
         """Register inbox behaviours for common operator-facing message types."""
         # Only capture common operator-facing types; avoid stealing replies awaited elsewhere
         for t in ("chat", "ack", "task"):
-            tpl = Template(); tpl.set_metadata("type", t)
+            tpl = Template()
+            tpl.set_metadata("type", t)
             self.add_behaviour(self._Inbox(), tpl)
         self.logger.info(f"[ready] {self.jid} (User agent)")
 
     class _Inbox(CyclicBehaviour):
         async def run(self):
             msg = await self.receive(timeout=0.5)
-            if not msg: return
+            if not msg:
+                return
             mtype = (msg.metadata or {}).get("type")
             body = msg.body or ""
             sender = str(msg.sender)
@@ -65,21 +71,28 @@ class User(Agent):
 
     async def say(self, to_jid: str, text: str, *, mtype: str = "chat") -> None:
         """Send a one-way message to another agent."""
-        msg = Message(to=to_jid); msg.set_metadata("type", mtype); msg.body = text
+        msg = Message(to=to_jid)
+        msg.set_metadata("type", mtype)
+        msg.body = text
         await self.send(msg)
         self.logger.info(f"[User.say] → {to_jid} type={mtype} body={text[:200]}")
 
     async def request_reply(self, to_jid: str, *, mtype: str, payload: dict, timeout: float = 10.0):
         """Send a request and wait (briefly) for a matching reply message."""
-        msg = Message(to=to_jid); msg.set_metadata("type", mtype); msg.body = json.dumps(payload)
+        msg = Message(to=to_jid)
+        msg.set_metadata("type", mtype)
+        msg.body = json.dumps(payload)
         await self.send(msg)
 
         deadline = self.loop.time() + timeout
         while self.loop.time() < deadline:
             reply = await self.receive(timeout=0.5)
-            if not reply: 
+            if not reply:
                 continue
-            if str(reply.sender) == to_jid and reply.metadata.get("type") in ("llm.reply", "tool.reply"):
+            if str(reply.sender) == to_jid and reply.metadata.get("type") in (
+                "llm.reply",
+                "tool.reply",
+            ):
                 return reply
             # log any other unsolicited messages too
             self.inbox.append((str(reply.sender), reply.metadata.get("type"), reply.body or ""))

@@ -131,7 +131,9 @@ PRINTER_PROFILE = ResourceProfile(
     facet_builder=_printer_facet,
     occupancy_builder=_printer_occupancy,
     availability_resolver=_printer_availability,
-    primitive_owner_resolver=lambda agent: agent if getattr(agent, "_BRIDGE_PRIMITIVES", None) else None,
+    primitive_owner_resolver=lambda agent: agent
+    if getattr(agent, "_BRIDGE_PRIMITIVES", None)
+    else None,
     sync_map={
         "active_job": "_active_job",
         "job_state": "_job_state",

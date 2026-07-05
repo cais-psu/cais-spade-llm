@@ -828,7 +828,9 @@ def _recover_resume_task_ids(
         if str(node.get("id", "")).strip()
     }
     last_task = task_lookup.get(last_successful_task) or {}
-    requirement_id = _task_requirement_id(last_task) or _task_requirement_id({"id": last_successful_task})
+    requirement_id = _task_requirement_id(last_task) or _task_requirement_id(
+        {"id": last_successful_task}
+    )
     try:
         last_sequence_index = int(last_task.get("sequence_index"))
     except (TypeError, ValueError):
@@ -936,11 +938,7 @@ def _origin_candidates_from_plan(
 
 def _origin_candidates_from_task(task: dict[str, Any], *, part_name: str) -> list[str]:
     params = dict(task.get("params") or {})
-    task_part = str(
-        task.get("part_name")
-        or params.get("part_name")
-        or ""
-    ).strip()
+    task_part = str(task.get("part_name") or params.get("part_name") or "").strip()
     if task_part and task_part != part_name:
         return []
     candidate = str(params.get("origin_resource_location") or "").strip()
@@ -962,11 +960,7 @@ def _part_pick_geometry(grounding_context: dict[str, Any], *, part_name: str) ->
     board_top_z = target.get("board_top_z")
     slot_pose = dict(target.get("slot_pose") or {})
     try:
-        board_z = float(
-            board_top_z
-            if board_top_z is not None
-            else slot_pose.get("z", 1.02)
-        )
+        board_z = float(board_top_z if board_top_z is not None else slot_pose.get("z", 1.02))
     except (TypeError, ValueError):
         board_z = 1.02
 

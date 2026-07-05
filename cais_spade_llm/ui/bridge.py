@@ -54,8 +54,8 @@ from cais_spade_llm.ui import digital_twin
 log = logging.getLogger("ui.bridge")
 
 # Filesystem locations (mirror spade_main.py constants).
-_BASE = Path(__file__).resolve().parent.parent          # cais_spade_llm/
-_PROJECT_ROOT = _BASE.parent                             # repo root
+_BASE = Path(__file__).resolve().parent.parent  # cais_spade_llm/
+_PROJECT_ROOT = _BASE.parent  # repo root
 _PRODUCT_DIR = _BASE / "initialization" / "products"
 _RESOURCE_DIR = _BASE / "initialization" / "resources"
 _TOOLS_OUT = _BASE / "initialization" / "tools.json"
@@ -70,8 +70,12 @@ _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
 _VENV_PYTHON = _PROJECT_ROOT / ".venv" / "bin" / "python"
-_UR5E_RG2_GRIPPER_SCRIPT = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rg2_rtde_gripper.py"
-_UR5E_RTDE_TRAJECTORY_SCRIPT = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rtde_trajectory_server.py"
+_UR5E_RG2_GRIPPER_SCRIPT = (
+    _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rg2_rtde_gripper.py"
+)
+_UR5E_RTDE_TRAJECTORY_SCRIPT = (
+    _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rtde_trajectory_server.py"
+)
 _UR5E_RTDE_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
 _UR5E_RTDE_TRAJECTORY_STATUS = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
 _UR5E_RG2_GRIPPER_ACTION = "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
@@ -307,9 +311,12 @@ class SystemBridge:
     )
     _SIM_PERCEPTION_SERVICES = ("/detect_all",)
     _SIM_PREWARM_SHELL_SERVICES = ("/compute_cartesian_path",)
-    _ENABLE_GAZEBO_TIMING_LOGS = str(
-        os.getenv("CAIS_SPADE_GAZEBO_TIMING", "")
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    _ENABLE_GAZEBO_TIMING_LOGS = str(os.getenv("CAIS_SPADE_GAZEBO_TIMING", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     _GAZEBO_WORKSPACE_LAUNCH_FILES = {
         "gazebo_dual": "dual_moveit_gazebo.launch.py",
         "gazebo_dual_gazebo_only": "dual_moveit_gazebo.launch.py",
@@ -341,7 +348,9 @@ class SystemBridge:
         self._xmpp_proc: subprocess.Popen | None = None
         self._xmpp_host: str = "127.0.0.1"
         self._xmpp_port: int = 5222
-        self._gazebo_reset_pose_cache: dict[str, tuple[float, float, float, float, float, float]] | None = None
+        self._gazebo_reset_pose_cache: (
+            dict[str, tuple[float, float, float, float, float, float]] | None
+        ) = None
 
         # Lifecycle flags.
         self.system_running: bool = False
@@ -392,8 +401,7 @@ class SystemBridge:
         self._teleop_server_ros_domain_id: int | None = None
         self._teleop_server_lock = threading.Lock()
         self._digital_twin_sim_modes: dict[str, str] = {
-            target: self._DIGITAL_TWIN_DEFAULT_SIM_MODE
-            for target in self._DIGITAL_TWIN_TARGETS
+            target: self._DIGITAL_TWIN_DEFAULT_SIM_MODE for target in self._DIGITAL_TWIN_TARGETS
         }
         # In-memory capture buffer for the manual record/replay feature (per target).
         self._digital_twin_waypoints: dict[str, list[dict[str, Any]]] = {}
@@ -484,12 +492,8 @@ class SystemBridge:
         ):
             preferred_entry = self._preferred_runtime_bridge_archive_entry()
             if isinstance(preferred_entry, dict):
-                self.runtime_bridge_archive_path = str(
-                    preferred_entry.get("path") or ""
-                ).strip()
-                self.runtime_bridge_archive_label = str(
-                    preferred_entry.get("label") or ""
-                ).strip()
+                self.runtime_bridge_archive_path = str(preferred_entry.get("path") or "").strip()
+                self.runtime_bridge_archive_label = str(preferred_entry.get("label") or "").strip()
         fixture_replay_path = str(
             os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or ""
         ).strip()
@@ -528,12 +532,8 @@ class SystemBridge:
         if self.runtime_bridge_mode == "pre_ran" and previous_mode != "pre_ran":
             preferred_entry = self._preferred_runtime_bridge_archive_entry()
             if isinstance(preferred_entry, dict):
-                self.runtime_bridge_archive_path = str(
-                    preferred_entry.get("path") or ""
-                ).strip()
-                self.runtime_bridge_archive_label = str(
-                    preferred_entry.get("label") or ""
-                ).strip()
+                self.runtime_bridge_archive_path = str(preferred_entry.get("path") or "").strip()
+                self.runtime_bridge_archive_label = str(preferred_entry.get("label") or "").strip()
         self._apply_runtime_bridge_session_settings()
         return self.get_runtime_bridge_settings()
 
@@ -541,8 +541,8 @@ class SystemBridge:
         self,
         validation_policy: str,
     ) -> dict[str, Any]:
-        self.runtime_bridge_validation_policy = (
-            self._normalize_runtime_bridge_validation_policy(validation_policy)
+        self.runtime_bridge_validation_policy = self._normalize_runtime_bridge_validation_policy(
+            validation_policy
         )
         self._apply_runtime_bridge_session_settings()
         return self.get_runtime_bridge_settings()
@@ -607,10 +607,7 @@ class SystemBridge:
 
         signature = self._runtime_bridge_archive_scan_signature()
         cached_entries = self._runtime_bridge_archive_cache_entries
-        if (
-            cached_entries is not None
-            and self._runtime_bridge_archive_cache_signature == signature
-        ):
+        if cached_entries is not None and self._runtime_bridge_archive_cache_signature == signature:
             return [dict(entry) for entry in cached_entries]
 
         entries: list[dict[str, Any]] = []
@@ -664,9 +661,7 @@ class SystemBridge:
                 or len(payload.get("outline_tasks") or [])
                 or 0
             )
-            label = (
-                f"{timestamp} | trace={accepted_trace_length} | {rel_path}"
-            )
+            label = f"{timestamp} | trace={accepted_trace_length} | {rel_path}"
             entries.append(
                 {
                     "path": str(resolved),
@@ -715,12 +710,7 @@ class SystemBridge:
         with self._agent_runtime_lock:
             loop = self._agent_runtime_loop
             thread = self._agent_runtime_thread
-            if (
-                loop is not None
-                and thread is not None
-                and thread.is_alive()
-                and loop.is_running()
-            ):
+            if loop is not None and thread is not None and thread.is_alive() and loop.is_running():
                 return loop
 
             ready = threading.Event()
@@ -809,9 +799,7 @@ class SystemBridge:
                 "last_pending": (),
                 "last_pending_emit_ts": 0.0,
             }
-        self._gazebo_timing_emit(
-            f"launch#{launch_id} start name={launch_key} pid={pid}"
-        )
+        self._gazebo_timing_emit(f"launch#{launch_id} start name={launch_key} pid={pid}")
         return launch_id
 
     def _gazebo_launch_timing_snapshot(self) -> dict[str, Any] | None:
@@ -948,7 +936,9 @@ class SystemBridge:
             f"launch_elapsed={launch_elapsed:.2f}s"
         )
 
-    def _gazebo_note_prewarm_result(self, robot: str, ok: bool, elapsed: float, detail: str = "") -> None:
+    def _gazebo_note_prewarm_result(
+        self, robot: str, ok: bool, elapsed: float, detail: str = ""
+    ) -> None:
         meta = self._gazebo_launch_timing_snapshot()
         if not meta:
             return
@@ -1007,10 +997,7 @@ class SystemBridge:
         try:
             ac = self._import_agent_creator_module()
             self._agent_creator_cached = ac
-            self._diag_emit(
-                "agent_creator pre-import ready in "
-                f"{time.monotonic() - t0:.2f}s"
-            )
+            self._diag_emit(f"agent_creator pre-import ready in {time.monotonic() - t0:.2f}s")
         except Exception as exc:
             # Keep startup resilient: fallback import happens on demand in start_system.
             self._diag_emit(f"agent_creator pre-import failed: {exc}")
@@ -1188,7 +1175,9 @@ class SystemBridge:
         order_path = self._abs_project_path(product_order_file).resolve()
         return load_product_order_file(order_path)
 
-    def save_product_order(self, product_order_file: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def save_product_order(
+        self, product_order_file: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         order_path = self._abs_project_path(product_order_file).resolve()
         order_path.parent.mkdir(parents=True, exist_ok=True)
         order_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1232,7 +1221,9 @@ class SystemBridge:
                 return out
         if len(candidates) == 1:
             return candidates[0]
-        raise ValueError(f"No product initialization manifest references product order file: {product_order_file}")
+        raise ValueError(
+            f"No product initialization manifest references product order file: {product_order_file}"
+        )
 
     def resolve_product_init_for_product_order(self, product_order_file: str) -> str:
         ctx = self._resolve_product_init_for_product_order(product_order_file)
@@ -1269,7 +1260,9 @@ class SystemBridge:
             if legacy_raw:
                 raw = legacy_raw
                 source = _legacy_safety_intent_previews_path()
-        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(raw)
+        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(
+            raw
+        )
         if source != _SAFETY_INTENT_PREVIEWS or normalized != raw:
             _USER_VERIFIED_SAFETY.mkdir(parents=True, exist_ok=True)
             atomic_json_write(_SAFETY_INTENT_PREVIEWS, normalized)
@@ -1280,7 +1273,9 @@ class SystemBridge:
 
     def _save_safety_intent_previews(self, payload: dict[str, Any]) -> None:
         _USER_VERIFIED_SAFETY.mkdir(parents=True, exist_ok=True)
-        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(payload)
+        normalized, referenced_dirs, removed_dirs = self._normalize_safety_intent_previews_payload(
+            payload
+        )
         atomic_json_write(_SAFETY_INTENT_PREVIEWS, normalized)
         self._cleanup_safety_preview_dirs(referenced_dirs, removed_dirs)
         if _legacy_safety_intent_previews_path() != _SAFETY_INTENT_PREVIEWS:
@@ -1359,7 +1354,9 @@ class SystemBridge:
                 continue
         return None
 
-    def _normalize_preview_record(self, record: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+    def _normalize_preview_record(
+        self, record: dict[str, Any]
+    ) -> tuple[dict[str, Any], Path | None]:
         out = dict(record)
         preview_dir = self._preview_record_dir(record)
         preview_id = str(out.get("preview_id", "")).strip()
@@ -1387,8 +1384,12 @@ class SystemBridge:
             out["preview_dir"] = str(preview_dir)
             logic_path = preview_dir / "cca_safety_logic.json"
             out["safety_logic_json"] = str(logic_path.resolve())
-            out["dfa_dot_files"] = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.dot"))
-            out["dfa_png_files"] = sorted(str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.png"))
+            out["dfa_dot_files"] = sorted(
+                str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.dot")
+            )
+            out["dfa_png_files"] = sorted(
+                str(p.resolve()) for p in preview_dir.glob("SAFE_*_dfa.png")
+            )
             logic_payload = self._read_json_dict(logic_path)
             rules = logic_payload.get("rules", []) if isinstance(logic_payload, dict) else []
             if isinstance(rules, list):
@@ -1553,11 +1554,7 @@ class SystemBridge:
             for entry in entries:
                 normalized_entry, preview_dir = self._normalize_preview_record(entry)
                 logic_path = Path(str(normalized_entry.get("safety_logic_json", "")).strip())
-                if (
-                    preview_dir is None
-                    or not preview_dir.exists()
-                    or not logic_path.exists()
-                ):
+                if preview_dir is None or not preview_dir.exists() or not logic_path.exists():
                     continue
                 normalized_entries.append((normalized_entry, preview_dir.resolve()))
             kept_entries = normalized_entries[:_SAFETY_PREVIEW_HISTORY_LIMIT]
@@ -1697,9 +1694,7 @@ class SystemBridge:
             )
             details = []
             if bad_keys:
-                details.append(
-                    "Unsupported selector context keys: " + ", ".join(bad_keys)
-                )
+                details.append("Unsupported selector context keys: " + ", ".join(bad_keys))
             if canonical_roles:
                 details.append(
                     "Matching tool rows still pointed to multiple canonical context roles: "
@@ -1772,7 +1767,10 @@ class SystemBridge:
             )
             details = []
             if used_resources:
-                details.append("Resources actually referenced in the compiled formula: " + ", ".join(used_resources))
+                details.append(
+                    "Resources actually referenced in the compiled formula: "
+                    + ", ".join(used_resources)
+                )
             if expected_resources:
                 details.append("Resources expected from the rule: " + ", ".join(expected_resources))
             suggestions = [
@@ -1783,9 +1781,7 @@ class SystemBridge:
             category = "degenerate_mutex"
         elif "degenerates into independent single-resource conjuncts" in lower:
             title = "The generated mutex collapsed into self-constraints"
-            summary = (
-                "The compiled formula split into separate single-resource clauses instead of one real cross-resource mutex."
-            )
+            summary = "The compiled formula split into separate single-resource clauses instead of one real cross-resource mutex."
             details = [
                 "This means the generated logic prevented each resource from conflicting with itself, "
                 "rather than preventing the two resources from conflicting with each other."
@@ -1806,14 +1802,14 @@ class SystemBridge:
                 r"out_states (\[[^\]]*\])",
             )
             title = "The generated state slice does not exist in the matched tools"
-            summary = (
-                "The selector asked for persistent states that are not exposed by the matching tool rows."
-            )
+            summary = "The selector asked for persistent states that are not exposed by the matching tool rows."
             details = []
             if requested_states:
                 details.append("Requested states: " + ", ".join(requested_states))
             if available_states:
-                details.append("Available persistent states from matching rows: " + ", ".join(available_states))
+                details.append(
+                    "Available persistent states from matching rows: " + ", ".join(available_states)
+                )
             suggestions = [
                 "Use only persistent states that are actually produced by the matching tool family.",
                 "Do not mix generic idle states with action-specific occupancy states unless the catalog supports that slice.",
@@ -1837,9 +1833,7 @@ class SystemBridge:
             category = "no_matching_rows"
         elif "could not ground context" in lower:
             title = "The selector context could not be grounded"
-            summary = (
-                "The selector matched a tool family, but the context object still did not map to any concrete tool rows."
-            )
+            summary = "The selector matched a tool family, but the context object still did not map to any concrete tool rows."
             details = [
                 "This usually means the context value or key does not line up with the matched tool family's required context."
             ]
@@ -1851,9 +1845,7 @@ class SystemBridge:
             category = "context_grounding"
         elif "did not expand to any aps" in lower:
             title = "The selector over-constrained the safety condition"
-            summary = (
-                "The selector compiled successfully enough to resolve its shape, but no concrete APs survived expansion."
-            )
+            summary = "The selector compiled successfully enough to resolve its shape, but no concrete APs survived expansion."
             details = [
                 "This usually means the selector combined context, functions, or states too narrowly for any real APs to remain."
             ]
@@ -1916,9 +1908,7 @@ class SystemBridge:
         return payload
 
     @staticmethod
-    def _find_preview_record(
-        entries: list[dict[str, Any]], preview_id: str
-    ) -> dict[str, Any]:
+    def _find_preview_record(entries: list[dict[str, Any]], preview_id: str) -> dict[str, Any]:
         target = str(preview_id or "").strip()
         if not target:
             return {}
@@ -1932,7 +1922,9 @@ class SystemBridge:
             return []
         preview_dir = Path(str(record.get("preview_dir", "")).strip())
         logic_path_raw = str(record.get("safety_logic_json", "")).strip()
-        logic_path = Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        logic_path = (
+            Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        )
         if not logic_path.exists():
             return []
         logic_payload = self._read_json_dict(logic_path)
@@ -2104,9 +2096,8 @@ class SystemBridge:
                 continue
             ap_map[label] = full
         normalized = re.sub(r"\s+", "", ltlf)
-        m_order = (
-            re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized)
-            or re.fullmatch(r"\(!?(ap\d+)\)U(ap\d+)", normalized)
+        m_order = re.fullmatch(r"\(\(!?(ap\d+)\)U(ap\d+)\)", normalized) or re.fullmatch(
+            r"\(!?(ap\d+)\)U(ap\d+)", normalized
         )
         m_response = re.fullmatch(r"G\((ap\d+)->F(ap\d+)\)", normalized)
 
@@ -2145,7 +2136,9 @@ class SystemBridge:
             if not isinstance(rule, dict):
                 continue
             rid = str(rule.get("id", "")).strip() or f"SAFE_{idx}"
-            interpretation = str(rule.get("generated_interpretation", "")).strip() or cls._ltlf_plain_feedback(rule)
+            interpretation = str(
+                rule.get("generated_interpretation", "")
+            ).strip() or cls._ltlf_plain_feedback(rule)
             lines.append(f"- {rid}: {interpretation}")
         return "\n".join(lines) if lines else "No generated rule interpretation available."
 
@@ -2231,7 +2224,9 @@ class SystemBridge:
         latest = entries[0] if isinstance(entries[0], dict) else {}
         preview_dir = Path(str(latest.get("preview_dir", "")).strip())
         logic_path_raw = str(latest.get("safety_logic_json", "")).strip()
-        logic_path = Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        logic_path = (
+            Path(logic_path_raw) if logic_path_raw else (preview_dir / "cca_safety_logic.json")
+        )
         if not logic_path.exists():
             return {
                 "available": False,
@@ -2249,7 +2244,10 @@ class SystemBridge:
             try:
                 dot_path = Path(str(raw_dot or "").strip())
                 dot_signature.append(
-                    (str(dot_path.resolve()), dot_path.stat().st_mtime_ns if dot_path.exists() else 0)
+                    (
+                        str(dot_path.resolve()),
+                        dot_path.stat().st_mtime_ns if dot_path.exists() else 0,
+                    )
                 )
             except Exception:
                 continue
@@ -2299,7 +2297,9 @@ class SystemBridge:
             parsed = parsed_dfas.get(rid, {})
             dot_path = preview_dir / f"{rid}_dfa.dot"
             png_path = preview_dir / f"{rid}_dfa.png"
-            generated_interpretation = str(rule.get("generated_interpretation", "")).strip() or self._ltlf_plain_feedback(rule)
+            generated_interpretation = str(
+                rule.get("generated_interpretation", "")
+            ).strip() or self._ltlf_plain_feedback(rule)
             dfa_status, dfa_diagnostic = self._diagnose_dfa_artifact(dfa_map.get(rid, ""), parsed)
             preview_rules.append(
                 {
@@ -2315,7 +2315,9 @@ class SystemBridge:
                     "dfa_png_path": str(png_path) if png_path.exists() else "",
                     "dfa_initial_state": str(parsed.get("initial", "")),
                     "dfa_violation_state": str(parsed.get("violation_state", "")),
-                    "dfa_ap_symbols": parsed.get("ap_symbols", []) if isinstance(parsed.get("ap_symbols"), list) else [],
+                    "dfa_ap_symbols": parsed.get("ap_symbols", [])
+                    if isinstance(parsed.get("ap_symbols"), list)
+                    else [],
                     "dfa_transitions": self._flatten_dfa_transitions(parsed),
                     "dfa_meaning": self._dfa_plain_meaning(rule, parsed),
                     "dfa_status": dfa_status,
@@ -2390,9 +2392,7 @@ class SystemBridge:
                 raise ValueError(f"parent preview not found: {requested_parent_id}")
         elif str(refinement_feedback or "").strip() and history:
             parent_record = history[0]
-        prompt_preview_rules = self._preview_prompt_rules(
-            self._preview_record_rules(parent_record)
-        )
+        prompt_preview_rules = self._preview_prompt_rules(self._preview_record_rules(parent_record))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         preview_id = f"{stamp}__{slug(safety_path.stem)}__{safety_hash[:8]}"
         preview_dir = _SAFETY_PREVIEW_DIR / preview_id
@@ -2419,6 +2419,7 @@ class SystemBridge:
             raise RuntimeError("failed to initialize SafetyLogic for preview generation")
 
         try:
+
             async def _run_preview() -> dict[str, str]:
                 await safety_logic.build_safety_rules_and_logic(
                     safety_text,
@@ -2504,7 +2505,12 @@ class SystemBridge:
     def evaluate_safety_intent_approval(self, safety_requirement_file: str) -> dict[str, Any]:
         raw = str(safety_requirement_file or "").strip()
         if not raw:
-            return {"approved": False, "reason": "safety_file_missing", "record": {}, "safety_file": ""}
+            return {
+                "approved": False,
+                "reason": "safety_file_missing",
+                "record": {},
+                "safety_file": "",
+            }
 
         safety_path = self._abs_project_path(raw).resolve()
         if not safety_path.exists():
@@ -2599,15 +2605,15 @@ class SystemBridge:
 
         preview = self.get_safety_rule_preview(str(safety_path))
         if not bool(preview.get("available", False)):
-            raise ValueError(
-                "generate safety rule preview first before approving intent"
-            )
+            raise ValueError("generate safety rule preview first before approving intent")
         if not bool(preview.get("hash_matches_current", False)):
             raise ValueError(
                 "safety file changed after preview generation; regenerate preview before approval"
             )
         current_hashes = self._compute_safety_generation_hashes(safety_path)
-        preview_record = preview.get("record", {}) if isinstance(preview.get("record"), dict) else {}
+        preview_record = (
+            preview.get("record", {}) if isinstance(preview.get("record"), dict) else {}
+        )
         preview_id = str(preview_record.get("preview_id", "") or "").strip()
         preview_tools_hash = str(preview_record.get("tools_sha256", "") or "").strip()
         preview_prompts_hash = str(preview_record.get("prompts_sha256", "") or "").strip()
@@ -2656,7 +2662,9 @@ class SystemBridge:
             "safety_file": safety_key,
         }
 
-    def revoke_safety_intent_approval(self, safety_requirement_file: str, note: str = "") -> dict[str, Any]:
+    def revoke_safety_intent_approval(
+        self, safety_requirement_file: str, note: str = ""
+    ) -> dict[str, Any]:
         raw = str(safety_requirement_file or "").strip()
         if not raw:
             raise ValueError("safety requirement file is required")
@@ -2754,9 +2762,7 @@ class SystemBridge:
             safe_file_str = str(self._abs_project_path(safety_path).resolve())
         source_hashes = {}
         if include_hashes and req_file_str and safe_file_str and Path(req_file_str).exists():
-            source_hashes = self._compute_source_hashes(
-                Path(req_file_str), Path(safe_file_str)
-            )
+            source_hashes = self._compute_source_hashes(Path(req_file_str), Path(safe_file_str))
         return {
             "product_name": product_name,
             "product_spec_file": req_file_str,
@@ -2875,11 +2881,15 @@ class SystemBridge:
                 "reason": "plan set not found",
             }
 
-        status = str(manifest.get("status") or summary.get("status") or "").strip().lower() or "unknown"
+        status = (
+            str(manifest.get("status") or summary.get("status") or "").strip().lower() or "unknown"
+        )
         missing_links = self._bundle_missing_linked_files(manifest)
         manifest_missing = "manifest_missing" in missing_links
-        can_delete = status != BUNDLE_STATUS_VERIFIED or manifest_missing or bool(
-            [reason for reason in missing_links if reason != "manifest_missing"]
+        can_delete = (
+            status != BUNDLE_STATUS_VERIFIED
+            or manifest_missing
+            or bool([reason for reason in missing_links if reason != "manifest_missing"])
         )
         if can_delete:
             reason = "ok"
@@ -2957,7 +2967,11 @@ class SystemBridge:
         except Exception as exc:
             return False, [f"context_error:{exc}"]
 
-        got_hashes = manifest.get("source_hashes", {}) if isinstance(manifest.get("source_hashes"), dict) else {}
+        got_hashes = (
+            manifest.get("source_hashes", {})
+            if isinstance(manifest.get("source_hashes"), dict)
+            else {}
+        )
         tools_snapshot_ok = self._bundle_tools_snapshot_matches_manifest(bid, manifest)
         for key, expected in expected_hashes.items():
             # Prompt text changes affect future offline generation, but a
@@ -2995,7 +3009,9 @@ class SystemBridge:
         if not snapshot_path.exists():
             return False
 
-        got_hashes = data.get("source_hashes", {}) if isinstance(data.get("source_hashes"), dict) else {}
+        got_hashes = (
+            data.get("source_hashes", {}) if isinstance(data.get("source_hashes"), dict) else {}
+        )
         expected = str(got_hashes.get("tools_sha256", "")).strip()
         if not expected:
             return False
@@ -3061,7 +3077,9 @@ class SystemBridge:
                 f"System started without verified plan set '{active_id}': it was deactivated "
                 f"because {detail}."
             )
-            self._diag_emit(f"[Bundle] Auto-deactivated incompatible active bundle {active_id}: {detail}")
+            self._diag_emit(
+                f"[Bundle] Auto-deactivated incompatible active bundle {active_id}: {detail}"
+            )
             log.warning("Auto-deactivated incompatible active plan set %s: %s", active_id, detail)
             return None, notice
 
@@ -3284,15 +3302,15 @@ class SystemBridge:
             if isinstance(node, dict) and node.get("type") == "task"
         ]
         pending: dict[str, dict[str, Any]] = {
-            str(node.get("id")): node
-            for node in task_nodes
-            if str(node.get("id") or "").strip()
+            str(node.get("id")): node for node in task_nodes if str(node.get("id") or "").strip()
         }
         completed: set[str] = set()
         completed_operations: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
 
-        def _operation_row(node: dict[str, Any], *, missing: list[str] | None = None) -> dict[str, Any]:
+        def _operation_row(
+            node: dict[str, Any], *, missing: list[str] | None = None
+        ) -> dict[str, Any]:
             params = node.get("params") if isinstance(node.get("params"), dict) else {}
             return {
                 "task_id": str(node.get("id", "")),
@@ -3442,13 +3460,15 @@ class SystemBridge:
             if str(safety_requirement_file or "").strip()
             else None
         )
-        selected_safety_file = str(
-            safety_override or product_ctx.get("safety_file") or ""
-        ).strip() or None
+        selected_safety_file = (
+            str(safety_override or product_ctx.get("safety_file") or "").strip() or None
+        )
         precomputed_safety_artifacts: dict[str, Any] | None = None
         if selected_safety_file:
             safety_eval = self.evaluate_safety_intent_approval(selected_safety_file)
-            record = safety_eval.get("record", {}) if isinstance(safety_eval.get("record"), dict) else {}
+            record = (
+                safety_eval.get("record", {}) if isinstance(safety_eval.get("record"), dict) else {}
+            )
             if bool(safety_eval.get("approved", False)):
                 raw_precomputed = safety_eval.get("precomputed_safety_artifacts")
                 if not isinstance(raw_precomputed, dict) or not raw_precomputed:
@@ -3463,7 +3483,9 @@ class SystemBridge:
                 raise ValueError(
                     self._approval_refresh_error(str(safety_eval.get("reason", "") or ""))
                 )
-        resolved_auto_replan_max_attempts = 3 if auto_replan_max_attempts is None else auto_replan_max_attempts
+        resolved_auto_replan_max_attempts = (
+            3 if auto_replan_max_attempts is None else auto_replan_max_attempts
+        )
 
         return asyncio.run(
             self.bundle_compiler.compile_bundle(
@@ -3553,7 +3575,12 @@ class SystemBridge:
         if bundle_dir.exists():
             shutil.rmtree(bundle_dir, ignore_errors=True)
 
-        removed = self.bundle_store.delete_bundle_summary(bid) or bundle_dir_existed or bool(summary) or bool(manifest)
+        removed = (
+            self.bundle_store.delete_bundle_summary(bid)
+            or bundle_dir_existed
+            or bool(summary)
+            or bool(manifest)
+        )
         if self.bundle_store.get_active_bundle_id() == bid:
             self.bundle_store.set_active_bundle_id(None)
 
@@ -3572,7 +3599,9 @@ class SystemBridge:
         if not manifest:
             raise ValueError(f"plan-set manifest not found: {bid}")
         root = self.bundle_store.bundle_dir(bid)
-        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
 
         def _artifact_path(key: str) -> Path | None:
             rel = artifacts.get(key)
@@ -3593,7 +3622,9 @@ class SystemBridge:
             "bundle_id": bid,
             "manifest": manifest,
             "summary": self.bundle_store.get_bundle_summary(bid) or {},
-            "plan_nodes": plan_payload.get("nodes", []) if isinstance(plan_payload.get("nodes", []), list) else [],
+            "plan_nodes": plan_payload.get("nodes", [])
+            if isinstance(plan_payload.get("nodes", []), list)
+            else [],
             "global_fsa": fsa_payload,
             "validation": validation_payload,
             "paths": {
@@ -3613,7 +3644,9 @@ class SystemBridge:
         manifest = self.bundle_store.load_manifest(bid)
         if not manifest:
             return []
-        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
         logic_rel = str(artifacts.get("safety_logic_json", "")).strip()
         if not logic_rel:
             return []
@@ -3642,7 +3675,9 @@ class SystemBridge:
         manifest = self.bundle_store.load_manifest(bid)
         if not manifest:
             return []
-        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
         plan_rel = str(artifacts.get("plan_json", "")).strip()
         if not plan_rel:
             return []
@@ -3670,7 +3705,9 @@ class SystemBridge:
         if current_status == BUNDLE_STATUS_VERIFIED:
             raise ValueError("verified plan set is locked; unverify it before editing")
         root = self.bundle_store.bundle_dir(bid)
-        artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
 
         plan_rel = str(artifacts.get("plan_json", "")).strip()
         fsa_rel = str(artifacts.get("global_fsa_json", "")).strip()
@@ -3689,7 +3726,11 @@ class SystemBridge:
             raise FileNotFoundError(f"safety logic artifact missing: {safety_logic_path}")
 
         safety_payload = self._read_json_dict(safety_logic_path)
-        rules = safety_payload.get("rules", []) if isinstance(safety_payload.get("rules", []), list) else []
+        rules = (
+            safety_payload.get("rules", [])
+            if isinstance(safety_payload.get("rules", []), list)
+            else []
+        )
         if not rules:
             raise ValueError("safety logic has no rules")
 
@@ -3754,14 +3795,9 @@ class SystemBridge:
         product_agent.safety_text = safety_text
 
         try:
-            task_nodes = [
-                n for n in product_agent.process_planner.nodes
-                if n.get("type") == "task"
-            ]
+            task_nodes = [n for n in product_agent.process_planner.nodes if n.get("type") == "task"]
             pred_map = {
-                str(n.get("id")): list(n.get("predecessors", []))
-                for n in task_nodes
-                if n.get("id")
+                str(n.get("id")): list(n.get("predecessors", [])) for n in task_nodes if n.get("id")
             }
             seed_violations = [
                 {
@@ -3778,9 +3814,15 @@ class SystemBridge:
                 dfa_map=dfa_map,
                 tools_catalog=getattr(product_agent, "tools_catalog", []),
             )
-            replan_policy = manifest.get("replan_policy", {}) if isinstance(manifest.get("replan_policy"), dict) else {}
+            replan_policy = (
+                manifest.get("replan_policy", {})
+                if isinstance(manifest.get("replan_policy"), dict)
+                else {}
+            )
             try:
-                auto_replan_max_attempts = int(replan_policy.get("auto_replan_max_attempts", 3) or 0)
+                auto_replan_max_attempts = int(
+                    replan_policy.get("auto_replan_max_attempts", 3) or 0
+                )
             except Exception:
                 auto_replan_max_attempts = 3
             auto_replan_max_attempts = max(0, min(auto_replan_max_attempts, 10))
@@ -3882,7 +3924,9 @@ class SystemBridge:
             raise RuntimeError(f"Active plan-set manifest missing: {active_id}")
 
         root = self.bundle_store.bundle_dir(active_id)
-        raw_artifacts = manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        raw_artifacts = (
+            manifest.get("artifacts", {}) if isinstance(manifest.get("artifacts"), dict) else {}
+        )
         artifacts_abs: dict[str, Any] = {}
         for key, value in raw_artifacts.items():
             if isinstance(value, list):
@@ -3948,7 +3992,9 @@ class SystemBridge:
         if self._xmpp_proc is not None and self._xmpp_proc.poll() is None:
             return
         # If an external XMPP is already up, reuse it.
-        already_up = await asyncio.to_thread(self._tcp_port_open, self._xmpp_host, self._xmpp_port, 0.25)
+        already_up = await asyncio.to_thread(
+            self._tcp_port_open, self._xmpp_host, self._xmpp_port, 0.25
+        )
         if already_up:
             self._diag_emit("xmpp already listening on localhost:5222 (reusing existing server)")
             return
@@ -4005,7 +4051,9 @@ class SystemBridge:
         startup_id = self._startup_seq
         startup_t0 = time.monotonic()
         self._set_startup_phase("start_requested")
-        self._diag_emit(f"startup#{startup_id} begin mode={self.execution_mode} env={self.robot_env}")
+        self._diag_emit(
+            f"startup#{startup_id} begin mode={self.execution_mode} env={self.robot_env}"
+        )
 
         try:
             # Archive previous monitor outputs.
@@ -4020,12 +4068,8 @@ class SystemBridge:
             os.environ["ROBOT_ENV"] = self.robot_env
             os.environ["EXECUTION_MODE"] = self.execution_mode
             fast_forward_runtime = self._fast_forward_simulation_runtime_enabled()
-            os.environ["CAIS_GAZEBO_WAIT_SCALE"] = (
-                "0.35" if fast_forward_runtime else "1.0"
-            )
-            os.environ["CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE"] = (
-                "1" if fast_forward_runtime else "0"
-            )
+            os.environ["CAIS_GAZEBO_WAIT_SCALE"] = "0.35" if fast_forward_runtime else "1.0"
+            os.environ["CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE"] = "1" if fast_forward_runtime else "0"
             perception_backend = self._perception_backend_for_mode()
             os.environ["PERCEPTION_BACKEND"] = perception_backend
 
@@ -4210,9 +4254,7 @@ class SystemBridge:
                 self.resource_agents,
                 self.product_agents,
                 self.cca,
-            ) = await self._run_on_agent_runtime(
-                _create_agents_on_runtime_loop()
-            )
+            ) = await self._run_on_agent_runtime(_create_agents_on_runtime_loop())
             self._bind_agents_to_running_loop(
                 agent_loop,
                 user_agent=self.user_agent,
@@ -4272,7 +4314,9 @@ class SystemBridge:
                         messages.append(msg)
                 if cached_alerts:
                     self._cache_plan_safety_alerts(cached_alerts)
-                raise RuntimeError(" ; ".join(messages) or "product kickoff safety validation failed")
+                raise RuntimeError(
+                    " ; ".join(messages) or "product kickoff safety validation failed"
+                )
 
             self.system_running = True
             self._clear_cached_plan_safety_alerts()
@@ -4318,9 +4362,7 @@ class SystemBridge:
         if self.cca:
             t_cca = time.monotonic()
             await self.cca.start(auto_register=True)
-            self._diag_emit(
-                f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s"
-            )
+            self._diag_emit(f"startup#{startup_id} cca started in {time.monotonic() - t_cca:.2f}s")
 
         self._set_startup_phase("start_user")
         if self.user_agent:
@@ -4402,6 +4444,7 @@ class SystemBridge:
         # Destroy the global CameraModule ROS2 node (if any).
         try:
             import agent_creator as ac
+
             if hasattr(ac, "_CAMERA") and ac._CAMERA is not None:
                 ac._CAMERA.destroy()
                 log.info("CameraModule ROS2 node destroyed.")
@@ -4445,7 +4488,12 @@ class SystemBridge:
             for entry in bridge_runtime_dir.iterdir():
                 if entry.name in reserved_dirs:
                     continue
-                if entry.is_file() and entry.suffix.lower() in {".txt", ".json", ".md"} or entry.is_dir() and run_dir_pattern.match(entry.name):
+                if (
+                    entry.is_file()
+                    and entry.suffix.lower() in {".txt", ".json", ".md"}
+                    or entry.is_dir()
+                    and run_dir_pattern.match(entry.name)
+                ):
                     entries_to_archive.append(entry)
             if entries_to_archive:
                 archive.mkdir(parents=True, exist_ok=True)
@@ -4467,6 +4515,7 @@ class SystemBridge:
     @staticmethod
     def _import_agent_creator_module():
         import agent_creator as ac
+
         return ac
 
     @staticmethod
@@ -4552,7 +4601,12 @@ class SystemBridge:
     ) -> None:
         agents = [
             agent
-            for agent in [user_agent, cca, *list(resource_agents or []), *list(product_agents or [])]
+            for agent in [
+                user_agent,
+                cca,
+                *list(resource_agents or []),
+                *list(product_agents or []),
+            ]
             if agent is not None
         ]
         containers: list[Any] = []
@@ -4611,7 +4665,9 @@ class SystemBridge:
         "source $HOME/ros2_ws/install/setup.bash && "
     )
 
-    _TELEOP_SCRIPT = str(_PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "keyboard_teleop.py")
+    _TELEOP_SCRIPT = str(
+        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "keyboard_teleop.py"
+    )
     _DUAL_DRAG_MARKERS_SCRIPT = str(
         _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "dual_drag_markers.py"
     )
@@ -4653,16 +4709,13 @@ class SystemBridge:
             f"--robot-ip {{ur5e_ip}} --status-file {_UR5E_RTDE_TRAJECTORY_STATUS}"
         ),
         "hardware_ur5e_rg2_gripper": (
-            f"{_VENV_PYTHON} {_UR5E_RG2_GRIPPER_SCRIPT} "
-            "--robot-ip {ur5e_ip} --backend xmlrpc"
+            f"{_VENV_PYTHON} {_UR5E_RG2_GRIPPER_SCRIPT} --robot-ip {{ur5e_ip}} --backend xmlrpc"
         ),
         "hardware_ur5e_moveit": (
-            "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py "
-            "launch_rviz:=true"
+            "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true"
         ),
         "hardware_dual_robots_moveit": (
-            "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py "
-            "launch_rviz:=true"
+            "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py launch_rviz:=true"
         ),
         "perception": f"python3.10 {_PROJECT_ROOT / 'ros2' / 'cais_lab_gazebo' / 'sensor' / 'gazebo_camera_detector.py'}",
         "teleop_xarm6": f"python3.10 {_TELEOP_SCRIPT} --robot xarm6",
@@ -4821,7 +4874,9 @@ class SystemBridge:
             else:
                 required = [moveit_process]
                 if not self._teleop_process_running(moveit_process):
-                    warning = f"MoveIt for {key} is not running. Start the matching {key} launch first."
+                    warning = (
+                        f"MoveIt for {key} is not running. Start the matching {key} launch first."
+                    )
         elif op_key in {"cartesian", "joint", "home", "move_joints", "save_position", "state"}:
             required = [moveit_process]
             if not self._teleop_process_running(moveit_process):
@@ -4894,8 +4949,14 @@ class SystemBridge:
         return bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", ip or ""))
 
     def _load_hardware_ips(self) -> dict[str, str]:
-        xarm6_ip = self._extract_robot_ip_from_resource(_XARM6_RESOURCE, "xarm6") or self._HW_IP_DEFAULTS["xarm6"]
-        ur5e_ip = self._extract_robot_ip_from_resource(_UR5E_RESOURCE, "ur5e") or self._HW_IP_DEFAULTS["ur5e"]
+        xarm6_ip = (
+            self._extract_robot_ip_from_resource(_XARM6_RESOURCE, "xarm6")
+            or self._HW_IP_DEFAULTS["xarm6"]
+        )
+        ur5e_ip = (
+            self._extract_robot_ip_from_resource(_UR5E_RESOURCE, "ur5e")
+            or self._HW_IP_DEFAULTS["ur5e"]
+        )
         return {"xarm6": xarm6_ip, "ur5e": ur5e_ip}
 
     def get_hardware_ips(self) -> dict[str, str]:
@@ -4999,10 +5060,7 @@ class SystemBridge:
         fast_forward_simulation: bool | None = None,
     ) -> str:
         cmd = self.ROS2_LAUNCH_CMDS[name]
-        if (
-            str(name or "").strip().lower() == "gazebo_dual"
-            and bool(fast_forward_simulation)
-        ):
+        if str(name or "").strip().lower() == "gazebo_dual" and bool(fast_forward_simulation):
             cmd = f"{cmd} fast_sim:=true launch_rviz:=false"
         return cmd.format(
             xarm6_ip=self.hardware_ips.get("xarm6", self._HW_IP_DEFAULTS["xarm6"]),
@@ -5207,13 +5265,27 @@ class SystemBridge:
         )
 
         if launch_key == "gazebo_dual":
-            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *dual_assets]
+            return [
+                *workspace_xarm,
+                *moveit_core,
+                *ur_stack,
+                *onrobot_ws,
+                *link_attacher_ws,
+                *dual_assets,
+            ]
         if launch_key == "gazebo_dual_passive":
             return [*workspace_xarm, *ur_stack, *onrobot_ws, *dual_passive_assets]
         if launch_key == "gazebo_xarm6":
             return [*workspace_xarm, *moveit_core, *link_attacher_ws]
         if launch_key == "gazebo_ur5e":
-            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *link_attacher_ws, *ur_assets]
+            return [
+                *workspace_xarm,
+                *moveit_core,
+                *ur_stack,
+                *onrobot_ws,
+                *link_attacher_ws,
+                *ur_assets,
+            ]
         if launch_key == "gazebo_xarm6_passive":
             return [*workspace_xarm]
         if launch_key == "gazebo_ur5e_passive":
@@ -5221,7 +5293,13 @@ class SystemBridge:
         if launch_key == "hardware_xarm6_driver":
             return [*workspace_xarm, *xarm_hardware_driver_assets]
         if launch_key == "hardware_dual_robots_moveit":
-            return [*workspace_xarm, *moveit_core, *ur_stack, *onrobot_ws, *dual_hardware_moveit_assets]
+            return [
+                *workspace_xarm,
+                *moveit_core,
+                *ur_stack,
+                *onrobot_ws,
+                *dual_hardware_moveit_assets,
+            ]
         if launch_key == "hardware_ur5e_moveit":
             return [*moveit_core, *ur_stack, *onrobot_ws, *ur_hardware_rg2_assets]
         if launch_key == "hardware_ur5e_rg2_gripper":
@@ -5436,12 +5514,9 @@ class SystemBridge:
     ) -> str:
         details = [str(item).strip() for item in failures if str(item).strip()]
         if not details:
-            return (
-                "Simulation startup is not done yet. Controller prewarm failed before all robots were ready."
-            )
-        return (
-            "Simulation startup is not done yet. Controller prewarm failed: "
-            + "; ".join(details)
+            return "Simulation startup is not done yet. Controller prewarm failed before all robots were ready."
+        return "Simulation startup is not done yet. Controller prewarm failed: " + "; ".join(
+            details
         )
 
     def _any_running(self, names: set[str]) -> bool:
@@ -5452,7 +5527,9 @@ class SystemBridge:
         name = str(service_name or "").strip().lower()
         key = str(robot).strip().lower()
         if key == "xarm6":
-            return ("xarm" in name) and any(token in name for token in ("motion_enable", "set_mode", "set_state"))
+            return ("xarm" in name) and any(
+                token in name for token in ("motion_enable", "set_mode", "set_state")
+            )
         return False
 
     def _ros2_command_output(
@@ -5723,9 +5800,7 @@ class SystemBridge:
                 return f"{process_name} exited before {target} had a publisher"
 
             ok, out = self._ros2_command_output(
-                "ros2 topic info -v "
-                + shlex.quote(target)
-                + " --no-daemon --spin-time 2.0",
+                "ros2 topic info -v " + shlex.quote(target) + " --no-daemon --spin-time 2.0",
                 timeout_sec=7.0,
                 ros_domain_id=ros_domain_id,
                 emit_slow_diag=False,
@@ -5810,7 +5885,10 @@ class SystemBridge:
             )
             if ok:
                 services = [line.strip() for line in out.splitlines() if line.strip()]
-                if any(self._driver_service_hint_matches(key, service_name) for service_name in services):
+                if any(
+                    self._driver_service_hint_matches(key, service_name)
+                    for service_name in services
+                ):
                     return None
 
             # Best-effort fallback: if process stays alive for a short warmup, continue.
@@ -6048,7 +6126,9 @@ class SystemBridge:
 
     def _digital_twin_hardware_status(self, cfg: dict[str, Any]) -> dict[str, Any]:
         hardware_processes = cfg.get("hardware_processes") or {}
-        if not bool(cfg.get("hardware_supported", False)) or not isinstance(hardware_processes, dict):
+        if not bool(cfg.get("hardware_supported", False)) or not isinstance(
+            hardware_processes, dict
+        ):
             return {"overall": "unsupported", "driver": "unsupported", "moveit": "unsupported"}
         target = next(
             (
@@ -6087,9 +6167,13 @@ class SystemBridge:
         hardware_robots = tuple(str(r).strip().lower() for r in (cfg.get("hardware") or ()))
         if not self._digital_twin_has_per_robot_hardware_processes(cfg):
             robot = hardware_robots[0] if hardware_robots else ""
-            status = _status_for_processes(self._digital_twin_hardware_processes_for_robot(cfg, robot))
+            status = _status_for_processes(
+                self._digital_twin_hardware_processes_for_robot(cfg, robot)
+            )
             if robot == "ur5e":
-                self._attach_ur5e_rtde_trajectory_status(status, self._ur5e_rtde_trajectory_status())
+                self._attach_ur5e_rtde_trajectory_status(
+                    status, self._ur5e_rtde_trajectory_status()
+                )
             return status
 
         result: dict[str, Any] = {}
@@ -6102,7 +6186,9 @@ class SystemBridge:
                 self._digital_twin_hardware_processes_for_robot(cfg, robot)
             )
             if robot == "ur5e":
-                self._attach_ur5e_rtde_trajectory_status(robot_status, self._ur5e_rtde_trajectory_status())
+                self._attach_ur5e_rtde_trajectory_status(
+                    robot_status, self._ur5e_rtde_trajectory_status()
+                )
             result[robot] = robot_status
             overall_states.append(str(robot_status.get("overall", "unknown")))
             moveit_states.append(str(robot_status.get("moveit", "unknown")))
@@ -6117,10 +6203,20 @@ class SystemBridge:
         else:
             overall = "partial"
         result["overall"] = overall
-        result["driver"] = "running" if driver_states and all(state in {"running", "embedded"} for state in driver_states) else overall
-        result["moveit"] = "running" if moveit_states and all(state == "running" for state in moveit_states) else overall
+        result["driver"] = (
+            "running"
+            if driver_states and all(state in {"running", "embedded"} for state in driver_states)
+            else overall
+        )
+        result["moveit"] = (
+            "running"
+            if moveit_states and all(state == "running" for state in moveit_states)
+            else overall
+        )
         if gripper_states:
-            result["gripper"] = "running" if all(state == "running" for state in gripper_states) else overall
+            result["gripper"] = (
+                "running" if all(state == "running" for state in gripper_states) else overall
+            )
         return result
 
     def _digital_twin_blocked_reason(self, target: str, cfg: dict[str, Any]) -> str:
@@ -6360,7 +6456,9 @@ class SystemBridge:
                     domains=domains,
                     reason=restart_reason,
                 ):
-                    sync_snapshot = self._digital_twin_sync_status_snapshot(target, cfg, time.time())
+                    sync_snapshot = self._digital_twin_sync_status_snapshot(
+                        target, cfg, time.time()
+                    )
                     sync_process = str(sync_snapshot.get("process") or "")
                     sync_process_status = str(sync_snapshot.get("process_status") or "unknown")
                     status_data = dict(sync_snapshot.get("status_data") or {})
@@ -6401,7 +6499,9 @@ class SystemBridge:
                     sync_message = "teach stack is partially up; start or stop the full twin."
                 else:
                     sync_state = "ready"
-                    sync_message = "Ready to start Teach digital twin (sim RViz authoring + hardware commit)."
+                    sync_message = (
+                        "Ready to start Teach digital twin (sim RViz authoring + hardware commit)."
+                    )
             elif sync_process_status == "running":
                 if status_age_ms is None:
                     sync_state = "starting"
@@ -6417,10 +6517,14 @@ class SystemBridge:
                 sync_message = str(status_data.get("message") or "sync is waiting.")
             elif gazebo_status == "running" or hardware_overall in {"running", "partial"}:
                 sync_state = "partial"
-                sync_message = "digital twin stack is partially running; start or stop the full twin."
+                sync_message = (
+                    "digital twin stack is partially running; start or stop the full twin."
+                )
             else:
                 sync_state = "ready"
-                sync_message = "Ready to start hardware MoveIt + passive gazebo synched digital twin."
+                sync_message = (
+                    "Ready to start hardware MoveIt + passive gazebo synched digital twin."
+                )
 
             result[target] = {
                 "target": target,
@@ -6432,7 +6536,9 @@ class SystemBridge:
                 },
                 "direction": direction,
                 "sim_mode": self._digital_twin_sim_mode(target),
-                "sim_modes": list(self._digital_twin_allowed_sim_modes(cfg)) if hardware_supported else [],
+                "sim_modes": list(self._digital_twin_allowed_sim_modes(cfg))
+                if hardware_supported
+                else [],
                 "max_joint_delta_deg": self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG,
                 "gazebo": {
                     "name": gazebo_name,
@@ -6463,7 +6569,9 @@ class SystemBridge:
                     "process": sync_process,
                     "process_status": sync_process_status,
                     "message": sync_message,
-                    "status_file": str(sync_snapshot.get("status_file") or self._digital_twin_status_path(target)),
+                    "status_file": str(
+                        sync_snapshot.get("status_file") or self._digital_twin_status_path(target)
+                    ),
                     "status_files": list(sync_snapshot.get("status_files") or []),
                     "status_age_ms": status_age_ms,
                     "latency_ms": status_data.get("latency_ms"),
@@ -6828,7 +6936,9 @@ class SystemBridge:
             ros_domain_id=ros_domain_id,
         )
         if err:
-            readiness_errors.append(f"ur5e RTDE trajectory server is not publishing /joint_states: {err}")
+            readiness_errors.append(
+                f"ur5e RTDE trajectory server is not publishing /joint_states: {err}"
+            )
 
         if ur5e_gripper_process:
             err = self._wait_with_ros2_daemon_retry(
@@ -7068,7 +7178,9 @@ class SystemBridge:
         sync_items = self._digital_twin_sync_process_items(cfg)
         for robot, sync_process in sync_items:
             robot_key = str(robot or "").strip().lower()
-            robot_hardware_domain_id = self._digital_twin_hardware_domain_id(cfg, robot_key, domains)
+            robot_hardware_domain_id = self._digital_twin_hardware_domain_id(
+                cfg, robot_key, domains
+            )
             status_path = (
                 self._digital_twin_sync_status_path(target, robot_key)
                 if len(sync_items) > 1
@@ -7095,10 +7207,12 @@ class SystemBridge:
                 str(self._digital_twin_direction_path(target)),
             ]
             if robot_key == "ur5e":
-                args.extend([
-                    "--ur5e-hardware-trajectory-action",
-                    _UR5E_RTDE_TRAJECTORY_ACTION,
-                ])
+                args.extend(
+                    [
+                        "--ur5e-hardware-trajectory-action",
+                        _UR5E_RTDE_TRAJECTORY_ACTION,
+                    ]
+                )
             command = " ".join(shlex.quote(part) for part in args)
             if self.ros2_proc_status(sync_process) == "running":
                 continue
@@ -7119,7 +7233,9 @@ class SystemBridge:
             processes = self._digital_twin_dual_robots_processes(cfg)
             if isinstance(processes, str):
                 return processes
-            _xarm_driver_process, ur5e_driver_process, _ur5e_gripper_process, _moveit_process = processes
+            _xarm_driver_process, ur5e_driver_process, _ur5e_gripper_process, _moveit_process = (
+                processes
+            )
             err = self._wait_with_ros2_daemon_retry(
                 "ur5e RTDE feedback for initial gazebo pose",
                 lambda: self._wait_for_ros_topic_publisher(
@@ -7160,27 +7276,41 @@ class SystemBridge:
             )
             result = self._run_digital_twin_sync(
                 [
-                    "--mode", "initialize-gazebo-from-hardware",
-                    "--target", target,
-                    "--robot", robot_key,
-                    "--model-name", model_name,
-                    "--gazebo-domain-id", str(domains["gazebo"]),
-                    "--hardware-domain-id", str(robot_hardware_domain_id),
-                    "--status-file", str(status_path),
-                    "--direction-file", str(self._digital_twin_direction_path(target)),
+                    "--mode",
+                    "initialize-gazebo-from-hardware",
+                    "--target",
+                    target,
+                    "--robot",
+                    robot_key,
+                    "--model-name",
+                    model_name,
+                    "--gazebo-domain-id",
+                    str(domains["gazebo"]),
+                    "--hardware-domain-id",
+                    str(robot_hardware_domain_id),
+                    "--status-file",
+                    str(status_path),
+                    "--direction-file",
+                    str(self._digital_twin_direction_path(target)),
                 ],
                 timeout_sec=self._DIGITAL_TWIN_INITIALIZE_TIMEOUT_S,
             )
             if not result.get("success"):
                 details: list[str] = []
                 if result.get("max_joint_delta_rad") is not None:
-                    details.append(f"max_joint_delta_rad={float(result.get('max_joint_delta_rad') or 0.0):.4f}")
+                    details.append(
+                        f"max_joint_delta_rad={float(result.get('max_joint_delta_rad') or 0.0):.4f}"
+                    )
                 if result.get("max_joint_delta_joint"):
-                    details.append(f"max_joint_delta_joint={str(result.get('max_joint_delta_joint') or '')}")
+                    details.append(
+                        f"max_joint_delta_joint={str(result.get('max_joint_delta_joint') or '')}"
+                    )
                 if result.get("attempts") is not None:
                     details.append(f"attempts={int(result.get('attempts') or 0)}")
                 if result.get("init_tolerance_rad") is not None:
-                    details.append(f"init_tolerance_rad={float(result.get('init_tolerance_rad') or 0.0):.4f}")
+                    details.append(
+                        f"init_tolerance_rad={float(result.get('init_tolerance_rad') or 0.0):.4f}"
+                    )
                 detail_suffix = f" ({'; '.join(details)})" if details else ""
                 return (
                     f"{robot_key} gazebo initial hardware pose failed: "
@@ -7209,17 +7339,11 @@ class SystemBridge:
                     status_paths.append(self._digital_twin_sync_status_path(target, robot_key))
 
         for path in status_paths:
-            pattern = (
-                r"digital_twin_sync\.py.*--mode mirror.*--status-file "
-                + re.escape(str(path))
-            )
+            pattern = r"digital_twin_sync\.py.*--mode mirror.*--status-file " + re.escape(str(path))
             subprocess.run(["pkill", "-TERM", "-f", pattern], capture_output=True)
         time.sleep(0.2)
         for path in status_paths:
-            pattern = (
-                r"digital_twin_sync\.py.*--mode mirror.*--status-file "
-                + re.escape(str(path))
-            )
+            pattern = r"digital_twin_sync\.py.*--mode mirror.*--status-file " + re.escape(str(path))
             subprocess.run(["pkill", "-KILL", "-f", pattern], capture_output=True)
 
     def _start_digital_twin_sync_when_ready(
@@ -7721,17 +7845,23 @@ class SystemBridge:
         except Exception:
             return ""
 
-    def _run_digital_twin_sync(self, extra_args: list[str], timeout_sec: float = 60.0) -> dict[str, Any]:
+    def _run_digital_twin_sync(
+        self, extra_args: list[str], timeout_sec: float = 60.0
+    ) -> dict[str, Any]:
         """Run the digital twin sync helper in a one-shot mode and parse its JSON output."""
         extra_args = list(extra_args)
         if "--ur5e-hardware-trajectory-action" not in extra_args:
             robot_arg = self._sync_arg_value(extra_args, "--robot")
             target_arg = self._sync_arg_value(extra_args, "--target")
-            if str(robot_arg or "").strip().lower() == "ur5e" or str(target_arg or "").strip().lower() in {"ur5e only", "dual robots"}:
-                extra_args.extend([
-                    "--ur5e-hardware-trajectory-action",
-                    _UR5E_RTDE_TRAJECTORY_ACTION,
-                ])
+            if str(robot_arg or "").strip().lower() == "ur5e" or str(
+                target_arg or ""
+            ).strip().lower() in {"ur5e only", "dual robots"}:
+                extra_args.extend(
+                    [
+                        "--ur5e-hardware-trajectory-action",
+                        _UR5E_RTDE_TRAJECTORY_ACTION,
+                    ]
+                )
         args = ["python3.10", str(self._DIGITAL_TWIN_SYNC_SCRIPT), *extra_args]
         command = " ".join(shlex.quote(part) for part in args)
         full_cmd = self._ROS2_ENV + command
@@ -7745,7 +7875,11 @@ class SystemBridge:
         except subprocess.TimeoutExpired:
             mode = self._sync_arg_value(extra_args, "--mode")
             robot = self._sync_arg_value(extra_args, "--robot")
-            detail = " ".join(part for part in (f"mode={mode}" if mode else "", f"robot={robot}" if robot else "") if part)
+            detail = " ".join(
+                part
+                for part in (f"mode={mode}" if mode else "", f"robot={robot}" if robot else "")
+                if part
+            )
             suffix = f" ({detail})" if detail else ""
             return {
                 "success": False,
@@ -7969,7 +8103,7 @@ class SystemBridge:
         if not directory.is_dir():
             return []
         return sorted(
-            p.name[:-len(suffix)]
+            p.name[: -len(suffix)]
             for p in directory.glob(f"*{suffix}")
             if p.is_file() and p.name.endswith(suffix)
         )
@@ -8294,11 +8428,7 @@ class SystemBridge:
             "waypoints": [
                 {
                     "positions": list(body.get("positions") or []),
-                    **(
-                        {"gripper": body.get("gripper")}
-                        if body.get("gripper") is not None
-                        else {}
-                    ),
+                    **({"gripper": body.get("gripper")} if body.get("gripper") is not None else {}),
                 }
                 for body in waypoints
             ],
@@ -8318,7 +8448,11 @@ class SystemBridge:
         path = self._robot_function_path(robot, function_name, name, storage_source)
         payload = self._read_json_file(path)
         if not payload:
-            return None, path, f"taught function file not found: {self._robot_function_display_path(path)}"
+            return (
+                None,
+                path,
+                f"taught function file not found: {self._robot_function_display_path(path)}",
+            )
         return payload, path, ""
 
     def _single_robot_replay_cfg(self, cfg: dict[str, Any], robot: str) -> dict[str, Any]:
@@ -8443,18 +8577,34 @@ class SystemBridge:
                 {
                     "robots": {
                         "xarm6": {
-                            "positions": list(xarm6_waypoints[min(i, len(xarm6_waypoints) - 1)].get("positions") or []),
+                            "positions": list(
+                                xarm6_waypoints[min(i, len(xarm6_waypoints) - 1)].get("positions")
+                                or []
+                            ),
                             **(
-                                {"gripper": xarm6_waypoints[min(i, len(xarm6_waypoints) - 1)].get("gripper")}
-                                if xarm6_waypoints[min(i, len(xarm6_waypoints) - 1)].get("gripper") is not None
+                                {
+                                    "gripper": xarm6_waypoints[
+                                        min(i, len(xarm6_waypoints) - 1)
+                                    ].get("gripper")
+                                }
+                                if xarm6_waypoints[min(i, len(xarm6_waypoints) - 1)].get("gripper")
+                                is not None
                                 else {}
                             ),
                         },
                         "ur5e": {
-                            "positions": list(ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get("positions") or []),
+                            "positions": list(
+                                ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get("positions")
+                                or []
+                            ),
                             **(
-                                {"gripper": ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get("gripper")}
-                                if ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get("gripper") is not None
+                                {
+                                    "gripper": ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get(
+                                        "gripper"
+                                    )
+                                }
+                                if ur5e_waypoints[min(i, len(ur5e_waypoints) - 1)].get("gripper")
+                                is not None
                                 else {}
                             ),
                         },
@@ -8505,7 +8655,10 @@ class SystemBridge:
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
         if not self._digital_twin_is_dual_robots(cfg):
-            return {"success": False, "message": "Replay Dual Taught Function requires dual robots."}
+            return {
+                "success": False,
+                "message": "Replay Dual Taught Function requires dual robots.",
+            }
         xarm6_payload, ur5e_payload, err = self._load_dual_function_payloads(
             target,
             xarm6_function_name,
@@ -8521,7 +8674,10 @@ class SystemBridge:
             ur5e_payload,
         )
         if recording is None:
-            return {"success": False, "message": "both taught function files need at least one waypoint step."}
+            return {
+                "success": False,
+                "message": "both taught function files need at least one waypoint step.",
+            }
         temp_path = Path("/tmp") / (
             f"cais_digital_twin_dual_function_"
             f"{self._robot_function_safe_name(xarm6_function_name)}_{self._robot_function_safe_name(xarm6_name)}__"
@@ -8690,11 +8846,16 @@ class SystemBridge:
         domains = self._digital_twin_domain_ids()
         result = self._run_digital_twin_sync(
             [
-                "--mode", "snapshot",
-                "--robot", robot,
-                "--source", source_key,
-                "--gazebo-domain-id", str(domains["gazebo"]),
-                "--hardware-domain-id", str(domains["hardware"]),
+                "--mode",
+                "snapshot",
+                "--robot",
+                robot,
+                "--source",
+                source_key,
+                "--gazebo-domain-id",
+                str(domains["gazebo"]),
+                "--hardware-domain-id",
+                str(domains["hardware"]),
             ],
             timeout_sec=20.0,
         )
@@ -8844,7 +9005,11 @@ class SystemBridge:
         slug = self._digital_twin_slug(cfg)
         path = self._digital_twin_recordings_dir() / f"{slug}__{safe}.json"
         atomic_json_write(path, recording)
-        return {"success": True, "message": f"saved {len(buf)} waypoints to {path.name}", "file": str(path)}
+        return {
+            "success": True,
+            "message": f"saved {len(buf)} waypoints to {path.name}",
+            "file": str(path),
+        }
 
     def digital_twin_list_recordings(self, target: str) -> list[str]:
         cfg = self._digital_twin_target(target)
@@ -8853,7 +9018,7 @@ class SystemBridge:
         slug = self._digital_twin_slug(cfg)
         prefix = f"{slug}__"
         return sorted(
-            p.name[len(prefix):-len(".json")]
+            p.name[len(prefix) : -len(".json")]
             for p in self._digital_twin_recordings_dir().glob(f"{prefix}*.json")
         )
 
@@ -8909,8 +9074,13 @@ class SystemBridge:
                     {
                         "robots": {
                             robot: {
-                                "positions": list(dict((wp.get("robots") or {}).get(robot) or {}).get("positions") or []),
-                                "gripper": dict((wp.get("robots") or {}).get(robot) or {}).get("gripper"),
+                                "positions": list(
+                                    dict((wp.get("robots") or {}).get(robot) or {}).get("positions")
+                                    or []
+                                ),
+                                "gripper": dict((wp.get("robots") or {}).get(robot) or {}).get(
+                                    "gripper"
+                                ),
                             }
                             for robot in self._digital_twin_dual_robot_keys(cfg)
                         }
@@ -8974,7 +9144,10 @@ class SystemBridge:
                 )
                 return {"success": False, "message": message}
         gazebo_process = str(cfg.get("gazebo_process") or "")
-        if replay_target in ("twin", "gazebo") and self.ros2_proc_status(gazebo_process) != "running":
+        if (
+            replay_target in ("twin", "gazebo")
+            and self.ros2_proc_status(gazebo_process) != "running"
+        ):
             return {"success": False, "message": f"{target} gazebo is not running."}
 
         prepared_path = self._digital_twin_prepared_replay_path(
@@ -8996,16 +9169,26 @@ class SystemBridge:
             )
             result = self._run_digital_twin_sync(
                 [
-                    "--mode", "prepare-replay",
-                    "--robot", str(cfg.get("robot") or ""),
-                    "--replay-target", sync_target,
-                    "--recording-file", str(recording_path),
-                    "--prepared-file", str(prepared_path),
-                    "--gazebo-domain-id", str(domains["gazebo"]),
-                    "--hardware-domain-id", str(domains["hardware"]),
-                    "--max-joint-delta-deg", str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
-                    "--status-file", str(self._digital_twin_status_path(target)),
-                    "--direction-file", str(self._digital_twin_direction_path(target)),
+                    "--mode",
+                    "prepare-replay",
+                    "--robot",
+                    str(cfg.get("robot") or ""),
+                    "--replay-target",
+                    sync_target,
+                    "--recording-file",
+                    str(recording_path),
+                    "--prepared-file",
+                    str(prepared_path),
+                    "--gazebo-domain-id",
+                    str(domains["gazebo"]),
+                    "--hardware-domain-id",
+                    str(domains["hardware"]),
+                    "--max-joint-delta-deg",
+                    str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
+                    "--status-file",
+                    str(self._digital_twin_status_path(target)),
+                    "--direction-file",
+                    str(self._digital_twin_direction_path(target)),
                 ],
                 timeout_sec=120.0,
             )
@@ -9030,7 +9213,9 @@ class SystemBridge:
         except Exception:
             repeat_total = 1
         repeat_total = max(1, min(999, repeat_total))
-        replay_label = "Replay Dual Function" if str(source).startswith("dual_function") else "Replay Function"
+        replay_label = (
+            "Replay Dual Function" if str(source).startswith("dual_function") else "Replay Function"
+        )
         # "twin" drives gazebo + hardware together; "gazebo" is a sim-only dry run.
         sync_target = "both" if replay_target == "twin" else replay_target
         needs_hardware = replay_target in ("twin", "hardware")
@@ -9042,7 +9227,9 @@ class SystemBridge:
                 target,
                 {
                     "state": "checking",
-                    "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                    "direction": "hardware -> gazebo"
+                    if replay_target == "twin"
+                    else self._digital_twin_direction(target),
                     "message": message,
                     "last_error": "",
                 },
@@ -9058,7 +9245,9 @@ class SystemBridge:
                 target,
                 {
                     "state": "blocked",
-                    "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                    "direction": "hardware -> gazebo"
+                    if replay_target == "twin"
+                    else self._digital_twin_direction(target),
                     "message": message,
                     "last_error": message,
                 },
@@ -9072,7 +9261,9 @@ class SystemBridge:
                 target,
                 {
                     "state": "checking",
-                    "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                    "direction": "hardware -> gazebo"
+                    if replay_target == "twin"
+                    else self._digital_twin_direction(target),
                     "message": "checking replay readiness.",
                     "last_error": "",
                 },
@@ -9088,7 +9279,9 @@ class SystemBridge:
                     target,
                     {
                         "state": "blocked",
-                        "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                        "direction": "hardware -> gazebo"
+                        if replay_target == "twin"
+                        else self._digital_twin_direction(target),
                         "message": message,
                         "last_error": message,
                     },
@@ -9183,7 +9376,9 @@ class SystemBridge:
             target,
             {
                 "state": "replaying",
-                "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                "direction": "hardware -> gazebo"
+                if replay_target == "twin"
+                else self._digital_twin_direction(target),
                 "message": (
                     "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /execute_trajectory."
                     if (
@@ -9222,18 +9417,29 @@ class SystemBridge:
                 },
             )
         sync_args = [
-            "--mode", "replay",
-            "--robot", str(cfg.get("robot") or ""),
-            "--replay-target", sync_target,
-            "--recording-file", str(recording_path),
+            "--mode",
+            "replay",
+            "--robot",
+            str(cfg.get("robot") or ""),
+            "--replay-target",
+            sync_target,
+            "--recording-file",
+            str(recording_path),
             *prepared_args,
-            "--gazebo-domain-id", str(domains["gazebo"]),
-            "--hardware-domain-id", str(domains["hardware"]),
-            "--max-joint-delta-deg", str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
-            "--waypoint-duration-sec", f"{self._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC:.6f}",
-            "--max-joint-vel-deg-s", f"{self._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S:.6f}",
-            "--status-file", str(self._digital_twin_status_path(target)),
-            "--direction-file", str(self._digital_twin_direction_path(target)),
+            "--gazebo-domain-id",
+            str(domains["gazebo"]),
+            "--hardware-domain-id",
+            str(domains["hardware"]),
+            "--max-joint-delta-deg",
+            str(self._DIGITAL_TWIN_MAX_JOINT_DELTA_DEG),
+            "--waypoint-duration-sec",
+            f"{self._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC:.6f}",
+            "--max-joint-vel-deg-s",
+            f"{self._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S:.6f}",
+            "--status-file",
+            str(self._digital_twin_status_path(target)),
+            "--direction-file",
+            str(self._digital_twin_direction_path(target)),
         ]
         result: dict[str, Any] = {}
         for repeat_index in range(repeat_total):
@@ -9242,7 +9448,9 @@ class SystemBridge:
                     target,
                     {
                         "state": "replaying",
-                        "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                        "direction": "hardware -> gazebo"
+                        if replay_target == "twin"
+                        else self._digital_twin_direction(target),
                         "message": f"executing replay repeat {repeat_index + 1}/{repeat_total}.",
                         "last_error": "",
                     },
@@ -9276,8 +9484,7 @@ class SystemBridge:
                 break
         if repeat_total > 1 and result.get("success"):
             result["message"] = (
-                f"{replay_label} repeated {repeat_total} times. "
-                f"{str(result.get('message') or '')}"
+                f"{replay_label} repeated {repeat_total} times. {str(result.get('message') or '')}"
             )
         result["gazebo_initialization"] = gazebo_initialization
         if replay_target == "twin" and (result.get("success") or stopped_mirror_workers):
@@ -9341,9 +9548,13 @@ class SystemBridge:
         if result.get("approach_time") is not None:
             detail_parts.append(f"approach_time={float(result.get('approach_time') or 0.0):.3f}s")
         if result.get("max_joint_delta_deg") is not None:
-            detail_parts.append(f"max_joint_delta_deg={float(result.get('max_joint_delta_deg') or 0.0):.3f}")
+            detail_parts.append(
+                f"max_joint_delta_deg={float(result.get('max_joint_delta_deg') or 0.0):.3f}"
+            )
         if result.get("max_joint_delta_joint"):
-            detail_parts.append(f"max_joint_delta_joint={str(result.get('max_joint_delta_joint') or '')}")
+            detail_parts.append(
+                f"max_joint_delta_joint={str(result.get('max_joint_delta_joint') or '')}"
+            )
         if gazebo_initialization != "not_required":
             detail_parts.append(f"gazebo_initialization={gazebo_initialization}")
         if result.get("used_prepared_file") is not None:
@@ -9360,14 +9571,18 @@ class SystemBridge:
             target,
             {
                 "state": "replayed" if result.get("success") else "blocked",
-                "direction": "hardware -> gazebo" if replay_target == "twin" else self._digital_twin_direction(target),
+                "direction": "hardware -> gazebo"
+                if replay_target == "twin"
+                else self._digital_twin_direction(target),
                 "message": message or "replay finished.",
                 "last_error": "" if result.get("success") else message,
             },
         )
         return result
 
-    def digital_twin_replay(self, target: str, name: str, *, replay_target: str = "twin") -> dict[str, Any]:
+    def digital_twin_replay(
+        self, target: str, name: str, *, replay_target: str = "twin"
+    ) -> dict[str, Any]:
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
@@ -9377,7 +9592,9 @@ class SystemBridge:
             return {"success": False, "message": f"recording not found: {name}"}
         return self._replay_recording_file(target, cfg, path, replay_target, source=f"saved_{name}")
 
-    def digital_twin_replay_buffer(self, target: str, *, replay_target: str = "twin") -> dict[str, Any]:
+    def digital_twin_replay_buffer(
+        self, target: str, *, replay_target: str = "twin"
+    ) -> dict[str, Any]:
         """Replay the just-captured (unsaved) waypoint buffer, without forcing a Save."""
         cfg = self._digital_twin_target(target)
         if not cfg:
@@ -9511,8 +9728,7 @@ class SystemBridge:
             )
             if err:
                 return (
-                    f"{key} MoveIt is not ready: {err}. "
-                    "MoveIt may have failed to launch correctly."
+                    f"{key} MoveIt is not ready: {err}. MoveIt may have failed to launch correctly."
                 )
             err = self._wait_with_ros2_daemon_retry(
                 f"{key} RTDE /joint_states publisher",
@@ -9591,10 +9807,7 @@ class SystemBridge:
             ),
         )
         if err:
-            return (
-                f"{key} MoveIt is not ready: {err}. "
-                "MoveIt may have failed to launch correctly."
-            )
+            return f"{key} MoveIt is not ready: {err}. MoveIt may have failed to launch correctly."
         return None
 
     def ros2_stop_hardware_stack(self, robot: str) -> str | None:
@@ -9612,7 +9825,9 @@ class SystemBridge:
         self._stop_teleop_server()
         return None
 
-    def _load_gazebo_controller_settings(self, robot: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    def _load_gazebo_controller_settings(
+        self, robot: str
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         robot_key = str(robot or "").strip().lower()
         path_map = {
             "xarm6": _XARM6_RESOURCE,
@@ -9632,7 +9847,9 @@ class SystemBridge:
         block = raw.get(robot_key, {}) if isinstance(raw, dict) else {}
         gazebo_block = block.get("gazebo", {}) if isinstance(block, dict) else {}
         controller = gazebo_block.get("controller", {}) if isinstance(gazebo_block, dict) else {}
-        named_positions = gazebo_block.get("named_positions", {}) if isinstance(gazebo_block, dict) else {}
+        named_positions = (
+            gazebo_block.get("named_positions", {}) if isinstance(gazebo_block, dict) else {}
+        )
         if not controller:
             log.warning("Gazebo prewarm skipped; controller config empty for %s", robot_key)
             return None
@@ -9735,7 +9952,8 @@ class SystemBridge:
             else:
                 log.warning("Gazebo prewarm not ready for %s after %.2fs", robot_key, elapsed)
                 detail = str(
-                    getattr(controller, "_last_failure_message", "") or "wait_for_services returned false"
+                    getattr(controller, "_last_failure_message", "")
+                    or "wait_for_services returned false"
                 ).strip()
                 return False, time.monotonic() - start_ts, detail
         except Exception:
@@ -9839,7 +10057,9 @@ class SystemBridge:
                     if ok:
                         ready_count += 1
                     else:
-                        detail_text = str(detail or "controller not ready").strip() or "controller not ready"
+                        detail_text = (
+                            str(detail or "controller not ready").strip() or "controller not ready"
+                        )
                         failures.append(f"{robot_key}: {detail_text}")
                     self._gazebo_note_prewarm_result(robot_key, ok, elapsed, detail)
 
@@ -9982,9 +10202,11 @@ class SystemBridge:
         if prereq_err:
             return prereq_err
         if name == "perception":
-            backend = str(
-                os.environ.get("PERCEPTION_BACKEND", self._perception_backend_for_mode())
-            ).strip().lower()
+            backend = (
+                str(os.environ.get("PERCEPTION_BACKEND", self._perception_backend_for_mode()))
+                .strip()
+                .lower()
+            )
             if backend != "gazebo_gt":
                 return (
                     "Perception ROS2 process is simulation-only (gazebo_gt). "
@@ -10044,7 +10266,9 @@ class SystemBridge:
         proc = self._ros2_procs.get(name)
         if proc is None or proc.poll() is not None:
             self._ros2_procs.pop(name, None)
-            if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
+            if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(
+                self._GAZEBO_PROCESS_NAMES
+            ):
                 self._shutdown_gazebo_prewarm_controllers()
                 self._kill_stale_gazebo_helpers()
             return None
@@ -10132,6 +10356,7 @@ class SystemBridge:
     def _cleanup_shm_and_tmp() -> None:
         """Remove stale DDS shared-memory and Gazebo temp/lock files (WSL2)."""
         import time
+
         for pattern in [
             "/dev/shm/fastrtps_*",
             "/dev/shm/cyclonedds_*",
@@ -10140,7 +10365,8 @@ class SystemBridge:
         ]:
             subprocess.run(
                 ["bash", "-c", f"rm -rf {pattern} 2>/dev/null"],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
         time.sleep(3)
 
@@ -10194,7 +10420,9 @@ class SystemBridge:
             return True, "Plan/runtime state already clean."
         return True, f"Plan/runtime state reset ({total} file(s) archived)."
 
-    def _load_gazebo_reset_model_poses(self) -> dict[str, tuple[float, float, float, float, float, float]]:
+    def _load_gazebo_reset_model_poses(
+        self,
+    ) -> dict[str, tuple[float, float, float, float, float, float]]:
         if self._gazebo_reset_pose_cache is not None:
             return dict(self._gazebo_reset_pose_cache)
         if not _GAZEBO_WORLD_FILE.exists():
@@ -10205,7 +10433,9 @@ class SystemBridge:
             root = ET.parse(_GAZEBO_WORLD_FILE).getroot()
             for model in root.findall(".//world/model"):
                 name = str(model.get("name", "")).strip()
-                if not name or not any(name.startswith(prefix) for prefix in _RESETTABLE_GAZEBO_MODEL_PREFIXES):
+                if not name or not any(
+                    name.startswith(prefix) for prefix in _RESETTABLE_GAZEBO_MODEL_PREFIXES
+                ):
                     continue
                 pose_text = str(model.findtext("pose", default="")).strip()
                 if not pose_text:
@@ -10222,7 +10452,9 @@ class SystemBridge:
         return poses
 
     @staticmethod
-    def _quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    def _quaternion_from_rpy(
+        roll: float, pitch: float, yaw: float
+    ) -> tuple[float, float, float, float]:
         cr = math.cos(roll * 0.5)
         sr = math.sin(roll * 0.5)
         cp = math.cos(pitch * 0.5)
@@ -10528,7 +10760,9 @@ class SystemBridge:
 
     def _ensure_teleop_server_locked(self, ros_domain_id: int | None) -> str | None:
         try:
-            resolved_domain_id = int(ros_domain_id) if ros_domain_id is not None else self._default_ros_domain_id()
+            resolved_domain_id = (
+                int(ros_domain_id) if ros_domain_id is not None else self._default_ros_domain_id()
+            )
         except (TypeError, ValueError):
             resolved_domain_id = self._default_ros_domain_id()
         proc = self._teleop_server_proc
@@ -10541,12 +10775,7 @@ class SystemBridge:
         self._stop_teleop_server_locked()
 
         quoted_script = shlex.quote(self._TELEOP_SCRIPT)
-        cmd = (
-            f"python3.10 {quoted_script} "
-            "--server "
-            "--service-timeout-sec 8 "
-            "--tf-warmup-sec 0.2"
-        )
+        cmd = f"python3.10 {quoted_script} --server --service-timeout-sec 8 --tf-warmup-sec 0.2"
         try:
             proc = subprocess.Popen(
                 ["bash", "-c", self._ROS2_ENV + self._ros2_domain_export(resolved_domain_id) + cmd],
@@ -10594,7 +10823,9 @@ class SystemBridge:
                 return False, f"failed to send teleop command: {exc}", {}
 
             ok, msg, response_payload = self._read_teleop_response_locked(timeout_sec=timeout_sec)
-            if not ok and (self._teleop_server_proc is None or self._teleop_server_proc.poll() is not None):
+            if not ok and (
+                self._teleop_server_proc is None or self._teleop_server_proc.poll() is not None
+            ):
                 # One transparent restart/retry for crashed backend.
                 err = self._ensure_teleop_server_locked(ros_domain_id)
                 if err:
@@ -10851,33 +11082,43 @@ class SystemBridge:
     def get_agent_statuses(self) -> list[dict[str, Any]]:
         statuses = []
         for a in self.resource_agents:
-            statuses.append({
-                "name": getattr(a, "agent_name", str(a.jid)),
-                "jid": str(a.jid),
-                "type": "robot",
-                "alive": a.is_alive() if hasattr(a, "is_alive") else False,
-            })
+            statuses.append(
+                {
+                    "name": getattr(a, "agent_name", str(a.jid)),
+                    "jid": str(a.jid),
+                    "type": "robot",
+                    "alive": a.is_alive() if hasattr(a, "is_alive") else False,
+                }
+            )
         for a in self.product_agents:
-            statuses.append({
-                "name": getattr(a, "name", str(a.jid)),
-                "jid": str(a.jid),
-                "type": "product",
-                "alive": a.is_alive() if hasattr(a, "is_alive") else False,
-            })
+            statuses.append(
+                {
+                    "name": getattr(a, "name", str(a.jid)),
+                    "jid": str(a.jid),
+                    "type": "product",
+                    "alive": a.is_alive() if hasattr(a, "is_alive") else False,
+                }
+            )
         if self.cca:
-            statuses.append({
-                "name": getattr(self.cca, "agent_name", "cca"),
-                "jid": str(self.cca.jid),
-                "type": "cca",
-                "alive": self.cca.is_alive() if hasattr(self.cca, "is_alive") else False,
-            })
+            statuses.append(
+                {
+                    "name": getattr(self.cca, "agent_name", "cca"),
+                    "jid": str(self.cca.jid),
+                    "type": "cca",
+                    "alive": self.cca.is_alive() if hasattr(self.cca, "is_alive") else False,
+                }
+            )
         if self.user_agent:
-            statuses.append({
-                "name": "user",
-                "jid": str(self.user_agent.jid),
-                "type": "user",
-                "alive": self.user_agent.is_alive() if hasattr(self.user_agent, "is_alive") else False,
-            })
+            statuses.append(
+                {
+                    "name": "user",
+                    "jid": str(self.user_agent.jid),
+                    "type": "user",
+                    "alive": self.user_agent.is_alive()
+                    if hasattr(self.user_agent, "is_alive")
+                    else False,
+                }
+            )
         return statuses
 
     def get_robot_states(self) -> dict[str, dict[str, Any]]:
@@ -10908,10 +11149,7 @@ class SystemBridge:
             if not isinstance(task_states, dict):
                 task_states = {}
             runtime = getattr(pp, "product_order_runtime", {})
-            if (
-                isinstance(runtime, dict)
-                and runtime.get("enabled")
-            ):
+            if isinstance(runtime, dict) and runtime.get("enabled"):
                 committed_parts = {
                     str(part or "").strip()
                     for part in (runtime.get("committed_product_order_parts") or [])
@@ -10936,7 +11174,9 @@ class SystemBridge:
                     if node_id:
                         visible_ids.add(node_id)
                         if node_id in task_states:
-                            node_copy["status"] = str(task_states.get(node_id) or node_copy.get("status") or "pending")
+                            node_copy["status"] = str(
+                                task_states.get(node_id) or node_copy.get("status") or "pending"
+                            )
                     visible_nodes.append(node_copy)
                 for node in visible_nodes:
                     node["predecessors"] = [
@@ -11204,7 +11444,9 @@ class SystemBridge:
         loader_sync = getattr(agent, "load_preprogrammed_runtime_bridge_scenario_sync", None)
         if not callable(loader):
             if not callable(loader_sync):
-                raise RuntimeError("product agent does not support preprogrammed runtime bridge scenarios")
+                raise RuntimeError(
+                    "product agent does not support preprogrammed runtime bridge scenarios"
+                )
         log.info(
             "[ui.bridge] Loading preprogrammed runtime bridge scenario product=%s scenario=%s",
             product_jid,
@@ -11302,7 +11544,10 @@ class SystemBridge:
                     item["generated_interpretation"] = interpretation
                     normalized.append(item)
                 return normalized
-        target_bundle_id = str(bundle_id or "").strip() or str(self.bundle_store.get_active_bundle_id() or "").strip()
+        target_bundle_id = (
+            str(bundle_id or "").strip()
+            or str(self.bundle_store.get_active_bundle_id() or "").strip()
+        )
         if target_bundle_id:
             return self.get_bundle_safety_rules(target_bundle_id)
         return []

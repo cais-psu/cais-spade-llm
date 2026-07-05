@@ -36,8 +36,7 @@ def _is_resource_state_token(token: str) -> bool:
 
 def _outline_state_resource_state_token(state: dict[str, Any]) -> str:
     return str(
-        _first_non_empty_state_value(state, "current_state", "state", "resource_state")
-        or ""
+        _first_non_empty_state_value(state, "current_state", "state", "resource_state") or ""
     ).strip()
 
 
@@ -228,7 +227,7 @@ def _outline_task_part_binding(
 
 def _outline_task_predecessors(task: dict[str, Any]) -> list[str]:
     predecessor_ids: list[str] = []
-    for item in (task.get("predecessors") or []):
+    for item in task.get("predecessors") or []:
         token = str(item).strip()
         if token and token not in predecessor_ids:
             predecessor_ids.append(token)
@@ -237,8 +236,7 @@ def _outline_task_predecessors(task: dict[str, Any]) -> list[str]:
 
 def _resource_row_state_token(row: dict[str, Any]) -> str:
     return str(
-        _first_non_empty_state_value(row, "current_state", "state", "resource_state")
-        or ""
+        _first_non_empty_state_value(row, "current_state", "state", "resource_state") or ""
     ).strip()
 
 
@@ -248,8 +246,7 @@ def _resource_row_held_part_token(row: dict[str, Any]) -> str:
 
 def _part_row_state_token(row: dict[str, Any]) -> str:
     return str(
-        _first_non_empty_state_value(row, "part_state", "current_state", "state")
-        or ""
+        _first_non_empty_state_value(row, "part_state", "current_state", "state") or ""
     ).strip()
 
 
@@ -295,7 +292,10 @@ def _outline_task_requirement_facts(task: dict[str, Any]) -> list[tuple[tuple[st
     if resource_jid:
         if "resource_state" in start_state:
             requirements.append(
-                (("resource", resource_jid, "resource_state"), deepcopy(start_state.get("resource_state")))
+                (
+                    ("resource", resource_jid, "resource_state"),
+                    deepcopy(start_state.get("resource_state")),
+                )
             )
         if "held_part" in start_state:
             requirements.append(
@@ -340,9 +340,7 @@ def _outline_task_produced_facts(task: dict[str, Any]) -> dict[tuple[str, str, s
                 end_state.get("resource_state")
             )
         if "held_part" in end_state:
-            produced[("resource", resource_jid, "held_part")] = deepcopy(
-                end_state.get("held_part")
-            )
+            produced[("resource", resource_jid, "held_part")] = deepcopy(end_state.get("held_part"))
         if "resource_location" in end_state:
             produced[("resource", resource_jid, "resource_location")] = deepcopy(
                 end_state.get("resource_location")
@@ -350,9 +348,7 @@ def _outline_task_produced_facts(task: dict[str, Any]) -> dict[tuple[str, str, s
 
     if part_name:
         if "part_state" in end_state:
-            produced[("part", part_name, "part_state")] = deepcopy(
-                end_state.get("part_state")
-            )
+            produced[("part", part_name, "part_state")] = deepcopy(end_state.get("part_state"))
         if "part_location" in end_state:
             produced[("part", part_name, "part_location")] = deepcopy(
                 end_state.get("part_location")
@@ -442,11 +438,14 @@ def infer_outline_predecessors(
 
         requirements = _outline_task_requirement_facts(task)
         for fact_key, expected_value in requirements:
-            if _state_fact_value(
-                fact_key,
-                resources_by_jid=resources_by_jid,
-                parts_by_name=parts_by_name,
-            ) == expected_value:
+            if (
+                _state_fact_value(
+                    fact_key,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                )
+                == expected_value
+            ):
                 continue
             initial_unsatisfied = True
             for prior_task in reversed(inferred_tasks):
@@ -466,12 +465,9 @@ def infer_outline_predecessors(
             task_predecessors,
             predecessors_by_outline_id,
         )
-        if (
-            initial_unsatisfied
-            and not _is_failed_resource_recovery_task(
-                task,
-                initial_resources_by_jid=resources_by_jid,
-            )
+        if initial_unsatisfied and not _is_failed_resource_recovery_task(
+            task,
+            initial_resources_by_jid=resources_by_jid,
         ):
             for recovery_outline_id in prior_failed_resource_recoveries:
                 if (
@@ -578,12 +574,16 @@ def _outline_task_matches_pending_nominal_suffix(
     requirement_id = _outline_task_requirement_id(task, parts_by_name=parts_by_name)
     target_locations = set(_outline_task_target_locations(task))
     end_state = dict(task.get("expected_end_state") or {})
-    end_state_token = str(
-        end_state.get("part_state")
-        or end_state.get("current_state")
-        or end_state.get("state")
-        or ""
-    ).strip().lower()
+    end_state_token = (
+        str(
+            end_state.get("part_state")
+            or end_state.get("current_state")
+            or end_state.get("state")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
     for pending_task in _modeled_gap_pending_nominal_tasks(llm_input):
         pending_part = str(pending_task.get("part") or "").strip()
         pending_resource = str(pending_task.get("resource") or "").strip()
@@ -655,22 +655,32 @@ def _infer_outline_macro_signature(
         or (
             "closed"
             if "held_part" in end_state and after_held_part
-            else "open" if "held_part" in end_state else ""
+            else "open"
+            if "held_part" in end_state
+            else ""
         )
         or before_gripper_state
         or ""
     ).strip()
-    before_named_pose = _outline_resource_named_pose_token(
-        state=start_state,
-        action_target={},
-    ) or str(resource_row.get("current_location") or "").strip()
-    after_named_pose = _outline_resource_named_pose_token(
-        state=end_state,
-        action_target=action_target,
-    ) or before_named_pose
-    before_resource_pose = _outline_state_pose_value(start_state) or dict(
-        resource_row.get("current_pose") or {}
-    ) or None
+    before_named_pose = (
+        _outline_resource_named_pose_token(
+            state=start_state,
+            action_target={},
+        )
+        or str(resource_row.get("current_location") or "").strip()
+    )
+    after_named_pose = (
+        _outline_resource_named_pose_token(
+            state=end_state,
+            action_target=action_target,
+        )
+        or before_named_pose
+    )
+    before_resource_pose = (
+        _outline_state_pose_value(start_state)
+        or dict(resource_row.get("current_pose") or {})
+        or None
+    )
     after_resource_pose = _outline_state_pose_value(end_state) or before_resource_pose
 
     resource_delta: dict[str, Any] = {}
@@ -698,9 +708,7 @@ def _infer_outline_macro_signature(
             for token in (
                 explicit_end_part_name,
                 explicit_start_part_name,
-                str(end_state.get("held_part") or "").strip()
-                if "held_part" in end_state
-                else "",
+                str(end_state.get("held_part") or "").strip() if "held_part" in end_state else "",
                 str(start_state.get("held_part") or "").strip()
                 if "held_part" in start_state
                 else "",

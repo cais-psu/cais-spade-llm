@@ -11,6 +11,7 @@ except ModuleNotFoundError as exc:
         raise
     from xarmlib.wrapper import XArmAPI
 
+
 class UR5eRTDECommander:
     def __init__(self):
         self.hostname = "192.168.1.172"
@@ -27,11 +28,13 @@ class UR5eRTDECommander:
 
     def build_pose(self, pose):
         x, y, z = [float(value) for value in pose]
-        rotvec = Rotation.from_euler("xyz", [self.roll, self.pitch, self.yaw], degrees=True).as_rotvec()
+        rotvec = Rotation.from_euler(
+            "xyz", [self.roll, self.pitch, self.yaw], degrees=True
+        ).as_rotvec()
         return [x / 1000.0, y / 1000.0, z / 1000.0, *rotvec]
 
     def move_to_pose(self, pose):
-        self.rtde.moveL( self.build_pose(pose), self.speed, self.acceleration)
+        self.rtde.moveL(self.build_pose(pose), self.speed, self.acceleration)
 
     def move_tcp_z(self, delta_mm=10.0):
         start_pose = list(self.rtde_receive.getActualTCPPose())
@@ -92,6 +95,7 @@ class UR5eRTDECommander:
         self.open_gripper()
         self.rtde.moveL(self.build_pose(intermediate_pose), self.speed, self.acceleration)
 
+
 class xArmCommander:
     def __init__(self):
         self.arm = XArmAPI("192.168.1.240")
@@ -107,7 +111,6 @@ class xArmCommander:
         self.gripper_open_position = 850
         self.gripper_close_position = 0
 
-
     def move_to_pose(self, pose):
         code = self.arm.set_position(
             *pose,
@@ -118,16 +121,10 @@ class xArmCommander:
         )
 
     def close_gripper(self):
-        self.arm.set_gripper_position(
-            self.gripper_close_position,
-            speed=self.grip_speed
-        )
+        self.arm.set_gripper_position(self.gripper_close_position, speed=self.grip_speed)
 
     def open_gripper(self):
-        self.arm.gripper_open_position(
-            self.gripper_close_position,
-            speed=self.grip_speed
-        )
+        self.arm.gripper_open_position(self.gripper_close_position, speed=self.grip_speed)
 
     def build_intermediate_pose(self, pose):
         pose[2] += self.approach_offset
@@ -150,6 +147,7 @@ class xArmCommander:
         self.move_to_pose(pose)
         self.open_gripper()
         self.move_to_pose(intermediate_pose)
+
 
 if __name__ == "__main__":
     ur5e_commander = UR5eRTDECommander()

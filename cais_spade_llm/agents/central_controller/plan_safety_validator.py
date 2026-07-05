@@ -44,9 +44,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     # Guardrail: stop if product graph explodes (tune as needed)
     MAX_PRODUCT_STATES: int = 200_000
-    _RUNNING_TASK_RE = re.compile(
-        r"([^=,\s]+)=\([^)]*?run=([^:,\)]+):([A-Za-z0-9_-]+)"
-    )
+    _RUNNING_TASK_RE = re.compile(r"([^=,\s]+)=\([^)]*?run=([^:,\)]+):([A-Za-z0-9_-]+)")
 
     def __init__(
         self,
@@ -114,17 +112,15 @@ class PlanSafetyValidator(BaseSafetyChecker):
             aps_for_rule: set[str] = set(dfa.get("ap_symbols", []))
             if not aps_for_rule:
                 continue
-            start_plan_state, start_q, start_resource_states = (
-                self._restore_runtime_rule_start(
-                    rule_id=rule_id,
-                    aps_for_rule=aps_for_rule,
-                    enabled=enabled,
-                    x0=x0,
-                    task_lookup=task_lookup,
-                    task_meta_lookup=task_meta_lookup,
-                    initial_resource_states=initial_resource_states,
-                    runtime_context=runtime_context,
-                )
+            start_plan_state, start_q, start_resource_states = self._restore_runtime_rule_start(
+                rule_id=rule_id,
+                aps_for_rule=aps_for_rule,
+                enabled=enabled,
+                x0=x0,
+                task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                initial_resource_states=initial_resource_states,
+                runtime_context=runtime_context,
             )
 
             violations = self._check_rule_on_fsa_product(
@@ -422,7 +418,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
         for transition in enabled.get(str(x0), []):
             task_id = str(transition.get("task_id") or "").strip()
             meta = task_meta_lookup.get(task_id, {})
-            resource_jid = str(meta.get("resource_jid") or transition.get("resource_jid") or "").strip()
+            resource_jid = str(
+                meta.get("resource_jid") or transition.get("resource_jid") or ""
+            ).strip()
             in_state = str(meta.get("in_state") or transition.get("in_state") or "").strip()
             if not resource_jid:
                 continue
@@ -462,7 +460,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
         task_lookup: dict[str, dict[str, Any]],
         task_meta_lookup: dict[str, dict[str, Any]],
         resource_states: dict[str, dict[str, Any]],
-    ) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, dict[str, Any]], dict[str, frozenset[str]]]:
+    ) -> tuple[
+        tuple[str, ...], tuple[str, ...], dict[str, dict[str, Any]], dict[str, frozenset[str]]
+    ]:
         event_name = str(transition.get("event") or "").strip()
         meta = self._transition_task_meta(transition, task_lookup, task_meta_lookup)
         resource_jid = str(meta.get("resource_jid") or "").strip()
@@ -473,8 +473,12 @@ class PlanSafetyValidator(BaseSafetyChecker):
         persistent_before_all = set(self._state_aps_for_resources_all(resource_states))
 
         if resource_jid and function_name:
-            candidate_event_aps_all = set(self._map_task_to_aps(resource_jid, function_name, params))
-            predicted_state_aps_all = set(self._predict_state_aps(resource_jid, function_name, params))
+            candidate_event_aps_all = set(
+                self._map_task_to_aps(resource_jid, function_name, params)
+            )
+            predicted_state_aps_all = set(
+                self._predict_state_aps(resource_jid, function_name, params)
+            )
         else:
             candidate_event_aps_all = set()
             predicted_state_aps_all = set()
@@ -504,7 +508,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                     next_payload["params"] = dict(params)
 
             persistent_after_all = set(self._state_aps_for_resources_all(next_resource_states))
-            sigma_all = frozenset(running_after_all | persistent_after_all | candidate_event_aps_all)
+            sigma_all = frozenset(
+                running_after_all | persistent_after_all | candidate_event_aps_all
+            )
         elif event_name.endswith(".start"):
             sigma_all = frozenset(
                 running_before_all
@@ -513,7 +519,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 | predicted_state_aps_all
             )
         else:
-            sigma_all = frozenset(running_before_all | persistent_before_all | candidate_event_aps_all)
+            sigma_all = frozenset(
+                running_before_all | persistent_before_all | candidate_event_aps_all
+            )
 
         checked_vec: list[str] = []
         committed_vec: list[str] = []
@@ -597,20 +605,17 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         rule_ids = self._ordered_rule_ids()
         rule_ap_sets: dict[str, set[str]] = {
-            rule_id: set(self.dfas.get(rule_id, {}).get("ap_symbols", []))
-            for rule_id in rule_ids
+            rule_id: set(self.dfas.get(rule_id, {}).get("ap_symbols", [])) for rule_id in rule_ids
         }
-        start_plan_state, start_q_vec, start_resource_states = (
-            self._restore_runtime_joint_start(
-                rule_ids=rule_ids,
-                rule_ap_sets=rule_ap_sets,
-                enabled=enabled,
-                x0=x0,
-                task_lookup=task_lookup,
-                task_meta_lookup=task_meta_lookup,
-                initial_resource_states=initial_resource_states,
-                runtime_context=runtime_context,
-            )
+        start_plan_state, start_q_vec, start_resource_states = self._restore_runtime_joint_start(
+            rule_ids=rule_ids,
+            rule_ap_sets=rule_ap_sets,
+            enabled=enabled,
+            x0=x0,
+            task_lookup=task_lookup,
+            task_meta_lookup=task_meta_lookup,
+            initial_resource_states=initial_resource_states,
+            runtime_context=runtime_context,
         )
 
         start_payload = deepcopy(start_resource_states)
@@ -681,7 +686,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 violates = False
                 violated_rule_ids: list[str] = []
                 for idx, rule_id in enumerate(rule_ids):
-                    violation_state = str(self.dfas.get(rule_id, {}).get("violation_state") or "").strip()
+                    violation_state = str(
+                        self.dfas.get(rule_id, {}).get("violation_state") or ""
+                    ).strip()
                     if violation_state and checked_vec[idx] == violation_state:
                         violates = True
                         violated_rule_ids.append(rule_id)
@@ -689,7 +696,11 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 if violates:
                     continue
 
-                successor = (x2, committed_vec, self._resource_state_signature(next_resource_states))
+                successor = (
+                    x2,
+                    committed_vec,
+                    self._resource_state_signature(next_resource_states),
+                )
                 edge_meta = {
                     "event": transition.get("event"),
                     "task_id": transition.get("task_id"),
@@ -700,8 +711,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
                     "to": x2,
                     "successor": successor,
                     "sigma_by_rule": {
-                        rid: sorted(list(sigma_by_rule.get(rid, frozenset())))
-                        for rid in rule_ids
+                        rid: sorted(list(sigma_by_rule.get(rid, frozenset()))) for rid in rule_ids
                     },
                 }
                 product_graph[node].append(edge_meta)
@@ -792,8 +802,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
         )
 
         current_state = str(x0)
-        completed_task_ids, running_task_ids, failed_task_ids = (
-            self._runtime_progress_task_ids(runtime_context)
+        completed_task_ids, running_task_ids, failed_task_ids = self._runtime_progress_task_ids(
+            runtime_context
         )
         completed_set = set(completed_task_ids)
 
@@ -810,17 +820,15 @@ class PlanSafetyValidator(BaseSafetyChecker):
             )
             if not isinstance(transition, dict):
                 return False
-            checked_q, committed_q, next_resource_states, _sigma = (
-                self._transition_successor(
-                    rule_id=rule_id,
-                    q=current_q,
-                    x=current_state,
-                    transition=transition,
-                    aps_for_rule=aps_for_rule,
-                    task_lookup=task_lookup,
-                    task_meta_lookup=task_meta_lookup,
-                    resource_states=current_resource_states,
-                )
+            checked_q, committed_q, next_resource_states, _sigma = self._transition_successor(
+                rule_id=rule_id,
+                q=current_q,
+                x=current_state,
+                transition=transition,
+                aps_for_rule=aps_for_rule,
+                task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                resource_states=current_resource_states,
             )
             violation_state = str(self.dfas.get(rule_id, {}).get("violation_state") or "").strip()
             if violation_state and checked_q == violation_state:
@@ -888,29 +896,32 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if part_name and not params.get("part_name"):
                 params["part_name"] = part_name
             resource_jid = str(meta.get("resource_jid") or event.get("resource_jid") or "").strip()
-            function_name = str(meta.get("function_name") or event.get("function_name") or "").strip()
+            function_name = str(
+                meta.get("function_name") or event.get("function_name") or ""
+            ).strip()
             if not resource_jid or not function_name:
                 continue
 
             running_before: set[str] = set()
             for aps in running_task_aps.values():
                 running_before.update(aps)
-            persistent_before = set(self._state_aps_for_resources(current_resource_states, aps_for_rule))
+            persistent_before = set(
+                self._state_aps_for_resources(current_resource_states, aps_for_rule)
+            )
             candidate_event_aps = set(
-                ap for ap in self._map_task_to_aps(resource_jid, function_name, params)
+                ap
+                for ap in self._map_task_to_aps(resource_jid, function_name, params)
                 if ap in aps_for_rule
             )
 
             if suffix == "start":
                 predicted_state_aps = set(
-                    ap for ap in self._predict_state_aps(resource_jid, function_name, params)
+                    ap
+                    for ap in self._predict_state_aps(resource_jid, function_name, params)
                     if ap in aps_for_rule
                 )
                 sigma = frozenset(
-                    running_before
-                    | persistent_before
-                    | candidate_event_aps
-                    | predicted_state_aps
+                    running_before | persistent_before | candidate_event_aps | predicted_state_aps
                 )
                 checked_q = self._delta(rule_id, current_q, sigma)
                 if violation_state and checked_q == violation_state:
@@ -943,7 +954,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 elif "params" not in next_payload:
                     next_payload["params"] = dict(params)
 
-            persistent_after = set(self._state_aps_for_resources(current_resource_states, aps_for_rule))
+            persistent_after = set(
+                self._state_aps_for_resources(current_resource_states, aps_for_rule)
+            )
             sigma = frozenset(running_after | persistent_after | candidate_event_aps)
             current_q = self._delta(rule_id, current_q, sigma)
 
@@ -961,8 +974,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
         initial_resource_states: dict[str, dict[str, Any]],
         runtime_context: dict[str, Any] | None,
     ) -> tuple[str, str, dict[str, dict[str, Any]]]:
-        completed_task_ids, running_task_ids, failed_task_ids = (
-            self._runtime_progress_task_ids(runtime_context)
+        completed_task_ids, running_task_ids, failed_task_ids = self._runtime_progress_task_ids(
+            runtime_context
         )
         if not completed_task_ids and not running_task_ids and not failed_task_ids:
             return (
@@ -989,17 +1002,15 @@ class PlanSafetyValidator(BaseSafetyChecker):
             )
             if not isinstance(transition, dict):
                 return False
-            checked_q, committed_q, next_resource_states, _sigma = (
-                self._transition_successor(
-                    rule_id=rule_id,
-                    q=current_q,
-                    x=current_state,
-                    transition=transition,
-                    aps_for_rule=aps_for_rule,
-                    task_lookup=task_lookup,
-                    task_meta_lookup=task_meta_lookup,
-                    resource_states=current_resource_states,
-                )
+            checked_q, committed_q, next_resource_states, _sigma = self._transition_successor(
+                rule_id=rule_id,
+                q=current_q,
+                x=current_state,
+                transition=transition,
+                aps_for_rule=aps_for_rule,
+                task_lookup=task_lookup,
+                task_meta_lookup=task_meta_lookup,
+                resource_states=current_resource_states,
             )
             del checked_q, _sigma
             current_state = str(transition.get("to") or current_state).strip() or current_state
@@ -1036,12 +1047,11 @@ class PlanSafetyValidator(BaseSafetyChecker):
         initial_resource_states: dict[str, dict[str, Any]],
         runtime_context: dict[str, Any] | None,
     ) -> tuple[str, tuple[str, ...], dict[str, dict[str, Any]]]:
-        completed_task_ids, running_task_ids, failed_task_ids = (
-            self._runtime_progress_task_ids(runtime_context)
+        completed_task_ids, running_task_ids, failed_task_ids = self._runtime_progress_task_ids(
+            runtime_context
         )
         q0_vec = tuple(
-            str(self.dfas.get(rule_id, {}).get("initial") or "1")
-            for rule_id in rule_ids
+            str(self.dfas.get(rule_id, {}).get("initial") or "1") for rule_id in rule_ids
         )
         if not completed_task_ids and not running_task_ids and not failed_task_ids:
             return str(x0), q0_vec, deepcopy(initial_resource_states)
@@ -1122,11 +1132,13 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         if resource_jid and function_name:
             candidate_event_aps = set(
-                ap for ap in self._map_task_to_aps(resource_jid, function_name, params)
+                ap
+                for ap in self._map_task_to_aps(resource_jid, function_name, params)
                 if ap in aps_for_rule
             )
             predicted_state_aps = set(
-                ap for ap in self._predict_state_aps(resource_jid, function_name, params)
+                ap
+                for ap in self._predict_state_aps(resource_jid, function_name, params)
                 if ap in aps_for_rule
             )
         else:
@@ -1135,10 +1147,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         if event_name.endswith(".start"):
             sigma = frozenset(
-                running_before
-                | persistent_before
-                | candidate_event_aps
-                | predicted_state_aps
+                running_before | persistent_before | candidate_event_aps | predicted_state_aps
             )
             checked_q = self._delta(rule_id, q, sigma)
             return checked_q, q, deepcopy(resource_states), sigma
@@ -1152,7 +1161,12 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if resource_jid:
                 next_payload = next_resource_states.setdefault(
                     resource_jid,
-                    {"current_state": next_resource_states.get(resource_jid, {}).get("current_state", "idle"), "params": {}},
+                    {
+                        "current_state": next_resource_states.get(resource_jid, {}).get(
+                            "current_state", "idle"
+                        ),
+                        "params": {},
+                    },
                 )
                 out_state = str(meta.get("out_state") or "").strip()
                 if out_state and out_state.lower() != "any":
@@ -1161,7 +1175,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 elif "params" not in next_payload:
                     next_payload["params"] = dict(params)
 
-            persistent_after = set(self._state_aps_for_resources(next_resource_states, aps_for_rule))
+            persistent_after = set(
+                self._state_aps_for_resources(next_resource_states, aps_for_rule)
+            )
             sigma = frozenset(running_after | persistent_after | candidate_event_aps)
             committed_q = self._delta(rule_id, q, sigma)
             return committed_q, committed_q, next_resource_states, sigma
@@ -1195,19 +1211,22 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         rule_info = self.rule_lookup.get(rule_id, {})
         ap_defs = {
-            ap["label"]: ap.get("full", "")
-            for ap in rule_info.get("aps", [])
-            if ap.get("label")
+            ap["label"]: ap.get("full", "") for ap in rule_info.get("aps", []) if ap.get("label")
         }
 
         start_state_payload = deepcopy(initial_resource_states)
         start_sig = self._resource_state_signature(start_state_payload)
         start = (str(x0), str(q0), start_sig)
-        parent: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], tuple[str, str, tuple[tuple[str, str, str], ...]] | None] = {start: None}
-        parent_edge: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, Any] | None] = {start: None}
-        state_payloads: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, dict[str, Any]]] = {
-            start: start_state_payload
-        }
+        parent: dict[
+            tuple[str, str, tuple[tuple[str, str, str], ...]],
+            tuple[str, str, tuple[tuple[str, str, str], ...]] | None,
+        ] = {start: None}
+        parent_edge: dict[
+            tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, Any] | None
+        ] = {start: None}
+        state_payloads: dict[
+            tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, dict[str, Any]]
+        ] = {start: start_state_payload}
 
         stack = deque([start])
         seen: set[tuple[str, str, tuple[tuple[str, str, str], ...]]] = {start}
@@ -1228,12 +1247,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
                     terminal_invalid = True
                 if terminal_invalid:
                     trace = self._reconstruct_trace(node, parent, parent_edge)
-                    violations.append(self._build_fsa_violation_entry(
-                        rule_id=rule_id,
-                        rule=rule_info,
-                        ap_defs=ap_defs,
-                        witness=trace,
-                    ))
+                    violations.append(
+                        self._build_fsa_violation_entry(
+                            rule_id=rule_id,
+                            rule=rule_info,
+                            ap_defs=ap_defs,
+                            witness=trace,
+                        )
+                    )
                     # You can continue searching to find more witnesses; usually one is enough.
                     continue
 
@@ -1257,10 +1278,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 if violation_state and checked_q == violation_state:
                     # Found violation witness
                     # record (x2,q2) as the violating product state for trace reconstruction
-                    violating = (x2, checked_q, self._resource_state_signature(next_resource_states))
+                    violating = (
+                        x2,
+                        checked_q,
+                        self._resource_state_signature(next_resource_states),
+                    )
                     if violating not in parent:
                         parent[violating] = node
-                        
+
                         t_dbg = dict(t)
                         t_dbg["_sigma"] = sorted(list(sigma))
                         t_dbg["_q_from"] = q
@@ -1268,15 +1293,17 @@ class PlanSafetyValidator(BaseSafetyChecker):
                         t_dbg["_resource_states"] = deepcopy(next_resource_states)
                         parent_edge[violating] = t_dbg
                         state_payloads[violating] = deepcopy(next_resource_states)
-                        
+
                     trace = self._reconstruct_trace(violating, parent, parent_edge)
 
-                    violations.append(self._build_fsa_violation_entry(
-                        rule_id=rule_id,
-                        rule=rule_info,
-                        ap_defs=ap_defs,
-                        witness=trace,
-                    ))
+                    violations.append(
+                        self._build_fsa_violation_entry(
+                            rule_id=rule_id,
+                            rule=rule_info,
+                            ap_defs=ap_defs,
+                            witness=trace,
+                        )
+                    )
                     # Do not expand this violating successor
                     continue
 
@@ -1286,7 +1313,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
                 seen.add(s2)
                 parent[s2] = node
-                                
+
                 t_dbg = dict(t)
                 t_dbg["_sigma"] = sorted(list(sigma))
                 t_dbg["_q_from"] = q
@@ -1361,7 +1388,6 @@ class PlanSafetyValidator(BaseSafetyChecker):
             "violation_text": rule.get("raw_text", ""),
             "violation_logic": rule.get("ltlf", ""),
             "ap_definitions": ap_defs,
-
             # Witness info
             "witness_events": witness_events,
             "witness_task_ids": witness_task_ids,

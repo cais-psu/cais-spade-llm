@@ -395,7 +395,10 @@ def _robot_primitive_owner(agent: Any) -> Any | None:
 def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
     current_pose = None
     controller = getattr(agent, "_controller", None)
-    if controller is not None and str(getattr(agent, "execution_mode", "")).strip().lower() != "dry_run":
+    if (
+        controller is not None
+        and str(getattr(agent, "execution_mode", "")).strip().lower() != "dry_run"
+    ):
         try:
             pose_result = controller.get_current_pose()
         except Exception:

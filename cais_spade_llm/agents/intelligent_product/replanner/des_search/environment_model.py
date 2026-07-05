@@ -108,10 +108,9 @@ def _find_start_state(states: dict, x_c: dict) -> str | None:
         return exact
 
     for key, state in states.items():
-        if (
-            state.get("resource_state") == x_c.get("resource_state")
-            and state.get("part_states") == x_c.get("part_states")
-        ):
+        if state.get("resource_state") == x_c.get("resource_state") and state.get(
+            "part_states"
+        ) == x_c.get("part_states"):
             return key
 
     return None

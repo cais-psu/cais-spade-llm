@@ -8,8 +8,20 @@ from cais_spade_llm.ui.bridge import SystemBridge
 
 # Workspace boundaries (mm) from robot configs.
 _WORKSPACES = {
-    "xarm6": {"x_min": -150, "x_max": 650, "y_min": -800, "y_max": -400, "color": "rgba(33, 150, 243, 0.15)"},
-    "ur5e": {"x_min": 100, "x_max": 900, "y_min": -800, "y_max": -400, "color": "rgba(76, 175, 80, 0.15)"},
+    "xarm6": {
+        "x_min": -150,
+        "x_max": 650,
+        "y_min": -800,
+        "y_max": -400,
+        "color": "rgba(33, 150, 243, 0.15)",
+    },
+    "ur5e": {
+        "x_min": 100,
+        "x_max": 900,
+        "y_min": -800,
+        "y_max": -400,
+        "color": "rgba(76, 175, 80, 0.15)",
+    },
 }
 
 
@@ -35,7 +47,12 @@ def render(bridge: SystemBridge) -> None:
                 # Try to get observations from camera via bridge.
                 observations = _get_observations(bridge)
                 rows = [
-                    {"part": name, "x": round(p.get("x", 0), 1), "y": round(p.get("y", 0), 1), "z": round(p.get("z", 0), 1)}
+                    {
+                        "part": name,
+                        "x": round(p.get("x", 0), 1),
+                        "y": round(p.get("y", 0), 1),
+                        "z": round(p.get("z", 0), 1),
+                    }
                     for name, p in observations.items()
                 ]
                 parts_table.rows = rows
@@ -46,10 +63,12 @@ def render(bridge: SystemBridge) -> None:
         # ── 2D Workspace Plot ────────────────────────────────────────
         with ui.card().classes("w-full"):
             ui.label("Workspace View (top-down)").classes("text-lg font-semibold mb-2")
-            plot = ui.plotly({
-                "data": [],
-                "layout": _base_layout(),
-            }).classes("w-full h-96")
+            plot = ui.plotly(
+                {
+                    "data": [],
+                    "layout": _base_layout(),
+                }
+            ).classes("w-full h-96")
 
             # Initial load.
             observations = _get_observations(bridge)
@@ -82,16 +101,23 @@ def _base_layout() -> dict:
         "shapes": [
             {
                 "type": "rect",
-                "x0": ws["x_min"], "x1": ws["x_max"],
-                "y0": ws["y_min"], "y1": ws["y_max"],
+                "x0": ws["x_min"],
+                "x1": ws["x_max"],
+                "y0": ws["y_min"],
+                "y1": ws["y_max"],
                 "fillcolor": ws["color"],
                 "line": {"dash": "dash", "width": 1},
             }
             for ws in _WORKSPACES.values()
         ],
         "annotations": [
-            {"x": (ws["x_min"] + ws["x_max"]) / 2, "y": ws["y_max"] + 20,
-             "text": name, "showarrow": False, "font": {"size": 12}}
+            {
+                "x": (ws["x_min"] + ws["x_max"]) / 2,
+                "y": ws["y_max"] + 20,
+                "text": name,
+                "showarrow": False,
+                "font": {"size": 12},
+            }
             for name, ws in _WORKSPACES.items()
         ],
     }
@@ -107,15 +133,17 @@ def _update_plot(plot, observations: dict) -> None:
     names = list(observations.keys())
 
     plot.update_figure(
-        data=[{
-            "type": "scatter",
-            "x": xs,
-            "y": ys,
-            "mode": "markers+text",
-            "text": names,
-            "textposition": "top center",
-            "marker": {"size": 12, "color": "#f44336"},
-            "name": "Parts",
-        }],
+        data=[
+            {
+                "type": "scatter",
+                "x": xs,
+                "y": ys,
+                "mode": "markers+text",
+                "text": names,
+                "textposition": "top center",
+                "marker": {"size": 12, "color": "#f44336"},
+                "name": "Parts",
+            }
+        ],
         layout=_base_layout(),
     )

@@ -34,6 +34,7 @@ _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
+
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
     import agent_creator
@@ -59,7 +60,7 @@ def _run_headless() -> None:
         )
         cca = agent_creator.create_central_controller(
             "cais_spade_llm/initialization/cca.json", resources
-        ) 
+        )
 
         FunctionAnalyzer.build_tools_catalogue(
             agents=products + resources,
@@ -79,7 +80,7 @@ def _run_headless() -> None:
 
         print("Agents running (headless). Press Ctrl+C to stop.")
         try:
-            while True:     
+            while True:
                 await asyncio.sleep(1)
         except (KeyboardInterrupt, SystemExit):
             pass
@@ -128,7 +129,9 @@ def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") 
     for cmd in _KILL_CMDS:
         try:
             result = subprocess.run(
-                ["bash", "-c", cmd], capture_output=True, timeout=5,
+                ["bash", "-c", cmd],
+                capture_output=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 killed_any = True
@@ -137,6 +140,7 @@ def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") 
     if killed_any:
         # Give OS time to release ports/shared memory (critical on WSL2)
         import time
+
         time.sleep(3)
         if not quiet:
             log.info(
@@ -161,12 +165,15 @@ def _cleanup_ros2_shm() -> None:
         try:
             result = subprocess.run(
                 ["bash", "-c", f"ls {pattern} 2>/dev/null"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.stdout.strip():
                 subprocess.run(
                     ["bash", "-c", f"rm -rf {pattern} 2>/dev/null"],
-                    capture_output=True, timeout=5,
+                    capture_output=True,
+                    timeout=5,
                 )
                 cleaned = True
         except Exception:
@@ -204,6 +211,7 @@ def _run_ui() -> None:
         flush=True,
     )
     from cais_spade_llm.ui.app import create_app
+
     create_app()
 
 

@@ -47,7 +47,9 @@ def validate_product_order(
         raise ValueError("product order JSON must be an object")
 
     if "constraints" in payload:
-        raise ValueError("product order must not include constraints; put constraints in safety files")
+        raise ValueError(
+            "product order must not include constraints; put constraints in safety files"
+        )
 
     missing = [field for field in _REQUIRED_FIELDS if field not in payload]
     if missing:

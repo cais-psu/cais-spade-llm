@@ -145,7 +145,7 @@ def projected_outline_validation_context(
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
 
     resources_by_jid: dict[str, dict[str, Any]] = {}
-    for row in (observed_runtime_state.get("resources") or []):
+    for row in observed_runtime_state.get("resources") or []:
         if not isinstance(row, dict):
             continue
         resource_jid = str(row.get("resource_jid") or "").strip()
@@ -183,7 +183,7 @@ def projected_outline_validation_context(
                 resource_row[key] = deepcopy(bridge_snapshot.get(key))
 
     parts_by_name: dict[str, dict[str, Any]] = {}
-    for row in (llm_input.get("part_facts") or []):
+    for row in llm_input.get("part_facts") or []:
         if not isinstance(row, dict):
             continue
         part_name = str(row.get("part_name") or "").strip()
@@ -409,21 +409,9 @@ def _translate_findings(
                 stage=stage,
                 code=str(row.get("constraint_code") or default_code).strip(),
                 reason=str(row.get("reason") or default_reason).strip(),
-                task_id=str(
-                    row.get("task_id")
-                    or task.get("outline_id")
-                    or ""
-                ).strip(),
-                resource_jid=str(
-                    row.get("resource_jid")
-                    or task.get("resource_jid")
-                    or ""
-                ).strip(),
-                part_name=str(
-                    row.get("part_name")
-                    or task.get("part_name")
-                    or ""
-                ).strip(),
+                task_id=str(row.get("task_id") or task.get("outline_id") or "").strip(),
+                resource_jid=str(row.get("resource_jid") or task.get("resource_jid") or "").strip(),
+                part_name=str(row.get("part_name") or task.get("part_name") or "").strip(),
                 unsatisfied_predicates=[
                     str(item).strip()
                     for item in (row.get("unsatisfied_predicates") or [])
@@ -521,11 +509,7 @@ def _validate_outline_task_cca(
         dependency_map={task_id: _outline_task_predecessors(task)},
         previously_cleared_condition_ids=None,
     )
-    return [
-        deepcopy(row)
-        for row in (cca_result.get("findings") or [])
-        if isinstance(row, dict)
-    ]
+    return [deepcopy(row) for row in (cca_result.get("findings") or []) if isinstance(row, dict)]
 
 
 def _evaluate_marked_progress(

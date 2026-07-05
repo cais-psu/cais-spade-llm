@@ -15,8 +15,8 @@ class BaseSafetyChecker:
     1. Parsing DFA DOT strings.
     2. Mapping tasks to Atomic Propositions (APs).
     3. Evaluating DFA transitions (The 'Physics' of the safety logic).
-    
-    This class is STATELESS regarding the robot execution. 
+
+    This class is STATELESS regarding the robot execution.
     It only holds the rules.
     """
 
@@ -30,7 +30,7 @@ class BaseSafetyChecker:
         self.logger = logging.getLogger("BaseSafetyChecker")
         self.safety_rules = safety_rules or []
         self.tools_catalog = tools_catalog or []
-        
+
         # Performance optimization caches
         self._compiled_expr_cache: dict[str, Any] = {}
         self._eval_result_cache: dict[tuple[str, frozenset[str]], bool] = {}
@@ -57,12 +57,7 @@ class BaseSafetyChecker:
 
     @staticmethod
     def _task_product_name(params: dict[str, Any]) -> str:
-        product = (
-            params.get("part_name")
-            or params.get("part")
-            or params.get("product")
-            or "any"
-        )
+        product = params.get("part_name") or params.get("part") or params.get("product") or "any"
         return str(product).lower()
 
     @staticmethod
@@ -152,9 +147,7 @@ class BaseSafetyChecker:
         params: dict[str, Any],
     ) -> bool:
         source_task_ids = {
-            str(token).strip()
-            for token in (ap.get("source_task_ids") or [])
-            if str(token).strip()
+            str(token).strip() for token in (ap.get("source_task_ids") or []) if str(token).strip()
         }
         if not source_task_ids:
             return True
@@ -228,9 +221,7 @@ class BaseSafetyChecker:
         for rule in self.safety_rules:
             rule_context = rule.get("context") or {}
             # Also consider rule context values as potential matches
-            rule_ctx_value_strings = {
-                self._context_scalar_text(v) for v in rule_context.values()
-            }
+            rule_ctx_value_strings = {self._context_scalar_text(v) for v in rule_context.values()}
 
             for ap in rule.get("aps", []):
                 full = ap.get("full") or ""
@@ -253,10 +244,7 @@ class BaseSafetyChecker:
 
                 # 2) Event / function name match
                 expected_event = str(
-                    ap.get("event_name")
-                    or ap.get("function")
-                    or ap_event
-                    or ""
+                    ap.get("event_name") or ap.get("function") or ap_event or ""
                 ).strip()
                 if expected_event not in event_tokens:
                     continue
@@ -313,9 +301,7 @@ class BaseSafetyChecker:
 
         for rule in self.safety_rules:
             rule_context = rule.get("context") or {}
-            rule_ctx_value_strings = {
-                self._context_scalar_text(v) for v in rule_context.values()
-            }
+            rule_ctx_value_strings = {self._context_scalar_text(v) for v in rule_context.values()}
 
             for ap in rule.get("aps", []):
                 full = ap.get("full") or ""
@@ -336,7 +322,9 @@ class BaseSafetyChecker:
 
                 field_name = str(ap.get("field") or "").strip()
                 field_value = str(ap.get("value") or "").strip()
-                expected_state = f"{field_name}={field_value}" if field_name and field_value else str(ap_state)
+                expected_state = (
+                    f"{field_name}={field_value}" if field_name and field_value else str(ap_state)
+                )
                 if "=" in expected_state:
                     token = expected_state.strip()
                     if token not in state_tokens:
@@ -487,11 +475,11 @@ class BaseSafetyChecker:
 
         transitions = dfa_data.get("transitions", {}).get(current_state, [])
         ap_symbols = dfa_data.get("ap_symbols", [])
-        
+
         for label, dst in transitions:
             if self._eval_label(label, sigma, ap_symbols):
                 return dst
-        
+
         # If no transition matches, remain in current state (Stuttering)
         return current_state
 
@@ -513,7 +501,12 @@ class BaseSafetyChecker:
 
         # Fast path 2: parse and compile expression only once
         if label not in self._compiled_expr_cache:
-            expr = label.replace("&", " and ").replace("|", " or ").replace("~", " not ").replace("!", " not ")
+            expr = (
+                label.replace("&", " and ")
+                .replace("|", " or ")
+                .replace("~", " not ")
+                .replace("!", " not ")
+            )
             expr = re.sub(r"\btrue\b", "True", expr, flags=re.IGNORECASE)
             expr = re.sub(r"\bfalse\b", "False", expr, flags=re.IGNORECASE)
             try:
@@ -521,7 +514,7 @@ class BaseSafetyChecker:
             except Exception:
                 self.logger.error(f"Failed to compile label expression: {label}")
                 self._compiled_expr_cache[label] = None
-        
+
         compiled_expr = self._compiled_expr_cache.get(label)
         if compiled_expr is None:
             self._eval_result_cache[cache_key] = False
@@ -570,7 +563,7 @@ class BaseSafetyChecker:
 
         # Match transitions: '1 -> 2 [label="..."];'
         pattern = re.compile(rf"({state_pat})\s*->\s*({state_pat})\s*\[label=\"(.*?)\"\];")
-        
+
         for src, dst, label in pattern.findall(text):
             transitions.setdefault(src, []).append((label, dst))
 
@@ -589,5 +582,5 @@ class BaseSafetyChecker:
             "transitions": transitions,
             "violation_state": violation,
             "accepting_states": sorted(accepting),
-            "ap_symbols": ap_list
+            "ap_symbols": ap_list,
         }

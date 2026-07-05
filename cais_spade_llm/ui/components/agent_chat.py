@@ -47,7 +47,9 @@ def render_chat(
             agent_select = None
 
         # ── Chat history ──────────────────────────────────────
-        chat_log = ui.scroll_area().classes("w-full border rounded bg-slate-50").style("min-height: 600px")
+        chat_log = (
+            ui.scroll_area().classes("w-full border rounded bg-slate-50").style("min-height: 600px")
+        )
         chat_column = None
         with chat_log:
             chat_column = ui.column().classes("w-full gap-2 p-3")
@@ -83,9 +85,11 @@ def render_chat(
 
         # ── Input row ─────────────────────────────────────────
         with ui.row().classes("w-full gap-2 mt-2 items-center"):
-            chat_input = ui.input(placeholder="Ask a question...").classes(
-                "flex-grow"
-            ).props("outlined dense")
+            chat_input = (
+                ui.input(placeholder="Ask a question...")
+                .classes("flex-grow")
+                .props("outlined dense")
+            )
             send_btn = ui.button(icon="send").props("color=primary round dense")
 
         async def _on_send():
@@ -115,7 +119,7 @@ def render_chat(
                 except Exception as exc:
                     reply_text = f"[Chat request failed: {exc}]"
             else:
-                reply_text = f"[Chat backend not connected yet. Your message: \"{text}\"]"
+                reply_text = f'[Chat backend not connected yet. Your message: "{text}"]'
 
             messages.append(
                 {

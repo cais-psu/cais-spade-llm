@@ -119,9 +119,7 @@ def add_header(
 
 def draw_header_axis(ax: plt.Axes, title: str, icon_text: str, title_size: int) -> None:
     ax.set_axis_off()
-    ax.add_patch(
-        Rectangle((0, 0), 1, 1, transform=ax.transAxes, color=NAVY, clip_on=False)
-    )
+    ax.add_patch(Rectangle((0, 0), 1, 1, transform=ax.transAxes, color=NAVY, clip_on=False))
     ax.scatter(
         [0.075],
         [0.5],
@@ -248,9 +246,7 @@ def save_figure(fig: plt.Figure, name: str) -> None:
 def plot_rule_satisfaction_rate(rows: list[dict[str, str]]) -> None:
     scenarios = [row[SCENARIO_FIELD] for row in rows]
     pure_llm = [as_float(row, PURE_LLM_RULE_SAT_FIELD) for row in rows]
-    proposed_framework = [
-        as_float(row, PROPOSED_FRAMEWORK_RULE_SAT_FIELD) for row in rows
-    ]
+    proposed_framework = [as_float(row, PROPOSED_FRAMEWORK_RULE_SAT_FIELD) for row in rows]
 
     fig, ax = plt.subplots(figsize=(6.6, 4.1))
     fig.patch.set_facecolor("white")
@@ -351,9 +347,7 @@ def plot_cost_axis(
 def plot_evaluation_dashboard(rows: list[dict[str, str]]) -> None:
     scenarios = [row[SCENARIO_FIELD] for row in rows]
     pure_llm = [as_float(row, PURE_LLM_RULE_SAT_FIELD) for row in rows]
-    proposed_framework = [
-        as_float(row, PROPOSED_FRAMEWORK_RULE_SAT_FIELD) for row in rows
-    ]
+    proposed_framework = [as_float(row, PROPOSED_FRAMEWORK_RULE_SAT_FIELD) for row in rows]
 
     fig = plt.figure(figsize=(10.4, 5.0), facecolor="white")
     left_header_ax = fig.add_axes((0.055, 0.79, 0.57, 0.13))
@@ -380,9 +374,7 @@ def plot_evaluation_dashboard(rows: list[dict[str, str]]) -> None:
         edgecolor=ORANGE,
     )
     draw_header_axis(left_header_ax, "Safety Rule Satisfaction", "S", 13)
-    rule_ax.set_ylabel(
-        "Rule Satisfaction (%)", fontsize=11, fontweight="bold", color=TEXT
-    )
+    rule_ax.set_ylabel("Rule Satisfaction (%)", fontsize=11, fontweight="bold", color=TEXT)
     rule_ax.set_xticks(list(x_positions))
     rule_ax.set_xticklabels(scenarios, fontsize=12, fontweight="bold")
     rule_ax.set_ylim(0, 110)

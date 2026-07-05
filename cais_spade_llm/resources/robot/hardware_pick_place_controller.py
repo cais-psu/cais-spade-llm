@@ -74,9 +74,7 @@ class UR5eRG2GripperControllerSettings:
         gripper = dict(config or {})
         rtde = dict(gripper.get("rtde") or {})
         resolved_hostname = (
-            str(hostname or "").strip()
-            or str(rtde.get("hostname") or "").strip()
-            or cls.hostname
+            str(hostname or "").strip() or str(rtde.get("hostname") or "").strip() or cls.hostname
         )
         return cls(
             hostname=resolved_hostname,
@@ -220,9 +218,7 @@ class UR5eRG2GripperController:
         if abs(open_position - close_position) < 1e-9:
             return float(settings.open_width_mm)
         ratio = (float(position) - close_position) / (open_position - close_position)
-        width = settings.close_width_mm + ratio * (
-            settings.open_width_mm - settings.close_width_mm
-        )
+        width = settings.close_width_mm + ratio * (settings.open_width_mm - settings.close_width_mm)
         return _clamp(width, settings.close_width_mm, settings.open_width_mm)
 
     def force_for_position(self, position: float) -> float:
@@ -236,8 +232,14 @@ class UR5eRG2GripperController:
         settings = self.settings
         midpoint = (float(settings.open_position) + float(settings.close_position)) * 0.5
         if settings.open_position >= settings.close_position:
-            return settings.open_settle_sec if float(position) >= midpoint else settings.close_settle_sec
-        return settings.open_settle_sec if float(position) <= midpoint else settings.close_settle_sec
+            return (
+                settings.open_settle_sec
+                if float(position) >= midpoint
+                else settings.close_settle_sec
+            )
+        return (
+            settings.open_settle_sec if float(position) <= midpoint else settings.close_settle_sec
+        )
 
     def command_width(
         self,
@@ -441,7 +443,11 @@ class HardwarePickPlaceController(GazeboPickPlaceController):
             item = dict(step or {})
             if str(item.get("step_name") or "").strip() == target_step:
                 return item, path, ""
-        return None, path, f"taught function step not found: {function_name}.{target_step} in {path}"
+        return (
+            None,
+            path,
+            f"taught function step not found: {function_name}.{target_step} in {path}",
+        )
 
     def replay_taught_function_step(
         self,

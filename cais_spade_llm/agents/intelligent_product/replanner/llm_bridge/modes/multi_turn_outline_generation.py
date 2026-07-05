@@ -218,9 +218,7 @@ async def _handle_outline_incremental(
     )
 
     session_state["status"] = (
-        "ready_for_primitive_generation"
-        if outline_complete
-        else "paused_after_outline_turn"
+        "ready_for_primitive_generation" if outline_complete else "paused_after_outline_turn"
     )
     return decision, turn_entry
 
@@ -270,9 +268,7 @@ async def _handle_outline_incremental_validated(
             "status": "rejected",
             "findings": deepcopy(schema_findings),
         }
-        session_state["transition_validation"] = deepcopy(
-            turn_entry["transition_validation"]
-        )
+        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
     findings, grounded_action = _shared._validate_single_outline_task(
@@ -299,9 +295,7 @@ async def _handle_outline_incremental_validated(
             "status": "rejected",
             "findings": deepcopy(findings),
         }
-        session_state["transition_validation"] = deepcopy(
-            turn_entry["transition_validation"]
-        )
+        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         _logger.info(
             "[MultiTurn] outline incremental_validated: rejected event %s (%d findings)",
             str(next_transition.get("outline_id") or "").strip(),
@@ -316,10 +310,12 @@ async def _handle_outline_incremental_validated(
     session_state["outline_lookahead"] = deepcopy(transition_suffix)
 
     _shared._apply_task_effects_to_symbolic_state(next_transition, session_state)
-    session_state["outline_validation_findings"] = _shared._prune_resolved_outline_validation_findings(
-        list(session_state.get("outline_validation_findings") or []),
-        session_state=session_state,
-        prepared_bridge_request=prepared_bridge_request,
+    session_state["outline_validation_findings"] = (
+        _shared._prune_resolved_outline_validation_findings(
+            list(session_state.get("outline_validation_findings") or []),
+            session_state=session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
     )
     _shared._sync_des_recovery_aliases(
         session_state,
@@ -339,9 +335,7 @@ async def _handle_outline_incremental_validated(
     )
 
     session_state["status"] = (
-        "ready_for_primitive_generation"
-        if outline_complete
-        else "paused_after_outline_turn"
+        "ready_for_primitive_generation" if outline_complete else "paused_after_outline_turn"
     )
     return decision, turn_entry
 
@@ -371,14 +365,10 @@ async def _handle_outline_incremental_candidates_validated(
     ]
     turn_entry["candidate_events"] = deepcopy(candidate_events)
 
-    candidate_bound = int(
-        session_state.get("candidate_bound")
-        or _shared._DEFAULT_CANDIDATE_BOUND
-    )
+    candidate_bound = int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND)
     if not (1 <= len(candidate_events) <= candidate_bound):
         turn_entry["error"] = (
-            "outline response must include 1 to "
-            f"{candidate_bound} candidate_events"
+            f"outline response must include 1 to {candidate_bound} candidate_events"
         )
         _logger.warning(
             "[MultiTurn] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
@@ -388,9 +378,8 @@ async def _handle_outline_incremental_candidates_validated(
         return "need_revision", turn_entry
 
     selected_candidate_index_raw = parsed_response.get("selected_candidate_index")
-    if (
-        not isinstance(selected_candidate_index_raw, int)
-        or isinstance(selected_candidate_index_raw, bool)
+    if not isinstance(selected_candidate_index_raw, int) or isinstance(
+        selected_candidate_index_raw, bool
     ):
         finding = _shared._candidate_schema_finding(
             task={},
@@ -406,9 +395,7 @@ async def _handle_outline_incremental_candidates_validated(
             "findings": [deepcopy(finding)],
         }
         session_state["outline_validation_findings"] = [deepcopy(finding)]
-        session_state["transition_validation"] = deepcopy(
-            turn_entry["transition_validation"]
-        )
+        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
     selected_candidate_index = int(selected_candidate_index_raw)
@@ -416,9 +403,7 @@ async def _handle_outline_incremental_candidates_validated(
     if not (0 <= selected_candidate_index < len(candidate_events)):
         finding = _shared._candidate_schema_finding(
             task={},
-            reason=(
-                "selected_candidate_index must reference an item in candidate_events"
-            ),
+            reason=("selected_candidate_index must reference an item in candidate_events"),
             evidence={
                 "field": "selected_candidate_index",
                 "selected_candidate_index": selected_candidate_index,
@@ -431,9 +416,7 @@ async def _handle_outline_incremental_candidates_validated(
             "findings": [deepcopy(finding)],
         }
         session_state["outline_validation_findings"] = [deepcopy(finding)]
-        session_state["transition_validation"] = deepcopy(
-            turn_entry["transition_validation"]
-        )
+        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
 
@@ -518,12 +501,8 @@ async def _handle_outline_incremental_candidates_validated(
             "selected_candidate_index": selected_candidate_index,
             "findings": deepcopy(feedback_rows),
         }
-        session_state["transition_validation"] = deepcopy(
-            turn_entry["transition_validation"]
-        )
-        session_state["rejected_turn_thought"] = str(
-            parsed_response.get("thought") or ""
-        ).strip()
+        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
+        session_state["rejected_turn_thought"] = str(parsed_response.get("thought") or "").strip()
         _logger.info(
             "[MultiTurn] outline incremental_candidates_validated: rejected selected candidate %d",
             selected_candidate_index + 1,
@@ -535,18 +514,16 @@ async def _handle_outline_incremental_candidates_validated(
             if not isinstance(row, dict):
                 continue
             findings = [
-                dict(f)
-                for f in (row.get("validation_findings") or [])
-                if isinstance(f, dict)
+                dict(f) for f in (row.get("validation_findings") or []) if isinstance(f, dict)
             ]
             if not findings:
                 continue
             status = _shared._finding_event_status_for_logging(findings[0])
             status_counts[status] = int(status_counts.get(status) or 0) + 1
-        status_summary = ", ".join(
-            f"{status}={count}"
-            for status, count in sorted(status_counts.items())
-        ) or "none"
+        status_summary = (
+            ", ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
+            or "none"
+        )
         rejection_codes = [
             str(f.get("constraint_code") or "unknown")
             for row in candidate_evaluations
@@ -556,11 +533,13 @@ async def _handle_outline_incremental_candidates_validated(
         ]
         _logger.info(
             "[MultiTurn] Stagnation %d — status_counts: %s",
-            stagnation, status_summary,
+            stagnation,
+            status_summary,
         )
         _logger.debug(
             "[MultiTurn] Stagnation %d — rejection codes: %s",
-            stagnation, rejection_codes,
+            stagnation,
+            rejection_codes,
         )
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
@@ -622,9 +601,7 @@ async def _handle_outline_incremental_candidates_validated(
     )
 
     session_state["status"] = (
-        "ready_for_primitive_generation"
-        if outline_complete
-        else "paused_after_outline_turn"
+        "ready_for_primitive_generation" if outline_complete else "paused_after_outline_turn"
     )
     return decision, turn_entry
 
@@ -637,9 +614,7 @@ async def _handle_outline_phase(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Dispatch outline handling according to configured outline mode."""
-    outline_mode = str(
-        session_state.get("outline_mode") or "incremental"
-    ).strip().lower()
+    outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     decision: str
     turn_entry: dict[str, Any]
     if outline_mode == "single_pass":

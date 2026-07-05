@@ -206,9 +206,7 @@ class ProductProfile:
                 return dict(geometry)
 
             if logger is not None:
-                logger.warning(
-                    "[Product] Geometry file %s has no usable '%s' block.", path, env
-                )
+                logger.warning("[Product] Geometry file %s has no usable '%s' block.", path, env)
         except Exception:
             if logger is not None:
                 logger.exception("[Product] Failed to load geometry from %s", geometry_file)
@@ -472,13 +470,7 @@ def _product_geometry_path_for_token(token: str) -> Path | None:
 def _direct_geometry_path_for_token(token: str) -> Path:
     # Printer/support destinations may have simulation/real geometry fallbacks
     # without being registered as full product manifests.
-    return (
-        _PACKAGE_ROOT
-        / "specification"
-        / "products"
-        / "geometry"
-        / f"{token}.json"
-    )
+    return _PACKAGE_ROOT / "specification" / "products" / "geometry" / f"{token}.json"
 
 
 @lru_cache(maxsize=16)

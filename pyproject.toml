@@ -76,6 +76,9 @@ max-statements = 80
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+# ros2/ launch files and scripts are source-text contracts: tests read them with
+# read_text() and assert exact snippets (quotes included). Lint them, never format them.
+exclude = ["ros2/**"]
 
 [build-system]
 requires = ["poetry-core"]

@@ -271,9 +271,7 @@ def test_lg_slippage_after_place_insert_returns_failed_drop_observation():
     agent.agent_name = "xarm6"
     agent.execution_mode = "simulation"
     agent.logger = logging.getLogger("test.robot_task.lg_slippage")
-    agent.failure_scenarios = [
-        {"scenario_id": "lg_slippage", "mode": "once", "scope": "xarm6"}
-    ]
+    agent.failure_scenarios = [{"scenario_id": "lg_slippage", "mode": "once", "scope": "xarm6"}]
     agent._triggered_failure_scenarios = set()
     agent._held_part = "LG"
     agent._current_state = "positioned"
@@ -619,7 +617,9 @@ def test_fast_recovery_release_and_place_macros_omit_optional_trailing_home(monk
         start_state="holding",
     )
 
-    assert all(step["primitive"] != "move_to_named_pose" for step in release_macro["primitive_steps"])
+    assert all(
+        step["primitive"] != "move_to_named_pose" for step in release_macro["primitive_steps"]
+    )
     assert all(step["primitive"] != "move_to_named_pose" for step in place_macro["primitive_steps"])
 
 
@@ -921,9 +921,7 @@ def test_snap_part_to_slot_attaches_part_to_assembly_board(monkeypatch):
     controller._set_state_client = _FakeServiceClient(
         types.SimpleNamespace(success=True, message="")
     )
-    controller._attach_client = _FakeServiceClient(
-        types.SimpleNamespace(success=True, message="")
-    )
+    controller._attach_client = _FakeServiceClient(types.SimpleNamespace(success=True, message=""))
     controller._detach_client = _FakeServiceClient(
         types.SimpleNamespace(success=False, message="not attached")
     )
@@ -961,9 +959,10 @@ def test_snap_part_to_slot_attaches_part_to_assembly_board(monkeypatch):
     assert attach_req.link1_name == "anchor_gear_medium"
     assert attach_req.model2_name == "gear_medium"
     assert attach_req.link2_name == "link"
-    assert {
-        request.link1_name for request in controller._detach_client.requests
-    } == {"anchor_gear_medium", "link"}
+    assert {request.link1_name for request in controller._detach_client.requests} == {
+        "anchor_gear_medium",
+        "link",
+    }
     assert detach_calls[0]["extra_link_candidates"] == ["ur5e_tool0"]
     assert controller._attached_model is None
     assert controller._attached_link is None
@@ -1073,7 +1072,9 @@ def test_snap_part_to_slot_falls_back_to_board_link_when_anchor_link_is_missing(
         types.SimpleNamespace(success=True, message="")
     )
     attach_responses = [
-        types.SimpleNamespace(success=False, message="Failed to find link with name: anchor_gear_medium"),
+        types.SimpleNamespace(
+            success=False, message="Failed to find link with name: anchor_gear_medium"
+        ),
         types.SimpleNamespace(success=True, message="attached"),
     ]
 
@@ -1170,9 +1171,7 @@ def test_simulation_release_part_continues_when_detach_verification_is_unavailab
         return False
 
     controller._detach_part = _best_effort_detach
-    controller._verify_detach_timeout_release = (
-        lambda model_name, timeout_log_level="error": None
-    )
+    controller._verify_detach_timeout_release = lambda model_name, timeout_log_level="error": None
     controller.close_gripper = lambda: (_ for _ in ()).throw(
         AssertionError("simulation release fallback should not reclose the gripper")
     )
@@ -1295,8 +1294,10 @@ def test_simulation_release_part_verifies_release_with_rcutils_style_logger():
         AssertionError("simulation release should bypass detach_part retry loop")
     )
     controller._detach_part = lambda *args, **kwargs: False
-    controller._get_entity_world_position = (
-        lambda model_name, timeout_log_level="error": (0.0, 0.0, 0.0)
+    controller._get_entity_world_position = lambda model_name, timeout_log_level="error": (
+        0.0,
+        0.0,
+        0.0,
     )
     controller._get_link_world_position = lambda link_name: (0.10, 0.0, 0.0)
     controller.close_gripper = lambda: (_ for _ in ()).throw(
@@ -1327,8 +1328,10 @@ def test_detach_verification_failure_logs_with_rcutils_style_logger():
     controller._attached_link = "xarm6_link6"
     logger = _WarnLogger()
     controller._log = lambda: logger
-    controller._get_entity_world_position = (
-        lambda model_name, timeout_log_level="error": (0.0, 0.0, 0.0)
+    controller._get_entity_world_position = lambda model_name, timeout_log_level="error": (
+        0.0,
+        0.0,
+        0.0,
     )
     controller._get_link_world_position = lambda link_name: (0.01, 0.0, 0.0)
 
