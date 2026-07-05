@@ -7,14 +7,13 @@
 # Install once:   poetry run pre-commit install
 # Run on demand:  poetry run pre-commit run --all-files
 #
-# NOTE: the ruff-format hook is intentionally left disabled until the one-time
-# repo-wide format baseline lands (run `make format` once and commit it). Until
-# then, formatting a not-yet-formatted legacy file would produce a whole-file
-# diff that buries the real change. Enable it right after that baseline commit.
+# The format baseline landed (commit 861ff57), so ruff-format is active. Both
+# hooks read pyproject.toml config, including the ros2/** format exclusion
+# (launch files/scripts are source-text contracts read by tests — never format).
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.14
     hooks:
       - id: ruff
         args: [--fix]
-      # - id: ruff-format   # enable after `make format` baseline is committed
+      - id: ruff-format
