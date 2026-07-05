@@ -22,6 +22,62 @@ pytest = "^9.0.2"
 scipy = "^1.14.1"
 ur-rtde = "^1.6.0"
 
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [
+    ".venv",
+    "cais_spade_llm/Jeebies1/xarmlib",
+    "ros2/third_party",
+]
+
+[tool.ruff.lint]
+# Enforced rule families. E/F are the pycodestyle+pyflakes baseline; the rest
+# target the specific debt this repo accumulated from agent-authored code.
+select = [
+    "E",       # pycodestyle errors
+    "F",       # pyflakes
+    "I",       # import sorting (isort)
+    "UP",      # pyupgrade — modernize syntax for the py310 target
+    "B",       # flake8-bugbear — likely bugs and footguns
+    "SIM",     # flake8-simplify — redundant/overcomplicated constructs
+    "T20",     # flake8-print — no print(); CLAUDE.md mandates logging
+    "BLE",     # flake8-blind-except — no bare `except Exception`
+    "C901",    # mccabe — function too complex
+    "PLR0912", # too many branches
+    "PLR0913", # too many arguments
+    "PLR0915", # too many statements
+]
+ignore = [
+    "E501",    # line length — the formatter handles wrapping; not worth failing on
+    "E402",    # module-import-not-at-top — this repo REQUIRES lazy ROS2 imports
+    "F821",    # undefined-name — false-positives on this repo's nested UI closures
+]
+
+# Package __init__ files legitimately re-export names.
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+# Generous thresholds so the complexity rules flag only egregious cases now,
+# not merely-large functions. Tighten these as the monster files get decomposed.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-branches = 20
+max-statements = 80
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.14,<0.15)"
+]

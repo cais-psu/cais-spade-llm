@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(/home/jongh/projects/cais-spade-llm/.venv/bin/python -c 'import json,sys; print(json.load(sys.stdin).get(\"tool_input\",{}).get(\"file_path\",\"\"))' 2>/dev/null); case \"$f\" in /home/jongh/projects/cais-spade-llm/*.py) /home/jongh/projects/cais-spade-llm/.venv/bin/ruff check --fix --exit-zero \"$f\" ;; esac 2>/dev/null || true",
+            "statusMessage": "ruff --fix on edited file"
+          }
+        ]
+      }
+    ]
+  }
+}

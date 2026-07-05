@@ -1,0 +1,25 @@
+name: lint
+
+on: [push, pull_request]
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff==0.14.14
+
+      # Report-only for now: the repo carries a known lint backlog that is being
+      # burned down per docs/refactoring.md. These steps annotate the diff but do
+      # not fail the build. Remove `continue-on-error` on each step to turn it
+      # into a hard gate once `make lint-fix` + `make format` baselines have landed.
+      - name: ruff check
+        run: ruff check --output-format=github .
+        continue-on-error: true
+
+      - name: ruff format --check
+        run: ruff format --check .
+        continue-on-error: true

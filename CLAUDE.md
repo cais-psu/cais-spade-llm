@@ -44,24 +44,22 @@ python -m cais_spade_llm --mode simulation
 ## Running Tests
 
 ```bash
-# Smoke tests (no ROS2 needed)
-python3 test/test_robot_wiring_smoke.py --robot both
+# Full pytest suite (no ROS2 needed)
+poetry run python -m pytest test/
 
-# ROS2 integration tests (requires Gazebo running)
-python3 test/test_ur5e_camera_move.py
-python3 test/test_xarm6_camera_move.py
+# Digital twin / Teach / Replay in Twin / ROS2 launch gate (per AGENTS.md)
+poetry run python -m pytest test/test_ur5e_rg2_rtde_gripper.py
 ```
 
-## Code Conventions
+## Conventions & standards
 
-- **Type hints** everywhere (use `from __future__ import annotations`)
-- **Google-style docstrings**
-- **snake_case** for functions/variables, **PascalCase** for classes
-- **Private methods** prefixed with underscore
-- **Logging** via `logging.getLogger(...)` per module — no print statements
-- **Async/await** patterns throughout (SPADE behaviours are async)
-- **Lazy imports** for ROS2 modules (allows non-ROS testing)
-- **Configuration-driven** — robot capabilities, products, and safety rules live in JSON manifests under `initialization/` and `specification/`
+Code conventions, repository boundaries, and the enforced clean-code standards
+(ruff rules, `make lint` / `make lint-fix`, pre-commit, and the docstring &
+comment policy) live in **AGENTS.md** and the files under `docs/`. AGENTS.md is
+imported below so this file and AGENTS.md never drift — read it before changing
+code.
+
+@AGENTS.md
 
 ## Important Patterns
 
@@ -69,10 +67,3 @@ python3 test/test_xarm6_camera_move.py
 - SPADE agents communicate over XMPP; the `SystemBridge` syncs agent state to the NiceGUI UI
 - Safety validation runs both offline (pre-execution LTL→DFA) and online (runtime FSA monitoring)
 - Three execution modes: `dry_run` (pure Python), `simulation` (Gazebo), `physical` (hardware)
-
-## Things to Avoid
-
-- Do NOT add `.env` or credentials to commits
-- Do NOT import ROS2 modules at the top level — use lazy imports so non-ROS environments work
-- Do NOT hardcode robot positions — they come from JSON manifests
-- Do NOT use `print()` — use the `logging` module

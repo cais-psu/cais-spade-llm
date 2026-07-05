@@ -1,0 +1,20 @@
+# Pre-commit gate. Runs ruff only on the files you stage, so pre-existing debt
+# in untouched files never blocks a commit. It auto-fixes what it can; a commit
+# is blocked only when a file you touched has an UNFIXABLE issue (a new print, a
+# new blind-except, an over-complex new function). That is the ratchet: you
+# cannot add new dirt, but you are not forced to clean the whole repo first.
+#
+# Install once:   poetry run pre-commit install
+# Run on demand:  poetry run pre-commit run --all-files
+#
+# NOTE: the ruff-format hook is intentionally left disabled until the one-time
+# repo-wide format baseline lands (run `make format` once and commit it). Until
+# then, formatting a not-yet-formatted legacy file would produce a whole-file
+# diff that buries the real change. Enable it right after that baseline commit.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff
+        args: [--fix]
+      # - id: ruff-format   # enable after `make format` baseline is committed
