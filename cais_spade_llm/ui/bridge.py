@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -27,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
+from cais_spade_llm.ui import digital_twin
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
 from cais_spade_llm.bundles.models import (
     BUNDLE_STATUS_DRAFT,
@@ -5858,30 +5858,40 @@ class SystemBridge:
         return result
 
     def _digital_twin_target(self, target: str) -> dict[str, Any] | None:
-        return self._DIGITAL_TWIN_TARGETS.get(str(target or "").strip().lower())
+        return digital_twin.digital_twin_target(self._DIGITAL_TWIN_TARGETS, target)
 
     @staticmethod
     def _digital_twin_slug(cfg: dict[str, Any]) -> str:
-        return str(cfg.get("slug") or "digital_twin").strip()
+        return digital_twin.digital_twin_slug(cfg)
 
     def _digital_twin_status_path(self, target: str) -> Path:
-        cfg = self._digital_twin_target(target) or {}
-        return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}.json"
+        return digital_twin.digital_twin_status_path(
+            self._DIGITAL_TWIN_TARGETS,
+            target,
+            Path("/tmp"),
+        )
 
     def _digital_twin_direction_path(self, target: str) -> Path:
-        cfg = self._digital_twin_target(target) or {}
-        return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}_direction.json"
+        return digital_twin.digital_twin_direction_path(
+            self._DIGITAL_TWIN_TARGETS,
+            target,
+            Path("/tmp"),
+        )
 
     def _digital_twin_sync_status_path(self, target: str, robot: str = "") -> Path:
-        cfg = self._digital_twin_target(target) or {}
-        robot_key = str(robot or "").strip().lower()
-        if robot_key:
-            return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}_{robot_key}.json"
-        return self._digital_twin_status_path(target)
+        return digital_twin.digital_twin_sync_status_path(
+            self._DIGITAL_TWIN_TARGETS,
+            target,
+            robot,
+            Path("/tmp"),
+        )
 
     def _digital_twin_dual_drag_markers_status_path(self, target: str) -> Path:
-        cfg = self._digital_twin_target(target) or {}
-        return Path("/tmp") / f"cais_digital_twin_{self._digital_twin_slug(cfg)}_dual_drag_markers.json"
+        return digital_twin.digital_twin_dual_drag_markers_status_path(
+            self._DIGITAL_TWIN_TARGETS,
+            target,
+            Path("/tmp"),
+        )
 
     @staticmethod
     def _read_json_file(path: Path) -> dict[str, Any]:
@@ -5900,60 +5910,34 @@ class SystemBridge:
         cfg: dict[str, Any],
         robot: str,
     ) -> dict[str, str]:
-        hardware_processes = cfg.get("hardware_processes") or {}
-        if not isinstance(hardware_processes, dict):
-            return {}
-        robot_key = str(robot or "").strip().lower()
-        per_robot = hardware_processes.get(robot_key)
-        if isinstance(per_robot, dict):
-            return {
-                str(key): str(value)
-                for key, value in per_robot.items()
-                if str(value or "").strip()
-            }
-        return {
-            str(key): str(value)
-            for key, value in hardware_processes.items()
-            if isinstance(value, str) and str(value or "").strip()
-        }
+        return digital_twin.digital_twin_hardware_processes_for_robot(cfg, robot)
 
     @staticmethod
     def _digital_twin_sync_process_items(cfg: dict[str, Any]) -> list[tuple[str, str]]:
-        sync_processes = cfg.get("sync_processes") or {}
-        if isinstance(sync_processes, dict) and sync_processes:
-            return [
-                (str(robot).strip().lower(), str(process).strip())
-                for robot, process in sync_processes.items()
-                if str(robot).strip() and str(process).strip()
-            ]
-        sync_process = str(cfg.get("sync_process") or "").strip()
-        robot = str(cfg.get("robot") or "").strip()
-        return [(robot, sync_process)] if sync_process else []
+        return digital_twin.digital_twin_sync_process_items(cfg)
 
     @staticmethod
     def _digital_twin_allowed_sim_modes(cfg: dict[str, Any]) -> tuple[str, ...]:
-        modes = tuple(
-            SystemBridge._normalize_digital_twin_sim_mode(mode)
-            for mode in (cfg.get("sim_modes") or ())
+        return digital_twin.digital_twin_allowed_sim_modes(
+            cfg,
+            SystemBridge._DIGITAL_TWIN_SIM_MODES,
+            SystemBridge._DIGITAL_TWIN_SIM_MODE_ALIASES,
         )
-        canonical_modes = tuple(dict.fromkeys(mode for mode in modes if mode))
-        return canonical_modes or SystemBridge._DIGITAL_TWIN_SIM_MODES
 
     @classmethod
     def _normalize_digital_twin_sim_mode(cls, mode: object) -> str:
-        value = str(mode or "").strip()
-        return cls._DIGITAL_TWIN_SIM_MODE_ALIASES.get(value, value)
+        return digital_twin.normalize_digital_twin_sim_mode(
+            mode,
+            cls._DIGITAL_TWIN_SIM_MODE_ALIASES,
+        )
 
     @staticmethod
     def _digital_twin_has_multiple_hardware_domains(cfg: dict[str, Any]) -> bool:
-        return bool(cfg.get("multiple_hardware_domains", False))
+        return digital_twin.digital_twin_has_multiple_hardware_domains(cfg)
 
     @staticmethod
     def _digital_twin_has_per_robot_hardware_processes(cfg: dict[str, Any]) -> bool:
-        hardware_processes = cfg.get("hardware_processes") or {}
-        return isinstance(hardware_processes, dict) and any(
-            isinstance(value, dict) for value in hardware_processes.values()
-        )
+        return digital_twin.digital_twin_has_per_robot_hardware_processes(cfg)
 
     def _digital_twin_hardware_domain_id(
         self,
@@ -5961,34 +5945,11 @@ class SystemBridge:
         robot: str,
         domains: dict[str, int],
     ) -> int:
-        if self._digital_twin_has_multiple_hardware_domains(cfg):
-            robot_key = str(robot or "").strip().lower()
-            return int(domains.get(f"hardware_{robot_key}", domains["hardware"]))
-        return int(domains["hardware"])
+        return digital_twin.digital_twin_hardware_domain_id(cfg, robot, domains)
 
     @staticmethod
     def _digital_twin_process_names(cfg: dict[str, Any]) -> list[str]:
-        names: list[str] = []
-        for key in ("gazebo_process", "gazebo_moveit_process", "paired_marker_process"):
-            value = str(cfg.get(key) or "").strip()
-            if value:
-                names.append(value)
-        for _robot, process in SystemBridge._digital_twin_sync_process_items(cfg):
-            if process:
-                names.append(process)
-        hardware_processes = cfg.get("hardware_processes") or {}
-        if isinstance(hardware_processes, dict):
-            for value in hardware_processes.values():
-                if isinstance(value, dict):
-                    for nested_value in value.values():
-                        name = str(nested_value or "").strip()
-                        if name and name not in names:
-                            names.append(name)
-                else:
-                    name = str(value or "").strip()
-                    if name and name not in names:
-                        names.append(name)
-        return names
+        return digital_twin.digital_twin_process_names(cfg)
 
     def _digital_twin_direction(self, target: str) -> str:
         # Direction is implied by sim mode: teach = sim leads (gazebo -> hardware),
@@ -7858,23 +7819,19 @@ class SystemBridge:
         function_name: str,
         step_name: str,
     ) -> dict[str, str] | None:
-        step_key = str(step_name or "").strip()
-        for step in cls.digital_twin_function_template(function_name):
-            if str(step.get("step_name") or "") == step_key:
-                return step
-        return None
+        return digital_twin.robot_function_template_step(
+            cls._ROBOT_FUNCTION_TEMPLATES,
+            function_name,
+            step_name,
+        )
 
     @staticmethod
     def _robot_function_safe_name(name: object) -> str:
-        value = str(name or "").strip()
-        safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in value)
-        return safe or "default"
+        return digital_twin.robot_function_safe_name(name)
 
     @classmethod
     def _robot_function_safe_function_name(cls, function_name: object) -> str:
-        if not str(function_name or "").strip():
-            return ""
-        return cls._robot_function_safe_name(function_name)
+        return digital_twin.robot_function_safe_function_name(function_name)
 
     @staticmethod
     def _robot_function_buffer_key(
@@ -7883,29 +7840,19 @@ class SystemBridge:
         function_name: str,
         name: str,
     ) -> str:
-        return "::".join(
-            [
-                str(target or "").strip().lower(),
-                str(robot or "").strip().lower(),
-                str(function_name or "").strip(),
-                str(name or "").strip(),
-            ]
-        )
+        return digital_twin.robot_function_buffer_key(target, robot, function_name, name)
 
     @staticmethod
     def _robot_function_display_path(path: Path) -> str:
-        try:
-            return str(path.relative_to(_PROJECT_ROOT))
-        except Exception:
-            return str(path)
+        return digital_twin.robot_function_display_path(path, _PROJECT_ROOT)
 
     @staticmethod
     def _robot_function_launch_mode_from_target(_target: str, _cfg: dict[str, Any]) -> str:
-        return "digital_twin"
+        return digital_twin.robot_function_launch_mode_from_target(_target, _cfg)
 
     @staticmethod
     def _robot_function_storage_source_for_launch(launch_mode: str) -> str:
-        return "gazebo" if str(launch_mode or "").strip() == "gazebo" else "hardware"
+        return digital_twin.robot_function_storage_source_for_launch(launch_mode)
 
     def _robot_function_storage_source(self, target: str, cfg: dict[str, Any]) -> str:
         launch_mode = self._robot_function_launch_mode_from_target(target, cfg)
@@ -7922,15 +7869,12 @@ class SystemBridge:
         name: str,
         storage_source: str,
     ) -> Path:
-        robot_key = str(robot or "").strip().lower()
-        function_key = self._robot_function_safe_function_name(function_name)
-        safe_name = self._robot_function_safe_name(name)
-        source_key = str(storage_source or "hardware").strip()
-        return (
-            _ROBOT_TAUGHT_FUNCTIONS_DIR
-            / robot_key
-            / function_key
-            / f"{safe_name}__{source_key}.json"
+        return digital_twin.robot_function_path(
+            _ROBOT_TAUGHT_FUNCTIONS_DIR,
+            robot,
+            function_name,
+            name,
+            storage_source,
         )
 
     def digital_twin_function_info(
@@ -8314,20 +8258,7 @@ class SystemBridge:
 
     @staticmethod
     def _robot_function_step_waypoint(step: dict[str, Any]) -> dict[str, Any] | None:
-        waypoint = dict(step.get("waypoint") or {})
-        positions = waypoint.get("joint_positions") or waypoint.get("positions") or []
-        if not positions:
-            return None
-        body: dict[str, Any] = {
-            "positions": [float(v) for v in positions],
-            "joint_names": list(waypoint.get("joint_names") or []),
-            "gripper_joint": waypoint.get("gripper_joint"),
-        }
-        if waypoint.get("gripper_position") is not None:
-            body["gripper"] = float(waypoint.get("gripper_position"))
-        elif waypoint.get("gripper") is not None:
-            body["gripper"] = float(waypoint.get("gripper"))
-        return body
+        return digital_twin.robot_function_step_waypoint(step)
 
     def _recording_from_function_payload(
         self,
@@ -8392,11 +8323,7 @@ class SystemBridge:
         return payload, path, ""
 
     def _single_robot_replay_cfg(self, cfg: dict[str, Any], robot: str) -> dict[str, Any]:
-        robot_key = str(robot or "").strip().lower()
-        replay_cfg = dict(cfg)
-        replay_cfg["robot"] = robot_key
-        replay_cfg["hardware"] = (robot_key,)
-        return replay_cfg
+        return digital_twin.single_robot_replay_cfg(cfg, robot)
 
     def digital_twin_replay_function(
         self,
@@ -8669,8 +8596,7 @@ class SystemBridge:
 
     @staticmethod
     def _digital_twin_recording_hash(recording: dict[str, Any]) -> str:
-        body = json.dumps(recording, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+        return digital_twin.digital_twin_recording_hash(recording)
 
     def _digital_twin_prepared_replay_path(
         self,
@@ -8680,73 +8606,35 @@ class SystemBridge:
         replay_target: str,
         source: str,
     ) -> Path:
-        slug = self._digital_twin_slug(cfg)
-        digest = self._digital_twin_recording_hash(recording)[:16]
-        safe_source = "".join(
-            c if (c.isalnum() or c in "-_") else "_"
-            for c in str(source or "recording").strip()
-        ) or "recording"
-        safe_replay = "".join(
-            c if (c.isalnum() or c in "-_") else "_"
-            for c in str(replay_target or "twin").strip()
-        ) or "twin"
-        return Path("/tmp") / f"cais_digital_twin_{slug}_{safe_source}_{safe_replay}_{digest}_prepared.json"
+        return digital_twin.digital_twin_prepared_replay_path(
+            cfg,
+            recording,
+            replay_target,
+            source,
+            Path("/tmp"),
+        )
 
     @staticmethod
     def _digital_twin_is_dual_robots(cfg: dict[str, Any]) -> bool:
-        return str(cfg.get("robot") or "").strip().lower() == "dual robots"
+        return digital_twin.digital_twin_is_dual_robots(cfg)
 
     @staticmethod
     def _digital_twin_dual_robot_keys(cfg: dict[str, Any]) -> list[str]:
-        return [
-            str(robot).strip().lower()
-            for robot in (cfg.get("hardware") or ())
-            if str(robot).strip().lower() in {"xarm6", "ur5e"}
-        ]
+        return digital_twin.digital_twin_dual_robot_keys(cfg)
 
     @staticmethod
     def _digital_twin_recovery_metadata(target: str, *, recording_type: str) -> dict[str, Any]:
-        return {
-            "source": "digital_twin_teach",
-            "target": target,
-            "recording_type": recording_type,
-            "dispatch": "manual",
-            "created_at": time.time(),
-        }
+        return digital_twin.digital_twin_recovery_metadata(
+            target,
+            recording_type=recording_type,
+        )
 
     def _waypoints_from_recording(
         self,
         cfg: dict[str, Any],
         recording: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        waypoints: list[dict[str, Any]] = []
-        if self._digital_twin_is_dual_robots(cfg):
-            for waypoint in list(recording.get("waypoints") or []):
-                robots = {
-                    str(robot): dict(body)
-                    for robot, body in dict(waypoint.get("robots") or {}).items()
-                    if isinstance(body, dict)
-                }
-                if robots:
-                    waypoints.append({"robots": robots, "t": time.time()})
-            return waypoints
-
-        joint_names = list(recording.get("joint_names") or [])
-        gripper_joint = recording.get("gripper_joint")
-        for waypoint in list(recording.get("waypoints") or []):
-            body = dict(waypoint or {})
-            positions = list(body.get("positions") or [])
-            if positions:
-                waypoints.append(
-                    {
-                        "positions": positions,
-                        "gripper": body.get("gripper"),
-                        "joint_names": joint_names,
-                        "gripper_joint": gripper_joint,
-                        "t": time.time(),
-                    }
-                )
-        return waypoints
+        return digital_twin.waypoints_from_recording(cfg, recording)
 
     def _load_digital_twin_buffer_waypoints(
         self,
